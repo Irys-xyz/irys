@@ -5373,15 +5373,16 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "itertools 0.13.0",
  "lru 0.14.0",
  "nodit",
+ "num-bigfloat",
  "openssl",
  "proptest",
  "rand 0.8.5",
  "reth",
  "reth-db",
  "rstest",
- "rug",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -5409,7 +5410,7 @@ name = "irys-macros-integer-tagged"
 version = "0.1.0"
 dependencies = [
  "quote",
- "syn 1.0.109",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -6757,6 +6758,17 @@ dependencies = [
  "num-iter",
  "num-rational",
  "num-traits",
+]
+
+[[package]]
+name = "num-bigfloat"
+version = "1.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "793a9a2afbf2b4fc1b9a47de731031b06ed362a5ede3681fbfbaeb2ad4faaa13"
+dependencies = [
+ "num-traits",
+ "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]

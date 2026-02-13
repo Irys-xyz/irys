@@ -47,14 +47,15 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    H256List, IrysAddress, IrysPeerId, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
+    H256, U256,
 };
 use irys_types::{
-    Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    DataTransactionHeader, DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId,
-    LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
-    UnpackedChunk,
+    Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
+    CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
+    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
+    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -464,8 +465,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut peer_config = node_config.clone();
         peer_config.mining_key = peer_signer.signer.clone();
         peer_config.reward_address = peer_signer.address();
-        // Generate a distinct peer_id (separate from mining address) for test isolation
-        peer_config.peer_id = Some(IrysPeerId::random());
 
         // Set peer mode and expected genesis hash via consensus config
         peer_config.node_mode = NodeMode::Peer;
@@ -1082,7 +1081,11 @@ impl IrysNodeTest<IrysNodeCtx> {
                         if tx_proofs.len() >= num_proofs {
                             for ingress_proof in tx_proofs.iter() {
                                 assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                                tracing::info!("proof signer: {}", ingress_proof.address);
+                                tracing::info!(
+                                    "proof {} signer: {}",
+                                    ingress_proof.proof.id(),
+                                    ingress_proof.address
+                                );
                             }
                             to_remove.insert(to_check[idx]);
                         }
@@ -1251,7 +1254,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
-        maybe.ok_or_eyre("block not returned")
+        let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
+        Ok((
+            sealed_block.header().clone(),
+            eth_payload,
+            BlockTransactions::clone(sealed_block.transactions()),
+        ))
     }
 
     pub async fn mine_block_without_gossip(
@@ -1839,19 +1847,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         height: u64,
         include_chunk: bool,
     ) -> eyre::Result<IrysBlockHeader> {
-        self.node_ctx
+        let block = self
+            .node_ctx
             .block_index_guard
             .read()
             .get_item(height)
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))?;
+        self.node_ctx
+            .db
+            .view_eyre(|tx| {
+                irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+            })?
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            .and_then(|block| {
-                self.node_ctx
-                    .db
-                    .view_eyre(|tx| {
-                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
-                    })?
-                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            })
     }
 
     pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {
@@ -1970,29 +1977,24 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
-        block_transactions: BlockTransactions,
+        sealed_block: Arc<SealedBlock>,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(Arc::clone(&sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
             Err(res) => {
                 tracing::error!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 );
                 Err(eyre!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 ))
             }
@@ -2130,13 +2132,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .add_execution_payload_to_cache(eth_payload.block().clone())
             .await;
 
+        let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
+
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(sealed_block, false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 
@@ -2367,7 +2367,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         GossipClient::new(
             Duration::from_secs(5),
             self.node_ctx.config.node_config.miner_address(),
-            self.node_ctx.config.node_config.peer_id(),
+            self.node_ctx.config.peer_id(),
         )
     }
 
@@ -2401,7 +2401,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             chain_id: self.node_ctx.config.consensus.chain_id,
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
-            peer_id: self.node_ctx.config.node_config.peer_id(),
+            peer_id: self.node_ctx.config.peer_id(),
+            consensus_config_hash: self.node_ctx.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.node_ctx
@@ -2489,6 +2490,49 @@ impl IrysNodeTest<IrysNodeCtx> {
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
+    }
+
+    /// Helper to post an UpdateRewardAddress commitment transaction.
+    pub async fn post_update_reward_address(
+        &self,
+        signer: &IrysSigner,
+        new_reward_address: IrysAddress,
+    ) -> eyre::Result<CommitmentTransaction> {
+        self.post_update_reward_address_with_fee(
+            signer,
+            new_reward_address,
+            self.node_ctx.config.consensus.mempool.commitment_fee,
+        )
+        .await
+    }
+
+    /// Helper to post an UpdateRewardAddress commitment transaction with a custom fee.
+    pub async fn post_update_reward_address_with_fee(
+        &self,
+        signer: &IrysSigner,
+        new_reward_address: IrysAddress,
+        fee: u64,
+    ) -> eyre::Result<CommitmentTransaction> {
+        let consensus = &self.node_ctx.config.consensus;
+        let anchor = self.get_anchor().await.expect("anchor should be available");
+
+        let mut update_tx = CommitmentTransaction::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
+                anchor,
+                fee,
+                value: U256::zero(),
+                ..CommitmentTransactionV2::new(consensus)
+            },
+            metadata: Default::default(),
+        });
+
+        signer.sign_commitment(&mut update_tx)?;
+        tracing::info!("Generated update_reward_address_tx.id: {}", update_tx.id());
+
+        self.post_commitment_tx(&update_tx).await?;
+
+        Ok(update_tx)
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
@@ -3407,4 +3451,19 @@ pub async fn gossip_data_tx_to_node(
 
     resp_rx.await??;
     Ok(())
+}
+
+/// Helper function to construct a SealedBlock from a header and transactions.
+/// This centralizes the BlockBody construction and SealedBlock::new validation
+/// for consistent usage across tests.
+pub fn build_sealed_block(
+    header: IrysBlockHeader,
+    txs: &BlockTransactions,
+) -> eyre::Result<Arc<SealedBlock>> {
+    let block_body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: txs.all_data_txs().cloned().collect(),
+        commitment_transactions: txs.commitment_txs.clone(),
+    };
+    Ok(Arc::new(SealedBlock::new(header, block_body)?))
 }

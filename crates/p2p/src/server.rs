@@ -21,9 +21,9 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponse,
-    IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem, PeerScore,
-    ProtocolVersion, UnpackedChunk,
+    GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
+    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem,
+    PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -1019,12 +1019,12 @@ where
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
@@ -1032,13 +1032,13 @@ where
         let version_request = body.into_inner();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
                 RejectionReason::UnsupportedProtocolVersion(
                     version_request.protocol_version as u32,
                 ),
@@ -1046,7 +1046,7 @@ where
         }
 
         if !version_request.verify_signature() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
@@ -1096,7 +1096,7 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = HandshakeResponse {
+        let response = HandshakeResponseV1 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
             peers,
@@ -1123,12 +1123,12 @@ where
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
@@ -1136,13 +1136,13 @@ where
         let version_request = body.into_inner();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
                 RejectionReason::UnsupportedProtocolVersion(
                     version_request.protocol_version as u32,
                 ),
@@ -1154,7 +1154,7 @@ where
                 "V2 Handshake signature verification failed for mining_address: {}, peer_id: {}",
                 version_request.mining_address, version_request.peer_id
             );
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
@@ -1162,6 +1162,18 @@ where
             "V2 Handshake signature verified for mining_address: {}",
             version_request.mining_address
         );
+
+        let this_node_consensus_config_hash = server.data_handler.consensus_config_hash;
+        if version_request.consensus_config_hash != this_node_consensus_config_hash {
+            error!(
+                "Consensus config mismatch with peer! ours={} theirs={} peer_addr={} mining_address={} peer_id={}",
+                this_node_consensus_config_hash,
+                version_request.consensus_config_hash,
+                source_addr,
+                version_request.mining_address,
+                version_request.peer_id,
+            );
+        }
 
         let mut peers = server.peer_list.all_known_peers();
         peers.shuffle(&mut rand::thread_rng());
@@ -1211,7 +1223,7 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = HandshakeResponse {
+        let response = HandshakeResponseV2 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
             peers,
@@ -1220,6 +1232,7 @@ where
                 .unwrap_or_default()
                 .as_millis() as u64,
             message: Some(format!("Welcome to the network {node_name}")),
+            consensus_config_hash: this_node_consensus_config_hash,
         };
 
         HttpResponse::Ok()
@@ -1636,8 +1649,8 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        Config, DatabaseProvider, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore,
-        RethPeerInfo,
+        Config, DatabaseProvider, IrysPeerId, NodeConfig, PeerAddress, PeerNetworkSender,
+        PeerScore, RethPeerInfo,
     };
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
@@ -1648,7 +1661,7 @@ mod tests {
     async fn handle_invalid_block_penalizes_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env =
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).expect("db");
         let db = DatabaseProvider(Arc::new(db_env));

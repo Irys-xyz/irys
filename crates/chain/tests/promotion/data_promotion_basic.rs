@@ -6,12 +6,13 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
 use irys_actors::MempoolServiceMessage;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_testing_utils::initialize_tracing;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 #[test_log::test(tokio::test)]
 async fn heavy_data_promotion_test() -> eyre::Result<()> {
@@ -505,6 +506,221 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(is_promoted, "Transaction was not promoted within timeout");
+
+    // Wind down test
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+/// This test is a regression test that ensures that ingress proofs with edge-case invalid anchors (miss the expiry by one block height, but are valid at ingest) are not accepted by the node as part of validation, and are also not selected as part of the block building process.
+#[tokio::test]
+async fn heavy_promotion_validates_ingress_proof_anchor_edge_doesnt_promote() -> eyre::Result<()> {
+    test_ingress_proof_anchor_edge_case(0, false).await
+}
+
+/// This test is a regression test that ensures that ingress proofs with edge-case valid anchors (exactly at the minimum expiry height, valid at ingest) are accepted by the node as part of validation, and are also selected as part of the block building process.
+#[tokio::test]
+async fn heavy_promotion_validates_ingress_proof_anchor_edge_does_promote() -> eyre::Result<()> {
+    test_ingress_proof_anchor_edge_case(1, true).await
+}
+
+/// Helper function to test ingress proof anchor validation edge cases.
+/// Tests regression for a bug where ingress proofs with boundary anchor expiry heights
+/// could have inconsistent behavior between mempool and block validation.
+async fn test_ingress_proof_anchor_edge_case(
+    anchor_height_offset: u64,
+    should_promote: bool,
+) -> eyre::Result<()> {
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+    );
+    initialize_tracing();
+
+    let seconds_to_wait = 30;
+
+    let config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            consensus.num_partitions_per_slot = 1;
+            consensus.epoch.num_blocks_in_epoch = 3;
+            consensus.block_migration_depth = 1;
+            consensus.mempool.tx_anchor_expiry_depth = 3;
+            consensus.mempool.ingress_proof_anchor_expiry_depth = 5;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+
+    let genesis_signer = config.signer();
+
+    // Start the genesis node and wait for packing
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // This is a secondary regression test for the bug where an anchor at height (current_height - tx_anchor_expiry_depth - 1)
+    // passes mempool validation but fails block validation.
+
+    // With tx_anchor_expiry_depth=3 and ingress_proof_anchor_expiry_depth=5:
+    // - When mining block at height H:
+    //   - min_tx_anchor_height = H - 3
+    //   - min_ingress_proof_anchor_height = H - 5
+    //   - valid anchors from block tree: H-1, H-2, H-3
+    //   - valid anchors from block index: H-5
+    //   - MISSING: H-4
+    // - An ingress proof at H-4 passes mempool (H-4 >= H-5) but would fail block validation with this bug.
+
+    let ingress_anchor_expiry = config
+        .consensus_config()
+        .mempool
+        .ingress_proof_anchor_expiry_depth as u64;
+
+    genesis_node
+        .mine_until_condition(
+            |b| b.last().unwrap().height >= ingress_anchor_expiry + 2, // buffer
+            1,
+            10,
+            30,
+        )
+        .await?;
+
+    let current_height = genesis_node.get_canonical_chain_height().await;
+
+    // calculate the edge case anchor height with the provided offset
+    let edge_case_anchor_height = (current_height - ingress_anchor_expiry) + anchor_height_offset;
+    let edge_case_block = genesis_node
+        .get_block_by_height(edge_case_anchor_height)
+        .await?;
+
+    info!(
+        "current_height: {}, edge_case_anchor_height:{} (offset: {})",
+        current_height, edge_case_anchor_height, anchor_height_offset
+    );
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let mut data: Vec<u8> = Vec::new();
+    for chunk in &chunks {
+        data.extend_from_slice(chunk);
+    }
+
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let edge_data_tx = genesis_signer.create_publish_transaction(
+        data.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let edge_data_tx = genesis_signer.sign_transaction(edge_data_tx)?;
+
+    info!("Edge case transaction ID: {}", edge_data_tx.header.id);
+
+    genesis_node.post_data_tx_raw(&edge_data_tx.header).await;
+    genesis_node
+        .wait_for_mempool(edge_data_tx.header.id, seconds_to_wait)
+        .await?;
+
+    // create an ingress proof anchored at the edge case height
+    let edge_case_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        edge_data_tx.header.data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        edge_case_block.block_hash,
+    )?;
+
+    info!(
+        "Submitting ingress proof with anchor at height {} (block hash: {}, id: {})",
+        edge_case_anchor_height,
+        edge_case_block.block_hash,
+        edge_case_ingress_proof.id()
+    );
+
+    // Post chunks first so the node auto-generates an ingress proof once all chunks are cached.
+    genesis_node.post_chunk_32b(&edge_data_tx, 0, &chunks).await;
+    genesis_node.post_chunk_32b(&edge_data_tx, 1, &chunks).await;
+    genesis_node.post_chunk_32b(&edge_data_tx, 2, &chunks).await;
+
+    // Wait for the auto-generated proof (1 proof from genesis_signer).
+    // We must wait for this async task to complete before injecting the edge-case proof,
+    // otherwise it could race and overwrite the edge-case proof after we insert it below.
+    genesis_node
+        .wait_for_multiple_ingress_proofs_no_mining(
+            vec![edge_data_tx.header.id],
+            1,
+            seconds_to_wait,
+        )
+        .await?;
+
+    // Now inject the edge-case ingress proof to verify mempool validation accepts it.
+    // This replaces the auto-generated proof (same signer address, dupsort dedup).
+    let resp = genesis_node
+        .ingest_ingress_proof(edge_case_ingress_proof.clone())
+        .await;
+
+    assert!(
+        resp.is_ok(),
+        "Edge case ingress proof should pass mempool validation but got: {:?}",
+        resp.err()
+    );
+
+    genesis_node.node_ctx.db.update_eyre(|tx| {
+        use reth_db::transaction::DbTxMut as _;
+        tx.clear::<irys_database::tables::IngressProofs>()?; // wipe all existing ingress proofs
+                                                             // insert just our one, so it always gets included
+        irys_database::store_ingress_proof_checked(tx, &edge_case_ingress_proof, &genesis_signer)
+    })?;
+
+    // Now mine a block. If the bug exists, this will fail during block discovery
+    // because the edge_case_anchor_height is not in valid_ingress_anchor_blocks
+
+    info!("Mining block at height {}...", current_height + 1);
+    let mine_result = genesis_node.mine_block().await;
+
+    match mine_result {
+        Err(e) => {
+            let error_str = format!("{:?}", e);
+            if error_str.contains("InvalidAnchor")
+                && error_str.contains(&edge_case_block.block_hash.to_string())
+            {
+                eyre::bail!("Block validation failed with InvalidAnchor error for edge case anchor at height {}", edge_case_anchor_height)
+            } else {
+                // different error - propagate it
+                eyre::bail!("Unexpected error, expected InvalidAnchor, got {}", &e)
+            }
+        }
+        Ok(block) => {
+            // check if the edge case transaction was actually promoted in this block
+            let publish_tx_ids: Vec<_> = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+
+            if publish_tx_ids.contains(&edge_data_tx.header.id) {
+                if should_promote {
+                    info!("tx was promoted as expected");
+                } else {
+                    warn!("Tx was promoted but should NOT have been");
+                    eyre::bail!(
+                        "Expected submit tx {} to NOT be promoted by ingress proof {}",
+                        &edge_data_tx.header.id,
+                        &edge_case_ingress_proof.id(),
+                    );
+                }
+            } else if should_promote {
+                warn!("Tx was NOT promoted but should have been");
+                eyre::bail!(
+                    "Expected submit tx {} to be promoted by ingress proof {}",
+                    &edge_data_tx.header.id,
+                    &edge_case_ingress_proof.id(),
+                );
+            } else {
+                info!("tx was NOT promoted as expected");
+            }
+        }
+    }
 
     // Wind down test
     genesis_node.stop().await;

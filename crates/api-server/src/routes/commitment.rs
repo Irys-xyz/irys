@@ -143,6 +143,9 @@ async fn process_commitment_transaction(
                 );
                 Err(ApiError::InvalidTransactionVersion { version, minimum })
             }
+            TxIngressError::UpdateRewardAddressNotAllowed => {
+                Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
+            }
         };
     }
 

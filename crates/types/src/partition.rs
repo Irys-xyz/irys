@@ -1,7 +1,7 @@
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
-use crate::{IrysAddress, H256};
+use crate::{DataLedger, IrysAddress, H256};
 
 /// A H256 hash that uniquely identifies a partition
 pub type PartitionHash = H256;
@@ -27,7 +27,7 @@ impl Default for PartitionAssignment {
         Self {
             partition_hash: PartitionHash::zero(),
             miner_address: IrysAddress::ZERO,
-            ledger_id: Some(0),
+            ledger_id: Some(DataLedger::Publish.into()),
             slot_index: Some(0),
         }
     }

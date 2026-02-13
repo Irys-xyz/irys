@@ -27,7 +27,18 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1;
     config.storage.num_writes_before_sync = 1;
-    let signer = IrysSigner::random_signer(&config.consensus_config());
+    // Use hardcoded key for deterministic consensus hash
+    let key_bytes: [u8; 32] = [
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99,
+    ];
+    let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
+    let signer = IrysSigner {
+        signer: signing_key,
+        chain_id: config.consensus_config().chain_id,
+        chunk_size: config.consensus_config().chunk_size,
+    };
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
@@ -148,7 +159,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         },
         "timestamp": 0,
         "user_agent": "miner2/0.1.0 (macos/aarch64)",
-        "signature": "7Z8g7rpyjRFjQky3kHLGr6YU5Er44a1MfUH8LWqLL4FDjsdMwmeoCHbcDNQz8Y44RKo2biebghZ5qcmVQ1ioBvr2N"
+        "consensus_config_hash": "5dGdi2oSdmpFdBGoUKGfHcWoQD4F6d6p8VhY9t9sZdfe",
+        "signature": "EoXNEmq4E4uoEoNVUcJ8A5VtteamtDtLcWfMJevjwLfLNDzebVQtFHcoqwTJqxDo8tVZBcTuHoqdNyb27RMEFK1wH"
     });
     // spellchecker:on
 
@@ -203,6 +215,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         "peer_id": miner_signer_2.address(),
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp,
+        "consensus_config_hash": config.consensus_config().keccak256_hash(),
         // Signature from another signer (0xaabb...), should fail verification
         "signature": "BGhPXuxCGZAomzoNKMZAr9ZrNEfcTWJgx5ag3N2fCDTVWgjTdc5SQhqQt4PHh6YZTYDnCURVGbuQL7vhEMjt4dhUo"
     });

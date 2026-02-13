@@ -203,7 +203,7 @@ impl VdfStateReadonly {
 
 /// create VDF state using the latest block in db
 pub fn create_state(
-    block_index: Arc<RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     db: DatabaseProvider,
     is_vdf_mining_enabled: Arc<AtomicBool>,
     config: &Config,
@@ -211,8 +211,6 @@ pub fn create_state(
     let capacity = calc_capacity(config);
 
     let block_hash = block_index
-        .read()
-        .expect("To unlock block index")
         .get_latest_item()
         .map(|item| item.block_hash)
         .expect("To have at least genesis block");
@@ -466,7 +464,7 @@ mod tests {
             .vdf
             .num_checkpoints_in_vdf_step = 10;
 
-        let config = Config::new(node_config.clone());
+        let config = Config::new_with_random_peer_id(node_config.clone());
         let vdf_config = config.vdf.clone();
 
         // Generate fewer steps but with much higher computational cost each

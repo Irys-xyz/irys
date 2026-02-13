@@ -408,7 +408,7 @@ impl TestSetup {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create mining addresses for all the mocked up peers
         let slow_peer_addr = IrysAddress::from([1_u8; 20]);
@@ -417,8 +417,8 @@ impl TestSetup {
         let sync_peer_addr = IrysAddress::from([4_u8; 20]);
 
         // Create partition assignments for each of the peers, assigning them to the same
-        // ledger_id(0) and slot_index(0)
-        let ledger_id = 0;
+        // ledger_id(DataLedger::Publish) and slot_index(0)
+        let ledger_id = DataLedger::Publish.into();
         let slot_index = 0;
         let partition_assignments = [
             PartitionAssignment {
@@ -712,7 +712,7 @@ impl TestSetup {
         chunks: Vec<UnpackedChunk>,
         config: &Config,
     ) -> HashMap<SocketAddr, Arc<MockChunkFetcher>> {
-        let ledger_id: u32 = 0;
+        let ledger_id: u32 = DataLedger::Publish.into();
 
         let mut mock_fetchers = HashMap::default();
         let config = &config.consensus;

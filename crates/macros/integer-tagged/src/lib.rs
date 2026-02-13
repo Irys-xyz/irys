@@ -188,7 +188,7 @@ pub fn derive_integer_tagged(input: TokenStream) -> TokenStream {
 
 fn extract_tag_name(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
-        if attr.path.is_ident("integer_tagged") {
+        if attr.path().is_ident("integer_tagged") {
             let result = attr.parse_args_with(|input: syn::parse::ParseStream| {
                 let mut tag_name = None;
                 while !input.is_empty() {
@@ -219,7 +219,7 @@ fn extract_tag_name(attrs: &[syn::Attribute]) -> Option<String> {
 
 fn extract_version(attrs: &[syn::Attribute]) -> Option<u8> {
     for attr in attrs {
-        if attr.path.is_ident("integer_tagged") {
+        if attr.path().is_ident("integer_tagged") {
             let result = attr.parse_args_with(|input: syn::parse::ParseStream| {
                 let mut version = None;
                 while !input.is_empty() {

@@ -240,6 +240,7 @@ impl LedgerExpiryTestContext {
     ) -> eyre::Result<Self> {
         // Configure node
         let mut config = NodeConfig::testing();
+        config.consensus.get_mut().num_chunks_in_recall_range = 1;
         config.consensus.get_mut().block_migration_depth = 1;
         config.consensus.get_mut().chunk_size = chunk_size;
         config.consensus.get_mut().num_chunks_in_partition = num_chunks_in_partition;

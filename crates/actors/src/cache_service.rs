@@ -874,17 +874,16 @@ impl ChunkCacheService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
-    use irys_testing_utils::initialize_tracing;
+    use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
+        NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -894,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -933,16 +932,13 @@ mod tests {
             Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -953,7 +949,7 @@ mod tests {
                 db: db.clone(),
                 block_tree_guard,
                 block_index_guard,
-                config: config.clone(),
+                config,
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
@@ -981,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1019,16 +1015,13 @@ mod tests {
             Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -1039,7 +1032,7 @@ mod tests {
                 db: db.clone(),
                 block_tree_guard,
                 block_index_guard,
-                config: config.clone(),
+                config,
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
@@ -1087,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1132,20 +1125,19 @@ mod tests {
         })??;
 
         // Setup minimal service context
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
@@ -1184,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1224,20 +1216,19 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
@@ -1401,7 +1392,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
         node_config.cache.max_cache_size_bytes = 96;
-        let config_below = Config::new(node_config.clone());
+        let config_below = Config::new_with_random_peer_id(node_config.clone());
 
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
@@ -1451,14 +1442,13 @@ mod tests {
         })??;
 
         // Minimal service context
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config_below.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config_below.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Below-capacity prune: should NOT remove chunks
@@ -1466,7 +1456,7 @@ mod tests {
             db: db.clone(),
             block_tree_guard: block_tree_guard.clone(),
             block_index_guard: block_index_guard.clone(),
-            config: config_below.clone(),
+            config: config_below,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
@@ -1493,9 +1483,9 @@ mod tests {
         })??;
 
         // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
-        let mut node_config2 = node_config.clone();
+        let mut node_config2 = node_config;
         node_config2.cache.max_cache_size_bytes = 64;
-        let config_above = Config::new(node_config2);
+        let config_above = Config::new_with_random_peer_id(node_config2);
         let task_above = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
@@ -1525,7 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1555,14 +1545,13 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let generation_state = IngressProofGenerationState::new();
         generation_state.mark_generating(tx_header.data_root);
@@ -1570,7 +1559,7 @@ mod tests {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: generation_state,
             cache_sender: tx,
@@ -1594,7 +1583,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1640,21 +1629,20 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,

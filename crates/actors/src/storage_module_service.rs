@@ -378,7 +378,7 @@ impl StorageModuleServiceInner {
                 let end_block = end_block_bounds.height;
 
                 // Drop the guard before the next read
-                drop(block_index_guard);
+                let _ = block_index_guard;
 
                 {
                     let bi = self.block_index.read();

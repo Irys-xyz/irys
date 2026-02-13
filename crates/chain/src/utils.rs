@@ -43,23 +43,5 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
         config.node_mode = NodeMode::Genesis;
     }
 
-    // Ensure peer_id is set, generate and persist if missing
-    let mut needs_persist = false;
-    if config.peer_id.is_none() {
-        debug!("Generating new peer_id");
-        config.ensure_peer_id();
-        needs_persist = true;
-    }
-
-    // Persist config if peer_id was generated
-    if needs_persist {
-        debug!(
-            "Persisting updated config with peer_id to {:?}",
-            &config_path
-        );
-        let config_toml = toml::to_string_pretty(&config)?;
-        std::fs::write(&config_path, config_toml)?;
-    }
-
     Ok(config)
 }

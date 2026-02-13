@@ -86,20 +86,22 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
                 response: response_tx,
             })
             .unwrap();
-        let (block, _, _) = response_rx.await??.unwrap();
+        let (sealed_block, _) = response_rx.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
             .inner
             .provider
-            .block_by_hash(block.evm_block_hash)?
+            .block_by_hash(sealed_block.header().evm_block_hash)?
             .unwrap();
 
         // check irys DB for built block
         let db_irys_block = &node
             .node_ctx
             .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
+            .view_eyre(|tx| {
+                irys_database::block_header_by_hash(tx, &sealed_block.header().block_hash, false)
+            })?
             .unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());

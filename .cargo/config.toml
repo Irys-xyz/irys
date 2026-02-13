@@ -1,6 +1,6 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
-# incremental = true
+incremental = true
 # jobs = 2 # number of parallel jobs, defaults to # of CPUs
 
 [alias]

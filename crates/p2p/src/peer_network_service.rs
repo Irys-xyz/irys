@@ -156,13 +156,14 @@ impl PeerNetworkServiceState {
     }
 
     fn create_handshake_request_v2(&self) -> HandshakeRequestV2 {
-        let peer_id = self.config.node_config.peer_id();
+        let peer_id = self.config.peer_id();
         let mut handshake_request = HandshakeRequestV2 {
             address: self.peer_address,
             chain_id: self.chain_id,
             peer_id,
             protocol_version: ProtocolVersion::V2,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.config
@@ -197,7 +198,7 @@ impl PeerNetworkServiceInner {
             gossip_client: GossipClient::new(
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
-                config.node_config.peer_id(),
+                config.peer_id(),
             ),
             chain_id: config.consensus.chain_id,
             peer_address,
@@ -1017,6 +1018,17 @@ impl PeerNetworkService {
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
+                // Only log mismatch if the version is not V1 - V1 peers have zero hash
+                if protocol_version != ProtocolVersion::V1 {
+                    let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
+                    if accepted_peers.consensus_config_hash != our_hash {
+                        error!(
+                            "Consensus config mismatch with peer at {}! ours={} theirs={}",
+                            gossip_address, our_hash, accepted_peers.consensus_config_hash,
+                        );
+                    }
+                }
+
                 if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
                     let peer_addresses: Vec<SocketAddr> =
                         accepted_peers.peers.iter().map(|p| p.api).collect();
@@ -1118,7 +1130,9 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::{Config, IrysAddress, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo};
+    use irys_types::{
+        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
+    };
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr as _;
@@ -1205,7 +1219,7 @@ mod tests {
     #[test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1234,7 +1248,7 @@ mod tests {
     #[test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1349,7 +1363,7 @@ mod tests {
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let harness = TestHarness::new(temp_dir.path(), config);
         let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
         let max_retries = harness.config.node_config.p2p_handshake.max_retries;
@@ -1379,7 +1393,7 @@ mod tests {
     //     let temp_dir = setup_tracing_and_temp_dir(None, false);
     //     let mut node_config = NodeConfig::testing();
     //     node_config.trusted_peers = vec![];
-    //     let config = Config::new(node_config);
+    //     let config = Config::new_with_random_peer_id(node_config);
     //     let harness = TestHarness::new(temp_dir.path(), config);
     //     let peer = create_test_peer(
     //         "0x1234567890123456789012345678901234567890",
@@ -1435,7 +1449,7 @@ mod tests {
     // #[test]
     // async fn test_reth_sender_receives_reth_peer_info() {
     //     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    //     let config: Config = NodeConfig::testing().into();
+    //     let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
     //     let harness = TestHarness::new(temp_dir.path(), config);
     //     harness
     //         .api_client
@@ -1459,7 +1473,7 @@ mod tests {
     #[test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
@@ -1511,7 +1525,7 @@ mod tests {
     #[test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
@@ -1575,7 +1589,7 @@ mod tests {
     #[test]
     async fn test_wait_for_active_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1606,7 +1620,7 @@ mod tests {
     #[test]
     async fn test_wait_for_active_peer_no_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1629,7 +1643,7 @@ mod tests {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let harness = TestHarness::new(temp_dir.path(), config);
         let (_staked_mining_addr, staked_peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1668,7 +1682,7 @@ mod tests {
     #[test]
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(

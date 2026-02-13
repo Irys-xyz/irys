@@ -20,10 +20,10 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -53,6 +53,8 @@ where
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
     pub started_at: Instant,
+    /// Precomputed hash of the consensus config to avoid recomputing on every handshake
+    pub consensus_config_hash: H256,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -74,6 +76,7 @@ where
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
             started_at: self.started_at,
+            consensus_config_hash: self.consensus_config_hash,
         }
     }
 }
@@ -326,18 +329,30 @@ where
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
         debug!("Pulling block {} from the network", block_hash);
-        let (source_address, irys_block) = self
+        let (source_address, irys_block) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
             // This shouldn't happen, but we still should have a safeguard just in case
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_address
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_address, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
@@ -365,17 +380,29 @@ where
         block_hash: BlockHash,
         peer: &(irys_types::IrysPeerId, PeerListItem),
     ) -> GossipResult<()> {
-        let (source_peer_id, irys_block) = self
+        let (source_peer_id, irys_block) = match self
             .gossip_client
             .pull_block_header_from_peer(block_hash, peer, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_peer failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
-                source_peer_id
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         // Get miner_address from the peer item
@@ -502,12 +529,15 @@ where
             .pull_block_body(&block_header, use_trusted_peers_only)
             .await?;
 
+        let sealed_block = SealedBlock::new(block_header, block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(
-                Arc::new(block_header),
-                block_body,
-                skip_validation_for_fast_track,
-            )
+            .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
             .await?;
         Ok(())
     }
@@ -654,8 +684,15 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
+        let sealed_block = SealedBlock::new((*block_header).clone(), block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(block_header, Arc::new(block_body), skip_block_validation)
+            .process_block(Arc::new(sealed_block), skip_block_validation)
             .await?;
         Ok(())
     }
@@ -676,11 +713,13 @@ where
             .await?;
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_peer_id
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block header from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
@@ -742,7 +781,12 @@ where
                 }
             }
         }
-        Err(last_err.expect("Error must be set after 3 attempts"))
+        let err = last_err.expect("Error must be set after 3 attempts");
+        self.sync_state.record_data_pull_error(format!(
+            "pull_payload_from_network failed for {}: {:?}",
+            evm_block_hash, err
+        ));
+        Err(err)
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -863,7 +907,7 @@ where
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV2::BlockBody(block_body));
+                    let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
                     self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
                     Ok(true)
                 } else {
@@ -973,7 +1017,7 @@ where
             GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body =
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
-                Ok(maybe_block_body.map(GossipDataV2::BlockBody))
+                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::clone(&body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1119,7 +1163,7 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<Arc<BlockBody>> {
+    ) -> GossipResult<BlockBody> {
         let block_hash = header.block_hash;
 
         debug!(
@@ -1148,7 +1192,7 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, source_peer_id
                             );
-                            return Ok(irys_block_body);
+                            return Ok((*irys_block_body).clone());
                         }
                         Ok(false) => {
                             warn!(

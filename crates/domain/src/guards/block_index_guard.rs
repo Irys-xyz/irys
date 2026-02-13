@@ -1,43 +1,41 @@
 use irys_database::block_header_by_hash;
 use irys_types::{BlockIndexItem, DatabaseProvider};
 use reth_db::Database as _;
-use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
 
 use crate::BlockIndex;
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Read-only wrapper around [`BlockIndex`].
+///
+/// Since `BlockIndex` is now backed by MDBX (which handles its own
+/// concurrency), no `RwLock` is needed.
 #[derive(Debug, Clone)]
 pub struct BlockIndexReadGuard {
-    block_index_data: Arc<RwLock<BlockIndex>>,
+    block_index: BlockIndex,
 }
 
 impl BlockIndexReadGuard {
-    /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(block_index_data: Arc<RwLock<BlockIndex>>) -> Self {
-        Self { block_index_data }
+    /// Creates a new `BlockIndexReadGuard`
+    pub fn new(block_index: BlockIndex) -> Self {
+        Self { block_index }
     }
 
-    /// Accessor method to get a read guard for Ledgers
-    pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex> {
-        self.block_index_data.read().unwrap()
+    /// Returns a reference to the inner `BlockIndex`
+    pub fn read(&self) -> &BlockIndex {
+        &self.block_index
     }
 
-    /// Get the inner `Arc<RwLock<BlockIndex>>`
-    pub fn inner(&self) -> Arc<RwLock<BlockIndex>> {
-        self.block_index_data.clone()
+    /// Returns a clone of the inner `BlockIndex`
+    pub fn inner(&self) -> BlockIndex {
+        self.block_index.clone()
     }
 
     /// Debug utility to validate block index integrity
     ///
     /// Iterates through all items in the block index and verifies that each entry's
     /// position matches its block height, detecting potential synchronization issues.
-    /// This helps identify corrupted index state where the array position doesn't
-    /// match the expected block height, which would indicate data inconsistency.
-    ///
-    /// @param db Database provider for accessing the blockchain data
     pub fn print_items(&self, db: DatabaseProvider) {
-        let rg = self.read();
+        let bi = &self.block_index;
         let tx = match db.tx() {
             Ok(tx) => tx,
             Err(e) => {
@@ -48,8 +46,8 @@ impl BlockIndexReadGuard {
                 return;
             }
         };
-        for i in 0..rg.num_blocks() {
-            let Some(item) = rg.get_item(i) else {
+        for i in 0..bi.num_blocks() {
+            let Some(item) = bi.get_item(i) else {
                 error!("Block index missing item at position {}", i);
                 continue;
             };
@@ -73,18 +71,10 @@ impl BlockIndexReadGuard {
     }
 
     pub fn get_latest_item_cloned(&self) -> Option<BlockIndexItem> {
-        let rg = self.read();
-        rg.get_latest_item().cloned()
+        self.block_index.get_latest_item()
     }
 
     pub fn latest_height(&self) -> u64 {
-        let rg = self.read();
-        rg.latest_height()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    /// Accessor method to get a write guard for the `block_index`
-    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockIndex> {
-        self.block_index_data.write().unwrap()
+        self.block_index.latest_height()
     }
 }

@@ -413,8 +413,15 @@ impl Index<DataLedger> for Ledgers {
 impl IndexMut<DataLedger> for Ledgers {
     fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
         match ledger {
-            DataLedger::Publish => &mut self.perm,
-            DataLedger::Submit => &mut self.term[0],
+            DataLedger::Publish => &mut self.perm as &mut dyn LedgerCore,
+            ledger => {
+                let ledger_id = ledger as u32;
+                self.term
+                    .iter_mut()
+                    .find(|l| l.ledger_id == ledger_id)
+                    .map(|l| l as &mut dyn LedgerCore)
+                    .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+            }
         }
     }
 }

@@ -116,7 +116,7 @@ impl PeerList {
         let inner = PeerListDataInner::new(
             vec![],
             PeerNetworkSender::new(sender),
-            &Config::new(irys_types::NodeConfig::testing()),
+            &Config::new_with_random_peer_id(irys_types::NodeConfig::testing()),
             broadcast::channel::<PeerEvent>(100).0,
         )?;
         Ok(Self(Arc::new(RwLock::new(inner))))
@@ -1356,7 +1356,8 @@ mod tests {
             #[case] reason: ScoreDecreaseReason,
             #[case] expected_score: u16,
         ) {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(peer, true);
@@ -1368,7 +1369,8 @@ mod tests {
 
         #[test]
         fn test_multiple_decreases_cumulative() {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(peer, true);
@@ -1409,7 +1411,8 @@ mod tests {
 
         #[test]
         fn test_decrease_score_removes_inactive_from_known_peers() {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
             peer.reputation_score = PeerScore::new(25);
 
@@ -1431,7 +1434,8 @@ mod tests {
 
         #[test]
         fn test_decrease_score_unstaked_peer_removal() {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(peer.clone(), false);
@@ -1453,7 +1457,8 @@ mod tests {
             #[case] reason: ScoreIncreaseReason,
             #[case] expected_score: u16,
         ) {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(peer, true);
@@ -1465,7 +1470,8 @@ mod tests {
 
         #[test]
         fn test_score_transitions_across_thresholds() {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
@@ -1488,7 +1494,8 @@ mod tests {
 
         #[test]
         fn test_unstaked_peer_operations() {
-            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(50);
@@ -1512,7 +1519,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_methods_treat_staked_unstaked_peers_equally_except_persistable() {
-        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         // Create test peers
         let (staked_mining_addr, staked_peer_id, staked_peer) = create_test_peer(1);
@@ -1745,7 +1753,8 @@ mod tests {
 
     #[test]
     fn test_protocol_version_propagation() {
-        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         // Create a peer with protocol version V1
         let (mining_addr, peer_id, mut peer) = create_test_peer(1);
@@ -1857,7 +1866,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_active_peers_includes_both_staked_and_unstaked() {
-        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         // Create test peers with active reputation scores
         let (_staked_mining_addr, _staked_peer_id, mut staked_peer) = create_test_peer(1);

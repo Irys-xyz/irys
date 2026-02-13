@@ -1,7 +1,8 @@
 use alloy_primitives::B256;
 use irys_types::{
-    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1, IrysSignature, PoaData, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    partition::PartitionHash, DataLedger, DataTransactionLedger, GenesisConfig, H256List,
+    IrysBlockHeader, IrysBlockHeaderV1, IrysSignature, PoaData, UnixTimestampMs, VDFLimiterInfo,
+    H256, U256,
 };
 
 pub fn build_unsigned_irys_genesis_block(
@@ -37,7 +38,7 @@ pub fn build_unsigned_irys_genesis_block(
         system_ledgers: vec![],
         data_ledgers: vec![
             DataTransactionLedger {
-                ledger_id: 0,
+                ledger_id: DataLedger::Publish.into(),
                 tx_root: H256::zero(),
                 tx_ids: H256List::new(),
                 total_chunks: 0,
@@ -46,7 +47,7 @@ pub fn build_unsigned_irys_genesis_block(
                 required_proof_count: Some(number_of_ingress_proofs_total as u8),
             },
             DataTransactionLedger {
-                ledger_id: 1,
+                ledger_id: DataLedger::Submit.into(),
                 tx_root: H256::zero(),
                 tx_ids: H256List::new(),
                 total_chunks: 0,
