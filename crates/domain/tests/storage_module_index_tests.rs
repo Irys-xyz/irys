@@ -10,9 +10,10 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
-    partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions, DataTransaction,
-    DataTransactionHeader, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-    PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk, H256,
+    partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions, DataLedger,
+    DataTransaction, DataTransactionHeader, DataTransactionLedger, LedgerChunkOffset,
+    LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset,
+    UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database as _;
@@ -45,7 +46,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: config.node_config.miner_address(),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
@@ -59,7 +60,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: config.node_config.miner_address(),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
@@ -78,7 +79,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: config.node_config.miner_address(),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
             submodules: vec![

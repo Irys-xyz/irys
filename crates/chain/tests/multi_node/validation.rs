@@ -99,18 +99,22 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload, _) = block_prod_strategy
+    let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
+    insert_block_header_for_gossip_test(
+        &peer_node,
+        block.header().block_hash,
+        (**block.header()).clone(),
+    )?;
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&block)?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -155,11 +159,11 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload, _) = block_prod_strategy
+    let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    let (_block, eth_payload_other, _) = block_prod_strategy
+    let (_block, eth_payload_other) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -169,7 +173,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
         "eth payloads must have different hashes"
     );
 
-    let mut irys_block = block.as_ref().clone();
+    let mut irys_block = (**block.header()).clone();
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
     // Re-signing actually changes the block hash, so we need to manually insert the header to the db
@@ -265,20 +269,24 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload, _) = block_prod_strategy
+    let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
 
-    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
+    insert_block_header_for_gossip_test(
+        &peer_node,
+        block.header().block_hash,
+        (**block.header()).clone(),
+    )?;
 
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&block)?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -365,18 +373,22 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload, _) = block_prod_strategy
+    let (block, eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
+    insert_block_header_for_gossip_test(
+        &peer_node,
+        block.header().block_hash,
+        (**block.header()).clone(),
+    )?;
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&block)?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -560,7 +572,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, transactions, _) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -569,7 +581,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), transactions, false)
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -591,7 +603,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, transactions, _) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -600,7 +612,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), transactions, false)
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -625,7 +637,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, transactions, _) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -634,7 +646,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), transactions, false)
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -734,7 +746,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     }
 
     genesis_node.gossip_disable();
-    let (block, _, transactions, _) = block_prod_strategy
+    let (block, _, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -742,7 +754,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), transactions, false)
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     debug!("validation result: {:?}", preval_res);

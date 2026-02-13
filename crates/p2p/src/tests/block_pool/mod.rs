@@ -19,6 +19,7 @@ use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
     PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
+    SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -41,6 +42,13 @@ fn create_test_block_body(block_hash: irys_types::BlockHash) -> BlockBody {
         block_hash,
         ..Default::default()
     }
+}
+
+fn create_test_sealed_block(
+    header: irys_types::IrysBlockHeader,
+    body: BlockBody,
+) -> Arc<SealedBlock> {
+    Arc::new(SealedBlock::new(header, body).expect("Failed to create SealedBlock"))
 }
 
 struct MockedServices {
@@ -172,7 +180,8 @@ async fn should_process_block() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
@@ -182,14 +191,13 @@ async fn should_process_block() {
 
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
-    let test_header = Arc::new(test_header.clone());
+    let sealed_block = create_test_sealed_block(
+        test_header.clone(),
+        create_test_block_body(test_header.block_hash),
+    );
 
     service
-        .process_block(
-            Arc::clone(&test_header),
-            Arc::new(create_test_block_body(test_header.block_hash)),
-            false,
-        )
+        .process_block(sealed_block, false)
         .await
         .expect("can't process block");
 
@@ -198,7 +206,7 @@ async fn should_process_block() {
         .first()
         .expect("to have a block")
         .clone();
-    assert_eq!(block_header_in_discovery, test_header);
+    assert_eq!(*block_header_in_discovery, test_header);
 }
 
 #[tokio::test]
@@ -214,11 +222,23 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Wait for the server to start
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_data_guard,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        service_senders,
+        is_vdf_mining_enabled,
+    } = MockedServices::new(&config);
+
     // Create three blocks in a chain: block1 -> block2 -> block3
     // block1: in database
     // block2: in API client
     // block3: test block to be processed
-    let test_chain = BlockStatusProvider::produce_mock_chain(3, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let test_chain = BlockStatusProvider::produce_mock_chain(3, Some(&genesis), &config.consensus);
 
     // Create block1 (will be in the database)
     let block1 = test_chain[0].clone();
@@ -242,17 +262,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         "Block 3 previous_block_hash: {:?}",
         block3.previous_block_hash
     );
-
-    let MockedServices {
-        block_status_provider_mock,
-        block_discovery_stub,
-        peer_list_data_guard,
-        db,
-        execution_payload_provider,
-        mempool_stub,
-        service_senders,
-        is_vdf_mining_enabled,
-    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -325,13 +334,13 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block(
-                    Arc::new(block.clone()),
-                    Arc::new(create_test_block_body(block.block_hash)),
-                    false,
-                )
-                .await
-                .expect("to process block");
+                let sealed_block = create_test_sealed_block(
+                    block.clone(),
+                    create_test_block_body(block.block_hash),
+                );
+                pool.process_block(sealed_block, false)
+                    .await
+                    .expect("to process block");
             });
             GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
                 block_for_response,
@@ -349,12 +358,11 @@ async fn should_process_block_with_intermediate_block_in_api() {
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
+    let block3_sealed =
+        create_test_sealed_block((*block3).clone(), create_test_block_body(block3.block_hash));
+
     block_pool
-        .process_block(
-            Arc::clone(&block3),
-            Arc::new(create_test_block_body(block3.block_hash)),
-            false,
-        )
+        .process_block(block3_sealed, false)
         .await
         .expect("can't process block");
 
@@ -389,12 +397,24 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
     // Wait for the server to start
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_data_guard,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        service_senders,
+        is_vdf_mining_enabled,
+    } = MockedServices::new(&config);
+
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
     // block1: in database
     // block2: in API client, but fails. It doesn't make it all the way to the block pool
     // block3: test block to be processed - getting stuck when processing block2
     // block4: new block that should trigger reprocessing of block2 and then block3
-    let test_chain = BlockStatusProvider::produce_mock_chain(4, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let test_chain = BlockStatusProvider::produce_mock_chain(4, Some(&genesis), &config.consensus);
 
     // Create block1 (will be in the database)
     let block1 = test_chain[0].clone();
@@ -425,17 +445,6 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         "Block 4 previous_block_hash: {:?}",
         block4.previous_block_hash
     );
-
-    let MockedServices {
-        block_status_provider_mock,
-        block_discovery_stub,
-        peer_list_data_guard,
-        db,
-        execution_payload_provider,
-        mempool_stub,
-        service_senders,
-        is_vdf_mining_enabled,
-    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -532,12 +541,11 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
+    let block3_sealed =
+        create_test_sealed_block((*block3).clone(), create_test_block_body(block3.block_hash));
+
     block_pool
-        .process_block(
-            Arc::clone(&block3),
-            Arc::new(create_test_block_body(block3.block_hash)),
-            false,
-        )
+        .process_block(block3_sealed, false)
         .await
         .expect("can't process block");
 
@@ -556,12 +564,11 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
     // Add a previously missing block to the server
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
+    let block4_sealed =
+        create_test_sealed_block((*block4).clone(), create_test_block_body(block4.block_hash));
+
     block_pool
-        .process_block(
-            Arc::clone(&block4),
-            Arc::new(create_test_block_body(block4.block_hash)),
-            false,
-        )
+        .process_block(block4_sealed, false)
         .await
         .expect("can't process block");
 
@@ -620,7 +627,8 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -653,15 +661,12 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         header_building_on_very_old_block.block_hash
     );
 
-    let res = block_pool
-        .process_block(
-            Arc::new(header_building_on_very_old_block.clone()),
-            Arc::new(create_test_block_body(
-                header_building_on_very_old_block.block_hash,
-            )),
-            false,
-        )
-        .await;
+    let sealed_block = create_test_sealed_block(
+        header_building_on_very_old_block.clone(),
+        create_test_block_body(header_building_on_very_old_block.block_hash),
+    );
+
+    let res = block_pool.process_block(sealed_block, false).await;
 
     assert!(res.is_err());
     assert!(matches!(
@@ -755,7 +760,8 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         tokio::runtime::Handle::current(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -808,13 +814,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let res = pool
-                    .process_block(
-                        Arc::new(block.clone()),
-                        Arc::new(create_test_block_body(block.block_hash)),
-                        false,
-                    )
-                    .await;
+                let sealed_block = create_test_sealed_block(
+                    block.clone(),
+                    create_test_block_body(block.block_hash),
+                );
+                let res = pool.process_block(sealed_block, false).await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -837,13 +841,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert!(is_parent_in_index);
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let res = block_pool
-        .process_block(
-            Arc::new(bogus_block.clone()),
-            Arc::new(create_test_block_body(bogus_block.block_hash)),
-            false,
-        )
-        .await;
+    let sealed_block = create_test_sealed_block(
+        bogus_block.clone(),
+        create_test_block_body(bogus_block.block_hash),
+    );
+    let res = block_pool.process_block(sealed_block, false).await;
 
     sync_service_handle.shutdown_signal.fire();
 
@@ -888,7 +890,8 @@ async fn should_not_fast_track_block_already_in_index() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
@@ -899,12 +902,13 @@ async fn should_not_fast_track_block_already_in_index() {
 
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
+    let sealed_block = create_test_sealed_block(
+        test_header.clone(),
+        create_test_block_body(test_header.block_hash),
+    );
+
     let err = service
-        .process_block(
-            Arc::new(test_header.clone()),
-            Arc::new(create_test_block_body(test_header.block_hash)),
-            true,
-        )
+        .process_block(sealed_block, true)
         .await
         .expect_err("to have an error");
 
