@@ -915,11 +915,7 @@ where
                             );
                         }
                         let data = Arc::new(GossipDataV2::BlockHeader(block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -935,7 +931,7 @@ where
 
                 if let Some(block_body) = block_body {
                     let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
-                    self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
+                    self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -954,11 +950,7 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipDataV2::ExecutionPayload(evm_block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -980,7 +972,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -1001,7 +993,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::Transaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -1125,7 +1117,7 @@ where
 
     fn send_gossip_data(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
         check_result: &RequestCheckResult,
     ) {
