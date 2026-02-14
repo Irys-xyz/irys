@@ -48,6 +48,15 @@ CARGO_CACHE_DIR="${HOME}/.cache/irys-docker-cargo"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yaml"
 CONFIG_DIR="$SCRIPT_DIR/configs"
 
+# ── Docker CLI discovery ──────────────────────────────────────────────────
+# On macOS, Docker Desktop installs its CLI at ~/.docker/bin which may not
+# be on PATH (especially in non-interactive shells / agent environments).
+if ! command -v docker &>/dev/null; then
+    if [[ -x "$HOME/.docker/bin/docker" ]]; then
+        export PATH="$HOME/.docker/bin:$PATH"
+    fi
+fi
+
 # ── Platform detection ─────────────────────────────────────────────────────
 
 HOST_OS="$(uname -s)"  # Darwin or Linux
