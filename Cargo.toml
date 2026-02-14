@@ -111,20 +111,24 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 
 # OpenTelemetry
-opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs", "metrics"] }
 opentelemetry-otlp = { version = "0.31.0", features = [
   "trace",
   "logs",
+  "metrics",
   "http-proto",
+  "grpc-tonic",
 ] }
 opentelemetry_sdk = { version = "0.31.0", features = [
   "rt-tokio",
   "trace",
   "logs",
+  "metrics",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
 tracing-opentelemetry = "0.32.0"
 opentelemetry-semantic-conventions = "0.31.0"
+metrics = "0.24"
 tempfile = "3"
 csv = "1"
 futures-util = "0.3"

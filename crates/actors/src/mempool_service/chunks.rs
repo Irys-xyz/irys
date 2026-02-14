@@ -1,4 +1,5 @@
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::mempool_service::metrics::{record_chunk_duplicate, record_chunk_ingested};
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
@@ -66,7 +67,7 @@ pub fn select_data_size_from_storage_modules(
 }
 
 impl Inner {
-    #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -94,6 +95,7 @@ impl Inner {
                 "Chunk {} already processed recently, skipping re-gossip",
                 &chunk_path_hash
             );
+            record_chunk_duplicate();
             return Ok(());
         }
 
@@ -399,6 +401,8 @@ impl Inner {
             .record_recent_valid_chunk(chunk_path_hash)
             .await;
 
+        record_chunk_ingested(chunk_len);
+
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
@@ -626,7 +630,6 @@ pub enum ChunkIngressError {
 }
 
 impl ChunkIngressError {
-    /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.into()))
@@ -634,12 +637,23 @@ impl ChunkIngressError {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.into()))
         }
     }
-    /// Allows converting an error that implements Display into an Other error
+
     pub fn other_display(err: impl Display, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.to_string()))
         } else {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.to_string()))
+        }
+    }
+
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Self::Advisory(_))
+    }
+
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::Critical(e) => e.error_type(),
+            Self::Advisory(e) => e.error_type(),
         }
     }
 }
@@ -656,40 +670,52 @@ impl From<AdvisoryChunkIngressError> for ChunkIngressError {
     }
 }
 
-/// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone)]
 pub enum CriticalChunkIngressError {
-    /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
-    /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
-    /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
-    /// The tx_offset exceeds valid bounds for the data_size
     InvalidOffset(String),
-    /// Some database error occurred when reading or writing the chunk
     DatabaseError,
-    /// The service is uninitialized
     ServiceUninitialized,
-    /// Catch-all variant for other errors.
     Other(String),
 }
 
-// non-critical reasons why chunk ingress might fail
+impl CriticalChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidProof => "invalid_proof",
+            Self::InvalidDataHash => "invalid_data_hash",
+            Self::InvalidChunkSize => "invalid_chunk_size",
+            Self::InvalidDataSize => "invalid_data_size",
+            Self::InvalidOffset(_) => "invalid_offset",
+            Self::DatabaseError => "database_error",
+            Self::ServiceUninitialized => "service_uninitialized",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AdvisoryChunkIngressError {
-    /// Oversized chunk bytes submitted before header arrival
     PreHeaderOversizedBytes,
-    /// Oversized data_path submitted before header arrival
     PreHeaderOversizedDataPath,
-    /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
-    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
     PreHeaderInvalidOffset(String),
-    /// Catch-all variant for other errors.
     Other(String),
+}
+
+impl AdvisoryChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::PreHeaderOversizedBytes => "pre_header_oversized_bytes",
+            Self::PreHeaderOversizedDataPath => "pre_header_oversized_data_path",
+            Self::PreHeaderOffsetExceedsCap => "pre_header_offset_exceeds_cap",
+            Self::PreHeaderInvalidOffset(_) => "pre_header_invalid_offset",
+            Self::Other(_) => "other",
+        }
+    }
 }
 
 /// Generates an ingress proof for a specific `data_root`

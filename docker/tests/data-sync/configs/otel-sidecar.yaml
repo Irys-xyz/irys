@@ -1,0 +1,63 @@
+# OTEL Collector Sidecar Configuration
+# Scrapes Reth Prometheus metrics locally and pushes to central OTEL collector
+#
+# This runs alongside each Irys node to collect Reth metrics and forward them
+# to the remote observability stack. The node name is set via OTEL_SERVICE_NAME env var.
+
+receivers:
+  # Scrape Prometheus metrics from the local Reth endpoint
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: '${env:OTEL_SERVICE_NAME}'
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['${env:RETH_METRICS_HOST}:9001']
+          # Note: Reth already adds reth_ prefix to all metrics, no relabeling needed
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  # Add resource attributes for service identification
+  resource:
+    attributes:
+      - key: service.name
+        value: ${env:OTEL_SERVICE_NAME}
+        action: upsert
+      - key: service.type
+        value: reth-metrics
+        action: insert
+
+exporters:
+  # Forward to central OTEL collector via OTLP
+  otlp:
+    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}
+    tls:
+      insecure: true
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 100
+
+  # Debug exporter for troubleshooting
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [resource, batch]
+      exporters: [otlp, debug]
+
+  telemetry:
+    logs:
+      level: debug

@@ -1,5 +1,6 @@
 use crate::{
     block_producer::BlockProducerCommand,
+    metrics,
     mining_bus::{
         BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
         MiningBroadcastEvent,
@@ -265,6 +266,7 @@ impl PartitionMiningServiceInner {
                     chunks.len(),
                     self.difficulty
                 );
+                metrics::record_mining_solution_found();
 
                 let solution = SolutionContext {
                     partition_hash,

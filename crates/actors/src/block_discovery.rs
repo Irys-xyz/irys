@@ -6,6 +6,7 @@ use crate::{
     MempoolServiceMessage,
 };
 
+use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
@@ -241,6 +242,9 @@ impl BlockDiscoveryService {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
                 let result = self.inner.clone().block_discovered(block, skip_vdf).await;
+                if let Err(ref e) = result {
+                    metrics::record_block_discovery_error(&format!("{e}"));
+                }
                 if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
                         tracing::error!(

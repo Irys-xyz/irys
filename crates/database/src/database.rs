@@ -32,7 +32,6 @@ use reth_db::{
     ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_db_api::Database as _;
-use reth_node_metrics::recorder::install_prometheus_recorder;
 use tracing::{debug, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
@@ -50,9 +49,8 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             .with_shrink_threshold((20 * MEGABYTE).try_into()?),
     );
 
-    // Register the prometheus recorder before creating the database,
-    // because irys_database init needs it to register metrics.
-    let _ = install_prometheus_recorder();
+    // Note: Metrics recorder should be installed via init_telemetry() before this is called.
+    // The OpenTelemetryRecorder bridges `metrics` crate to OTEL for push-based export.
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
 
     Ok(db)

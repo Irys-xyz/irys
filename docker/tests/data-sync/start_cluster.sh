@@ -4,8 +4,8 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
-# Default to debug image (has shell for test scripts)
-IMAGE_NAME="${IMAGE_NAME:-irys:debug}"
+# Default to the image built by build_image.sh
+IMAGE_NAME="${IMAGE_NAME:-localhost/irys-test:latest}"
 export IMAGE_NAME
 
 echo "========================================"

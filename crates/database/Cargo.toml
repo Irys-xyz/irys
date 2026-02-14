@@ -22,7 +22,6 @@ irys-testing-utils.workspace = true
 test-fuzz.workspace = true
 reth-db.workspace = true
 reth-db-api.workspace = true
-reth-node-metrics.workspace = true
 reth-codecs.workspace = true
 paste.workspace = true
 strum.workspace = true
