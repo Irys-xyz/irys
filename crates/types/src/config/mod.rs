@@ -8,7 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
-use crate::{IrysPeerId, UnixTimestamp};
+use crate::{IrysPeerId, UnixTimestamp, H256};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -34,6 +34,22 @@ impl Config {
 
     pub fn peer_id(&self) -> IrysPeerId {
         self.0.peer_id
+    }
+
+    /// Returns a new Config with `expected_genesis_hash` set.
+    /// Used by Genesis nodes to align their consensus hash with peers
+    /// after the genesis block hash becomes known.
+    pub fn with_expected_genesis_hash(self, hash: H256) -> Self {
+        let inner = &*self.0;
+        let mut consensus = inner.consensus.clone();
+        consensus.expected_genesis_hash = Some(hash);
+        Self(Arc::new(CombinedConfigInner {
+            consensus,
+            node_config: inner.node_config.clone(),
+            vdf: inner.vdf.clone(),
+            mempool: inner.mempool.clone(),
+            peer_id: inner.peer_id,
+        }))
     }
 
     pub fn irys_signer(&self) -> IrysSigner {
@@ -493,7 +509,7 @@ pub mod serde_utils {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{PeerAddress, RethPeerInfo};
+    use crate::{PeerAddress, RethPeerInfo, H256};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -784,5 +800,18 @@ mod tests {
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
+    }
+
+    #[test]
+    fn test_with_expected_genesis_hash() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        assert!(config.consensus.expected_genesis_hash.is_none());
+
+        let hash = H256::from_base58("5VoHFxVrC4WM7VHDwUJrFWZ2yVJXkY3JHEsR2U9bQxXH");
+        let updated = config.clone().with_expected_genesis_hash(hash);
+
+        assert_eq!(updated.consensus.expected_genesis_hash, Some(hash));
+        assert_eq!(updated.consensus.chain_id, config.consensus.chain_id);
+        assert_eq!(updated.peer_id(), config.peer_id());
     }
 }
