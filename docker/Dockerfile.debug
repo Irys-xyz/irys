@@ -31,7 +31,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY . .
 
 # Build the release binary with portable CPU target
-ENV RUSTFLAGS="-C target-cpu=native"
+ENV RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold"
 RUN cargo build --release --bin irys -p irys-chain --locked
 
 # Compute binary MD5 hash
