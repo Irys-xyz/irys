@@ -35,7 +35,7 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
-use irys_types::ingress::IngressProof;
+use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
@@ -1214,6 +1214,8 @@ impl Inner {
                 acc
             });
 
+            let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+
             for tx_header in &tx_headers {
                 debug!(
                     "Processing publish candidate tx {} {:#?}",
@@ -1285,13 +1287,7 @@ impl Inner {
                 }
 
                 // Check for minimum number of ingress proofs
-                let total_miners = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_epoch_snapshot()
-                    .commitment_state
-                    .stake_commitments
-                    .len();
+                let total_miners = epoch_snapshot.commitment_state.stake_commitments.len();
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
@@ -1311,25 +1307,30 @@ impl Inner {
                     continue;
                 }
 
-                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+                let mut all_tx_proofs: Vec<CachedIngressProof> =
+                    Vec::with_capacity(all_proofs.len());
 
                 //filter all these ingress proofs by their anchor validity
-                for (_hash, proof) in all_proofs {
-                    let proof = proof.0.proof;
+                for (_hash, cached) in all_proofs {
+                    let cached_proof = cached.0;
                     // validate the anchor is still valid
                     let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
                         min_ingress_proof_anchor_height,
-                        &proof,
+                        &cached_proof.proof,
                     )?;
                     if anchor_is_valid {
-                        all_tx_proofs.push(proof)
+                        all_tx_proofs.push(cached_proof)
                     }
                     // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
                 }
 
+                // Extract IngressProofs for get_assigned_ingress_proofs API
+                let proofs_only: Vec<IngressProof> =
+                    all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
+
                 // Get assigned and unassigned proofs using the existing utility function
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
-                    &all_tx_proofs,
+                    &proofs_only,
                     tx_header,
                     |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
                     &self.block_tree_read_guard,
@@ -1381,8 +1382,12 @@ impl Inner {
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
-                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
-                    .cloned()
+                    .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
+                    .filter(|c| {
+                        // Filter out proofs from unstaked signers
+                        epoch_snapshot.is_staked(c.address)
+                    })
+                    .map(|c| c.proof.clone())
                     .collect();
 
                 // Build the final proof list
@@ -2958,6 +2963,33 @@ pub enum IngressProofError {
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
+}
+
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+    }
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.

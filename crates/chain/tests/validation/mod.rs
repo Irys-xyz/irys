@@ -1,6 +1,7 @@
 mod blobs_rejected;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;
+mod ingress_proof_validation;
 mod invalid_perm_fee_refund;
 mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
@@ -849,6 +850,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 256;
+    // Reduce epoch length for faster testing
+    genesis_config.consensus.get_mut().epoch.num_blocks_in_epoch = 3;
     // Set to expect 2 proofs per transaction so we can test duplicate signers
     genesis_config
         .consensus
@@ -862,6 +865,14 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
+
+    // Stake the test_signer so they can sign ingress proofs
+    genesis_node
+        .post_stake_commitment_with_signer(&test_signer)
+        .await?;
+
+    // Mine to next epoch so the stake is in the snapshot
+    genesis_node.mine_until_next_epoch().await?;
 
     // Create test data
     let chunk_size = 256_usize;
