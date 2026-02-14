@@ -712,24 +712,43 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis)
     #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
-    pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
-        // Determine node startup mode
-        let config = &self.config;
-        let node_mode = &config.node_config.node_mode;
+    pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
+        // Determine node startup mode (Copy, avoids borrowing self.config)
+        let node_mode = self.config.node_config.node_mode;
 
         // Use the irys_db already initialized in new()
         let irys_db = self.irys_db.clone();
-        let block_index = BlockIndex::new(&config.node_config, irys_db.clone())
+        let block_index = BlockIndex::new(&self.config.node_config, irys_db.clone())
             .expect("initializing a new block index should be doable");
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments, reth_chainspec) = self
-            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
+            .get_or_create_genesis_info(&node_mode, &irys_db, &block_index)
             .await?;
 
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
         info!("Node starting with genesis hash: {}", genesis_hash);
+
+        // Genesis node: now that the genesis hash is known, set expected_genesis_hash
+        // so our consensus config hash matches peer nodes during P2P handshakes.
+        if self.config.consensus.expected_genesis_hash.is_none() {
+            info!(
+                "Setting expected_genesis_hash to {} (was None)",
+                genesis_hash
+            );
+            self.config = self.config.clone().with_expected_genesis_hash(genesis_hash);
+            info!(
+                "Consensus config hash after update: {}",
+                self.config.consensus.keccak256_hash()
+            );
+        } else {
+            info!(
+                "expected_genesis_hash already set to {:?}, consensus hash: {}",
+                self.config.consensus.expected_genesis_hash,
+                self.config.consensus.keccak256_hash()
+            );
+        }
 
         // Persist the genesis block to the block_index and db if it's not there already
         if block_index.num_blocks() == 0 {
@@ -857,12 +876,8 @@ impl IrysNode {
                 sleep(Duration::from_secs(2)).await;
                 let config = config;
                 let latest_block = latest_block;
-                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-                let mut validation_tracker = BlockValidationTracker::new(
-                    block_tree_guard.clone(),
-                    service_senders,
-                    MAX_WAIT_TIME,
-                );
+                let mut validation_tracker =
+                    BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
                 // wait for any pending blocks to finish validating
                 let latest_hash = validation_tracker
                     .wait_for_validation()
