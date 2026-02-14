@@ -1074,6 +1074,11 @@ impl NodeConfig {
         self.base_directory.join("vdf_steps")
     }
 
+    /// get the peer info directory path
+    pub fn peer_info_dir(&self) -> PathBuf {
+        self.base_directory.join("peer_info")
+    }
+
     /// Get the PeerAddress for this node configuration
     pub fn peer_address(&self) -> PeerAddress {
         PeerAddress {
