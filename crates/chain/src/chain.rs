@@ -2200,32 +2200,39 @@ pub fn get_or_create_peer_id(node_config: &NodeConfig) -> eyre::Result<irys_type
     let peer_info_dir = node_config.peer_info_dir();
     let key_path = peer_info_dir.join("peer_key.bin");
 
-    let signing_key = if key_path.exists() {
-        let bytes = std::fs::read(&key_path)
-            .with_context(|| format!("Failed to read peer key from {}", key_path.display()))?;
-        let key = k256::ecdsa::SigningKey::from_slice(&bytes)
-            .with_context(|| "Failed to parse peer key file as secp256k1 private key")?;
-        let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
-        info!("Loaded peer_id from {}: {:?}", key_path.display(), peer_id);
-        key
-    } else {
-        use rand::rngs::OsRng;
-        let key = k256::ecdsa::SigningKey::random(&mut OsRng);
-        std::fs::create_dir_all(&peer_info_dir).with_context(|| {
-            format!(
-                "Failed to create peer info directory {}",
-                peer_info_dir.display()
-            )
-        })?;
-        std::fs::write(&key_path, key.to_bytes().as_slice())
-            .with_context(|| format!("Failed to write peer key to {}", key_path.display()))?;
-        let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
-        info!(
-            "Generated new peer_id, key saved to {}: {:?}",
-            key_path.display(),
-            peer_id
-        );
-        key
+    let signing_key = match std::fs::read(&key_path) {
+        Ok(bytes) => {
+            let key = k256::ecdsa::SigningKey::from_slice(&bytes)
+                .with_context(|| "Failed to parse peer key file as secp256k1 private key")?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!("Loaded peer_id from {}: {:?}", key_path.display(), peer_id);
+            key
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use rand::rngs::OsRng;
+            let key = k256::ecdsa::SigningKey::random(&mut OsRng);
+            std::fs::create_dir_all(&peer_info_dir).with_context(|| {
+                format!(
+                    "Failed to create peer info directory {}",
+                    peer_info_dir.display()
+                )
+            })?;
+            std::fs::write(&key_path, key.to_bytes().as_slice())
+                .with_context(|| format!("Failed to write peer key to {}", key_path.display()))?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!(
+                "Generated new peer_id, key saved to {}: {:?}",
+                key_path.display(),
+                peer_id
+            );
+            key
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read peer key from {}", key_path.display()));
+        }
     };
 
     let peer_id =
