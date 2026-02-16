@@ -2058,6 +2058,103 @@ mod tests {
         }
     }
 
+    mod health_check_v2_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_v2_connection_refused() {
+            let fixture = TestFixture::new();
+            let unreachable_port = get_free_port();
+            let peer = create_peer_address("127.0.0.1", unreachable_port);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::GetRequest(addr, reason) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert!(
+                        reason.to_lowercase().contains("connection refused"),
+                        "Expected connection refused error, got: {}",
+                        reason
+                    );
+                }
+                err => panic!("Expected GetRequest error, got: {:?}", err),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_v2_health_check_accepted() {
+            let body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "V2 health check should succeed: {:?}",
+                result
+            );
+            assert!(result.unwrap(), "V2 health check should return true");
+        }
+
+        #[tokio::test]
+        async fn test_v2_404_not_found() {
+            let server = MockHttpServer::new_with_response(404, "", "text/plain");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::HealthCheck(addr, status) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert_eq!(status, StatusCode::NOT_FOUND);
+                }
+                err => panic!("Expected HealthCheck error, got: {:?}", err),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_v2_invalid_json_response() {
+            let server =
+                MockHttpServer::new_with_response(200, "invalid json {", "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                GossipClientError::GetJsonResponsePayload(_, _)
+            ));
+        }
+    }
+
     // Response parsing tests
     mod response_parsing_tests {
         use super::*;
