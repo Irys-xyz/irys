@@ -1303,6 +1303,17 @@ impl SealedBlock {
             result_data_txs.insert(ledger_type, ledger_txs);
         }
 
+        if !data_tx_map.is_empty() {
+            let extra_ids: Vec<_> = data_tx_map.keys().collect();
+            return Err(eyre::eyre!(
+                "Header/body mismatch in block {:?}: body contains {} extra data transaction(s) \
+                 not referenced by header: {:?}",
+                block_header.block_hash,
+                extra_ids.len(),
+                extra_ids,
+            ));
+        }
+
         // System transactions — each appears in exactly one ledger, so simple remove suffices
         let mut commitment_tx_map: HashMap<H256, CommitmentTransaction> =
             HashMap::with_capacity(commitment_txs.len());
@@ -1334,6 +1345,17 @@ impl SealedBlock {
                 ledger_txs.push(tx);
             }
             result_system_txs.insert(ledger_type, ledger_txs);
+        }
+
+        if !commitment_tx_map.is_empty() {
+            let extra_ids: Vec<_> = commitment_tx_map.keys().collect();
+            return Err(eyre::eyre!(
+                "Header/body mismatch in block {:?}: body contains {} extra commitment \
+                 transaction(s) not referenced by header: {:?}",
+                block_header.block_hash,
+                extra_ids.len(),
+                extra_ids,
+            ));
         }
 
         Ok(BlockTransactions {
@@ -1706,5 +1728,74 @@ mod tests {
 
         let deserialized: DataTransactionLedger = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.expires, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_extra_data_txs() {
+        // Header references one data tx
+        let referenced_id = H256::random();
+        let extra_id = H256::random();
+
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_ids: H256List(vec![referenced_id]),
+            ..Default::default()
+        }];
+        v1.system_ledgers = vec![];
+
+        // Body has the referenced tx plus an extra one not in the header
+        let mut referenced_tx = DataTransactionHeader::default();
+        referenced_tx.id = referenced_id;
+        let mut extra_tx = DataTransactionHeader::default();
+        extra_tx.id = extra_id;
+
+        let result =
+            SealedBlock::order_transactions(&header, vec![referenced_tx, extra_tx], vec![]);
+
+        assert!(
+            result.is_err(),
+            "Should reject body with extra data transactions not referenced by header"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(&format!("{extra_id:?}")),
+            "Error should mention the extra tx id, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_extra_commitment_txs() {
+        // Header references one commitment tx
+        let referenced_id = H256::random();
+        let extra_id = H256::random();
+
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![];
+        v1.system_ledgers = vec![SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment.into(),
+            tx_ids: H256List(vec![referenced_id]),
+        }];
+
+        // Body has the referenced commitment tx plus an extra one
+        let mut referenced_tx = CommitmentTransaction::default();
+        referenced_tx.set_id(referenced_id);
+        let mut extra_tx = CommitmentTransaction::default();
+        extra_tx.set_id(extra_id);
+
+        let result =
+            SealedBlock::order_transactions(&header, vec![], vec![referenced_tx, extra_tx]);
+
+        assert!(
+            result.is_err(),
+            "Should reject body with extra commitment transactions not referenced by header"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(&format!("{extra_id:?}")),
+            "Error should mention the extra commitment tx id, got: {err_msg}"
+        );
     }
 }
