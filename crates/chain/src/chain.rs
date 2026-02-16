@@ -888,7 +888,7 @@ impl IrysNode {
                     let btrg = block_tree_guard.read();
                     debug!(
                         "Checking stakes & pledges at height {}, latest hash: {}",
-                        btrg.get_canonical_chain().0.last().unwrap().height,
+                        btrg.get_canonical_chain().0.last().unwrap().height(),
                         &latest_hash
                     );
                 };

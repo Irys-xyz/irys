@@ -575,10 +575,10 @@ impl Inner {
 
             eyre::ensure!(
                 // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-                canonical.iter().any(|entry| entry.block_hash == parent_block_hash),
+                canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
                 "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
-                canonical.last().map(|entry| entry.block_hash)
+                canonical.last().map(BlockTreeEntry::block_hash)
             );
 
             let block = tree
@@ -640,9 +640,13 @@ impl Inner {
 
         // Collect confirmed commitment transactions from canonical chain to avoid duplicates
         for entry in canonical.iter() {
-            let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
-            if let Some(commitment_tx_ids) = commitment_tx_ids {
-                for tx_id in &commitment_tx_ids.0 {
+            let commitment_ledger = entry
+                .header()
+                .system_ledgers
+                .iter()
+                .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
+            if let Some(commitment_ledger) = commitment_ledger {
+                for tx_id in &commitment_ledger.tx_ids.0 {
                     confirmed_commitments.insert(*tx_id);
                 }
             }
@@ -1210,7 +1214,7 @@ impl Inner {
 
             // reduce down the canonical chain to the txs in the submit ledger
             let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
-                acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
+                acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
                 acc
             });
 
@@ -1494,8 +1498,8 @@ impl Inner {
                     .get_canonical_chain()
                     .0
                     .iter()
-                    .find(|b| b.block_hash == anchor)
-                    .map(|b| b.height)
+                    .find(|b| b.block_hash() == anchor)
+                    .map(BlockTreeEntry::height)
             } else {
                 guard.get_block(&anchor).map(|h| h.height)
             }
@@ -1712,7 +1716,7 @@ impl Inner {
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
-        Ok(latest.height)
+        Ok(latest.height())
     }
 
     /// Calculate the expected protocol fee for permanent storage

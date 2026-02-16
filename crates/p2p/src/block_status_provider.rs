@@ -190,7 +190,7 @@ impl BlockStatusProvider {
 
     pub fn canonical_height(&self) -> u64 {
         let binding = self.block_tree_read_guard.read();
-        binding.get_latest_canonical_entry().height
+        binding.get_latest_canonical_entry().height()
     }
 
     pub fn index_height(&self) -> u64 {
@@ -417,7 +417,7 @@ impl BlockProvider for BlockStatusProvider {
     fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
         let binding = self.block_tree_read_guard.read();
 
-        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash;
+        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash();
         binding
             .get_block(&latest_canonical_hash)
             .map(|block| block.vdf_limiter_info.clone())

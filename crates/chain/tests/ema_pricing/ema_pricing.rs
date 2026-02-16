@@ -35,7 +35,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
             .await
             .unwrap();
-        let tip_hash = chain.last().unwrap().block_hash;
+        let tip_hash = chain.last().unwrap().block_hash();
         let ema_snapshot = ctx
             .node_ctx
             .block_tree_guard
@@ -155,7 +155,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         .unwrap();
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
     let genesis_block =
-        get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash).unwrap();
+        get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash()).unwrap();
     let mut price_prev = genesis_block.oracle_irys_price;
     for block in [header_1, header_2, header_3] {
         let max_allowed_price = price_prev.add_multiplier(token_price_safe_range).unwrap();

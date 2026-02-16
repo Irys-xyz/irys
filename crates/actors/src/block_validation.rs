@@ -700,7 +700,7 @@ pub async fn prevalidate_block(
         .iter()
         .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-    let commitment_txs = &transactions.commitment_txs;
+    let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
 
     if let Some(commitment_ledger) = commitment_ledger {
         // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
@@ -1573,7 +1573,7 @@ async fn generate_expected_shadow_transactions(
     let commitment_txs: &[CommitmentTransaction] = if is_epoch_block {
         &[]
     } else {
-        &transactions.commitment_txs
+        transactions.get_ledger_system_txs(SystemLedger::Commitment)
     };
 
     // Use pre-fetched submit ledger transactions

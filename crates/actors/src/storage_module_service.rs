@@ -510,7 +510,7 @@ impl StorageModuleServiceInner {
             .and_then(|a| a.ledger_id)
             .expect("storage module must be assigned to a data ledger slot");
 
-        let current_height = self.block_tree.read().get_latest_canonical_entry().height;
+        let current_height = self.block_tree.read().get_latest_canonical_entry().height();
         let migration_height =
             current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
 

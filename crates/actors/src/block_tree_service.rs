@@ -20,7 +20,7 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
-    H256List, IrysAddress, IrysBlockHeader, SealedBlock, TokioServiceHandle, H256,
+    H256List, IrysAddress, IrysBlockHeader, SealedBlock, SystemLedger, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -542,7 +542,9 @@ impl BlockTreeServiceInner {
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
             block_header,
-            &block.transactions().commitment_txs,
+            block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment),
             &prev_commitment_snapshot,
             arc_epoch_snapshot.clone(),
             &self.config.consensus,
@@ -753,7 +755,9 @@ impl BlockTreeServiceInner {
             };
 
             // if the old tip isn't in the fork_blocks, it's a reorg
-            let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
+            let is_reorg = !fork_blocks
+                .iter()
+                .any(|bh| bh.header().block_hash == old_tip);
 
             // Get block info before mutable operations
             let block_entry = cache
@@ -803,23 +807,29 @@ impl BlockTreeServiceInner {
                     // =====================================
 
                     // Collect all blocks that are being orphaned (from the prior canonical chain)
-                    let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                    orphaned_blocks.push(&old_tip_block);
+                    let mut orphaned_blocks =
+                        cache.get_fork_blocks(old_tip_block.previous_block_hash);
+                    orphaned_blocks.push(
+                        cache
+                            .blocks
+                            .get(&old_tip_block.block_hash)
+                            .expect("old tip must be in cache")
+                            .block
+                            .clone(),
+                    );
 
                     // Find the fork point where the old and new chains diverged
-                    let fork_hash = orphaned_blocks
+                    let fork_block_sealed = orphaned_blocks
                         .first()
-                        .expect("no orphaned blocks to determine fork point")
-                        .block_hash;
-                    let fork_block = cache
-                        .get_block(&fork_hash)
-                        .unwrap_or_else(|| panic!("fork block {fork_hash} not found in cache"));
-                    let fork_height = fork_block.height;
+                        .expect("no orphaned blocks to determine fork point");
+                    let fork_hash = fork_block_sealed.header().block_hash;
+                    let fork_height = fork_block_sealed.header().height;
+                    let fork_block = fork_block_sealed.header().clone();
 
                     // Convert orphaned blocks to BlockTreeEntry to make a snapshot of the old canonical chain
                     let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
                     for block in &orphaned_blocks {
-                        let entry = make_block_tree_entry(block);
+                        let entry = make_block_tree_entry(Arc::clone(block));
                         old_canonical.push(entry);
                     }
 
@@ -827,11 +837,11 @@ impl BlockTreeServiceInner {
                     let new_canonical = cache.get_canonical_chain();
 
                     for o in old_canonical.iter() {
-                        debug!("old_canonical({}) - {}", o.height, o.block_hash);
+                        debug!("old_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
                     for o in new_canonical.0.iter() {
-                        debug!("new_canonical({}) - {}", o.height, o.block_hash);
+                        debug!("new_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
                     debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
@@ -848,15 +858,7 @@ impl BlockTreeServiceInner {
                     let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache
-                                .get_block(&e.block_hash)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "block {} not found in cache while preparing reorg event",
-                                        e.block_hash
-                                    )
-                                })
-                                .clone();
+                            let mut block = e.header().as_ref().clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -865,15 +867,7 @@ impl BlockTreeServiceInner {
                     let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache
-                                .get_block(&e.block_hash)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "block {} not found in cache while preparing reorg event",
-                                        e.block_hash
-                                    )
-                                })
-                                .clone();
+                            let mut block = e.header().as_ref().clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -888,7 +882,7 @@ impl BlockTreeServiceInner {
                     let event = ReorgEvent {
                         old_fork: Arc::new(old_fork_blocks),
                         new_fork: Arc::new(new_fork_blocks),
-                        fork_parent: Arc::new(fork_block.clone()),
+                        fork_parent: fork_block,
                         new_tip: block_hash,
                         timestamp: SystemTime::now(),
                         db: Some(self.db.clone()),
@@ -1080,13 +1074,13 @@ pub fn prune_chains_at_ancestor(
     // Find the ancestor index in the old chain
     let old_ancestor_idx = old_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
         .expect("Common ancestor should exist in old chain");
 
     // Find the ancestor index in the new chain
     let new_ancestor_idx = new_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
         .expect("Common ancestor should exist in new chain");
 
     // Return the portions after the common ancestor (excluding the ancestor itself)

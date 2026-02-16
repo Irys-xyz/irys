@@ -319,12 +319,12 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     println!("old_fork:\n  {:?}", old_fork);
     println!("new_fork:\n  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash()]);
     assert_eq!(
         new_fork,
         vec![
-            canon.0[canon.0.len() - 2].block_hash,
-            canon.0.last().unwrap().block_hash
+            canon.0[canon.0.len() - 2].block_hash(),
+            canon.0.last().unwrap().block_hash()
         ]
     );
 
@@ -503,7 +503,9 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             let block_tree_guard = node.node_ctx.block_tree_guard.read();
             let (canonical_entries, _) = block_tree_guard.get_canonical_chain();
             let last_entry = canonical_entries.first().unwrap();
-            let last_entry = block_tree_guard.get_block(&last_entry.block_hash).unwrap();
+            let last_entry = block_tree_guard
+                .get_block(&last_entry.block_hash())
+                .unwrap();
             assert_eq!(
                 last_entry.height,
                 prune_height + 1,
