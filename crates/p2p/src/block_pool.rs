@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
+const RECENTLY_PROCESSED_CACHE_SIZE: usize = 20;
 const BACKFILL_DEPTH: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -148,6 +149,8 @@ struct BlockCacheInner {
     pub(crate) requested_blocks: HashSet<BlockHash>,
     /// Per-block fetched transactions cache. Groups transactions by the block they belong to.
     pub(crate) txs_by_block: LruCache<BlockHash, Vec<IrysTransactionResponse>>,
+    /// Recently processed blocks kept for serving to peers after removal from the in-flight cache.
+    pub(crate) recently_processed: LruCache<BlockHash, Arc<SealedBlock>>,
 }
 
 #[derive(Clone, Debug)]
@@ -218,11 +221,15 @@ impl BlockCacheGuard {
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
         debug!("Block {block_hash:?} has been removed from BlockPool because {reason}",);
-        self.inner.write().await.remove_block(block_hash);
+        self.inner.write().await.remove_block(block_hash, &reason);
     }
 
     async fn get_block_cloned(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.inner.write().await.get_block_header_cloned(block_hash)
+    }
+
+    async fn get_recently_processed(&self, block_hash: &BlockHash) -> Option<Arc<SealedBlock>> {
+        self.inner.write().await.get_recently_processed(block_hash)
     }
 
     async fn contains_block(&self, block_hash: &BlockHash) -> bool {
@@ -286,6 +293,9 @@ impl BlockCacheInner {
             blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
             txs_by_block: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
+            recently_processed: LruCache::new(
+                NonZeroUsize::new(RECENTLY_PROCESSED_CACHE_SIZE).unwrap(),
+            ),
         }
     }
 
@@ -330,8 +340,15 @@ impl BlockCacheInner {
         }
     }
 
-    fn remove_block(&mut self, block_hash: &BlockHash) {
+    fn remove_block(&mut self, block_hash: &BlockHash, reason: &BlockRemovalReason) {
         if let Some(removed_block) = self.blocks.pop(block_hash) {
+            // On successful processing, keep the block in the recently_processed cache
+            // so we can serve it to peers without expensive reconstruction.
+            if matches!(reason, BlockRemovalReason::SuccessfullyProcessed) {
+                self.recently_processed
+                    .put(*block_hash, Arc::clone(&removed_block.block));
+            }
+
             let parent_hash = removed_block.block.header().previous_block_hash;
             let mut set_is_empty = false;
             if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
@@ -346,6 +363,10 @@ impl BlockCacheInner {
             // Remove any transactions cached for this block (if present)
             self.txs_by_block.pop(block_hash);
         }
+    }
+
+    fn get_recently_processed(&mut self, block_hash: &BlockHash) -> Option<Arc<SealedBlock>> {
+        self.recently_processed.get(block_hash).cloned()
     }
 
     fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
@@ -1092,6 +1113,19 @@ where
             return Ok(Some(Arc::clone(cached.block.header())));
         }
 
+        if let Some(sealed) = self.blocks_cache.get_recently_processed(block_hash).await {
+            return Ok(Some(Arc::clone(sealed.header())));
+        }
+
+        if let Some(sealed) = self
+            .block_status_provider
+            .block_tree_read_guard()
+            .read()
+            .get_sealed_block(block_hash)
+        {
+            return Ok(Some(Arc::clone(sealed.header())));
+        }
+
         match self.mempool.get_block_header(*block_hash, true).await {
             Ok(Some(header)) => return Ok(Some(Arc::new(header))),
             Ok(None) => {}
@@ -1113,10 +1147,15 @@ where
     }
 
     pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {
-        self.blocks_cache
-            .get_block_cloned(block_hash)
-            .await
-            .map(|cached| Arc::clone(cached.block.body()))
+        if let Some(cached) = self.blocks_cache.get_block_cloned(block_hash).await {
+            return Some(Arc::clone(cached.block.body()));
+        }
+
+        if let Some(sealed) = self.blocks_cache.get_recently_processed(block_hash).await {
+            return Some(Arc::clone(sealed.body()));
+        }
+
+        None
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
@@ -1361,7 +1400,10 @@ mod tests {
         cache.add_block(child2.clone(), false);
 
         // Remove first child
-        cache.remove_block(&child1.header().block_hash);
+        cache.remove_block(
+            &child1.header().block_hash,
+            &BlockRemovalReason::SuccessfullyProcessed,
+        );
         // parent entry still exists because child2 remains
         let set = cache
             .orphaned_blocks_by_parent
@@ -1371,7 +1413,10 @@ mod tests {
         assert!(set.contains(&child2.header().block_hash));
 
         // Remove the second child
-        cache.remove_block(&child2.header().block_hash);
+        cache.remove_block(
+            &child2.header().block_hash,
+            &BlockRemovalReason::SuccessfullyProcessed,
+        );
         // parent entry should now be gone
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
     }
@@ -1405,7 +1450,7 @@ mod tests {
         let mut cache = BlockCacheInner::new();
         // Attempt to remove block that was never added
         let bogus = BlockHash::repeat_byte(0xEE);
-        cache.remove_block(&bogus);
+        cache.remove_block(&bogus, &BlockRemovalReason::SuccessfullyProcessed);
         // Ensure internal maps remain empty
         assert!(cache.orphaned_blocks_by_parent.iter().next().is_none());
         assert!(cache.blocks.iter().next().is_none());
@@ -1420,7 +1465,10 @@ mod tests {
         // Sanity: parent entry exists
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
         // Remove only child
-        cache.remove_block(&child.header().block_hash);
+        cache.remove_block(
+            &child.header().block_hash,
+            &BlockRemovalReason::SuccessfullyProcessed,
+        );
         // Parent entry should be removed entirely
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
     }
@@ -1859,5 +1907,51 @@ mod tests {
         assert_eq!(publish_txs[0].id, dual_tx_id);
 
         // This tests the code path that handles transactions in both ledgers
+    }
+
+    #[test]
+    fn successfully_processed_block_enters_recently_processed_cache() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xA1);
+        let block = make_sealed_block(parent, 50, Default::default());
+        let block_hash = block.header().block_hash;
+
+        cache.add_block(block, false);
+        assert!(cache.blocks.get(&block_hash).is_some());
+
+        // Remove with SuccessfullyProcessed reason
+        cache.remove_block(&block_hash, &BlockRemovalReason::SuccessfullyProcessed);
+
+        // Block should be gone from the in-flight cache
+        assert!(cache.blocks.get(&block_hash).is_none());
+
+        // But present in recently_processed
+        let cached = cache
+            .recently_processed
+            .get(&block_hash)
+            .expect("block should be in recently_processed cache");
+        assert_eq!(cached.header().block_hash, block_hash);
+    }
+
+    #[test]
+    fn failed_block_does_not_enter_recently_processed_cache() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xA2);
+        let block = make_sealed_block(parent, 51, Default::default());
+        let block_hash = block.header().block_hash;
+
+        cache.add_block(block, false);
+
+        // Remove with a failure reason
+        cache.remove_block(
+            &block_hash,
+            &BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
+        );
+
+        // Block should be gone from the in-flight cache
+        assert!(cache.blocks.get(&block_hash).is_none());
+
+        // And NOT present in recently_processed
+        assert!(cache.recently_processed.get(&block_hash).is_none());
     }
 }

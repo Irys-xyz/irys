@@ -903,6 +903,14 @@ impl BlockTree {
             .map(|entry| -> &IrysBlockHeader { entry.block.header() })
     }
 
+    /// Gets the sealed block (header + body) by hash
+    #[must_use]
+    pub fn get_sealed_block(&self, block_hash: &BlockHash) -> Option<Arc<SealedBlock>> {
+        self.blocks
+            .get(block_hash)
+            .map(|entry| Arc::clone(&entry.block))
+    }
+
     pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
         let head_entry = self
             .longest_chain_cache
