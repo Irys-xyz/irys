@@ -103,5 +103,5 @@ Never add "Co-Authored-By" lines to commit messages.
 - `#[tokio::test]` for async, `#[test_log::test(tokio::test)]` for tracing output in tests
 - `NodeConfig::testing()` / `ConsensusConfig::testing()` for test configurations
 - `rstest` for parameterized tests, `proptest` for property-based tests
-- Failure tracking: `cargo xtask test` records failures to `.irys-tests/failures.json`
+- Failure tracking: `cargo xtask test` records failures to `target/nextest-failure-tracking/failures.json`
 - Crypto crates (`irys-vdf`, `irys-packing`, `irys-c`, `sha2`, `openssl`) are always compiled with `opt-level = 3`, even in dev builds
