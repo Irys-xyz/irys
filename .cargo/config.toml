@@ -1,7 +1,9 @@
+# NOTE: Assume changes here affect ALL build environments.
+# For environment-specific settings, use `~/.cargo/config.toml` or the `RUSTFLAGS` environment variable.
+# See https://doc.rust-lang.org/cargo/reference/config.html for more details.
 [build]
 rustflags = ["-C", "target-cpu=native"]
 incremental = true
-# jobs = 2 # number of parallel jobs, defaults to # of CPUs
 
 [alias]
 xtask = "run --package xtask --"
