@@ -1267,7 +1267,7 @@ impl GossipClient {
                         .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
-                    record_gossip_outbound_error(gossip_error_type(err));
+                    record_gossip_outbound_error(gossip_error_type(&err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
                         ScoreDecreaseReason::Offline(format!(
