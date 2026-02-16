@@ -698,16 +698,18 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap();
             let latest_block = canonical_chain.0.last().unwrap();
 
-            if latest_block.height >= target_height {
+            if latest_block.height() >= target_height {
                 // Get the specific block at target height, not the latest
-                if let Some(target_block) =
-                    canonical_chain.0.iter().find(|b| b.height == target_height)
+                if let Some(target_block) = canonical_chain
+                    .0
+                    .iter()
+                    .find(|b| b.height() == target_height)
                 {
                     info!(
                         "reached height {} after {} retries",
                         target_height, &retries
                     );
-                    return Ok(target_block.block_hash);
+                    return Ok(target_block.block_hash());
                 } else {
                     return Err(eyre::eyre!(
                         "Block at height {} not found in canonical chain",
@@ -750,16 +752,20 @@ impl IrysNodeTest<IrysNodeCtx> {
         let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
 
         // Look for the exact block at target height
-        if let Some(block) = canonical_chain.0.iter().find(|b| b.height == target_height) {
+        if let Some(block) = canonical_chain
+            .0
+            .iter()
+            .find(|b| b.height() == target_height)
+        {
             // Check if it's part of canonical chain (not discarded)
             let tree = self.node_ctx.block_tree_guard.read();
             let (canonical_entries, _) = tree.get_canonical_chain();
             if canonical_entries
                 .iter()
-                .any(|b| b.block_hash == block.block_hash)
+                .any(|b| b.block_hash() == block.block_hash())
             {
                 info!("Block at height {} already available", target_height);
-                return Ok(block.block_hash);
+                return Ok(block.block_hash());
             }
         }
 
@@ -784,7 +790,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                         let (canonical_entries, _) = tree.get_canonical_chain();
                         if canonical_entries
                             .iter()
-                            .any(|b| b.block_hash == event.block_hash)
+                            .any(|b| b.block_hash() == event.block_hash)
                         {
                             info!("Received block at height {} via event", target_height);
                             return Ok(event.block_hash);
@@ -794,14 +800,16 @@ impl IrysNodeTest<IrysNodeCtx> {
                     if event.height > target_height {
                         let canonical_chain =
                             get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-                        if let Some(block) =
-                            canonical_chain.0.iter().find(|b| b.height == target_height)
+                        if let Some(block) = canonical_chain
+                            .0
+                            .iter()
+                            .find(|b| b.height() == target_height)
                         {
                             info!(
                                 "Block at height {} became canonical after reorg",
                                 target_height
                             );
-                            return Ok(block.block_hash);
+                            return Ok(block.block_hash());
                         }
                     }
                 }
@@ -832,7 +840,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap();
             let latest_block = canonical_chain.0.last().unwrap();
 
-            let latest_height = latest_block.height;
+            let latest_height = latest_block.height();
             let not_onchain_count = canonical_chain.1 as u64;
             if (latest_height - not_onchain_count) >= target_height {
                 info!(
@@ -840,7 +848,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     target_height, &retries
                 );
 
-                return Ok(latest_block.block_hash);
+                return Ok(latest_block.block_hash());
             }
 
             if retries >= max_retries {
@@ -1124,7 +1132,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .height
+            .height()
     }
 
     pub fn get_max_difficulty_block(&self) -> IrysBlockHeader {
@@ -1600,7 +1608,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut prev = (0, 0, 0);
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
-            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash;
+            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash();
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(
                 canonical_tip,
@@ -1867,12 +1875,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap()
             .0
             .iter()
-            .find(|e| e.height == height)
+            .find(|e| e.height() == height)
             .and_then(|e| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
-                    .get_block(&e.block_hash)
+                    .get_block(&e.block_hash())
                     .cloned()
             })
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))

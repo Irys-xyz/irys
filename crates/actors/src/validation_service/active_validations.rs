@@ -315,7 +315,7 @@ impl ValidationCoordinator {
     #[instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
-        let canonical_tip = canonical_chain.last().unwrap().block_hash;
+        let canonical_tip = canonical_chain.last().unwrap().block_hash();
 
         let mut current = *block_hash;
         while let Some((block, _)) = block_tree.get_block_and_status(&current) {
@@ -677,7 +677,7 @@ mod tests {
             let tip = canonical_chain.last().unwrap();
 
             let mut blocks = Vec::new();
-            let mut last_hash = tip.block_hash;
+            let mut last_hash = tip.block_hash();
 
             for height in 4..=5 {
                 let mut header = IrysBlockHeader::new_mock_header();
@@ -731,10 +731,10 @@ mod tests {
         let fork_blocks = {
             let mut tree = block_tree_guard.write();
             let (canonical_chain, _) = tree.get_canonical_chain();
-            let fork_parent = canonical_chain.iter().find(|e| e.height == 2).unwrap();
+            let fork_parent = canonical_chain.iter().find(|e| e.height() == 2).unwrap();
 
             let mut blocks = Vec::new();
-            let mut last_hash = fork_parent.block_hash;
+            let mut last_hash = fork_parent.block_hash();
 
             // Create an alternative block at height 3 (competing with canonical block at height 3)
             for height in 3..=10 {

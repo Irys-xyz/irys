@@ -54,13 +54,13 @@ fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
         .last()
         .ok_or_else(|| eyre!("No blocks in canonical chain"))?;
 
-    if let Some(block) = tree.get_block(&last_entry.block_hash) {
+    if let Some(block) = tree.get_block(&last_entry.block_hash()) {
         return Ok(block.clone());
     }
 
     state
         .db
-        .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
+        .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash(), false))?
         .ok_or_else(|| eyre!("Block header not found for tip in tree or database"))
 }
 
