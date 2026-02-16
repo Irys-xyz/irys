@@ -20,15 +20,10 @@ pub async fn compute_transaction_status(
     // Check if in mempool
     let in_mempool = mempool_metadata.is_some() || mempool_guard.is_recent_valid_tx(tx_id).await;
 
-    // Merge metadata: prefer whichever source has included_height set.
-    // The mempool may have the tx with included_height=None (e.g. just ingested),
-    // while the DB already has included_height persisted from confirmation time.
-    let metadata = match (&mempool_metadata, &db_metadata) {
-        (Some(mem), Some(_)) if mem.included_height().is_some() => mempool_metadata,
-        (Some(_), Some(_)) => db_metadata,
-        (Some(_), None) => mempool_metadata,
-        (None, _) => db_metadata,
-    };
+    // Prefer DB metadata over mempool: BlockMigrator writes included_height
+    // to DB synchronously at confirmation time, so it is always authoritative.
+    // Mempool metadata is the fallback for pending txs not yet in the DB.
+    let metadata = db_metadata.or(mempool_metadata);
 
     match (metadata, in_mempool) {
         (Some(metadata), _) if metadata.included_height().is_some() => {
