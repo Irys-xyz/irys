@@ -39,6 +39,77 @@ impl BlockMigrator {
         }
     }
 
+    /// Persists only `included_height` and `promoted_height` metadata to the DB
+    /// for a confirmed block's transactions.
+    ///
+    /// This is a lightweight write that runs at confirmation time (every new tip),
+    /// before the full block migration at `migration_depth`. It ensures the
+    /// `/v1/tx/{txId}/status` endpoint can report CONFIRMED status even after
+    /// a node restart or mempool wipe.
+    ///
+    /// Unlike [`Self::persist_block_to_db`], this does NOT write tx headers,
+    /// commitment txs, or block headers — those are deferred to migration.
+    ///
+    /// NOTE: This write is NOT reorg-aware. During a reorg, the mempool's
+    /// reorg handler (`handle_confirmed_data_tx_reorg` / `handle_confirmed_commitment_tx_reorg`
+    /// in `lifecycle.rs`) is responsible for clearing stale metadata from the DB.
+    /// There is a brief window between the stale write and the reorg cleanup where
+    /// the DB may contain metadata for the old fork. This is acceptable because
+    /// the reorg handler runs synchronously before the new tip is confirmed.
+    pub fn persist_confirmed_metadata(&self, block: &IrysBlockHeader) -> eyre::Result<()> {
+        let block_height = block.height;
+
+        let submit_tx_ids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+        let publish_tx_ids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+        let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+
+        let all_data_tx_ids: Vec<H256> = submit_tx_ids
+            .iter()
+            .chain(publish_tx_ids.iter())
+            .copied()
+            .collect();
+
+        // Persist included_height for data + commitment txs
+        if !all_data_tx_ids.is_empty() || !commitment_tx_ids.is_empty() {
+            self.db.update_eyre(|tx| {
+                if !all_data_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(
+                        tx,
+                        &all_data_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                if !commitment_tx_ids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        &commitment_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                Ok(())
+            })?;
+        }
+
+        // Persist promoted_height for publish txs
+        if !publish_tx_ids.is_empty() {
+            self.db.update_eyre(|tx| {
+                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            })?;
+        }
+
+        info!(
+            block.height = block_height,
+            data_txs = all_data_tx_ids.len(),
+            commitment_txs = commitment_tx_ids.len(),
+            "Persisted confirmed metadata to DB"
+        );
+
+        Ok(())
+    }
+
     /// Synchronous preparation phase: validates continuity, collects blocks and their
     /// transactions from the cache. Returns `(block, transactions)` pairs in oldest-first
     /// order, ready for processing without further cache access.
