@@ -1647,6 +1647,37 @@ impl Inner {
         self.mempool_state.wipe_blacklists().await;
     }
 
+    /// After restoring the mempool from disk, reconstruct metadata fields (promoted_height)
+    /// from the database. The `#[serde(skip)]` on `DataTransactionMetadata` means these
+    /// fields are lost during serialization. The DB is authoritative since `BlockMigrator`
+    /// persists them at confirmation time.
+    pub async fn reconstruct_metadata_from_db(&self) {
+        let mut state = self.mempool_state.0.write().await;
+        let mut reconstructed = 0_u64;
+        for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
+            let db_meta = self
+                .irys_db
+                .view_eyre(|tx| {
+                    irys_database::get_data_tx_metadata(tx, txid)
+                        .map_err(|e| eyre::eyre!("{:?}", e))
+                })
+                .ok()
+                .flatten();
+            if let Some(meta) = db_meta {
+                if meta.promoted_height.is_some() {
+                    tx_header.metadata_mut().promoted_height = meta.promoted_height;
+                    reconstructed += 1;
+                }
+            }
+        }
+        if reconstructed > 0 {
+            tracing::info!(
+                reconstructed,
+                "Reconstructed promoted_height from DB for mempool txs"
+            );
+        }
+    }
+
     // Helper to verify signature
     #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
     pub async fn validate_signature<
@@ -3054,6 +3085,7 @@ impl MempoolService {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
+        self.inner.reconstruct_metadata_from_db().await;
 
         let mut shutdown_future = pin!(self.shutdown);
         loop {
