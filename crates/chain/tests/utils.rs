@@ -47,8 +47,9 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
+    SystemLedger, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
@@ -697,16 +698,18 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap();
             let latest_block = canonical_chain.0.last().unwrap();
 
-            if latest_block.height >= target_height {
+            if latest_block.height() >= target_height {
                 // Get the specific block at target height, not the latest
-                if let Some(target_block) =
-                    canonical_chain.0.iter().find(|b| b.height == target_height)
+                if let Some(target_block) = canonical_chain
+                    .0
+                    .iter()
+                    .find(|b| b.height() == target_height)
                 {
                     info!(
                         "reached height {} after {} retries",
                         target_height, &retries
                     );
-                    return Ok(target_block.block_hash);
+                    return Ok(target_block.block_hash());
                 } else {
                     return Err(eyre::eyre!(
                         "Block at height {} not found in canonical chain",
@@ -749,16 +752,20 @@ impl IrysNodeTest<IrysNodeCtx> {
         let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
 
         // Look for the exact block at target height
-        if let Some(block) = canonical_chain.0.iter().find(|b| b.height == target_height) {
+        if let Some(block) = canonical_chain
+            .0
+            .iter()
+            .find(|b| b.height() == target_height)
+        {
             // Check if it's part of canonical chain (not discarded)
             let tree = self.node_ctx.block_tree_guard.read();
             let (canonical_entries, _) = tree.get_canonical_chain();
             if canonical_entries
                 .iter()
-                .any(|b| b.block_hash == block.block_hash)
+                .any(|b| b.block_hash() == block.block_hash())
             {
                 info!("Block at height {} already available", target_height);
-                return Ok(block.block_hash);
+                return Ok(block.block_hash());
             }
         }
 
@@ -783,7 +790,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                         let (canonical_entries, _) = tree.get_canonical_chain();
                         if canonical_entries
                             .iter()
-                            .any(|b| b.block_hash == event.block_hash)
+                            .any(|b| b.block_hash() == event.block_hash)
                         {
                             info!("Received block at height {} via event", target_height);
                             return Ok(event.block_hash);
@@ -793,14 +800,16 @@ impl IrysNodeTest<IrysNodeCtx> {
                     if event.height > target_height {
                         let canonical_chain =
                             get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-                        if let Some(block) =
-                            canonical_chain.0.iter().find(|b| b.height == target_height)
+                        if let Some(block) = canonical_chain
+                            .0
+                            .iter()
+                            .find(|b| b.height() == target_height)
                         {
                             info!(
                                 "Block at height {} became canonical after reorg",
                                 target_height
                             );
-                            return Ok(block.block_hash);
+                            return Ok(block.block_hash());
                         }
                     }
                 }
@@ -831,7 +840,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap();
             let latest_block = canonical_chain.0.last().unwrap();
 
-            let latest_height = latest_block.height;
+            let latest_height = latest_block.height();
             let not_onchain_count = canonical_chain.1 as u64;
             if (latest_height - not_onchain_count) >= target_height {
                 info!(
@@ -839,7 +848,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     target_height, &retries
                 );
 
-                return Ok(latest_block.block_hash);
+                return Ok(latest_block.block_hash());
             }
 
             if retries >= max_retries {
@@ -1123,7 +1132,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .0
             .last()
             .unwrap()
-            .height
+            .height()
     }
 
     pub fn get_max_difficulty_block(&self) -> IrysBlockHeader {
@@ -1253,7 +1262,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
-        maybe.ok_or_eyre("block not returned")
+        let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
+        Ok((
+            sealed_block.header().clone(),
+            eth_payload,
+            BlockTransactions::clone(sealed_block.transactions()),
+        ))
     }
 
     pub async fn mine_block_without_gossip(
@@ -1594,7 +1608,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut prev = (0, 0, 0);
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
-            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash;
+            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash();
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(
                 canonical_tip,
@@ -1861,12 +1875,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap()
             .0
             .iter()
-            .find(|e| e.height == height)
+            .find(|e| e.height() == height)
             .and_then(|e| {
                 self.node_ctx
                     .block_tree_guard
                     .read()
-                    .get_block(&e.block_hash)
+                    .get_block(&e.block_hash())
                     .cloned()
             })
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
@@ -1971,29 +1985,24 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
-        block_transactions: BlockTransactions,
+        sealed_block: Arc<SealedBlock>,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(Arc::clone(&sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
             Err(res) => {
                 tracing::error!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 );
                 Err(eyre!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 ))
             }
@@ -2105,7 +2114,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         // Ingest commitment txs into peer's mempool
-        for commitment_tx in block_transactions.commitment_txs.iter() {
+        for commitment_tx in block_transactions.get_ledger_system_txs(SystemLedger::Commitment) {
             tracing::error!("{}", commitment_tx.id());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2131,13 +2140,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .add_execution_payload_to_cache(eth_payload.block().clone())
             .await;
 
+        let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
+
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(sealed_block, false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 
@@ -3452,4 +3459,19 @@ pub async fn gossip_data_tx_to_node(
 
     resp_rx.await??;
     Ok(())
+}
+
+/// Helper function to construct a SealedBlock from a header and transactions.
+/// This centralizes the BlockBody construction and SealedBlock::new validation
+/// for consistent usage across tests.
+pub fn build_sealed_block(
+    header: IrysBlockHeader,
+    txs: &BlockTransactions,
+) -> eyre::Result<Arc<SealedBlock>> {
+    let block_body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: txs.all_data_txs().cloned().collect(),
+        commitment_transactions: txs.all_system_txs().cloned().collect(),
+    };
+    Ok(Arc::new(SealedBlock::new(header, block_body)?))
 }

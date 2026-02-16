@@ -17,8 +17,8 @@ use irys_domain::{
     BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    BlockHash, BlockTransactions, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader,
-    TokioServiceHandle, H256,
+    BlockHash, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
+    SystemLedger, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -38,8 +38,7 @@ pub enum BlockTreeServiceMessage {
         response: oneshot::Sender<BlockTreeReadGuard>,
     },
     BlockPreValidated {
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
@@ -221,13 +220,12 @@ impl BlockTreeServiceInner {
             }
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
-                transactions,
                 skip_vdf_validation: skip_vdf,
                 response,
             } => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
-                let result = self.on_block_prevalidated(block, transactions, skip_vdf);
+                let block_hash = block.header().block_hash;
+                let block_height = block.header().height;
+                let result = self.on_block_prevalidated(block, skip_vdf);
                 if let Err(send_err) = response.send(result) {
                     tracing::warn!(
                         block.hash = ?block_hash,
@@ -317,14 +315,14 @@ impl BlockTreeServiceInner {
     }
 
     /// Handles pre-validated blocks received from the validation service.
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.header().block_hash, block.height = block.header().height))]
     fn on_block_prevalidated(
         &mut self,
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf: bool,
     ) -> eyre::Result<(), PreValidationError> {
-        let block_hash = &block.block_hash;
+        let block_header = block.header();
+        let block_hash = &block_header.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
         // Early return if block already exists
@@ -336,32 +334,36 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
-        let parent_block_entry =
-            cache
-                .blocks
-                .get(&block.previous_block_hash)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "block {} needs to be in cache at height: {}",
-                        block.previous_block_hash,
-                        block.height - 1
-                    )
-                });
+        let parent_block_entry = cache
+            .blocks
+            .get(&block_header.previous_block_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "block {} needs to be in cache at height: {}",
+                    block_header.previous_block_hash,
+                    block_header.height - 1
+                )
+            });
 
         // Get the parent block's commitment snapshot
         let prev_commitment_snapshot = parent_block_entry.commitment_snapshot.clone();
 
         // Create epoch snapshot for this block
-        let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus)
-                .map_err(|x| PreValidationError::InvalidEpochSnapshot {
-                    error: x.to_string(),
-                })?;
+        let arc_epoch_snapshot = create_epoch_snapshot_for_block(
+            block_header,
+            parent_block_entry,
+            &self.config.consensus,
+        )
+        .map_err(|x| PreValidationError::InvalidEpochSnapshot {
+            error: x.to_string(),
+        })?;
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
-            &block,
-            &transactions.commitment_txs,
+            block_header,
+            block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment),
             &prev_commitment_snapshot,
             arc_epoch_snapshot.clone(),
             &self.config.consensus,
@@ -370,46 +372,59 @@ impl BlockTreeServiceInner {
         // Create ema snapshot for this block
         let ema_snapshot = parent_block_entry
             .ema_snapshot
-            .next_snapshot(&block, &parent_block_entry.block, &self.config.consensus)
+            .next_snapshot(
+                block_header,
+                parent_block_entry.block.header(),
+                &self.config.consensus,
+            )
             .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
-        let add_result = cache.add_block(
-            &block,
-            transactions.clone(),
-            commitment_snapshot,
-            arc_epoch_snapshot,
-            ema_snapshot,
-        );
-
-        if add_result.is_ok() {
-            // Mark as scheduled and schedule validation
-            if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+        cache
+            .add_block(
+                &block,
+                commitment_snapshot,
+                arc_epoch_snapshot,
+                ema_snapshot,
+            )
+            .map_err(|e| {
                 error!(
-                    "Unable to mark block {} as ValidationScheduled: {:?}",
-                    block_hash, err
+                    block.hash = ?block_hash,
+                    block.height = block_header.height,
+                    ?e,
+                    "Failed to add block to block tree"
                 );
-                return Err(PreValidationError::UpdateCacheForScheduledValidationError(
-                    *block_hash,
-                ));
-            }
+                PreValidationError::AddBlockFailed {
+                    block_hash: *block_hash,
+                    reason: e.to_string(),
+                }
+            })?;
 
-            // Record validation started for diagnostics
-            self.chain_sync_state.record_validation_started(*block_hash);
-
-            self.service_senders
-                .validation_service
-                .send(ValidationServiceMessage::ValidateBlock {
-                    block: block.clone(),
-                    transactions,
-                    skip_vdf_validation: skip_vdf,
-                })
-                .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
-
-            debug!(
-                "scheduling block for validation: {} height: {}",
-                block_hash, block.height
+        // Mark as scheduled and schedule validation
+        if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+            error!(
+                "Unable to mark block {} as ValidationScheduled: {:?}",
+                block_hash, err
             );
+            return Err(PreValidationError::UpdateCacheForScheduledValidationError(
+                *block_hash,
+            ));
         }
+
+        // Record validation started for diagnostics
+        self.chain_sync_state.record_validation_started(*block_hash);
+
+        self.service_senders
+            .validation_service
+            .send(ValidationServiceMessage::ValidateBlock {
+                block: block.clone(),
+                skip_vdf_validation: skip_vdf,
+            })
+            .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
+
+        debug!(
+            "scheduling block for validation: {} height: {}",
+            block_hash, block_header.height
+        );
 
         Ok(())
     }
@@ -559,14 +574,16 @@ impl BlockTreeServiceInner {
             };
 
             // if the old tip isn't in the fork_blocks, it's a reorg
-            let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
+            let is_reorg = !fork_blocks
+                .iter()
+                .any(|bh| bh.header().block_hash == old_tip);
 
             // Get block info before mutable operations
             let block_entry = cache
                 .blocks
                 .get(&block_hash)
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
-            let arc_block = Arc::new(block_entry.block.clone());
+            let arc_block = block_entry.block.header().clone();
 
             let tip_changed = {
                 let old_tip_block = cache
@@ -609,23 +626,29 @@ impl BlockTreeServiceInner {
                     // =====================================
 
                     // Collect all blocks that are being orphaned (from the prior canonical chain)
-                    let mut orphaned_blocks = cache.get_fork_blocks(&old_tip_block);
-                    orphaned_blocks.push(&old_tip_block);
+                    let mut orphaned_blocks =
+                        cache.get_fork_blocks(old_tip_block.previous_block_hash);
+                    orphaned_blocks.push(
+                        cache
+                            .blocks
+                            .get(&old_tip_block.block_hash)
+                            .expect("old tip must be in cache")
+                            .block
+                            .clone(),
+                    );
 
                     // Find the fork point where the old and new chains diverged
-                    let fork_hash = orphaned_blocks
+                    let fork_block_sealed = orphaned_blocks
                         .first()
-                        .expect("no orphaned blocks to determine fork point")
-                        .block_hash;
-                    let fork_block = cache
-                        .get_block(&fork_hash)
-                        .unwrap_or_else(|| panic!("fork block {fork_hash} not found in cache"));
-                    let fork_height = fork_block.height;
+                        .expect("no orphaned blocks to determine fork point");
+                    let fork_hash = fork_block_sealed.header().block_hash;
+                    let fork_height = fork_block_sealed.header().height;
+                    let fork_block = fork_block_sealed.header().clone();
 
                     // Convert orphaned blocks to BlockTreeEntry to make a snapshot of the old canonical chain
                     let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
                     for block in &orphaned_blocks {
-                        let entry = make_block_tree_entry(block);
+                        let entry = make_block_tree_entry(Arc::clone(block));
                         old_canonical.push(entry);
                     }
 
@@ -633,11 +656,11 @@ impl BlockTreeServiceInner {
                     let new_canonical = cache.get_canonical_chain();
 
                     for o in old_canonical.iter() {
-                        debug!("old_canonical({}) - {}", o.height, o.block_hash);
+                        debug!("old_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
                     for o in new_canonical.0.iter() {
-                        debug!("new_canonical({}) - {}", o.height, o.block_hash);
+                        debug!("new_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
                     debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
@@ -654,15 +677,7 @@ impl BlockTreeServiceInner {
                     let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache
-                                .get_block(&e.block_hash)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "block {} not found in cache while preparing reorg event",
-                                        e.block_hash
-                                    )
-                                })
-                                .clone();
+                            let mut block = e.header().as_ref().clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -671,15 +686,7 @@ impl BlockTreeServiceInner {
                     let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache
-                                .get_block(&e.block_hash)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "block {} not found in cache while preparing reorg event",
-                                        e.block_hash
-                                    )
-                                })
-                                .clone();
+                            let mut block = e.header().as_ref().clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -694,7 +701,7 @@ impl BlockTreeServiceInner {
                     let event = ReorgEvent {
                         old_fork: Arc::new(old_fork_blocks),
                         new_fork: Arc::new(new_fork_blocks),
-                        fork_parent: Arc::new(fork_block.clone()),
+                        fork_parent: fork_block,
                         new_tip: block_hash,
                         timestamp: SystemTime::now(),
                         db: Some(self.db.clone()),
@@ -755,16 +762,10 @@ impl BlockTreeServiceInner {
         // metadata and write metadata for ALL new fork blocks synchronously,
         // BEFORE broadcasting the ReorgEvent to the mempool.
         let handled_reorg = if let Some(ref event) = reorg_event {
-            if let Err(e) = self.block_migrator.clear_orphaned_metadata(&event.old_fork) {
-                error!("Failed to clear orphaned metadata during reorg: {}", e);
-            }
+            self.block_migrator
+                .clear_orphaned_metadata(&event.old_fork)?;
             for block in event.new_fork.iter() {
-                if let Err(e) = self.block_migrator.persist_confirmed_metadata(block) {
-                    error!(
-                        "Failed to persist metadata for new fork block {}: {}",
-                        block.block_hash, e
-                    );
-                }
+                self.block_migrator.persist_confirmed_metadata(block)?;
             }
             true
         } else {
@@ -922,13 +923,13 @@ pub fn prune_chains_at_ancestor(
     // Find the ancestor index in the old chain
     let old_ancestor_idx = old_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
         .expect("Common ancestor should exist in old chain");
 
     // Find the ancestor index in the new chain
     let new_ancestor_idx = new_chain
         .iter()
-        .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)
+        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
         .expect("Common ancestor should exist in new chain");
 
     // Return the portions after the common ancestor (excluding the ancestor itself)

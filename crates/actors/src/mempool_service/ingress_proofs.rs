@@ -1,5 +1,5 @@
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
-use crate::mempool_service::{IngressProofError, Inner};
+use crate::mempool_service::{IngressProofError, IngressProofGenerationError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::{
@@ -24,24 +24,19 @@ impl Inner {
             .pre_validate(&ingress_proof.data_root)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
-        // Validate the proof address is a staked address
-        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
-        let commitment_snapshot = self
-            .block_tree_read_guard
-            .read()
-            .canonical_commitment_snapshot();
+        // Reject proofs from addresses not staked or pending stake (spam protection)
+        let block_tree = self.block_tree_read_guard.read();
+        let epoch_snapshot = block_tree.canonical_epoch_snapshot();
+        let commitment_snapshot = block_tree.canonical_commitment_snapshot();
+        drop(block_tree);
 
         if !epoch_snapshot.is_staked(address) && !commitment_snapshot.is_staked(address) {
             return Err(IngressProofError::UnstakedAddress);
         }
 
-        // validate the anchor
-        match self.validate_ingress_proof_anchor(&ingress_proof) {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(e);
-            }
-        }
+        // Validate the anchor
+        self.validate_ingress_proof_anchor(&ingress_proof)?;
+
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
             .irys_db
@@ -288,8 +283,15 @@ pub fn generate_and_store_ingress_proof(
     anchor_hint: Option<H256>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     cache_sender: &CacheServiceSender,
-) -> eyre::Result<IngressProof> {
+) -> Result<IngressProof, IngressProofGenerationError> {
     let signer: IrysSigner = config.irys_signer();
+
+    // Only staked nodes should generate ingress proofs
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    if !epoch_snapshot.is_staked(signer.address()) {
+        return Err(IngressProofGenerationError::NodeNotStaked);
+    }
+
     let chain_id = config.consensus.chain_id;
     let chunk_size = config.consensus.chunk_size;
 
@@ -299,7 +301,7 @@ pub fn generate_and_store_ingress_proof(
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
-        .block_hash;
+        .block_hash();
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
     let is_already_generating = {
@@ -310,21 +312,20 @@ pub fn generate_and_store_ingress_proof(
                 response_sender,
             })
         {
-            return Err(eyre::eyre!(
+            return Err(IngressProofGenerationError::CacheServiceError(format!(
                 "Failed to request ingress proof generation state: {err}"
-            ));
+            )));
         }
 
         response_receiver.recv().map_err(|err| {
-            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
+            IngressProofGenerationError::CacheServiceError(format!(
+                "Failed to receive ingress proof generation state response: {err}"
+            ))
         })?
     };
 
     if is_already_generating {
-        return Err(eyre::eyre!(
-            "Ingress proof generation is already in progress for data_root {:?}",
-            data_root
-        ));
+        return Err(IngressProofGenerationError::AlreadyGenerating);
     }
 
     // Generate + persist
@@ -348,7 +349,7 @@ pub fn generate_and_store_ingress_proof(
             let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
                 data_root,
             ));
-            return Err(e);
+            return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
         }
     };
 
@@ -369,7 +370,13 @@ pub fn reanchor_and_store_ingress_proof(
     proof: &IngressProof,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     cache_sender: &CacheServiceSender,
-) -> eyre::Result<IngressProof> {
+) -> Result<IngressProof, IngressProofGenerationError> {
+    // Only staked nodes should reanchor ingress proofs
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    if !epoch_snapshot.is_staked(signer.address()) {
+        return Err(IngressProofGenerationError::NodeNotStaked);
+    }
+
     let is_already_generating = {
         let (response_sender, response_receiver) = std::sync::mpsc::channel();
         if let Err(err) =
@@ -378,21 +385,20 @@ pub fn reanchor_and_store_ingress_proof(
                 response_sender,
             })
         {
-            return Err(eyre::eyre!(
+            return Err(IngressProofGenerationError::CacheServiceError(format!(
                 "Failed to request ingress proof generation state: {err}"
-            ));
+            )));
         }
 
         response_receiver.recv().map_err(|err| {
-            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
+            IngressProofGenerationError::CacheServiceError(format!(
+                "Failed to receive ingress proof generation state response: {err}"
+            ))
         })?
     };
 
     if is_already_generating {
-        return Err(eyre::eyre!(
-            "Ingress proof reanchoring already in progress for data_root {:?}",
-            proof.data_root
-        ));
+        return Err(IngressProofGenerationError::AlreadyGenerating);
     }
 
     // Notify start of reanchoring
@@ -412,24 +418,23 @@ pub fn reanchor_and_store_ingress_proof(
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
-        .block_hash;
-    let anchor = latest_anchor;
+        .block_hash();
 
     let mut proof = proof.clone();
     // Re-anchor and re-sign
-    proof.anchor = anchor;
+    proof.anchor = latest_anchor;
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
         ));
-        return Err(e);
+        return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     if let Err(e) = store_ingress_proof(db, &proof, signer) {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
         ));
-        return Err(e);
+        return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
@@ -466,25 +471,30 @@ pub fn calculate_and_validate_data_size(
     db: &DatabaseProvider,
     data_root: DataRoot,
     chunk_size: u64,
-) -> eyre::Result<u64> {
-    // Load data_size & confirm we have metadata for this root
-    let (data_size, chunk_count) = db.view_eyre(|tx| {
-        let data_size = cached_data_root_by_data_root(tx, data_root)
-            .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
-            .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
-            .data_size;
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        let count = cursor
-            .dup_count(data_root)?
-            .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
-        Ok((data_size, count))
-    })?;
+) -> Result<u64, IngressProofGenerationError> {
+    let err = |msg: String| IngressProofGenerationError::InvalidDataSize(msg);
 
-    let expected = data_size_to_chunk_count(data_size, chunk_size)?;
+    // Load data_size & confirm we have metadata for this root
+    let (data_size, chunk_count) = db
+        .view_eyre(|tx| {
+            let data_size = cached_data_root_by_data_root(tx, data_root)
+                .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
+                .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
+                .data_size;
+            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+            let count = cursor
+                .dup_count(data_root)?
+                .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
+            Ok((data_size, count))
+        })
+        .map_err(|e| err(e.to_string()))?;
+
+    let expected =
+        data_size_to_chunk_count(data_size, chunk_size).map_err(|e| err(e.to_string()))?;
     if chunk_count != expected {
-        return Err(eyre::eyre!(
-            "Cannot generate ingress proof: have {chunk_count} chunks expected {expected}"
-        ));
+        return Err(err(format!(
+            "have {chunk_count} chunks, expected {expected}"
+        )));
     }
 
     Ok(data_size)

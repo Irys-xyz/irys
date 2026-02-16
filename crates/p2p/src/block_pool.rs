@@ -17,10 +17,9 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::SystemLedger;
 use irys_types::{
-    BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
+    BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -137,10 +136,9 @@ where
 
 #[derive(Clone, Debug)]
 pub(crate) struct CachedBlock {
-    pub(crate) header: Arc<IrysBlockHeader>,
+    pub(crate) block: Arc<SealedBlock>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
-    pub(crate) block_body: Arc<BlockBody>,
 }
 
 #[derive(Clone, Debug)]
@@ -182,7 +180,6 @@ pub(crate) enum FailureReason {
     WasNotAbleToFetchRethPayload,
     BlockPrevalidationFailed,
     FailedToPull(GossipError),
-    HeaderBodyMismatch,
 }
 
 impl Display for FailureReason {
@@ -200,9 +197,6 @@ impl Display for FailureReason {
             Self::FailedToPull(err) => {
                 write!(f, "Failed to pull block because: {}", err)
             }
-            Self::HeaderBodyMismatch => {
-                write!(f, "Header/body transaction count mismatch")
-            }
         }
     }
 }
@@ -216,14 +210,10 @@ impl BlockCacheGuard {
 
     async fn add_block(
         &self,
-        block_header: Arc<IrysBlockHeader>,
-        block_body: Arc<BlockBody>,
+        block: Arc<SealedBlock>,
         is_fast_tracking: bool,
     ) -> Option<(BlockHash, CachedBlock)> {
-        self.inner
-            .write()
-            .await
-            .add_block(block_header, block_body, is_fast_tracking)
+        self.inner.write().await.add_block(block, is_fast_tracking)
     }
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
@@ -302,19 +292,17 @@ impl BlockCacheInner {
     /// Return a block if the previous record has been updated or evicted
     fn add_block(
         &mut self,
-        block_header: Arc<IrysBlockHeader>,
-        block_body: Arc<BlockBody>,
+        block: Arc<SealedBlock>,
         fast_track: bool,
     ) -> Option<(BlockHash, CachedBlock)> {
-        let block_hash = block_header.block_hash;
-        let previous_block_hash = block_header.previous_block_hash;
+        let block_hash = block.header().block_hash;
+        let previous_block_hash = block.header().previous_block_hash;
         let evicted = self.blocks.push(
-            block_header.block_hash,
+            block.header().block_hash,
             CachedBlock {
-                header: block_header,
+                block: Arc::clone(&block),
                 is_processing: true,
                 is_fast_tracking: fast_track,
-                block_body,
             },
         );
 
@@ -344,7 +332,7 @@ impl BlockCacheInner {
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
         if let Some(removed_block) = self.blocks.pop(block_hash) {
-            let parent_hash = removed_block.header.previous_block_hash;
+            let parent_hash = removed_block.block.header().previous_block_hash;
             let mut set_is_empty = false;
             if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
                 set.remove(block_hash);
@@ -616,45 +604,36 @@ where
     #[instrument(
         skip_all,
         target = "BlockPool",
-        fields(block.hash = ?block_header.block_hash, block.height = block_header.height),
+        fields(block.hash = ?block.header().block_hash, block.height = block.header().height),
     )]
     pub(crate) async fn process_block(
         &self,
-        block_header: Arc<IrysBlockHeader>,
-        block_body: Arc<BlockBody>,
+        block: Arc<SealedBlock>,
         skip_validation_for_fast_track: bool,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
-        check_block_status(
-            &self.block_status_provider,
-            block_header.block_hash,
-            block_header.height,
-        )?;
+        let block_hash = block.header().block_hash;
+        let block_height = block.header().height;
 
-        let is_processing = self
-            .blocks_cache
-            .is_block_processing(&block_header.block_hash)
-            .await;
+        check_block_status(&self.block_status_provider, block_hash, block_height)?;
+
+        let is_processing = self.blocks_cache.is_block_processing(&block_hash).await;
         if is_processing {
             warn!(
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
-                block_header.block_hash
+                block_hash
             );
             return Err(BlockPoolError::Advisory(
-                AdvisoryBlockPoolError::AlreadyProcessed(block_header.block_hash),
+                AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ));
         }
 
         let maybe_evicted_or_updated = self
             .blocks_cache
-            .add_block(
-                Arc::clone(&block_header),
-                Arc::clone(&block_body),
-                skip_validation_for_fast_track,
-            )
+            .add_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await;
 
         if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
-            let is_evicted = evicted_hash != block_header.block_hash;
+            let is_evicted = evicted_hash != block_hash;
             if is_evicted {
                 warn!("Block {evicted_hash:?} has been evicted from BlockPool cache");
             }
@@ -662,16 +641,16 @@ where
 
         debug!(
             "Block pool: Processing block {:?} (height {})",
-            block_header.block_hash, block_header.height,
+            block_hash, block_height,
         );
 
-        let current_block_height = block_header.height;
-        let prev_block_hash = block_header.previous_block_hash;
-        let current_block_hash = block_header.block_hash;
+        let current_block_height = block_height;
+        let prev_block_hash = block.header().previous_block_hash;
+        let current_block_hash = block_hash;
 
         let previous_block_status = self
             .block_status_provider
-            .block_status(block_header.height.saturating_sub(1), &prev_block_hash);
+            .block_status(block_height.saturating_sub(1), &prev_block_hash);
 
         debug!(
             "Previous block status for the parent block of the block {:?}: {:?}: {:?}",
@@ -685,46 +664,22 @@ where
             );
             self.blocks_cache
                 .remove_block(
-                    &block_header.block_hash,
+                    &block_hash,
                     BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
                 )
                 .await;
-            let err = CriticalBlockPoolError::ForkedBlock(block_header.block_hash);
+            let err = CriticalBlockPoolError::ForkedBlock(block.header().block_hash);
             self.sync_state
                 .record_block_processing_error(err.to_string());
             return Err(err.into());
         }
 
         if !previous_block_status.is_processed() {
-            let block_transactions = match order_transactions_for_block(
-                &block_header,
-                block_body.data_transactions.clone(),
-                block_body.commitment_transactions.clone(),
-            ) {
-                Ok(txs) => txs,
-                Err(
-                    e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                        block_hash,
-                        ..
-                    }),
-                ) => {
-                    error!(
-                        "Block pool: Header/body mismatch for orphan block {:?}. Removing from cache.",
-                        block_hash
-                    );
-                    self.blocks_cache
-                        .remove_block(
-                            &block_header.block_hash,
-                            BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
-                        )
-                        .await;
-                    self.sync_state.record_block_processing_error(e.to_string());
-                    return Err(e);
-                }
-                Err(e) => return Err(e),
-            };
+            // For orphan blocks, we already have ordered transactions from SealedBlock
+            let block_transactions = block.transactions();
+
             self.blocks_cache
-                .change_block_processing_status(block_header.block_hash, false)
+                .change_block_processing_status(block_hash, false)
                 .await;
 
             // Cache transactions for this orphan block so they're available when reprocessed
@@ -733,8 +688,7 @@ where
                 .map(|tx| IrysTransactionResponse::Storage(tx.clone()))
                 .chain(
                     block_transactions
-                        .commitment_txs
-                        .iter()
+                        .all_system_txs()
                         .map(|tx| IrysTransactionResponse::Commitment(tx.clone())),
                 )
                 .collect();
@@ -831,7 +785,7 @@ where
             if let Err(err) = Self::pull_and_seal_execution_payload(
                 &self.execution_payload_provider,
                 &self.sync_service_sender,
-                block_header.evm_block_hash,
+                block.header().evm_block_hash,
                 skip_validation_for_fast_track,
                 None,
             )
@@ -839,11 +793,11 @@ where
             {
                 error!(
                     "Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool",
-                    block_header.block_hash, err
+                    block_hash, err
                 );
                 self.blocks_cache
                     .remove_block(
-                        &block_header.block_hash,
+                        &block_hash,
                         BlockRemovalReason::FailedToProcess(
                             FailureReason::WasNotAbleToFetchRethPayload,
                         ),
@@ -862,91 +816,71 @@ where
 
         // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
         self.block_status_provider
-            .wait_for_block_tree_can_process_height(block_header.height)
+            .wait_for_block_tree_can_process_height(block_height)
             .await;
 
-        let block_transactions = match order_transactions_for_block(
-            &block_header,
-            block_body.data_transactions.clone(),
-            block_body.commitment_transactions.clone(),
-        ) {
-            Ok(txs) => txs,
-            Err(
-                e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                    block_hash,
-                    ..
-                }),
-            ) => {
-                error!(
-                    "Block pool: Header/body mismatch for block {:?}. Removing from cache.",
-                    block_hash
-                );
-                self.blocks_cache
-                    .remove_block(
-                        &block_header.block_hash,
-                        BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
-                    )
-                    .await;
-                self.sync_state.record_block_processing_error(e.to_string());
-                return Err(e);
-            }
-            Err(e) => return Err(e),
-        };
+        // Transactions are already ordered in SealedBlock
+        let block_transactions = block.transactions();
 
         debug!(
             "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
             current_block_hash,
             block_transactions.get_ledger_txs(DataLedger::Submit).len(),
             block_transactions.get_ledger_txs(DataLedger::Publish).len(),
-            block_transactions.commitment_txs.len()
+            block_transactions
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len()
         );
 
-        // Insert transactions into mempool so validation service can find them later.
-        for commitment_tx in &block_transactions.commitment_txs {
-            if let Err(err) = self
-                .mempool
-                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
-                        commitment_tx.id(), current_block_hash, err
-                    );
+        // Spawn mempool ingestion in the background - validation no longer needs
+        // transactions to be in the mempool, but the mempool lifecycle still saves them to DB.
+        {
+            let mempool = self.mempool.clone();
+            let block_transactions = Arc::clone(block_transactions);
+            tokio::spawn(async move {
+                for commitment_tx in
+                    block_transactions.get_ledger_system_txs(SystemLedger::Commitment)
+                {
+                    if let Err(err) = mempool
+                        .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
+                                commitment_tx.id(), current_block_hash, err
+                            );
+                        }
+                    }
                 }
-            }
-        }
-        for data_tx in block_transactions.all_data_txs() {
-            if let Err(err) = self
-                .mempool
-                .handle_data_transaction_ingress_gossip(data_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
-                        data_tx.id, current_block_hash, err
-                    );
+                for data_tx in block_transactions.all_data_txs() {
+                    if let Err(err) = mempool
+                        .handle_data_transaction_ingress_gossip(data_tx.clone())
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
+                                data_tx.id, current_block_hash, err
+                            );
+                        }
+                    }
                 }
-            }
+            });
         }
 
         if let Err(block_discovery_error) = self
             .block_discovery
-            .handle_block(
-                Arc::clone(&block_header),
-                block_transactions,
-                skip_validation_for_fast_track,
-            )
+            .handle_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await
         {
             error!(
                 "Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool",
-                block_header.block_hash, block_discovery_error
+                block_hash, block_discovery_error
             );
             self.blocks_cache
                 .remove_block(
-                    &block_header.block_hash,
+                    &block_hash,
                     BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
                 )
                 .await;
@@ -964,7 +898,7 @@ where
 
         if !skip_validation_for_fast_track {
             self.pull_and_seal_execution_payload_in_background(
-                block_header.evm_block_hash,
+                block.header().evm_block_hash,
                 skip_validation_for_fast_track,
             );
         }
@@ -978,10 +912,7 @@ where
         self.sync_state
             .record_successful_block_processing(current_block_hash);
         self.blocks_cache
-            .remove_block(
-                &block_header.block_hash,
-                BlockRemovalReason::SuccessfullyProcessed,
-            )
+            .remove_block(&block_hash, BlockRemovalReason::SuccessfullyProcessed)
             .await;
 
         debug!(
@@ -1160,8 +1091,8 @@ where
         &self,
         block_hash: &BlockHash,
     ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
-        if let Some(header) = self.blocks_cache.get_block_cloned(block_hash).await {
-            return Ok(Some(Arc::clone(&header.header)));
+        if let Some(cached) = self.blocks_cache.get_block_cloned(block_hash).await {
+            return Ok(Some(Arc::clone(cached.block.header())));
         }
 
         match self.mempool.get_block_header(*block_hash, true).await {
@@ -1188,7 +1119,7 @@ where
         self.blocks_cache
             .get_block_cloned(block_hash)
             .await
-            .map(|block| block.block_body)
+            .map(|cached| Arc::new(cached.block.to_block_body()))
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
@@ -1260,148 +1191,6 @@ where
     }
 }
 
-/// Order pre-fetched transactions into BlockTransactions structure.
-///
-/// Caller is responsible for providing ALL required transactions.
-/// This function only handles ordering them correctly per ledger.
-/// Transactions are returned in the exact order specified in the block header,
-/// which is critical for commitment transaction validation (e.g., stake must come before pledge).
-pub(crate) fn order_transactions_for_block(
-    block_header: &IrysBlockHeader,
-    data_txs: Vec<irys_types::DataTransactionHeader>,
-    commitment_txs: Vec<irys_types::CommitmentTransaction>,
-) -> Result<BlockTransactions, BlockPoolError> {
-    use std::collections::HashMap;
-
-    // Extract required IDs from block header (preserving order)
-    // Use ledger_id-based lookup to avoid relying on vector ordering
-    let submit_ids: Vec<H256> = block_header
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == DataLedger::Submit as u32)
-        .map(|l| l.tx_ids.0.clone())
-        .unwrap_or_default();
-
-    let publish_ids: Vec<H256> = block_header
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == DataLedger::Publish as u32)
-        .map(|l| l.tx_ids.0.clone())
-        .unwrap_or_default();
-
-    let commitment_ids: Vec<H256> = block_header
-        .system_ledgers
-        .iter()
-        .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
-        .map(|l| l.tx_ids.0.clone())
-        .unwrap_or_default();
-
-    // Create sets for quick lookup
-    let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
-    let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
-
-    // Collect transactions into maps by ID
-    let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
-    let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
-    let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
-
-    for data_tx in data_txs {
-        // Note: A tx can be in both submit and publish ledgers (published after submission)
-        // so we check both independently and clone if needed for both
-        let in_submit = submit_ids_set.contains(&data_tx.id);
-        let in_publish = publish_ids_set.contains(&data_tx.id);
-
-        if in_submit && in_publish {
-            submit_txs_map.insert(data_tx.id, data_tx.clone());
-            publish_txs_map.insert(data_tx.id, data_tx);
-        } else if in_submit {
-            submit_txs_map.insert(data_tx.id, data_tx);
-        } else if in_publish {
-            publish_txs_map.insert(data_tx.id, data_tx);
-        }
-    }
-
-    for commitment_tx in commitment_txs {
-        commitment_txs_map.insert(commitment_tx.id(), commitment_tx);
-    }
-
-    // Build final vectors in the exact order specified by block header
-    let submit_txs: Vec<_> = submit_ids
-        .iter()
-        .filter_map(|id| submit_txs_map.remove(id))
-        .collect();
-
-    let publish_txs: Vec<_> = publish_ids
-        .iter()
-        .filter_map(|id| publish_txs_map.remove(id))
-        .collect();
-
-    let commitment_txs: Vec<_> = commitment_ids
-        .iter()
-        .filter_map(|id| commitment_txs_map.remove(id))
-        .collect();
-
-    // Validate header/body consistency: check that resolved counts match expected counts
-    if submit_txs.len() != submit_ids.len() {
-        let missing_ids: Vec<H256> = submit_ids
-            .iter()
-            .filter(|id| !submit_txs.iter().any(|tx| &tx.id == *id))
-            .copied()
-            .collect();
-        return Err(BlockPoolError::Critical(
-            CriticalBlockPoolError::HeaderBodyMismatch {
-                block_hash: block_header.block_hash,
-                ledger: "submit".to_string(),
-                expected: submit_ids.len(),
-                found: submit_txs.len(),
-                missing_ids,
-            },
-        ));
-    }
-
-    if publish_txs.len() != publish_ids.len() {
-        let missing_ids: Vec<H256> = publish_ids
-            .iter()
-            .filter(|id| !publish_txs.iter().any(|tx| &tx.id == *id))
-            .copied()
-            .collect();
-        return Err(BlockPoolError::Critical(
-            CriticalBlockPoolError::HeaderBodyMismatch {
-                block_hash: block_header.block_hash,
-                ledger: "publish".to_string(),
-                expected: publish_ids.len(),
-                found: publish_txs.len(),
-                missing_ids,
-            },
-        ));
-    }
-
-    if commitment_txs.len() != commitment_ids.len() {
-        let missing_ids: Vec<H256> = commitment_ids
-            .iter()
-            .filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id))
-            .copied()
-            .collect();
-        return Err(BlockPoolError::Critical(
-            CriticalBlockPoolError::HeaderBodyMismatch {
-                block_hash: block_header.block_hash,
-                ledger: "commitment".to_string(),
-                expected: commitment_ids.len(),
-                found: commitment_txs.len(),
-                missing_ids,
-            },
-        ));
-    }
-
-    Ok(BlockTransactions {
-        commitment_txs,
-        data_txs: HashMap::from([
-            (DataLedger::Submit, submit_txs),
-            (DataLedger::Publish, publish_txs),
-        ]),
-    })
-}
-
 fn check_block_status(
     block_status_provider: &BlockStatusProvider,
     block_hash: BlockHash,
@@ -1440,38 +1229,95 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{CommitmentTransactionV2, DataTransactionHeader, IrysBlockHeaderV1};
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::{DataTransactionHeader, IrysBlockHeaderV1, SystemLedger};
     use std::sync::Arc;
 
-    fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
-        let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+    /// Helper to create a test data transaction with proper signature
+    fn make_test_data_tx() -> DataTransactionHeader {
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
+
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create transaction and sign it properly
+        let tx = DataTransactionHeader::new(&consensus);
+        tx.sign(&signer).expect("Failed to sign test transaction")
+    }
+
+    fn make_sealed_block(
+        parent_hash: BlockHash,
+        height: u64,
+        mut body: BlockBody,
+    ) -> Arc<SealedBlock> {
+        use irys_types::{DataTransactionLedger, H256List, SystemTransactionLedger};
+
+        // Build data_ledgers based on body content
+        let mut data_ledgers = vec![];
+        if !body.data_transactions.is_empty() {
+            // For simplicity, put all data transactions in Submit ledger
+            let tx_ids: H256List =
+                H256List(body.data_transactions.iter().map(|tx| tx.id).collect());
+            data_ledgers.push(DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids,
+                total_chunks: body.data_transactions.len() as u64,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            });
+        }
+
+        // Build system_ledgers based on body content
+        let mut system_ledgers = vec![];
+        if !body.commitment_transactions.is_empty() {
+            let tx_ids: H256List = H256List(
+                body.commitment_transactions
+                    .iter()
+                    .map(irys_types::CommitmentTransaction::id)
+                    .collect(),
+            );
+            system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids,
+            });
+        }
+
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
-            block_hash: BlockHash::repeat_byte(block_byte),
-            previous_block_hash: BlockHash::repeat_byte(parent_byte),
+            previous_block_hash: parent_hash,
+            data_ledgers,
+            system_ledgers,
             ..IrysBlockHeaderV1::default()
         });
-        Arc::new(header)
+        // Sign the header to get a valid signature and block_hash
+        header.test_sign();
+        // Ensure body.block_hash matches header.block_hash for consistency
+        body.block_hash = header.block_hash();
+        Arc::new(SealedBlock::new(header, body).expect("Failed to create SealedBlock"))
     }
 
     #[test]
     fn add_single_block() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAA);
-        let child1 = make_header(0x01, 0xAA, 10);
+        let child1 = make_sealed_block(parent, 10, Default::default());
 
-        cache.add_block(child1.clone(), Default::default(), false);
+        cache.add_block(child1.clone(), false);
 
         // parent -> set contains child1
         let set = cache
             .orphaned_blocks_by_parent
             .get(&parent)
             .expect("parent entry should exist");
-        assert!(set.contains(&child1.block_hash));
+        assert!(set.contains(&child1.header().block_hash));
 
         // child1 present in blocks cache with correct flags
         let cached = cache
             .blocks
-            .get(&child1.block_hash)
+            .get(&child1.header().block_hash)
             .expect("child1 should be stored in blocks cache");
         assert!(cached.is_processing);
         assert!(!cached.is_fast_tracking);
@@ -1481,28 +1327,28 @@ mod tests {
     fn add_multiple_sibling_blocks_only_first_cached() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xBB);
-        let child1 = make_header(0x02, 0xBB, 11);
-        let child2 = make_header(0x03, 0xBB, 12);
+        let child1 = make_sealed_block(parent, 11, Default::default());
+        let child2 = make_sealed_block(parent, 12, Default::default());
 
-        cache.add_block(child1.clone(), Default::default(), true); // fast track first
-        cache.add_block(child2.clone(), Default::default(), false); // second sibling
+        cache.add_block(child1.clone(), true); // fast track first
+        cache.add_block(child2.clone(), false); // second sibling
 
         let set = cache
             .orphaned_blocks_by_parent
             .get(&parent)
             .expect("parent entry should exist");
-        assert!(set.contains(&child1.block_hash));
-        assert!(set.contains(&child2.block_hash));
+        assert!(set.contains(&child1.header().block_hash));
+        assert!(set.contains(&child2.header().block_hash));
 
         // Both sibling blocks should be stored in blocks cache
-        assert!(cache.blocks.get(&child1.block_hash).is_some());
-        assert!(cache.blocks.get(&child2.block_hash).is_some());
+        assert!(cache.blocks.get(&child1.header().block_hash).is_some());
+        assert!(cache.blocks.get(&child2.header().block_hash).is_some());
 
         // Verify the fast tracking flag for first
         assert!(
             cache
                 .blocks
-                .get(&child1.block_hash)
+                .get(&child1.header().block_hash)
                 .expect("exists")
                 .is_fast_tracking
         );
@@ -1512,23 +1358,23 @@ mod tests {
     fn remove_blocks_updates_mappings() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xCC);
-        let child1 = make_header(0x10, 0xCC, 20);
-        let child2 = make_header(0x11, 0xCC, 21);
-        cache.add_block(child1.clone(), Default::default(), false);
-        cache.add_block(child2.clone(), Default::default(), false);
+        let child1 = make_sealed_block(parent, 20, Default::default());
+        let child2 = make_sealed_block(parent, 21, Default::default());
+        cache.add_block(child1.clone(), false);
+        cache.add_block(child2.clone(), false);
 
         // Remove first child
-        cache.remove_block(&child1.block_hash);
+        cache.remove_block(&child1.header().block_hash);
         // parent entry still exists because child2 remains
         let set = cache
             .orphaned_blocks_by_parent
             .get(&parent)
             .expect("parent entry should remain");
-        assert!(!set.contains(&child1.block_hash));
-        assert!(set.contains(&child2.block_hash));
+        assert!(!set.contains(&child1.header().block_hash));
+        assert!(set.contains(&child2.header().block_hash));
 
         // Remove the second child
-        cache.remove_block(&child2.block_hash);
+        cache.remove_block(&child2.header().block_hash);
         // parent entry should now be gone
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
     }
@@ -1536,22 +1382,22 @@ mod tests {
     #[test]
     fn change_processing_status() {
         let mut cache = BlockCacheInner::new();
-        let block = make_header(0x20, 0xDD, 30);
-        cache.add_block(block.clone(), Default::default(), false);
+        let block = make_sealed_block(BlockHash::repeat_byte(0xDD), 30, Default::default());
+        cache.add_block(block.clone(), false);
 
         assert!(
             cache
                 .blocks
-                .get(&block.block_hash)
+                .get(&block.header().block_hash)
                 .expect("cached")
                 .is_processing
         );
 
-        cache.change_block_processing_status(block.block_hash, false);
+        cache.change_block_processing_status(block.header().block_hash, false);
         assert!(
             !cache
                 .blocks
-                .get(&block.block_hash)
+                .get(&block.header().block_hash)
                 .expect("cached")
                 .is_processing
         );
@@ -1572,12 +1418,12 @@ mod tests {
     fn remove_single_orphan_removes_parent_entry() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAB);
-        let child = make_header(0xCD, 0xAB, 42);
-        cache.add_block(child.clone(), Default::default(), false);
+        let child = make_sealed_block(parent, 42, Default::default());
+        cache.add_block(child.clone(), false);
         // Sanity: parent entry exists
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
         // Remove only child
-        cache.remove_block(&child.block_hash);
+        cache.remove_block(&child.header().block_hash);
         // Parent entry should be removed entirely
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
     }
@@ -1585,71 +1431,102 @@ mod tests {
     #[test]
     fn block_body_storage_and_retrieval() {
         let mut cache = BlockCacheInner::new();
-        let _parent = BlockHash::repeat_byte(0xFA);
-        let child1 = make_header(0x50, 0xFA, 100);
+        let parent = BlockHash::repeat_byte(0xFA);
 
-        // Create a non-empty BlockBody
-        let block_body = Arc::new(BlockBody {
-            block_hash: child1.block_hash,
-            data_transactions: vec![DataTransactionHeader::default()],
+        // Create a non-empty BlockBody with a valid test transaction
+        let block_body = BlockBody {
+            data_transactions: vec![make_test_data_tx()],
             commitment_transactions: vec![],
-        });
+            ..Default::default()
+        };
+
+        let child1 = make_sealed_block(parent, 100, block_body);
+        let block_hash = child1.header().block_hash;
 
         // Add block with the BlockBody
-        cache.add_block(child1.clone(), block_body.clone(), false);
+        cache.add_block(child1, false);
 
         // Retrieve the cached block
         let cached = cache
             .blocks
-            .get(&child1.block_hash)
+            .get(&block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify BlockBody can be retrieved and matches what was inserted
-        assert_eq!(cached.block_body.block_hash, child1.block_hash);
-        assert_eq!(cached.block_body.data_transactions.len(), 1);
-        assert_eq!(cached.block_body.commitment_transactions.len(), 0);
-
-        // Verify the BlockBody is the same Arc reference
-        assert!(Arc::ptr_eq(&cached.block_body, &block_body));
+        // Verify block data matches what was inserted
+        assert_eq!(cached.block.header().block_hash, block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 1);
+        assert_eq!(
+            cached
+                .block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn block_body_storage_with_default() {
         let mut cache = BlockCacheInner::new();
-        let _parent = BlockHash::repeat_byte(0xFB);
-        let child1 = make_header(0x51, 0xFB, 101);
+        let parent = BlockHash::repeat_byte(0xFB);
+        let child1 = make_sealed_block(parent, 101, Default::default());
 
         // Add block with Default::default() BlockBody (as used in existing call sites)
-        cache.add_block(child1.clone(), Default::default(), false);
+        cache.add_block(child1.clone(), false);
 
         // Retrieve the cached block
         let cached = cache
             .blocks
-            .get(&child1.block_hash)
+            .get(&child1.header().block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify default BlockBody is stored
-        assert_eq!(cached.block_body.block_hash, BlockHash::default());
-        assert_eq!(cached.block_body.data_transactions.len(), 0);
-        assert_eq!(cached.block_body.commitment_transactions.len(), 0);
+        // Verify block data (block_hash will be set to header's block_hash by make_sealed_block)
+        assert_eq!(cached.block.header().block_hash, child1.header().block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 0);
+        assert_eq!(
+            cached
+                .block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn order_transactions_matching_header_body() {
         use irys_types::{
-            CommitmentTransaction, CommitmentV2WithMetadata, DataTransactionHeaderV1,
-            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, SystemTransactionLedger,
+            CommitmentTransaction, DataTransactionHeader, IrysTransactionCommon as _, NodeConfig,
+            SystemTransactionLedger,
         };
 
-        // Create test transaction IDs
-        let submit_tx_id1 = H256::repeat_byte(0x11);
-        let submit_tx_id2 = H256::repeat_byte(0x12);
-        let publish_tx_id1 = H256::repeat_byte(0x21);
-        let commitment_tx_id1 = H256::repeat_byte(0x31);
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create 3 data transactions (2 for submit, 1 for publish) and sign them
+        // Make them unique by setting different data_roots
+        let mut submit_tx1 = DataTransactionHeader::new(&consensus);
+        submit_tx1.data_root = H256::repeat_byte(0x01);
+        submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
+        let submit_tx_id1 = submit_tx1.id();
+
+        let mut submit_tx2 = DataTransactionHeader::new(&consensus);
+        submit_tx2.data_root = H256::repeat_byte(0x02);
+        submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
+        let submit_tx_id2 = submit_tx2.id();
+
+        // For publish, we'll use submit_tx1 (same transaction can be in multiple ledgers)
+        let publish_tx_id1 = submit_tx_id1;
+
+        // Create 1 commitment transaction
+        let mut commitment_tx = CommitmentTransaction::new_stake(&consensus, H256::zero());
+        commitment_tx = commitment_tx.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id1 = commitment_tx.id();
 
         // Create block header with specific transaction ordering
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xAA),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 50,
             data_ledgers: vec![
                 irys_types::DataTransactionLedger {
@@ -1672,51 +1549,34 @@ mod tests {
                 },
             ],
             system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
+                ledger_id: SystemLedger::Commitment.into(),
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
             }],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Create matching transactions (deliberately in different order than header)
+        // Note: submit_tx1 appears in both submit and publish ledgers
         let data_txs = vec![
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id2,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: publish_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
+            submit_tx1.clone(),
+            submit_tx2.clone(),
+            // publish_tx1 is the same as submit_tx1, so we don't need to add it separately
         ];
 
-        let commitment_tx = CommitmentTransactionV2 {
-            id: commitment_tx_id1,
-            ..Default::default()
+        let commitment_txs = vec![commitment_tx];
+
+        // Create BlockBody
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: commitment_txs,
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(CommitmentV2WithMetadata {
-            tx: commitment_tx,
-            metadata: Default::default(),
-        })];
 
         // Execute ordering function
-        let result = order_transactions_for_block(&header, data_txs, commitment_txs)
-            .expect("Should succeed with matching header/body");
+        let sealed_block =
+            SealedBlock::new(header, body).expect("Should succeed with matching header/body");
+        let result = sealed_block.transactions();
 
         // Verify transaction ordering matches header's ledger ID order
         let submit_txs = result.data_txs.get(&DataLedger::Submit).unwrap();
@@ -1728,23 +1588,32 @@ mod tests {
         assert_eq!(publish_txs.len(), 1);
         assert_eq!(publish_txs[0].id, publish_tx_id1);
 
-        assert_eq!(result.commitment_txs.len(), 1);
-        assert_eq!(result.commitment_txs[0].id(), commitment_tx_id1);
+        let commitment_txs = result.get_ledger_system_txs(SystemLedger::Commitment);
+        assert_eq!(commitment_txs.len(), 1);
+        assert_eq!(commitment_txs[0].id(), commitment_tx_id1);
     }
 
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
-        use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
-        // Create test transaction IDs
-        let submit_tx_id1 = H256::repeat_byte(0x11);
-        let submit_tx_id2 = H256::repeat_byte(0x12); // This will be missing from body
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        let mut submit_tx1 = DataTransactionHeader::new(&consensus);
+        submit_tx1.data_root = H256::repeat_byte(0x11);
+        submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
+        let submit_tx_id1 = submit_tx1.id();
+
+        let mut submit_tx2 = DataTransactionHeader::new(&consensus);
+        submit_tx2.data_root = H256::repeat_byte(0x12);
+        submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
+        let submit_tx_id2 = submit_tx2.id();
 
         // Create block header expecting two submit transactions
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xBB),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 51,
             // Only include Submit ledger at correct index (1)
             // Need to have Publish at index 0 (even if empty) since Submit is at index 1
@@ -1770,25 +1639,23 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
+        });
+        header.test_sign();
 
-        let header = IrysBlockHeader::V1(header);
-
-        // Create body with only ONE transaction (mismatch)
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        // Create body with only ONE transaction (mismatch - header expects 2)
+        let data_txs = vec![submit_tx1];
 
         let commitment_txs = vec![];
 
+        // Create BlockBody
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: commitment_txs,
+        };
+
         // Execute ordering function - it should return an error
-        let result = order_transactions_for_block(&header, data_txs, commitment_txs);
+        let result = SealedBlock::new(header, body);
 
         // Verify the function returns an error for the mismatch
         assert!(
@@ -1796,36 +1663,34 @@ mod tests {
             "Should return error for header/body mismatch"
         );
 
-        if let Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-            ledger,
-            expected,
-            found,
-            missing_ids,
-            ..
-        })) = result
-        {
-            assert_eq!(ledger, "submit");
-            assert_eq!(expected, 2);
-            assert_eq!(found, 1);
-            assert_eq!(missing_ids.len(), 1);
-            assert!(missing_ids.contains(&submit_tx_id2));
-        } else {
-            panic!("Expected HeaderBodyMismatch error");
-        }
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
-        use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
-        // Create test transaction IDs
-        let tx_id1 = H256::repeat_byte(0x13);
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
 
-        // Create block header expecting transaction in Submit ledger
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xCC),
+        // Create a transaction that we'll claim should be in Submit ledger
+        let mut expected_tx = DataTransactionHeader::new(&consensus);
+        expected_tx.data_root = H256::repeat_byte(0x13);
+        expected_tx = expected_tx.sign(&signer).expect("Failed to sign");
+        let expected_tx_id = expected_tx.id();
+
+        // Create a different transaction that we'll actually put in the body
+        let mut actual_tx = DataTransactionHeader::new(&consensus);
+        actual_tx.data_root = H256::repeat_byte(0x99);
+        actual_tx = actual_tx.sign(&signer).expect("Failed to sign");
+
+        // Create block header expecting expected_tx_id in Submit ledger
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 52,
             // Need Publish at index 0 (empty) and Submit at index 1
             data_ledgers: vec![
@@ -1841,7 +1706,7 @@ mod tests {
                 irys_types::DataTransactionLedger {
                     ledger_id: DataLedger::Submit as u32,
                     tx_root: H256::zero(),
-                    tx_ids: irys_types::H256List(vec![tx_id1]),
+                    tx_ids: irys_types::H256List(vec![expected_tx_id]),
                     total_chunks: 1,
                     expires: None,
                     proofs: None,
@@ -1850,27 +1715,26 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
+        });
+        header.test_sign();
 
-        let header = IrysBlockHeader::V1(header);
-
-        // Create body with transaction that has a different ID than expected
+        // Create body with actual_tx that has a different ID than expected
         // (simulating the transaction being missing from expected ledger)
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        let data_txs = vec![actual_tx];
 
         let commitment_txs = vec![];
 
         // Execute ordering function - since we're providing tx with wrong ID,
         // it gets ignored. We get error for missing tx in Submit.
-        let result = order_transactions_for_block(&header, data_txs, commitment_txs);
+
+        // Create BlockBody
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: commitment_txs,
+        };
+
+        let result = SealedBlock::new(header, body);
 
         // This should return an error because tx_id1 is expected in Submit but not provided
         assert!(
@@ -1878,57 +1742,57 @@ mod tests {
             "Should return error when expected transaction is missing"
         );
 
-        if let Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-            ledger,
-            expected,
-            found,
-            ..
-        })) = result
-        {
-            assert_eq!(ledger, "submit");
-            assert_eq!(expected, 1);
-            assert_eq!(found, 0); // Transaction not found in expected position
-        } else {
-            panic!("Expected HeaderBodyMismatch error");
-        }
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
     fn order_transactions_commitment_mismatch() {
-        use irys_types::{CommitmentTransaction, CommitmentTransactionV2, SystemTransactionLedger};
+        use irys_types::{
+            CommitmentTransaction, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger,
+        };
 
-        // Create test commitment transaction IDs
-        let commitment_tx_id1 = H256::repeat_byte(0x41);
-        let commitment_tx_id2 = H256::repeat_byte(0x42); // This will be missing
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create two commitment transactions
+        let commitment_tx1 = CommitmentTransaction::new_stake(&consensus, H256::repeat_byte(0x41));
+        let commitment_tx1 = commitment_tx1.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id1 = commitment_tx1.id();
+
+        let commitment_tx2 = CommitmentTransaction::new_stake(&consensus, H256::repeat_byte(0x42));
+        let commitment_tx2 = commitment_tx2.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id2 = commitment_tx2.id();
 
         // Create block header expecting two commitment transactions
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xDD),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 53,
             data_ledgers: vec![],
             system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
+                ledger_id: SystemLedger::Commitment.into(),
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1, commitment_tx_id2]),
             }],
             ..Default::default()
-        };
+        });
+        header.test_sign();
 
-        let header = IrysBlockHeader::V1(header);
-
-        // Create body with only ONE commitment transaction
+        // Create body with only ONE commitment transaction (mismatch)
         let data_txs = vec![];
+        let commitment_txs = vec![commitment_tx1];
 
-        let commitment_tx = CommitmentTransactionV2 {
-            id: commitment_tx_id1,
-            ..Default::default()
+        // Create BlockBody
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: commitment_txs,
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(
-            irys_types::CommitmentV2WithMetadata {
-                tx: commitment_tx,
-                metadata: Default::default(),
-            },
-        )];
-        let result = order_transactions_for_block(&header, data_txs, commitment_txs);
+
+        // Execute ordering function - should return error
+        let result = SealedBlock::new(header, body);
 
         // Verify the function returns an error for the mismatch
         assert!(
@@ -1936,36 +1800,28 @@ mod tests {
             "Should return error for commitment mismatch"
         );
 
-        if let Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-            ledger,
-            expected,
-            found,
-            missing_ids,
-            ..
-        })) = result
-        {
-            assert_eq!(ledger, "commitment");
-            assert_eq!(expected, 2);
-            assert_eq!(found, 1);
-            assert_eq!(missing_ids.len(), 1);
-            assert!(missing_ids.contains(&commitment_tx_id2));
-        } else {
-            panic!("Expected HeaderBodyMismatch error");
-        }
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
-        use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
-        // Create a transaction ID that appears in both Submit and Publish
-        let dual_tx_id = H256::repeat_byte(0x77);
+        // Create properly signed transaction
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        let mut dual_tx = DataTransactionHeader::new(&consensus);
+        dual_tx.data_root = H256::repeat_byte(0x77);
+        dual_tx = dual_tx.sign(&signer).expect("Failed to sign");
+        let dual_tx_id = dual_tx.id();
 
         // Create block header with transaction in BOTH ledgers (Publish at index 0, Submit at index 1)
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xEE),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 54,
             data_ledgers: vec![
                 irys_types::DataTransactionLedger {
@@ -1989,28 +1845,26 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Provide the transaction once in the body
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: dual_tx_id,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        let data_txs = vec![dual_tx];
 
         let commitment_txs = vec![];
 
-        // Execute ordering function
-        let result = order_transactions_for_block(&header, data_txs, commitment_txs)
-            .expect("Should succeed with transaction in both ledgers");
+        // Create BlockBody
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: commitment_txs,
+        };
 
-        // Verify the transaction appears in BOTH ledgers (cloned)
+        // Execute ordering function
+        let sealed_block = SealedBlock::new(header, body)
+            .expect("Should succeed with transaction in both ledgers");
+        let result = sealed_block.transactions();
+
         let submit_txs = result.data_txs.get(&DataLedger::Submit).unwrap();
         assert_eq!(submit_txs.len(), 1);
         assert_eq!(submit_txs[0].id, dual_tx_id);

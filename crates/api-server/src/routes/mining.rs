@@ -46,9 +46,9 @@ pub async fn get_mining_info(app_state: Data<ApiState>) -> Result<Json<MiningInf
     // Get the full block header from the block tree
     let block_tree = app_state.block_tree.read();
     let header = block_tree
-        .get_block(&latest_block_entry.block_hash)
+        .get_block(&latest_block_entry.block_hash())
         .ok_or_else(|| ApiError::BlockNotFound {
-            block_hash: format!("{:?}", latest_block_entry.block_hash),
+            block_hash: format!("{:?}", latest_block_entry.block_hash()),
         })?;
 
     Ok(Json(MiningInfo {

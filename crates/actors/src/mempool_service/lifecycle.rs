@@ -45,25 +45,22 @@ impl Inner {
 
         // Update promoted_height in mempool for publish ledger txs (in-memory only)
         for txid in publish_txids.iter() {
-            if let Some(promoted_header) = self
+            if self
                 .mempool_state
                 .set_promoted_height(*txid, block.height)
                 .await
+                .is_some()
             {
-                info!("Promoted tx:\n{:#?}", promoted_header);
+                debug!(tx.id = %txid, promoted_height = block.height, "Promoted tx in mempool");
             }
         }
 
         // Update `CachedDataRoots` so that this block_hash is cached for each data_root
-        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
-        let submit_tx_headers = self.handle_get_data_tx_message(submit_txids).await;
+        let submit_tx_headers = self.handle_get_data_tx_message(submit_txids.clone()).await;
 
         for (i, submit_tx) in submit_tx_headers.iter().enumerate() {
             let Some(submit_tx) = submit_tx else {
-                error!(
-                    "No transaction header found for txid: {}",
-                    block.data_ledgers[DataLedger::Submit].tx_ids.0[i]
-                );
+                error!("No transaction header found for txid: {}", submit_txids[i]);
                 continue;
             };
 

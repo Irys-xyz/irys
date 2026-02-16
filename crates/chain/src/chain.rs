@@ -32,7 +32,6 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::reth_db::DatabaseError;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
@@ -404,11 +403,11 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        // Initialize database early to get/create peer_id
-        let irys_db = init_irys_db(&node_config)?;
+        // Get or create peer_id from file
+        let peer_id = get_or_create_peer_id(&node_config)?;
 
-        // Get or create peer_id from database
-        let peer_id = get_or_create_peer_id(&irys_db)?;
+        // Initialize database
+        let irys_db = init_irys_db(&node_config)?;
 
         let config = Config::new(node_config, peer_id);
         config.validate()?;
@@ -712,24 +711,43 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis)
     #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
-    pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
-        // Determine node startup mode
-        let config = &self.config;
-        let node_mode = &config.node_config.node_mode;
+    pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
+        // Determine node startup mode (Copy, avoids borrowing self.config)
+        let node_mode = self.config.node_config.node_mode;
 
         // Use the irys_db already initialized in new()
         let irys_db = self.irys_db.clone();
-        let block_index = BlockIndex::new(&config.node_config, irys_db.clone())
+        let block_index = BlockIndex::new(&self.config.node_config, irys_db.clone())
             .expect("initializing a new block index should be doable");
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments, reth_chainspec) = self
-            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
+            .get_or_create_genesis_info(&node_mode, &irys_db, &block_index)
             .await?;
 
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
         info!("Node starting with genesis hash: {}", genesis_hash);
+
+        // Genesis node: now that the genesis hash is known, set expected_genesis_hash
+        // so our consensus config hash matches peer nodes during P2P handshakes.
+        if self.config.consensus.expected_genesis_hash.is_none() {
+            info!(
+                "Setting expected_genesis_hash to {} (was None)",
+                genesis_hash
+            );
+            self.config = self.config.clone().with_expected_genesis_hash(genesis_hash);
+            info!(
+                "Consensus config hash after update: {}",
+                self.config.consensus.keccak256_hash()
+            );
+        } else {
+            info!(
+                "expected_genesis_hash already set to {:?}, consensus hash: {}",
+                self.config.consensus.expected_genesis_hash,
+                self.config.consensus.keccak256_hash()
+            );
+        }
 
         // Persist the genesis block to the block_index and db if it's not there already
         if block_index.num_blocks() == 0 {
@@ -857,12 +875,8 @@ impl IrysNode {
                 sleep(Duration::from_secs(2)).await;
                 let config = config;
                 let latest_block = latest_block;
-                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-                let mut validation_tracker = BlockValidationTracker::new(
-                    block_tree_guard.clone(),
-                    service_senders,
-                    MAX_WAIT_TIME,
-                );
+                let mut validation_tracker =
+                    BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
                 // wait for any pending blocks to finish validating
                 let latest_hash = validation_tracker
                     .wait_for_validation()
@@ -874,7 +888,7 @@ impl IrysNode {
                     let btrg = block_tree_guard.read();
                     debug!(
                         "Checking stakes & pledges at height {}, latest hash: {}",
-                        btrg.get_canonical_chain().0.last().unwrap().height,
+                        btrg.get_canonical_chain().0.last().unwrap().height(),
                         &latest_hash
                     );
                 };
@@ -2193,19 +2207,51 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
     Ok(irys_db)
 }
 
-/// Gets the peer_id from the database, or generates a new one and stores it.
-pub fn get_or_create_peer_id(db: &DatabaseProvider) -> eyre::Result<irys_types::IrysPeerId> {
-    let peer_id = db.update(|tx| -> Result<irys_types::IrysPeerId, DatabaseError> {
-        if let Some(existing_peer_id) = database::get_peer_id(tx)? {
-            info!("Loaded peer_id from database: {:?}", existing_peer_id);
-            return Ok(existing_peer_id);
-        }
+/// Gets the peer_id from the peer key file, or generates a new keypair and stores it.
+///
+/// The private key is stored as raw 32 bytes in `<peer_info_dir>/peer_key.bin`.
+/// The PeerId is derived from the key using standard secp256k1 address derivation.
+pub fn get_or_create_peer_id(node_config: &NodeConfig) -> eyre::Result<irys_types::IrysPeerId> {
+    let peer_info_dir = node_config.peer_info_dir();
+    let key_path = peer_info_dir.join("peer_key.bin");
 
-        let new_peer_id = irys_types::IrysPeerId::random();
-        database::set_peer_id(tx, new_peer_id)?;
-        info!("Generated new peer_id: {:?}", new_peer_id);
-        Ok(new_peer_id)
-    })??;
+    let signing_key = match std::fs::read(&key_path) {
+        Ok(bytes) => {
+            let key = k256::ecdsa::SigningKey::from_slice(&bytes)
+                .with_context(|| "Failed to parse peer key file as secp256k1 private key")?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!("Loaded peer_id from {}: {:?}", key_path.display(), peer_id);
+            key
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use rand::rngs::OsRng;
+            let key = k256::ecdsa::SigningKey::random(&mut OsRng);
+            std::fs::create_dir_all(&peer_info_dir).with_context(|| {
+                format!(
+                    "Failed to create peer info directory {}",
+                    peer_info_dir.display()
+                )
+            })?;
+            std::fs::write(&key_path, key.to_bytes().as_slice())
+                .with_context(|| format!("Failed to write peer key to {}", key_path.display()))?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!(
+                "Generated new peer_id, key saved to {}: {:?}",
+                key_path.display(),
+                peer_id
+            );
+            key
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read peer key from {}", key_path.display()));
+        }
+    };
+
+    let peer_id =
+        irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&signing_key));
     Ok(peer_id)
 }
 

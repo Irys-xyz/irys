@@ -22,7 +22,7 @@ use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -556,12 +556,15 @@ where
             .pull_block_body(&block_header, use_trusted_peers_only)
             .await?;
 
+        let sealed_block = SealedBlock::new(block_header, block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(
-                Arc::new(block_header),
-                block_body,
-                skip_validation_for_fast_track,
-            )
+            .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
             .await?;
         Ok(())
     }
@@ -708,8 +711,15 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
+        let sealed_block = SealedBlock::new((*block_header).clone(), block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(block_header, Arc::new(block_body), skip_block_validation)
+            .process_block(Arc::new(sealed_block), skip_block_validation)
             .await?;
         Ok(())
     }
@@ -905,11 +915,7 @@ where
                             );
                         }
                         let data = Arc::new(GossipDataV2::BlockHeader(block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -924,8 +930,8 @@ where
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV2::BlockBody(block_body));
-                    self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
+                    let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
+                    self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -944,11 +950,7 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipDataV2::ExecutionPayload(evm_block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -970,7 +972,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -991,7 +993,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::Transaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -1034,7 +1036,7 @@ where
             GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body =
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
-                Ok(maybe_block_body.map(GossipDataV2::BlockBody))
+                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::clone(&body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1115,7 +1117,7 @@ where
 
     fn send_gossip_data(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
         check_result: &RequestCheckResult,
     ) {
@@ -1180,7 +1182,7 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<Arc<BlockBody>> {
+    ) -> GossipResult<BlockBody> {
         let block_hash = header.block_hash;
 
         debug!(
@@ -1209,7 +1211,7 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, source_peer_id
                             );
-                            return Ok(irys_block_body);
+                            return Ok((*irys_block_body).clone());
                         }
                         Ok(false) => {
                             warn!(

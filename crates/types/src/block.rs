@@ -19,7 +19,8 @@ use crate::{
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
-use crate::{CommitmentTransaction, IrysAddress};
+use crate::{CommitmentTransaction, IrysAddress, SystemLedger};
+
 use alloy_primitives::map::foldhash::HashSet;
 use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::sync::Arc;
 use tracing::debug;
 
 pub type BlockHash = H256;
@@ -715,24 +717,6 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
-impl Index<SystemLedger> for Vec<SystemTransactionLedger> {
-    type Output = SystemTransactionLedger;
-
-    fn index(&self, ledger: SystemLedger) -> &Self::Output {
-        self.iter()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No system transaction ledger found for given ledger type")
-    }
-}
-
-impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
-    fn index_mut(&mut self, ledger: SystemLedger) -> &mut Self::Output {
-        self.iter_mut()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No system transaction ledger found for given ledger type")
-    }
-}
-
 impl fmt::Display for IrysBlockHeaderV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
@@ -815,7 +799,7 @@ impl IrysBlockHeaderV1 {
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
-                    ledger_id: 0, // Publish ledger_id
+                    ledger_id: DataLedger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids,
                     total_chunks: 0,
@@ -825,7 +809,7 @@ impl IrysBlockHeaderV1 {
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
-                    ledger_id: 1, // Submit ledger_id
+                    ledger_id: DataLedger::Submit.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
                     total_chunks: 0,
@@ -860,61 +844,6 @@ pub struct CombinedBlockHeader {
     #[serde(flatten)]
     pub irys: IrysBlockHeader,
     pub execution: ExecutionHeader,
-}
-
-/// Names for each of the system ledgers as well as their `ledger_id` discriminant
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
-)]
-#[repr(u32)]
-#[derive(Default)]
-pub enum SystemLedger {
-    /// The commitments ledger, for pledging and staking related transactions
-    #[default]
-    Commitment = 0,
-}
-
-impl SystemLedger {
-    /// An array of all the System Ledgers, suitable for enumeration
-    pub const ALL: [Self; 1] = [Self::Commitment];
-
-    /// Make it possible to iterate over all the System ledgers in order
-    pub fn iter() -> impl Iterator<Item = Self> {
-        Self::ALL.iter().copied()
-    }
-    /// get the associated numeric SystemLedger ID
-    pub const fn get_id(&self) -> u32 {
-        *self as u32
-    }
-}
-
-impl From<SystemLedger> for u32 {
-    fn from(system_ledger: SystemLedger) -> Self {
-        system_ledger as Self
-    }
-}
-
-impl TryFrom<u32> for SystemLedger {
-    type Error = eyre::Report;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Commitment),
-            _ => Err(eyre::eyre!("Invalid system ledger number")),
-        }
-    }
-}
-
-impl PartialEq<u32> for SystemLedger {
-    fn eq(&self, other: &u32) -> bool {
-        self.get_id() == *other
-    }
-}
-
-impl PartialEq<SystemLedger> for u32 {
-    fn eq(&self, other: &SystemLedger) -> bool {
-        *self == other.get_id()
-    }
 }
 
 /// Names for each of the data ledgers as well as their `ledger_id` discriminant
@@ -1171,8 +1100,8 @@ impl BlockIndexItem {
 /// Used to pass pre-fetched transactions to block discovery.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockTransactions {
-    /// Commitment ledger transactions
-    pub commitment_txs: Vec<CommitmentTransaction>,
+    /// System transactions organized by ledger type (commitments, etc.)
+    pub system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>>,
     /// Data transactions organized by ledger type
     pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
 }
@@ -1189,6 +1118,19 @@ impl BlockTransactions {
     /// Iterate over all data transactions across all ledgers
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
+    }
+
+    /// Get transactions for a specific system ledger
+    pub fn get_ledger_system_txs(&self, ledger: SystemLedger) -> &[CommitmentTransaction] {
+        self.system_txs
+            .get(&ledger)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over all system transactions across all system ledgers
+    pub fn all_system_txs(&self) -> impl Iterator<Item = &CommitmentTransaction> {
+        self.system_txs.values().flatten()
     }
 }
 
@@ -1247,6 +1189,179 @@ impl BlockBody {
 
         Ok(expected_commitment_tx_ids == actual_commitment_tx_ids
             && expected_data_tx_ids == actual_data_tx_ids)
+    }
+}
+
+#[derive(Debug)]
+pub struct SealedBlock {
+    header: Arc<IrysBlockHeader>,
+    transactions: Arc<BlockTransactions>,
+}
+
+impl SealedBlock {
+    pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+        eyre::ensure!(
+            header.is_signature_valid(),
+            "Invalid block signature for block hash {:?}",
+            header.block_hash
+        );
+        eyre::ensure!(
+            header.block_hash == body.block_hash,
+            "Header block hash does not match body block hash. Header: {:?}, Body: {:?}",
+            header.block_hash,
+            body.block_hash
+        );
+        eyre::ensure!(
+            body.verify_tx_signatures(),
+            "Invalid transaction signatures for block {:?}",
+            header.block_hash
+        );
+
+        // Order and validate transactions against header specification
+        let transactions = Self::order_transactions(
+            &header,
+            body.data_transactions,
+            body.commitment_transactions,
+        )?;
+
+        Ok(Self {
+            header: Arc::new(header),
+            transactions: Arc::new(transactions),
+        })
+    }
+
+    pub fn header(&self) -> &Arc<IrysBlockHeader> {
+        &self.header
+    }
+
+    pub fn transactions(&self) -> &Arc<BlockTransactions> {
+        &self.transactions
+    }
+
+    /// Reconstruct a [`BlockBody`] from the sealed block's header and transactions.
+    /// Used for P2P serving when peers request the block body.
+    pub fn to_block_body(&self) -> BlockBody {
+        BlockBody {
+            block_hash: self.header.block_hash,
+            data_transactions: self.transactions.all_data_txs().cloned().collect(),
+            commitment_transactions: self.transactions.all_system_txs().cloned().collect(),
+        }
+    }
+
+    /// Order pre-fetched transactions into BlockTransactions structure.
+    ///
+    /// Transactions are returned in the exact order specified in the block header,
+    /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+    fn order_transactions(
+        block_header: &IrysBlockHeader,
+        data_txs: Vec<DataTransactionHeader>,
+        commitment_txs: Vec<CommitmentTransaction>,
+    ) -> eyre::Result<BlockTransactions> {
+        // Single lookup map for all body data transactions
+        let mut data_tx_map: HashMap<H256, DataTransactionHeader> =
+            HashMap::with_capacity(data_txs.len());
+        for tx in data_txs {
+            data_tx_map.insert(tx.id, tx);
+        }
+
+        // Build per-ledger ordered lists by iterating header IDs directly (no clones).
+        // A tx can appear in multiple ledgers (e.g. published after submission), so:
+        //  - first ledger to claim a tx moves it out of the map (no clone)
+        //  - subsequent ledgers find it in already-built results and clone
+        let mut result_data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        for ledger in &block_header.data_ledgers {
+            let ledger_type = DataLedger::try_from(ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "Invalid ledger_id {} in block {:?}",
+                    ledger.ledger_id,
+                    block_header.block_hash
+                )
+            })?;
+
+            let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
+            for expected_id in &ledger.tx_ids.0 {
+                if let Some(tx) = data_tx_map.remove(expected_id) {
+                    ledger_txs.push(tx);
+                } else {
+                    // TX was already claimed by another ledger (cross-ledger tx) — clone it
+                    let tx = result_data_txs
+                        .values()
+                        .flat_map(|txs| txs.iter())
+                        .find(|tx| tx.id == *expected_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Header/body mismatch in block {:?}: {:?} ledger missing tx {}",
+                                block_header.block_hash,
+                                ledger_type,
+                                expected_id,
+                            )
+                        })?;
+                    ledger_txs.push(tx);
+                }
+            }
+            result_data_txs.insert(ledger_type, ledger_txs);
+        }
+
+        if !data_tx_map.is_empty() {
+            let extra_ids: Vec<_> = data_tx_map.keys().collect();
+            return Err(eyre::eyre!(
+                "Header/body mismatch in block {:?}: body contains {} extra data transaction(s) \
+                 not referenced by header: {:?}",
+                block_header.block_hash,
+                extra_ids.len(),
+                extra_ids,
+            ));
+        }
+
+        // System transactions — each appears in exactly one ledger, so simple remove suffices
+        let mut commitment_tx_map: HashMap<H256, CommitmentTransaction> =
+            HashMap::with_capacity(commitment_txs.len());
+        for tx in commitment_txs {
+            commitment_tx_map.insert(tx.id(), tx);
+        }
+
+        let mut result_system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>> =
+            HashMap::new();
+        for ledger in &block_header.system_ledgers {
+            let ledger_type = SystemLedger::try_from(ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "Invalid system ledger_id {} in block {:?}",
+                    ledger.ledger_id,
+                    block_header.block_hash
+                )
+            })?;
+
+            let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
+            for expected_id in &ledger.tx_ids.0 {
+                let tx = commitment_tx_map.remove(expected_id).ok_or_else(|| {
+                    eyre::eyre!(
+                        "Header/body mismatch in block {:?}: {:?} system ledger missing tx {}",
+                        block_header.block_hash,
+                        ledger_type,
+                        expected_id,
+                    )
+                })?;
+                ledger_txs.push(tx);
+            }
+            result_system_txs.insert(ledger_type, ledger_txs);
+        }
+
+        if !commitment_tx_map.is_empty() {
+            let extra_ids: Vec<_> = commitment_tx_map.keys().collect();
+            return Err(eyre::eyre!(
+                "Header/body mismatch in block {:?}: body contains {} extra commitment \
+                 transaction(s) not referenced by header: {:?}",
+                block_header.block_hash,
+                extra_ids.len(),
+                extra_ids,
+            ));
+        }
+
+        Ok(BlockTransactions {
+            system_txs: result_system_txs,
+            data_txs: result_data_txs,
+        })
     }
 }
 
@@ -1334,7 +1449,7 @@ mod tests {
     fn test_storage_transaction_ledger_rlp_round_trip() {
         // setup
         let data = DataTransactionLedger {
-            ledger_id: 1,
+            ledger_id: DataLedger::Submit.into(),
             tx_root: H256::random(),
             tx_ids: H256List(vec![]),
             total_chunks: 55,
@@ -1362,7 +1477,7 @@ mod tests {
     fn test_system_transaction_ledger_rlp_round_trip() {
         // setup
         let system = SystemTransactionLedger {
-            ledger_id: 0, // System Ledger
+            ledger_id: SystemLedger::Commitment.into(),
             tx_ids: H256List(vec![H256::random(), H256::random()]),
         };
 
@@ -1613,5 +1728,74 @@ mod tests {
 
         let deserialized: DataTransactionLedger = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.expires, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_extra_data_txs() {
+        // Header references one data tx
+        let referenced_id = H256::random();
+        let extra_id = H256::random();
+
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_ids: H256List(vec![referenced_id]),
+            ..Default::default()
+        }];
+        v1.system_ledgers = vec![];
+
+        // Body has the referenced tx plus an extra one not in the header
+        let mut referenced_tx = DataTransactionHeader::default();
+        referenced_tx.id = referenced_id;
+        let mut extra_tx = DataTransactionHeader::default();
+        extra_tx.id = extra_id;
+
+        let result =
+            SealedBlock::order_transactions(&header, vec![referenced_tx, extra_tx], vec![]);
+
+        assert!(
+            result.is_err(),
+            "Should reject body with extra data transactions not referenced by header"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(&format!("{extra_id:?}")),
+            "Error should mention the extra tx id, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_extra_commitment_txs() {
+        // Header references one commitment tx
+        let referenced_id = H256::random();
+        let extra_id = H256::random();
+
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![];
+        v1.system_ledgers = vec![SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment.into(),
+            tx_ids: H256List(vec![referenced_id]),
+        }];
+
+        // Body has the referenced commitment tx plus an extra one
+        let mut referenced_tx = CommitmentTransaction::default();
+        referenced_tx.set_id(referenced_id);
+        let mut extra_tx = CommitmentTransaction::default();
+        extra_tx.set_id(extra_id);
+
+        let result =
+            SealedBlock::order_transactions(&header, vec![], vec![referenced_tx, extra_tx]);
+
+        assert!(
+            result.is_err(),
+            "Should reject body with extra commitment transactions not referenced by header"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(&format!("{extra_id:?}")),
+            "Error should mention the extra commitment tx id, got: {err_msg}"
+        );
     }
 }

@@ -7,11 +7,11 @@ use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_he
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockTree};
 use irys_types::{
     app_state::DatabaseProvider, BlockTransactions, CommitmentTransaction, DataLedger,
-    DataTransactionHeader, IrysBlockHeader, H256,
+    DataTransactionHeader, IrysBlockHeader, SystemLedger, H256,
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::info;
 
 /// Plain struct that owns block migration orchestration and DB persistence logic.
 ///
@@ -113,8 +113,11 @@ impl BlockMigrator {
             .copied()
             .collect();
 
-        // Persist included_height for data + commitment txs
-        if !all_data_tx_ids.is_empty() || !commitment_tx_ids.is_empty() {
+        // Persist all metadata atomically in a single DB transaction
+        if !all_data_tx_ids.is_empty()
+            || !commitment_tx_ids.is_empty()
+            || !publish_tx_ids.is_empty()
+        {
             self.db.update_eyre(|tx| {
                 if !all_data_tx_ids.is_empty() {
                     irys_database::batch_set_data_tx_included_height(
@@ -132,15 +135,15 @@ impl BlockMigrator {
                     )
                     .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
+                if !publish_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_promoted_height(
+                        tx,
+                        &publish_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
                 Ok(())
-            })?;
-        }
-
-        // Persist promoted_height for publish txs
-        if !publish_tx_ids.is_empty() {
-            self.db.update_eyre(|tx| {
-                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
             })?;
         }
 
@@ -165,7 +168,7 @@ impl BlockMigrator {
         &self,
         migration_block: &Arc<IrysBlockHeader>,
         cache: &BlockTree,
-    ) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, BlockTransactions)>> {
+    ) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, Arc<BlockTransactions>)>> {
         // 1. Collect blocks to migrate (oldest first)
         let blocks_to_migrate = self.get_blocks_to_migrate(migration_block, cache)?;
 
@@ -178,7 +181,7 @@ impl BlockMigrator {
             let transactions = cache
                 .blocks
                 .get(&block_to_migrate.block_hash)
-                .map(|meta| meta.transactions.clone())
+                .map(|meta| meta.block.transactions().clone())
                 .ok_or_else(|| {
                     eyre::eyre!(
                         "missing cache entry for block {} during block migration",
@@ -206,7 +209,7 @@ impl BlockMigrator {
     #[tracing::instrument(level = "trace", skip_all, fields(count = prepared.len()))]
     pub async fn process_migration(
         &self,
-        prepared: Vec<(Arc<IrysBlockHeader>, BlockTransactions)>,
+        prepared: Vec<(Arc<IrysBlockHeader>, Arc<BlockTransactions>)>,
         service_senders: &ServiceSenders,
     ) -> eyre::Result<()> {
         for (block_to_migrate, transactions) in prepared {
@@ -239,7 +242,7 @@ impl BlockMigrator {
             .get_latest_item()
             .ok_or_eyre("Block index is empty")?;
 
-        // Ensure continuous height progression
+        // Ensure continuous height progression from block index
         ensure!(
             block_index.latest_height() + 1 == first_block.height,
             "Height gap detected: block index at height {} ({}), trying to migrate height {} ({})",
@@ -249,13 +252,33 @@ impl BlockMigrator {
             &first_block.block_hash
         );
 
-        // Ensure proper chain linkage
+        // Ensure first block links to the indexed chain tip
         ensure!(
             latest_indexed.block_hash == first_block.previous_block_hash,
             "Chain break detected: migration block ({}) doesn't link to indexed chain ({})",
             &latest_indexed.block_hash,
             &first_block.previous_block_hash
         );
+
+        // Validate adjacency across the migration slice
+        for pair in blocks_to_migrate.windows(2) {
+            let prev = &pair[0];
+            let curr = &pair[1];
+            ensure!(
+                curr.height == prev.height + 1,
+                "Height gap in migration slice: block {} at height {}, next block {} at height {}",
+                prev.block_hash,
+                prev.height,
+                curr.block_hash,
+                curr.height
+            );
+            ensure!(
+                curr.previous_block_hash == prev.block_hash,
+                "Chain break in migration slice: block {} doesn't link to previous block {}",
+                curr.block_hash,
+                prev.block_hash
+            );
+        }
 
         Ok(())
     }
@@ -298,61 +321,26 @@ impl BlockMigrator {
         Ok(blocks_to_migrate)
     }
 
-    /// Persists commitment txs, data txs (submit + publish), metadata, and block header to DB.
+    /// Persists commitment txs, data txs (submit + publish), metadata, and block header to DB
+    /// in a single atomic transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     fn persist_block_to_db(
         &self,
         block: &Arc<IrysBlockHeader>,
         transactions: &BlockTransactions,
     ) -> eyre::Result<()> {
-        // Stage 1: Insert commitment transactions
-        let commitment_txs = &transactions.commitment_txs;
+        let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
         let commitment_tx_ids: Vec<H256> = commitment_txs
             .iter()
             .map(CommitmentTransaction::id)
             .collect();
 
-        self.db.update_eyre(|tx| {
-            for commitment_tx in commitment_txs {
-                insert_commitment_tx(tx, commitment_tx)?;
-            }
-            Ok(())
-        })?;
-
-        // Stage 2: Insert submit transactions
-        let submit_txs = transactions
-            .data_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
         let submit_tx_ids: Vec<H256> = submit_txs.iter().map(|tx| tx.id).collect();
 
-        self.db.update_eyre(|tx| {
-            for header in &submit_txs {
-                insert_tx_header(tx, header)?;
-            }
-            Ok(())
-        })?;
-
-        // Stage 3: Insert publish transactions (with promoted_height)
-        let publish_txs = transactions
-            .data_txs
-            .get(&DataLedger::Publish)
-            .cloned()
-            .unwrap_or_default();
+        let mut publish_txs = transactions.get_ledger_txs(DataLedger::Publish).to_vec();
         let publish_tx_ids: Vec<H256> = publish_txs.iter().map(|tx| tx.id).collect();
 
-        self.db.update_eyre(|mut_tx| {
-            for mut header in publish_txs {
-                if header.promoted_height().is_none() {
-                    header.metadata_mut().promoted_height = Some(block.height);
-                }
-                insert_tx_header(mut_tx, &header)?;
-            }
-            Ok(())
-        })?;
-
-        // Stage 4: Batch set metadata (included_height for all, promoted_height for publish)
         let block_height = block.height;
 
         let all_data_tx_ids: Vec<H256> = submit_tx_ids
@@ -361,43 +349,54 @@ impl BlockMigrator {
             .copied()
             .collect();
 
-        if !all_data_tx_ids.is_empty() || !commitment_tx_ids.is_empty() {
-            if let Err(e) = self.db.update_eyre(|tx| {
-                if !all_data_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(
-                        tx,
-                        &all_data_tx_ids,
-                        block_height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                if !commitment_tx_ids.is_empty() {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        &commitment_tx_ids,
-                        block_height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                Ok(())
-            }) {
-                error!("Failed to batch set included_height in database: {}", e);
-            }
-        }
-
-        if !publish_tx_ids.is_empty() {
-            if let Err(e) = self.db.update_eyre(|tx| {
-                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            }) {
-                error!("Failed to batch set promoted_height in database: {}", e);
-            }
-        }
-
-        // Stage 5: Insert block header with optional POA chunk
         let migrated_block = (*block).clone();
-        self.db
-            .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))?;
+
+        self.db.update_eyre(|tx| {
+            // Insert commitment transactions
+            for commitment_tx in commitment_txs {
+                insert_commitment_tx(tx, commitment_tx)?;
+            }
+
+            // Insert submit transactions
+            for header in submit_txs {
+                insert_tx_header(tx, header)?;
+            }
+
+            // Insert publish transactions (with promoted_height)
+            for header in &mut publish_txs {
+                if header.promoted_height().is_none() {
+                    header.metadata_mut().promoted_height = Some(block_height);
+                }
+                insert_tx_header(tx, header)?;
+            }
+
+            // Batch set metadata
+            if !all_data_tx_ids.is_empty() {
+                irys_database::batch_set_data_tx_included_height(
+                    tx,
+                    &all_data_tx_ids,
+                    block_height,
+                )
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+            if !commitment_tx_ids.is_empty() {
+                irys_database::batch_set_commitment_tx_included_height(
+                    tx,
+                    &commitment_tx_ids,
+                    block_height,
+                )
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+            if !publish_tx_ids.is_empty() {
+                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+
+            // Insert block header last
+            irys_database::insert_block_header(tx, &migrated_block)?;
+
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -410,20 +409,9 @@ impl BlockMigrator {
         transactions: &BlockTransactions,
         senders: &ServiceSenders,
     ) -> eyre::Result<()> {
-        let submit_txs = transactions
-            .data_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
-        let publish_txs = transactions
-            .data_txs
-            .get(&DataLedger::Publish)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut all_txs = vec![];
-        all_txs.extend(publish_txs);
-        all_txs.extend(submit_txs);
+        let mut all_txs = Vec::new();
+        all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Publish));
+        all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Submit));
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
@@ -452,20 +440,15 @@ impl BlockMigrator {
         transactions: &BlockTransactions,
         senders: &ServiceSenders,
     ) -> eyre::Result<()> {
-        let submit_txs = transactions
-            .data_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
-        let publish_txs = transactions
-            .data_txs
-            .get(&DataLedger::Publish)
-            .cloned()
-            .unwrap_or_default();
-
         let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
-        all_txs_map.insert(DataLedger::Submit, submit_txs);
-        all_txs_map.insert(DataLedger::Publish, publish_txs);
+        all_txs_map.insert(
+            DataLedger::Submit,
+            transactions.get_ledger_txs(DataLedger::Submit).to_vec(),
+        );
+        all_txs_map.insert(
+            DataLedger::Publish,
+            transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
+        );
 
         senders
             .chunk_migration

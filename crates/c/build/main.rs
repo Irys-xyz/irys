@@ -6,7 +6,13 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let c_src = manifest_dir.join("c_src");
 
-    println!("cargo:rerun-if-changed={}", c_src.display());
+    // Watch individual files instead of the directory.
+    // Directory-level watches use mtime which can change even when rsync
+    // doesn't modify any files, triggering unnecessary full rebuilds.
+    for entry in std::fs::read_dir(&c_src).unwrap() {
+        let entry = entry.unwrap();
+        println!("cargo:rerun-if-changed={}", entry.path().display());
+    }
 
     let (lib_dir, include_dir) = build_openssl();
     let pkgconfig_dir = lib_dir.join("pkgconfig");

@@ -35,7 +35,7 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
-use irys_types::ingress::IngressProof;
+use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
@@ -575,10 +575,10 @@ impl Inner {
 
             eyre::ensure!(
                 // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-                canonical.iter().any(|entry| entry.block_hash == parent_block_hash),
+                canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
                 "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
-                canonical.last().map(|entry| entry.block_hash)
+                canonical.last().map(BlockTreeEntry::block_hash)
             );
 
             let block = tree
@@ -640,9 +640,13 @@ impl Inner {
 
         // Collect confirmed commitment transactions from canonical chain to avoid duplicates
         for entry in canonical.iter() {
-            let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
-            if let Some(commitment_tx_ids) = commitment_tx_ids {
-                for tx_id in &commitment_tx_ids.0 {
+            let commitment_ledger = entry
+                .header()
+                .system_ledgers
+                .iter()
+                .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
+            if let Some(commitment_ledger) = commitment_ledger {
+                for tx_id in &commitment_ledger.tx_ids.0 {
                     confirmed_commitments.insert(*tx_id);
                 }
             }
@@ -1210,9 +1214,11 @@ impl Inner {
 
             // reduce down the canonical chain to the txs in the submit ledger
             let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
-                acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
+                acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
                 acc
             });
+
+            let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
             for tx_header in &tx_headers {
                 debug!(
@@ -1285,13 +1291,7 @@ impl Inner {
                 }
 
                 // Check for minimum number of ingress proofs
-                let total_miners = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_epoch_snapshot()
-                    .commitment_state
-                    .stake_commitments
-                    .len();
+                let total_miners = epoch_snapshot.commitment_state.stake_commitments.len();
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
@@ -1311,25 +1311,30 @@ impl Inner {
                     continue;
                 }
 
-                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+                let mut all_tx_proofs: Vec<CachedIngressProof> =
+                    Vec::with_capacity(all_proofs.len());
 
                 //filter all these ingress proofs by their anchor validity
-                for (_hash, proof) in all_proofs {
-                    let proof = proof.0.proof;
+                for (_hash, cached) in all_proofs {
+                    let cached_proof = cached.0;
                     // validate the anchor is still valid
                     let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
                         min_ingress_proof_anchor_height,
-                        &proof,
+                        &cached_proof.proof,
                     )?;
                     if anchor_is_valid {
-                        all_tx_proofs.push(proof)
+                        all_tx_proofs.push(cached_proof)
                     }
                     // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
                 }
 
+                // Extract IngressProofs for get_assigned_ingress_proofs API
+                let proofs_only: Vec<IngressProof> =
+                    all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
+
                 // Get assigned and unassigned proofs using the existing utility function
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
-                    &all_tx_proofs,
+                    &proofs_only,
                     tx_header,
                     |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
                     &self.block_tree_read_guard,
@@ -1381,8 +1386,12 @@ impl Inner {
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
-                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
-                    .cloned()
+                    .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
+                    .filter(|c| {
+                        // Filter out proofs from unstaked signers
+                        epoch_snapshot.is_staked(c.address)
+                    })
+                    .map(|c| c.proof.clone())
                     .collect();
 
                 // Build the final proof list
@@ -1489,8 +1498,8 @@ impl Inner {
                     .get_canonical_chain()
                     .0
                     .iter()
-                    .find(|b| b.block_hash == anchor)
-                    .map(|b| b.height)
+                    .find(|b| b.block_hash() == anchor)
+                    .map(BlockTreeEntry::height)
             } else {
                 guard.get_block(&anchor).map(|h| h.height)
             }
@@ -1655,14 +1664,15 @@ impl Inner {
         let mut state = self.mempool_state.0.write().await;
         let mut reconstructed = 0_u64;
         for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
-            let db_meta = self
-                .irys_db
-                .view_eyre(|tx| {
-                    irys_database::get_data_tx_metadata(tx, txid)
-                        .map_err(|e| eyre::eyre!("{:?}", e))
-                })
-                .ok()
-                .flatten();
+            let db_meta = match self.irys_db.view_eyre(|tx| {
+                irys_database::get_data_tx_metadata(tx, txid).map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::error!(tx.id = %txid, "Failed to read tx metadata from DB: {e}");
+                    None
+                }
+            };
             if let Some(meta) = db_meta {
                 if meta.promoted_height.is_some() {
                     tx_header.metadata_mut().promoted_height = meta.promoted_height;
@@ -1738,7 +1748,7 @@ impl Inner {
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
-        Ok(latest.height)
+        Ok(latest.height())
     }
 
     /// Calculate the expected protocol fee for permanent storage
@@ -2989,6 +2999,33 @@ pub enum IngressProofError {
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
+}
+
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+    }
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.

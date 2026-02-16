@@ -29,7 +29,7 @@ use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, BlockTransactions, IrysBlockHeader};
+use irys_types::{BlockHash, SealedBlock, SystemLedger};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
@@ -46,8 +46,7 @@ enum ParentValidationResult {
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
 pub(super) struct BlockValidationTask {
-    pub block: Arc<IrysBlockHeader>,
-    pub transactions: Arc<BlockTransactions>,
+    pub sealed_block: Arc<SealedBlock>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
@@ -55,7 +54,7 @@ pub(super) struct BlockValidationTask {
 
 impl PartialEq for BlockValidationTask {
     fn eq(&self, other: &Self) -> bool {
-        self.block.block_hash == other.block.block_hash
+        self.sealed_block.header().block_hash == other.sealed_block.header().block_hash
     }
 }
 
@@ -63,7 +62,7 @@ impl Eq for BlockValidationTask {}
 
 impl std::hash::Hash for BlockValidationTask {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write(self.block.block_hash.as_bytes());
+        state.write(self.sealed_block.header().block_hash.as_bytes());
     }
 }
 
@@ -77,21 +76,22 @@ impl Ord for BlockValidationTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Ordering is handled by ValidationPriority, this is
         // just to satisfy PriorityQueue requirement for the value to be Ord
-        self.block.block_hash.cmp(&other.block.block_hash)
+        self.sealed_block
+            .header()
+            .block_hash
+            .cmp(&other.sealed_block.header().block_hash)
     }
 }
 
 impl BlockValidationTask {
     pub(super) fn new(
-        block: Arc<IrysBlockHeader>,
-        transactions: Arc<BlockTransactions>,
+        sealed_block: Arc<SealedBlock>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         skip_vdf_validation: bool,
     ) -> Self {
         Self {
-            block,
-            transactions,
+            sealed_block,
             service_inner,
             block_tree_guard,
             skip_vdf_validation,
@@ -99,13 +99,13 @@ impl BlockValidationTask {
     }
 
     /// Execute the concurrent validation task
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference
             // Return invalid to prevent this block from being accepted
             tracing::warn!(
-                block.hash = %self.block.block_hash,
+                block.hash = %self.sealed_block.header().block_hash,
                 "Validation cancelled due to height difference"
             );
             ValidationResult::Invalid(ValidationError::ValidationCancelled {
@@ -139,7 +139,7 @@ impl BlockValidationTask {
 
     /// Wait for parent validation to complete
     /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_chain_state_check =
             |parent_hash: BlockHash| match self.get_parent_chain_state(&parent_hash) {
@@ -147,8 +147,8 @@ impl BlockValidationTask {
                     // Parent doesn't exist in tree - this is an error condition
                     error!(
                         block.parent_hash = %parent_hash,
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
+                        block.hash = %self.sealed_block.header().block_hash,
+                        block.height = %self.sealed_block.header().height,
                         "CRITICAL: Parent block not found"
                     );
                     ControlFlow::Break(ParentValidationResult::Cancelled)
@@ -167,12 +167,12 @@ impl BlockValidationTask {
             .await
     }
 
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     async fn exit_if_block_is_too_old(
         &self,
         extra_checks: impl Fn(BlockHash) -> ControlFlow<ParentValidationResult, ()>,
     ) -> ParentValidationResult {
-        let parent_hash = self.block.previous_block_hash;
+        let parent_hash = self.sealed_block.header().previous_block_hash;
 
         // Subscribe to block state updates
         let mut block_state_rx = self
@@ -186,10 +186,12 @@ impl BlockValidationTask {
                 let block_tree = self.block_tree_guard.read();
                 let tip_hash = block_tree.tip;
                 if let Some(tip_block) = block_tree.get_block(&tip_hash) {
-                    let height_diff = tip_block.height.saturating_sub(self.block.height);
+                    let height_diff = tip_block
+                        .height
+                        .saturating_sub(self.sealed_block.header().height);
                     warn!(
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
+                        block.hash = %self.sealed_block.header().block_hash,
+                        block.height = %self.sealed_block.header().height,
                         block.height_diff= height_diff,
                         config.threshold = self.service_inner.config.consensus.block_tree_depth,
                         "Cancelling validation: block too far behind tip"
@@ -218,8 +220,8 @@ impl BlockValidationTask {
                     // Channel closed - treat as error
                     error!(
                         block.parent_hash = %parent_hash,
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
+                        block.hash = %self.sealed_block.header().block_hash,
+                        block.height = %self.sealed_block.header().height,
                         "Block state channel closed while waiting for parent"
                     );
                     return ParentValidationResult::Cancelled;
@@ -234,7 +236,9 @@ impl BlockValidationTask {
         let tip_hash = block_tree.tip;
 
         if let Some(tip_block) = block_tree.get_block(&tip_hash) {
-            let height_diff = tip_block.height.saturating_sub(self.block.height);
+            let height_diff = tip_block
+                .height
+                .saturating_sub(self.sealed_block.header().height);
             height_diff > self.service_inner.config.consensus.block_tree_depth
         } else {
             false
@@ -260,13 +264,12 @@ impl BlockValidationTask {
     }
 
     /// Perform block validation
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     async fn validate_block(&self) -> ValidationResult {
         let skip_vdf_validation = self.skip_vdf_validation;
-        let poa = self.block.poa.clone();
-        let miner_address = self.block.miner_address;
-        let block = &self.block;
-        let transactions = Arc::clone(&self.transactions);
+        let poa = self.sealed_block.header().poa.clone();
+        let miner_address = self.sealed_block.header().miner_address;
+        let block = self.sealed_block.header();
 
         // Recall range validation
         let recall_task = async move {
@@ -285,7 +288,7 @@ impl BlockValidationTask {
                 ValidationResult::Invalid(ValidationError::RecallRangeInvalid(err.to_string()))
             })
         }
-        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.block.block_hash, block.height = %self.block.height));
+        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
         let parent_epoch_snapshot = match self
             .block_tree_guard
@@ -306,13 +309,13 @@ impl BlockValidationTask {
         tracing::info!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
-        let block_hash_for_error_log = self.block.block_hash;
-        let block_height_for_error_log = self.block.height;
+        let block_hash_for_error_log = self.sealed_block.header().block_hash;
+        let block_height_for_error_log = self.sealed_block.header().height;
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
-            let block_hash = self.block.block_hash;
-            let block_height = self.block.height;
+            let block_hash = self.sealed_block.header().block_hash;
+            let block_height = self.sealed_block.header().height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
                     debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
@@ -393,7 +396,7 @@ impl BlockValidationTask {
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
-        let transactions_for_shadow = Arc::clone(&transactions);
+        let sealed_block_for_shadow = self.sealed_block.clone();
         let shadow_tx_task = async move {
             let parent_commitment_snapshot = self
                 .block_tree_guard
@@ -416,12 +419,12 @@ impl BlockValidationTask {
                 parent_epoch_snapshot,
                 parent_commitment_snapshot,
                 block_index,
-                &transactions_for_shadow,
+                sealed_block_for_shadow.transactions(),
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",
-                block.hash = %self.block.block_hash,
-                block.height = %self.block.height
+                block.hash = %self.sealed_block.header().block_hash,
+                block.height = %self.sealed_block.header().height
             ))
             .await
             .inspect_err(|err| {
@@ -435,29 +438,36 @@ impl BlockValidationTask {
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
         let seeds_validation_task = async move {
             let binding = self.block_tree_guard.read();
-            let previous_block = match binding.get_block(&self.block.previous_block_hash) {
-                Some(block) => block,
-                None => {
-                    tracing::error!(
-                        block.parent_hash = %self.block.previous_block_hash,
-                        "Previous block not found in block tree"
-                    );
-                    return ValidationResult::Invalid(ValidationError::ParentBlockMissing {
-                        block_hash: self.block.previous_block_hash,
-                    });
-                }
-            };
-            is_seed_data_valid(&self.block, previous_block, vdf_reset_frequency)
+            let previous_block =
+                match binding.get_block(&self.sealed_block.header().previous_block_hash) {
+                    Some(block) => block,
+                    None => {
+                        tracing::error!(
+                            block.parent_hash = %self.sealed_block.header().previous_block_hash,
+                            "Previous block not found in block tree"
+                        );
+                        return ValidationResult::Invalid(ValidationError::ParentBlockMissing {
+                            block_hash: self.sealed_block.header().previous_block_hash,
+                        });
+                    }
+                };
+            is_seed_data_valid(
+                self.sealed_block.header(),
+                previous_block,
+                vdf_reset_frequency,
+            )
         };
 
         // Commitment transaction ordering validation
-        let transactions_for_commitment = Arc::clone(&transactions);
+        let sealed_block_for_commitment = self.sealed_block.clone();
         let commitment_ordering_task = async move {
             commitment_txs_are_valid(
                 config,
                 block,
                 &self.block_tree_guard,
-                &transactions_for_commitment.commitment_txs,
+                sealed_block_for_commitment
+                    .transactions()
+                    .get_ledger_system_txs(SystemLedger::Commitment),
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await
@@ -472,7 +482,7 @@ impl BlockValidationTask {
         };
 
         // Data transaction fee validation
-        let transactions_for_data = Arc::clone(&transactions);
+        let sealed_block_for_data = self.sealed_block.clone();
         let data_txs_validation_task = async move {
             data_txs_are_valid(
                 config,
@@ -480,13 +490,17 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,
-                transactions_for_data.get_ledger_txs(irys_types::DataLedger::Submit),
-                transactions_for_data.get_ledger_txs(irys_types::DataLedger::Publish),
+                sealed_block_for_data
+                    .transactions()
+                    .get_ledger_txs(irys_types::DataLedger::Submit),
+                sealed_block_for_data
+                    .transactions()
+                    .get_ledger_txs(irys_types::DataLedger::Publish),
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",
-                block.hash = %self.block.block_hash,
-                block.height = %self.block.height
+                block.hash = %self.sealed_block.header().block_hash,
+                block.height = %self.sealed_block.header().height
             ))
             .await
             .map(|()| ValidationResult::Valid)
@@ -545,14 +559,14 @@ impl BlockValidationTask {
 
                 // All consensus layer validations passed, now submit to execution layer
                 let reth_result = submit_payload_to_reth(
-                    &self.block,
+                    self.sealed_block.header(),
                     &self.service_inner.reth_node_adapter,
                     execution_data,
                 )
                 .instrument(tracing::error_span!(
                     "reth_submission",
-                    block.hash = %self.block.block_hash,
-                    block.height = %self.block.height
+                    block.hash = %self.sealed_block.header().block_hash,
+                    block.height = %self.sealed_block.header().height
                 ))
                 .await;
 

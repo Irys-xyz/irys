@@ -164,12 +164,10 @@ impl InnerCacheTask {
             let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
 
             let found_block = canonical.iter().rev().find_map(|block_entry| {
-                let block_hash = block_entry.block_hash;
-                let block_tree = self.block_tree_guard.read();
-                let block = block_tree.get_block(&block_hash)?;
+                let block = block_entry.header();
                 let ledger_total_chunks = block.data_ledgers[ledger_id].total_chunks;
                 if ledger_total_chunks <= chunk_offset {
-                    Some((block_entry.height, ledger_total_chunks))
+                    Some((block_entry.height(), ledger_total_chunks))
                 } else {
                     None
                 }
@@ -563,7 +561,7 @@ impl InnerCacheTask {
         // Regenerate local expired proofs (only when under capacity)
         for proof in to_reanchor.iter() {
             if REGENERATE_PROOFS {
-                if let Err(e) = reanchor_and_store_ingress_proof(
+                if let Err(error) = reanchor_and_store_ingress_proof(
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
@@ -572,7 +570,11 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                    if error.is_benign() {
+                        debug!(ingress_proof.data_root = ?proof, "Skipped ingress proof reanchoring: {error}");
+                    } else {
+                        warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {error}");
+                    }
                 }
             } else {
                 debug!(
@@ -587,7 +589,7 @@ impl InnerCacheTask {
 
         for proof in to_regen.iter() {
             if REGENERATE_PROOFS {
-                if let Err(report) = generate_and_store_ingress_proof(
+                if let Err(error) = generate_and_store_ingress_proof(
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
@@ -596,7 +598,11 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                    if error.is_benign() {
+                        debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
+                    } else {
+                        warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {error}");
+                    }
                 }
             } else {
                 debug!(
@@ -877,11 +883,11 @@ mod tests {
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
-    use irys_testing_utils::initialize_tracing;
+    use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
+        NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -930,7 +936,7 @@ mod tests {
             Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1013,7 +1019,7 @@ mod tests {
             Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1123,7 +1129,7 @@ mod tests {
         })??;
 
         // Setup minimal service context
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1214,7 +1220,7 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1440,7 +1446,7 @@ mod tests {
         })??;
 
         // Minimal service context
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config_below.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1543,7 +1549,7 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -1627,7 +1633,7 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        let genesis_block = IrysBlockHeader::new_mock_header();
+        let genesis_block = new_mock_signed_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));

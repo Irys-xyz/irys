@@ -132,7 +132,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let recv_tx =
         loop {
-            let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash;
+            let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash();
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             let response = node.node_ctx.service_senders.mempool.send(
                 MempoolServiceMessage::GetBestMempoolTxs(canonical_tip, oneshot_tx),

@@ -27,14 +27,15 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
+use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
     IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    TxKnownStatus, UnpackedChunk, H256,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle,
+    TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
-use irys_types::{BlockTransactions, IrysAddress};
+use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::{HashMap, HashSet};
@@ -239,16 +240,16 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
-        _transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
+        let header = Arc::clone(block.header());
         self.block_status_provider
-            .add_block_to_index_and_tree_for_testing(&block);
+            .add_block_to_index_and_tree_for_testing(&header);
         self.blocks
             .write()
             .expect("to unlock blocks")
-            .push(block.clone());
+            .push(header.clone());
 
         let sender = self.internal_message_bus.clone();
 
@@ -256,7 +257,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessageV2::from(block))
+                    .send(GossipBroadcastMessageV2::from(header))
                     .expect("to send block");
             });
         }
@@ -359,11 +360,9 @@ impl GossipServiceTestFixture {
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
             internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
-            block_status_provider: block_status_provider_mock,
+            block_status_provider: block_status_provider_mock.clone(),
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
-
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
 
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
@@ -455,12 +454,10 @@ impl GossipServiceTestFixture {
 
         let mempool_stub = self.mempool_stub.clone();
 
-        let block_status_provider_mock =
-            BlockStatusProvider::mock(&self.config.node_config, self.db.clone());
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
-            block_status_provider: block_status_provider_mock,
+            block_status_provider: self.block_status_provider.clone(),
         };
 
         let peer_list = self.peer_list.clone();
@@ -468,6 +465,7 @@ impl GossipServiceTestFixture {
 
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
 
+        let genesis = self.block_status_provider.genesis_header();
         gossip_service.sync_state.finish_sync();
         let (server, server_handle, broadcast_task_handle, _block_pool, _data_handler) =
             gossip_service
@@ -486,7 +484,7 @@ impl GossipServiceTestFixture {
                     MempoolReadGuard::new(self.mempool_state.clone()),
                     BlockIndexReadGuard::new(BlockIndex::new_for_testing(self.db.clone())),
                     BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
-                        &IrysBlockHeader::new_mock_header(),
+                        &genesis,
                         self.config.consensus.clone(),
                     )))),
                     std::time::Instant::now(),
@@ -983,7 +981,7 @@ pub(crate) fn data_handler_stub(
     db: DatabaseProvider,
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
-    let genesis_block = IrysBlockHeader::new_mock_header();
+    let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db.clone());
     let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
@@ -1030,10 +1028,11 @@ pub(crate) fn data_handler_stub(
         mempool: mempool_stub,
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
-        gossip_client: GossipClient::new(
+        gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::from(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from([0xAA_u8; 20]),
+            CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,
@@ -1065,7 +1064,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
 
-    let genesis_block = IrysBlockHeader::new_mock_header();
+    let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db);
     let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
@@ -1077,10 +1076,11 @@ pub(crate) fn data_handler_with_stubbed_pool(
         mempool: mempool_stub,
         block_pool,
         cache: Arc::new(GossipCache::new()),
-        gossip_client: GossipClient::new(
+        gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::from(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from([0xAA_u8; 20]),
+            CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

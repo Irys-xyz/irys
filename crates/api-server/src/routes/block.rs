@@ -48,13 +48,12 @@ pub async fn get_block(
                 .0
                 .iter()
                 .find_map(|e| {
-                    if e.height == height {
-                        Some(&e.block_hash)
+                    if e.height() == height {
+                        Some(e.block_hash())
                     } else {
                         None
                     }
-                })
-                .copied();
+                });
             if let Some(hash) = in_block_tree {
                 break 'outer hash;
             }

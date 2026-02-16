@@ -1,0 +1,30 @@
+# Lightweight runtime-only image for local development.
+# Expects the pre-built Linux binary at docker/build-output/irys.
+#
+# Usage:
+#   docker/tests/data-sync/build_image.sh
+#
+# The build script compiles the binary in a container with bind-mounted
+# cargo cache, then builds this image to package it.
+
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -s /sbin/nologin irys
+
+COPY docker/build-output/irys /app/irys
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/irys /app/entrypoint.sh \
+    && mkdir -p /app/data && chown irys:irys /app/data
+
+USER irys
+
+ENTRYPOINT ["/app/entrypoint.sh"]
