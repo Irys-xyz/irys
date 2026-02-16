@@ -1151,11 +1151,11 @@ where
 
     pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {
         if let Some(cached) = self.blocks_cache.get_block_cloned(block_hash).await {
-            return Some(Arc::clone(cached.block.body()));
+            return Some(Arc::new(cached.block.to_block_body()));
         }
 
         if let Some(sealed) = self.blocks_cache.get_recently_processed(block_hash).await {
-            return Some(Arc::clone(sealed.body()));
+            return Some(Arc::new(sealed.to_block_body()));
         }
 
         None

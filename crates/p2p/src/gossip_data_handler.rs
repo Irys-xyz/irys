@@ -1316,7 +1316,7 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     {
         let from_tree = block_tree.read().get_sealed_block(block_hash);
         if let Some(sealed) = from_tree {
-            return Ok(Some(Arc::clone(sealed.body())));
+            return Ok(Some(Arc::new(sealed.to_block_body())));
         }
     }
 
