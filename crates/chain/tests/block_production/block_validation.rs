@@ -278,7 +278,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
         .sign_block_header(&mut tampered_header)?;
 
     // Reconstruct SealedBlock with updated body.block_hash
-    let mut tampered_body = ctx.block.body().as_ref().clone();
+    let mut tampered_body = ctx.block.to_block_body();
     tampered_body.block_hash = tampered_header.block_hash;
     let tampered_block = Arc::new(SealedBlock::new(tampered_header, tampered_body)?);
 
@@ -305,7 +305,7 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     let excessive_txs = mock_data_txs(max + 1);
 
     // Construct new body with excessive transactions
-    let mut body = ctx.block.body().as_ref().clone();
+    let mut body = ctx.block.to_block_body();
     body.data_transactions = excessive_txs.clone();
 
     // Update header to match new transactions (so SealedBlock accepts it)
@@ -368,7 +368,7 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
 
     let excessive_txs = mock_commitment_txs(max + 1);
 
-    let mut body = ctx.block.body().as_ref().clone();
+    let mut body = ctx.block.to_block_body();
     body.commitment_transactions = excessive_txs.clone();
 
     let mut header = (**ctx.block.header()).clone();

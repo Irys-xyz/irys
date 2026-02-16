@@ -301,7 +301,7 @@ pub fn generate_and_store_ingress_proof(
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
-        .block_hash;
+        .block_hash();
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
     let is_already_generating = {
@@ -418,7 +418,7 @@ pub fn reanchor_and_store_ingress_proof(
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
-        .block_hash;
+        .block_hash();
 
     let mut proof = proof.clone();
     // Re-anchor and re-sign

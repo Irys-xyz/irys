@@ -131,8 +131,11 @@ pub(crate) fn block_at_height(
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
 ) -> Result<Arc<IrysBlockHeader>> {
-    if let Some(entry) = canonical_chain.iter().find(|entry| entry.height == height) {
-        let header = load_header(block_tree, database, entry.block_hash)?;
+    if let Some(entry) = canonical_chain
+        .iter()
+        .find(|entry| entry.height() == height)
+    {
+        let header = load_header(block_tree, database, entry.block_hash())?;
         return Ok(header);
     }
 
@@ -177,7 +180,7 @@ pub(crate) fn load_header_from_db(
 pub(crate) fn tree_head_height(canonical_chain: &[block_tree::BlockTreeEntry]) -> Result<u64> {
     canonical_chain
         .last()
-        .map(|entry| entry.height)
+        .map(super::block_tree::BlockTreeEntry::height)
         .ok_or_else(|| eyre!("canonical chain missing head entry"))
 }
 
@@ -186,11 +189,11 @@ pub(crate) fn tree_safe_height(
     migration_depth: usize,
 ) -> Result<u64> {
     if canonical_chain.len() > migration_depth {
-        Ok(canonical_chain[canonical_chain.len() - 1 - migration_depth].height)
+        Ok(canonical_chain[canonical_chain.len() - 1 - migration_depth].height())
     } else {
         canonical_chain
             .first()
-            .map(|entry| entry.height)
+            .map(super::block_tree::BlockTreeEntry::height)
             .ok_or_else(|| eyre!("canonical chain missing genesis entry"))
     }
 }

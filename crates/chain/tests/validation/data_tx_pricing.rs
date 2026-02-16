@@ -315,7 +315,7 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
     let body = irys_types::BlockBody {
         block_hash: header.block_hash,
         data_transactions: txs.all_data_txs().cloned().collect(),
-        commitment_transactions: txs.commitment_txs.clone(),
+        commitment_transactions: txs.all_system_txs().cloned().collect(),
     };
     let block = Arc::new(irys_types::SealedBlock::new(header.as_ref().clone(), body).unwrap());
 

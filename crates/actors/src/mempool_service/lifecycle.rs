@@ -837,7 +837,7 @@ impl Inner {
 
         // stage 1: move commitment transactions from tree to index
         // Use commitment transactions directly from the event
-        let commitment_txs = &transactions.commitment_txs;
+        let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
         let commitment_tx_ids: Vec<H256> = commitment_txs
             .iter()
             .map(irys_types::CommitmentTransaction::id)
