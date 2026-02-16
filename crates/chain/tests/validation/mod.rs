@@ -367,7 +367,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     genesis_config.signer().sign_block_header(&mut header)?;
 
     // Reconstruct SealedBlock with wrong header order
-    let mut tampered_body = block.body().as_ref().clone();
+    let mut tampered_body = block.to_block_body();
     tampered_body.block_hash = header.block_hash;
     let block = Arc::new(SealedBlock::new(header, tampered_body)?);
 
@@ -529,7 +529,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     }];
     peer1_signer.sign_block_header(&mut header)?;
 
-    let mut tampered_body = block.body().as_ref().clone();
+    let mut tampered_body = block.to_block_body();
     tampered_body.block_hash = header.block_hash;
     let block = Arc::new(SealedBlock::new(header, tampered_body)?);
 
@@ -682,7 +682,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     let mut header = (**block.header()).clone();
     header.last_epoch_hash = H256::random(); // Use random hash to ensure it's invalid
     genesis_config.signer().sign_block_header(&mut header)?;
-    let mut tampered_body = block.body().as_ref().clone();
+    let mut tampered_body = block.to_block_body();
     tampered_body.block_hash = header.block_hash;
     let block = Arc::new(SealedBlock::new(header, tampered_body).unwrap());
 
@@ -745,7 +745,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     let mut header = (**block_after_epoch.header()).clone();
     header.last_epoch_hash = prev.last_epoch_hash;
     genesis_config.signer().sign_block_header(&mut header)?;
-    let mut tampered_body = block_after_epoch.body().as_ref().clone();
+    let mut tampered_body = block_after_epoch.to_block_body();
     tampered_body.block_hash = header.block_hash;
     let block_after_epoch = Arc::new(SealedBlock::new(header, tampered_body).unwrap());
 

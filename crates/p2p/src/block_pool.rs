@@ -1116,7 +1116,7 @@ where
         self.blocks_cache
             .get_block_cloned(block_hash)
             .await
-            .map(|cached| Arc::clone(cached.block.body()))
+            .map(|cached| Arc::new(cached.block.to_block_body()))
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
@@ -1449,10 +1449,10 @@ mod tests {
             .get(&block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify BlockBody can be retrieved and matches what was inserted
-        assert_eq!(cached.block.body().block_hash, block_hash);
-        assert_eq!(cached.block.body().data_transactions.len(), 1);
-        assert_eq!(cached.block.body().commitment_transactions.len(), 0);
+        // Verify block data matches what was inserted
+        assert_eq!(cached.block.header().block_hash, block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 1);
+        assert_eq!(cached.block.transactions().commitment_txs.len(), 0);
     }
 
     #[test]
@@ -1470,10 +1470,10 @@ mod tests {
             .get(&child1.header().block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify BlockBody is stored (block_hash will be set to header's block_hash by make_sealed_block)
-        assert_eq!(cached.block.body().block_hash, child1.header().block_hash);
-        assert_eq!(cached.block.body().data_transactions.len(), 0);
-        assert_eq!(cached.block.body().commitment_transactions.len(), 0);
+        // Verify block data (block_hash will be set to header's block_hash by make_sealed_block)
+        assert_eq!(cached.block.header().block_hash, child1.header().block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 0);
+        assert_eq!(cached.block.transactions().commitment_txs.len(), 0);
     }
 
     #[test]

@@ -12,7 +12,6 @@ alloy-core.workspace = true
 atomic-write-file = "0.2"
 derive_more.workspace = true
 eyre.workspace = true
-itertools.workspace = true
 irys-types.workspace = true
 irys-config.workspace = true
 irys-database.workspace = true

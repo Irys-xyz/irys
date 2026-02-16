@@ -1182,7 +1182,6 @@ impl BlockBody {
 #[derive(Debug)]
 pub struct SealedBlock {
     header: Arc<IrysBlockHeader>,
-    body: Arc<BlockBody>,
     transactions: Arc<BlockTransactions>,
 }
 
@@ -1199,22 +1198,21 @@ impl SealedBlock {
             header.block_hash,
             body.block_hash
         );
-        // Verifies all tx signatures and that the tx ids in the body match those in the header
         eyre::ensure!(
-            body.tx_ids_match_the_header(&header)?,
-            "Transaction IDs do not match the header"
+            body.verify_tx_signatures(),
+            "Invalid transaction signatures for block {:?}",
+            header.block_hash
         );
 
-        // Order transactions according to header specification
+        // Order and validate transactions against header specification
         let transactions = Self::order_transactions(
             &header,
-            body.data_transactions.clone(),
-            body.commitment_transactions.clone(),
+            body.data_transactions,
+            body.commitment_transactions,
         )?;
 
         Ok(Self {
             header: Arc::new(header),
-            body: Arc::new(body),
             transactions: Arc::new(transactions),
         })
     }
@@ -1223,12 +1221,18 @@ impl SealedBlock {
         &self.header
     }
 
-    pub fn body(&self) -> &Arc<BlockBody> {
-        &self.body
-    }
-
     pub fn transactions(&self) -> &Arc<BlockTransactions> {
         &self.transactions
+    }
+
+    /// Reconstruct a [`BlockBody`] from the sealed block's header and transactions.
+    /// Used for P2P serving when peers request the block body.
+    pub fn to_block_body(&self) -> BlockBody {
+        BlockBody {
+            block_hash: self.header.block_hash,
+            data_transactions: self.transactions.all_data_txs().cloned().collect(),
+            commitment_transactions: self.transactions.commitment_txs.clone(),
+        }
     }
 
     /// Order pre-fetched transactions into BlockTransactions structure.
