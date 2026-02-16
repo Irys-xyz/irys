@@ -2341,7 +2341,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     },
 )]
 #[test_log::test(tokio::test)]
-async fn stake_tx_fee_and_value_validation_test(
+async fn heavy_stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -2412,7 +2412,7 @@ async fn stake_tx_fee_and_value_validation_test(
     },
 )]
 #[test_log::test(tokio::test)]
-async fn pledge_tx_fee_validation_test(
+async fn heavy_pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {

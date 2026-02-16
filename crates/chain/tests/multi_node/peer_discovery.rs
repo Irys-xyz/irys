@@ -509,6 +509,9 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         ctx_genesis_node.node_ctx.sync_state
     );
 
+    // Allow OS to release the ports from the previous PEER1 instance (TCP TIME_WAIT).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     info!("Restarting PEER1 node");
     let ctx_peer1_node = stopped_peer_1.start_with_name("PEER1").await;
     info!("PEER1 restarted");
