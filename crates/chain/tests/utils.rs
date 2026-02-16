@@ -3389,6 +3389,33 @@ pub fn get_block_parent(
     None
 }
 
+/// Polls `get_block_parent` until the block header appears in `IrysBlockHeaders`.
+/// The table is populated asynchronously after block migration, so a direct read
+/// may return `None` even though the block has already been mined.
+pub async fn wait_for_block_parent(
+    txid: H256,
+    ledger: DataLedger,
+    db: &DatabaseProvider,
+    max_seconds: usize,
+) -> eyre::Result<IrysBlockHeader> {
+    for attempt in 1..=max_seconds {
+        if let Some(block) = get_block_parent(txid, ledger, db) {
+            tracing::info!(
+                "found block parent for tx {} after {} attempt(s)",
+                txid,
+                attempt
+            );
+            return Ok(block);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(eyre::eyre!(
+        "block parent for tx {} not found in IrysBlockHeaders after {} seconds",
+        txid,
+        max_seconds
+    ))
+}
+
 /// Verifies that a published chunk matches its expected content.
 /// Gets a chunk from storage, unpacks it, and compares against expected bytes.
 /// Panics if the chunk is not found or content doesn't match expectations.

@@ -1,5 +1,5 @@
 use crate::utils::post_chunk;
-use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
+use crate::utils::{verify_published_chunk, wait_for_block_parent, IrysNodeTest};
 use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
@@ -175,7 +175,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     //assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
+    let block_tx1 = wait_for_block_parent(txs[0].header.id, DataLedger::Publish, db, 20).await?;
 
     let first_tx_id_in_block = block_tx1.data_ledgers[DataLedger::Publish]
         .tx_ids
@@ -333,7 +333,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     assert!(result.is_ok());
 
     let db = &node.node_ctx.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
+    let block_tx1 = wait_for_block_parent(txs[0].header.id, DataLedger::Publish, db, 20).await?;
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];

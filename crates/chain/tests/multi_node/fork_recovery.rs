@@ -1603,7 +1603,7 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
     let num_blocks_in_epoch = 10;
-    let seconds_to_wait = 30;
+    let seconds_to_wait = 60;
 
     // setup config
     let block_migration_depth = num_blocks_in_epoch - 1;
