@@ -23,7 +23,9 @@ use tracing::{error, info};
 /// - Collects blocks to migrate by walking the block tree
 /// - Persists all transaction data and block headers to the database
 /// - Notifies BlockIndexService (sync) and ChunkMigrationService (fire-and-forget)
-/// - Sends cleanup message to MempoolService (fire-and-forget)
+///
+/// Migrated transactions are removed from the mempool via anchor-expiry pruning
+/// in `prune_pending_txs`, not by an explicit cleanup message.
 #[derive(Debug)]
 pub struct BlockMigrator {
     db: DatabaseProvider,
