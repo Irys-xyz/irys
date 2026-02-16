@@ -259,9 +259,7 @@ impl ChunkOrchestrator {
                 let most_recent_migrated_block =
                     &canonical[canonical.len() - block_migration_depth];
 
-                let block = tree
-                    .get_block(&most_recent_migrated_block.block_hash)
-                    .expect("Block to be in block tree");
+                let block = most_recent_migrated_block.header();
 
                 let data_ledger = block
                     .data_ledgers

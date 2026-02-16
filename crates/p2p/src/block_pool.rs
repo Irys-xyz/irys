@@ -19,7 +19,7 @@ use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError, SealedBlock, H256,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -688,8 +688,7 @@ where
                 .map(|tx| IrysTransactionResponse::Storage(tx.clone()))
                 .chain(
                     block_transactions
-                        .commitment_txs
-                        .iter()
+                        .all_system_txs()
                         .map(|tx| IrysTransactionResponse::Commitment(tx.clone())),
                 )
                 .collect();
@@ -828,7 +827,9 @@ where
             current_block_hash,
             block_transactions.get_ledger_txs(DataLedger::Submit).len(),
             block_transactions.get_ledger_txs(DataLedger::Publish).len(),
-            block_transactions.commitment_txs.len()
+            block_transactions
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len()
         );
 
         // Spawn mempool ingestion in the background - validation no longer needs
@@ -837,7 +838,9 @@ where
             let mempool = self.mempool.clone();
             let block_transactions = Arc::clone(block_transactions);
             tokio::spawn(async move {
-                for commitment_tx in &block_transactions.commitment_txs {
+                for commitment_tx in
+                    block_transactions.get_ledger_system_txs(SystemLedger::Commitment)
+                {
                     if let Err(err) = mempool
                         .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
                         .await
@@ -1116,7 +1119,7 @@ where
         self.blocks_cache
             .get_block_cloned(block_hash)
             .await
-            .map(|cached| Arc::clone(cached.block.body()))
+            .map(|cached| Arc::new(cached.block.to_block_body()))
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
@@ -1449,10 +1452,17 @@ mod tests {
             .get(&block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify BlockBody can be retrieved and matches what was inserted
-        assert_eq!(cached.block.body().block_hash, block_hash);
-        assert_eq!(cached.block.body().data_transactions.len(), 1);
-        assert_eq!(cached.block.body().commitment_transactions.len(), 0);
+        // Verify block data matches what was inserted
+        assert_eq!(cached.block.header().block_hash, block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 1);
+        assert_eq!(
+            cached
+                .block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -1470,10 +1480,17 @@ mod tests {
             .get(&child1.header().block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify BlockBody is stored (block_hash will be set to header's block_hash by make_sealed_block)
-        assert_eq!(cached.block.body().block_hash, child1.header().block_hash);
-        assert_eq!(cached.block.body().data_transactions.len(), 0);
-        assert_eq!(cached.block.body().commitment_transactions.len(), 0);
+        // Verify block data (block_hash will be set to header's block_hash by make_sealed_block)
+        assert_eq!(cached.block.header().block_hash, child1.header().block_hash);
+        assert_eq!(cached.block.transactions().all_data_txs().count(), 0);
+        assert_eq!(
+            cached
+                .block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment)
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -1571,8 +1588,9 @@ mod tests {
         assert_eq!(publish_txs.len(), 1);
         assert_eq!(publish_txs[0].id, publish_tx_id1);
 
-        assert_eq!(result.commitment_txs.len(), 1);
-        assert_eq!(result.commitment_txs[0].id(), commitment_tx_id1);
+        let commitment_txs = result.get_ledger_system_txs(SystemLedger::Commitment);
+        assert_eq!(commitment_txs.len(), 1);
+        assert_eq!(commitment_txs[0].id(), commitment_tx_id1);
     }
 
     #[test]
@@ -1648,8 +1666,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
@@ -1728,8 +1745,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
@@ -1787,8 +1803,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]

@@ -88,7 +88,7 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let diverged_blocks: Vec<_> = chain_node_1
         .iter()
         .zip(chain_node_2.iter())
-        .filter(|(b1, b2)| b1.block_hash != b2.block_hash)
+        .filter(|(b1, b2)| b1.block_hash() != b2.block_hash())
         .collect();
 
     let blocks_compared = diverged_blocks.len();
@@ -100,7 +100,7 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // Process blocks where EMA should differ
     let blocks_with_ema_diff: Vec<_> = diverged_blocks
         .iter()
-        .filter(|(b1, _)| b1.height >= min_height_for_ema_diff)
+        .filter(|(b1, _)| b1.height() >= min_height_for_ema_diff)
         .collect();
 
     tracing::info!(
@@ -112,22 +112,29 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
 
     // Verify all diverged blocks have different hashes
     for (block_1, block_2) in &diverged_blocks {
-        assert_eq!(block_1.height, block_2.height, "heights must be the same");
+        assert_eq!(
+            block_1.height(),
+            block_2.height(),
+            "heights must be the same"
+        );
         assert_ne!(
-            block_1.block_hash, block_2.block_hash,
+            block_1.block_hash(),
+            block_2.block_hash(),
             "block hashes must differ"
         );
     }
 
     // Verify EMA differences for blocks after the delay period
     for (block_1, block_2) in &blocks_with_ema_diff {
-        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash).unwrap();
-        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash).unwrap();
+        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash()).unwrap();
+        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash()).unwrap();
 
         assert_ne!(
-            ema_1, ema_2,
+            ema_1,
+            ema_2,
             "ema snapshot values must differ at height {} (>= {} required for EMA differences)",
-            block_1.height, min_height_for_ema_diff
+            block_1.height(),
+            min_height_for_ema_diff
         );
     }
 
@@ -178,20 +185,26 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // Verify all blocks in the canonical chain are identical and have identical EMA snapshots
     for (block_1, block_2) in final_chain_node_1.iter().zip(final_chain_node_2.iter()) {
         assert_eq!(
-            block_1.block_hash, block_2.block_hash,
+            block_1.block_hash(),
+            block_2.block_hash(),
             "Block hashes must be identical at height {} after convergence",
-            block_1.height
+            block_1.height()
         );
-        assert_eq!(block_1.height, block_2.height, "Block heights must match");
+        assert_eq!(
+            block_1.height(),
+            block_2.height(),
+            "Block heights must match"
+        );
 
         // Get EMA snapshots for both blocks
-        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash).unwrap();
-        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash).unwrap();
+        let ema_1 = node_1.get_ema_snapshot(&block_1.block_hash()).unwrap();
+        let ema_2 = node_2.get_ema_snapshot(&block_2.block_hash()).unwrap();
 
         assert_eq!(
-            ema_1, ema_2,
+            ema_1,
+            ema_2,
             "EMA snapshots must be identical for block at height {} after convergence",
-            block_1.height
+            block_1.height()
         );
     }
 
