@@ -1,9 +1,8 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid};
 use irys_types::{
-    BlockBody, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SealedBlock, SystemLedger,
-    H256, U256,
+    BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig,
+    DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, SealedBlock, H256, U256,
 };
 use reth_db::Database as _;
 use std::{
@@ -18,13 +17,44 @@ use crate::{
     CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockTreeEntry {
-    pub block_hash: BlockHash,
-    pub height: u64,
-    pub data_ledgers: BTreeMap<DataLedger, H256List>,
-    pub system_ledgers: BTreeMap<SystemLedger, H256List>,
+#[derive(Debug)]
+pub struct BlockTreeEntry(pub Arc<SealedBlock>);
+
+impl BlockTreeEntry {
+    pub fn block_hash(&self) -> BlockHash {
+        self.0.header().block_hash
+    }
+
+    pub fn height(&self) -> u64 {
+        self.0.header().height
+    }
+
+    pub fn header(&self) -> &Arc<IrysBlockHeader> {
+        self.0.header()
+    }
+
+    pub fn transactions(&self) -> &Arc<BlockTransactions> {
+        self.0.transactions()
+    }
+
+    pub fn sealed_block(&self) -> &Arc<SealedBlock> {
+        &self.0
+    }
 }
+
+impl Clone for BlockTreeEntry {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl PartialEq for BlockTreeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_hash() == other.block_hash()
+    }
+}
+
+impl Eq for BlockTreeEntry {}
 
 #[derive(Debug)]
 pub struct BlockTree {
@@ -123,14 +153,20 @@ impl BlockTree {
             block_hash,
             ..Default::default()
         };
-        let sealed_genesis = SealedBlock::new(genesis_block_header.clone(), genesis_body)
-            .expect("genesis block must seal successfully");
+        let sealed_genesis = Arc::new(
+            SealedBlock::new(genesis_block_header.clone(), genesis_body)
+                .expect("genesis block must seal successfully"),
+        );
+
+        // Initialize longest chain cache to contain the genesis block
+        let entry = make_block_tree_entry(Arc::clone(&sealed_genesis));
+        let longest_chain_cache = (vec![(entry)], 0);
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
 
         let block_entry = BlockMetadata {
-            block: Arc::new(sealed_genesis),
+            block: sealed_genesis,
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -143,10 +179,6 @@ impl BlockTree {
         blocks.insert(block_hash, block_entry);
         solutions.insert(solution_hash, HashSet::from([block_hash]));
         height_index.insert(height, HashSet::from([block_hash]));
-
-        // Initialize longest chain cache to contain the genesis block
-        let entry = make_block_tree_entry(genesis_block_header);
-        let longest_chain_cache = (vec![(entry)], 0);
 
         Self {
             blocks,
@@ -249,8 +281,18 @@ impl BlockTree {
             start_block_hash, start_block.height
         );
 
+        // Load transactions for the start block from DB and construct SealedBlock
+        let start_block_commitment_txs = load_commitment_transactions(&start_block, &db)?;
+        let start_block_data_txs = load_data_transactions(&start_block, &db)?;
+        let start_block_body = BlockBody {
+            block_hash: start_block.block_hash,
+            data_transactions: start_block_data_txs.into_values().flatten().collect(),
+            commitment_transactions: start_block_commitment_txs,
+        };
+        let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
+
         // Initialize cache with start block
-        let entry = make_block_tree_entry(&start_block);
+        let entry = make_block_tree_entry(Arc::clone(&sealed_start_block));
         let mut block_tree_cache = Self {
             blocks: HashMap::new(),
             solutions: HashMap::new(),
@@ -276,16 +318,6 @@ impl BlockTree {
         // Create EMA cache for start block
         let ema_snapshot =
             build_current_ema_snapshot_from_index(&start_block, db.clone(), consensus_config);
-
-        // Load transactions for the start block from DB and construct SealedBlock
-        let start_block_commitment_txs = load_commitment_transactions(&start_block, &db)?;
-        let start_block_data_txs = load_data_transactions(&start_block, &db)?;
-        let start_block_body = BlockBody {
-            block_hash: start_block.block_hash,
-            data_transactions: start_block_data_txs.into_values().flatten().collect(),
-            commitment_transactions: start_block_commitment_txs,
-        };
-        let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
 
         // Create a Block Entry for the start block
         let block_entry = BlockMetadata {
@@ -647,7 +679,7 @@ impl BlockTree {
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
+                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
                     pairs.push(chain_cache_entry);
 
                     if blocks_to_collect == 0 {
@@ -657,7 +689,7 @@ impl BlockTree {
                 }
 
                 ChainState::Validated(_) => {
-                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
+                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
                     pairs.push(chain_cache_entry);
 
                     not_onchain_count += 1;
@@ -669,7 +701,7 @@ impl BlockTree {
                 }
 
                 ChainState::NotOnchain(block_state) => {
-                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
+                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
                     pairs.push(chain_cache_entry);
 
                     // We only count this as not onchain if it's validated
@@ -841,7 +873,7 @@ impl BlockTree {
             .expect("at least one block in the longest chain");
 
         self.blocks
-            .get(&head_entry.block_hash)
+            .get(&head_entry.block_hash())
             .expect("commitment snapshot for block")
             .commitment_snapshot
             .clone()
@@ -855,7 +887,7 @@ impl BlockTree {
             .expect("at least one block in the longest chain");
 
         self.blocks
-            .get(&head_entry.block_hash)
+            .get(&head_entry.block_hash())
             .expect("commitment snapshot for block")
             .epoch_snapshot
             .clone()
@@ -976,20 +1008,19 @@ impl BlockTree {
     }
 
     /// Collect previous blocks up to the last on-chain block
-    pub fn get_fork_blocks(&self, block: &IrysBlockHeader) -> Vec<&IrysBlockHeader> {
-        let mut prev_hash = block.previous_block_hash;
-        let mut fork_blocks: Vec<&IrysBlockHeader> = Vec::new();
+    pub fn get_fork_blocks(&self, previous_block_hash: BlockHash) -> Vec<Arc<SealedBlock>> {
+        let mut prev_hash = previous_block_hash;
+        let mut fork_blocks: Vec<Arc<SealedBlock>> = Vec::new();
 
-        while let Some(prev_entry) = self.blocks.get(&prev_hash) {
-            let header: &IrysBlockHeader = prev_entry.block.header();
-            match prev_entry.chain_state {
+        while let Some(entry) = self.blocks.get(&prev_hash) {
+            match entry.chain_state {
                 ChainState::Onchain => {
-                    fork_blocks.push(header);
+                    fork_blocks.push(Arc::clone(&entry.block));
                     break;
                 }
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    fork_blocks.push(header);
-                    prev_hash = header.previous_block_hash;
+                    fork_blocks.push(Arc::clone(&entry.block));
+                    prev_hash = entry.block.header().previous_block_hash;
                 }
             }
         }
@@ -1004,7 +1035,7 @@ impl BlockTree {
     fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockMetadata,
-    ) -> Option<(&'a BlockMetadata, Vec<&'a IrysBlockHeader>, SystemTime)> {
+    ) -> Option<(&'a BlockMetadata, Vec<Arc<SealedBlock>>, SystemTime)> {
         let mut current_entry = block;
         let mut prev_header: &IrysBlockHeader = current_entry.block.header();
         let mut depth_count = 0;
@@ -1022,7 +1053,7 @@ impl BlockTree {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((
                         current_entry,
-                        self.get_fork_blocks(prev_header),
+                        self.get_fork_blocks(prev_header.previous_block_hash),
                         current_entry.timestamp,
                     ));
                 }
@@ -1045,7 +1076,7 @@ impl BlockTree {
     #[must_use]
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
-    ) -> Option<(&BlockMetadata, Vec<&IrysBlockHeader>, SystemTime)> {
+    ) -> Option<(&BlockMetadata, Vec<Arc<SealedBlock>>, SystemTime)> {
         // Get the block with max cumulative difficulty
         let (_max_cdiff, max_diff_hash) = self.max_cumulative_difficulty;
 
@@ -1078,11 +1109,11 @@ impl BlockTree {
     pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
         // Get the block with max cumulative difficulty
         self.get_earliest_not_onchain_in_longest_chain()
-            .map(|(_entry, headers, _time)| {
-                headers
+            .map(|(_entry, blocks, _time)| {
+                blocks
                     .iter()
-                    .min_by(|header, header2| header.height.cmp(&header2.height))
-                    .map(|header| header.height)
+                    .min_by(|a, b| a.header().height.cmp(&b.header().height))
+                    .map(|block| block.header().height)
             })?
     }
 
@@ -1486,48 +1517,8 @@ fn load_data_transactions(
     Ok(data_txs)
 }
 
-pub fn make_block_tree_entry(block: &IrysBlockHeader) -> BlockTreeEntry {
-    // DataLedgers
-    let mut data_ledgers = BTreeMap::new();
-
-    // TODO: potentially loop through DataLedger::ALL and add them to the entry
-    //       to better support more data ledgers in the future.
-
-    let publish_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == DataLedger::Publish as u32);
-
-    if let Some(publish_ledger) = publish_ledger {
-        data_ledgers.insert(DataLedger::Publish, publish_ledger.tx_ids.clone());
-    }
-
-    let submit_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == DataLedger::Submit as u32);
-
-    if let Some(submit_ledger) = submit_ledger {
-        data_ledgers.insert(DataLedger::Submit, submit_ledger.tx_ids.clone());
-    }
-
-    // System Ledgers
-    let mut system_ledgers = BTreeMap::new();
-    let commitment_ledger = block
-        .system_ledgers
-        .iter()
-        .find(|tx_ledger| tx_ledger.ledger_id == SystemLedger::Commitment as u32);
-
-    if let Some(commitment_ledger) = commitment_ledger {
-        system_ledgers.insert(SystemLedger::Commitment, commitment_ledger.tx_ids.clone());
-    }
-
-    BlockTreeEntry {
-        block_hash: block.block_hash,
-        height: block.height,
-        data_ledgers,
-        system_ledgers,
-    }
+pub fn make_block_tree_entry(block: Arc<SealedBlock>) -> BlockTreeEntry {
+    BlockTreeEntry(block)
 }
 
 #[cfg(test)]
@@ -2614,7 +2605,10 @@ mod tests {
         cache: &BlockTree,
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
-        let actual_blocks: Vec<_> = canonical_blocks.iter().map(|e| e.block_hash).collect();
+        let actual_blocks: Vec<_> = canonical_blocks
+            .iter()
+            .map(super::BlockTreeEntry::block_hash)
+            .collect();
 
         let expected = expected_blocks
             .iter()

@@ -30,13 +30,13 @@ impl BlockTreeReadGuard {
         let tree = self.read();
         let (canonical, _) = tree.get_canonical_chain();
 
-        let block_depth: usize = (canonical.last().unwrap().height - block_height) as usize;
+        let block_depth: usize = (canonical.last().unwrap().height() - block_height) as usize;
 
         if canonical.len() >= block_depth {
             let block_entry = &canonical[canonical.len() - block_depth];
 
             let block = tree
-                .get_block(&block_entry.block_hash)
+                .get_block(&block_entry.block_hash())
                 .expect("Block to be in block tree");
 
             let data_ledger = block
