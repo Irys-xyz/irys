@@ -565,7 +565,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| {
                 error!(
                     block.hash = ?block_hash,
-                    block.height = block_header.height,
+                    block.height = block.height,
                     ?e,
                     "Failed to add block to block tree"
                 );
@@ -600,7 +600,7 @@ impl BlockTreeServiceInner {
 
         debug!(
             "scheduling block for validation: {} height: {}",
-            block_hash, block_header.height
+            block_hash, block.height
         );
 
         Ok(())
