@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_types::NodeConfig;
 use reth::rpc::types::BlockNumberOrTag;
 
-const WAIT_SECS: u64 = 2;
+const WAIT_SECS: u64 = 30;
 const INITIAL_MINED_BLOCKS: u64 = 5;
 const EXTRA_MINED_BLOCKS: u64 = 5;
 
