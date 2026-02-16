@@ -1051,10 +1051,12 @@ impl IrysNode {
                             }
 
                             // Send shutdown signal - propagate the original cause
-                            if let Some(reason) = shutdown_reason {
-                                vdf_shutdown_sender.send(reason).await.unwrap();
-                            } else {
-                                warn!("No shutdown reason received, VDF will be stopped without reason");
+                            let reason = shutdown_reason.unwrap_or_else(|| {
+                                warn!("No shutdown reason received, using default");
+                                ShutdownReason::Signal("unknown".to_string())
+                            });
+                            if let Err(e) = vdf_shutdown_sender.send(reason).await {
+                                warn!("Failed to send VDF shutdown signal: {}", e);
                             }
 
                             debug!("Waiting for VDF thread to finish");

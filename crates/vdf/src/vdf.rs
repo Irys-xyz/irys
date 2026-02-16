@@ -80,9 +80,16 @@ pub fn run_vdf<B: BlockProvider>(
     let vdf_reset_frequency = config.reset_frequency as u64;
 
     loop {
-        if let Ok(reason) = shutdown_listener.try_recv() {
-            tracing::info!("VDF loop shutdown signal received: {}", reason);
-            break;
+        match shutdown_listener.try_recv() {
+            Ok(reason) => {
+                tracing::info!("VDF loop shutdown signal received: {}", reason);
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                tracing::warn!("VDF shutdown channel disconnected, exiting");
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         }
 
         // check for VDF fast forward step
