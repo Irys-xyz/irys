@@ -631,6 +631,27 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// Polls `get_block_by_height_from_index` (which checks BOTH the index
+    /// entry AND the DB header) until it succeeds or the timeout expires.
+    pub async fn wait_for_block_in_index(
+        &self,
+        height: u64,
+        include_chunk: bool,
+        max_seconds: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        for _attempt in 1..=max_seconds {
+            if let Ok(block) = self.get_block_by_height_from_index(height, include_chunk) {
+                return Ok(block);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(eyre::eyre!(
+            "block at height {} not found in index after {}s",
+            height,
+            max_seconds
+        ))
+    }
+
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         self.node_ctx
             .packing_waiter

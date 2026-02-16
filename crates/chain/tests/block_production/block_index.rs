@@ -45,14 +45,10 @@ async fn heavy3_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
                 migration_height, i
             );
 
-            // Wait for the block index to catch up to the migration height
-            node.wait_until_block_index_height(migration_height, 10)
-                .await?;
-
-            // Verify the block at migration_height is in the block index WITH chunks
+            // Wait for the block to appear in the index AND the DB
             let block_from_index = node
-                .get_block_by_height_from_index(migration_height, true)
-                .expect("Block should be in block index after migration depth");
+                .wait_for_block_in_index(migration_height, true, 10)
+                .await?;
 
             // Assert that the block read from index has the chunk
             assert!(

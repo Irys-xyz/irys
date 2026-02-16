@@ -55,10 +55,13 @@ async fn heavy3_reth_restarts_use_block_index_before_sync() -> eyre::Result<()> 
 
     let genesis_head = genesis_node.get_block_by_height(final_height).await?;
     let safe_height = final_height.saturating_sub(migration_depth);
-    let genesis_safe_block = genesis_node.get_block_by_height_from_index(safe_height, false)?;
+    let genesis_safe_block = genesis_node
+        .wait_for_block_in_index(safe_height, false, WAIT_SECS as usize)
+        .await?;
     let finalized_height = final_height.saturating_sub(prune_depth);
-    let genesis_finalized_block =
-        genesis_node.get_block_by_height_from_index(finalized_height, false)?;
+    let genesis_finalized_block = genesis_node
+        .wait_for_block_in_index(finalized_height, false, WAIT_SECS as usize)
+        .await?;
 
     genesis_node
         .wait_for_reth_marker(

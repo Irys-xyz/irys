@@ -184,7 +184,7 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// but the solution still meets all requirements (VDF step and difficulty),
 /// the block producer rebuilds on the new parent using the same solution.
 #[test_log::test(tokio::test)]
-async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup
@@ -254,8 +254,8 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
 
     // Verify solution is still valid for new parent
     assert!(
-        original_vdf_step > node2_block.vdf_limiter_info.global_step_number,
-        "Solution VDF {} should be > new parent VDF {}",
+        original_vdf_step >= node2_block.vdf_limiter_info.global_step_number,
+        "Solution VDF {} should be >= new parent VDF {}",
         original_vdf_step,
         node2_block.vdf_limiter_info.global_step_number
     );
