@@ -1648,8 +1648,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
@@ -1728,8 +1727,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
@@ -1787,8 +1785,7 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        // The error message is now from tx_ids_match_the_header check
-        assert!(err_msg.contains("Transaction IDs do not match the header"));
+        assert!(err_msg.contains("missing tx"));
     }
 
     #[test]
