@@ -12,12 +12,13 @@ use awc::http::StatusCode;
 use irys_actors::{ChunkIngressError, MempoolServiceMessage};
 use irys_types::UnpackedChunk;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 /// Handles the HTTP POST request for adding a chunk to the mempool.
 /// This function takes in a JSON payload of a `Chunk` type, encapsulates it
 /// into a `ChunkIngressMessage` for further processing by the mempool actor,
 /// and manages error handling based on the results of message delivery and validation.
+#[instrument(level = "info", skip_all)]
 pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,

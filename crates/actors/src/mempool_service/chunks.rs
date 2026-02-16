@@ -23,7 +23,7 @@ use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
 use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{debug, error, info, info_span, instrument, warn, Instrument as _};
 
 /// Represents data_size information and if it comes from the publish ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +265,7 @@ impl Inner {
 
         // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
+        let _proof_span = info_span!("chunk.validate_proof").entered();
 
         let Some(max_valid_offset) = max_chunk_offset(data_size, chunk_size) else {
             error!(
@@ -389,20 +390,24 @@ impl Inner {
         // Record validation duration
         record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
+        drop(_proof_span);
+
+        // Queue the chunk for async batched write to CachedChunks via the
+        // write-behind writer, avoiding a synchronous MDBX transaction on the
+        // hot ingress path.
         let storage_start = Instant::now();
-        if let Err(e) = self
-            .irys_db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|e| {
+        match self.chunk_data_writer.queue_write(&chunk).await {
+            Ok(true) => {
+                record_chunk_duplicate();
+            }
+            Ok(false) => {}
+            Err(e) => {
                 error!(
-                    "Database error caching chunk data_root {:?} tx_offset {}: {:?}",
+                    "Write-behind queue error for chunk data_root {:?} tx_offset {}: {:?}",
                     chunk.data_root, chunk.tx_offset, e
                 );
-                CriticalChunkIngressError::DatabaseError
-            })
-        {
-            return Err(e.into());
+                return Err(CriticalChunkIngressError::DatabaseError.into());
+            }
         }
         record_storage_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
 
@@ -416,6 +421,7 @@ impl Inner {
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
+        let _sm_span = info_span!("chunk.write_storage_modules").entered();
         for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)
@@ -439,6 +445,8 @@ impl Inner {
                 }
             }
         }
+
+        drop(_sm_span);
 
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
