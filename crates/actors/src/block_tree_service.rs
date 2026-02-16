@@ -773,6 +773,23 @@ impl BlockTreeServiceInner {
             self.emit_fcu(markers).await?;
             self.emit_block_confirmed(markers);
 
+            // Persist tx metadata (included_height, promoted_height) to the DB so
+            // the status endpoint survives node restarts even before the block is
+            // fully migrated at migration_depth.
+            //
+            // NOTE: This is NOT reorg-aware — stale metadata from an old fork is
+            // cleaned up by the mempool's reorg handler, which runs before the
+            // new tip's metadata is written here.
+            if let Err(e) = self
+                .block_migrator
+                .persist_confirmed_metadata(&markers.head)
+            {
+                error!(
+                    "Failed to persist confirmed metadata for block {}: {}",
+                    markers.head.block_hash, e
+                );
+            }
+
             // Delegate migration to BlockMigrator (validates continuity internally)
             if tip_changed {
                 self.migrate_block(&markers.migration_block).await?;
