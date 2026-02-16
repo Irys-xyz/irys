@@ -160,7 +160,14 @@ impl IrysNodeCtx {
     pub fn get_gossip_server(
         &self,
     ) -> GossipServer<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl> {
-        GossipServer::new(self.gossip_data_handler.clone(), self.peer_list.clone())
+        GossipServer::new(
+            self.gossip_data_handler.clone(),
+            self.peer_list.clone(),
+            self.config
+                .node_config
+                .p2p_gossip
+                .max_concurrent_gossip_chunks,
+        )
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

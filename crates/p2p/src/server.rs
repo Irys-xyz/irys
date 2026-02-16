@@ -46,6 +46,7 @@ where
 {
     data_handler: Arc<GossipDataHandler<M, B>>,
     peer_list: PeerList,
+    chunk_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl<M, B> Clone for GossipServer<M, B>
@@ -57,6 +58,7 @@ where
         Self {
             data_handler: self.data_handler.clone(),
             peer_list: self.peer_list.clone(),
+            chunk_semaphore: self.chunk_semaphore.clone(),
         }
     }
 }
@@ -66,13 +68,15 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    pub const fn new(
+    pub fn new(
         gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
+        max_concurrent_chunks: usize,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
             peer_list,
+            chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_chunks)),
         }
     }
 
@@ -107,6 +111,14 @@ where
             peer_id,
             miner_address: source_miner_address,
             data: v1_request.data,
+        };
+
+        let _permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
         };
 
         if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
@@ -598,6 +610,14 @@ where
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
+
+        let _permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
+        };
 
         if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);

@@ -5406,6 +5406,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "async-trait",
+ "bytes",
  "dashmap 6.1.0",
  "eyre",
  "futures",
