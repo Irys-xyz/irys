@@ -5396,7 +5396,7 @@ name = "irys-macros-integer-tagged"
 version = "0.1.0"
 dependencies = [
  "quote",
- "syn 2.0.111",
+ "syn 2.0.114",
 ]
 
 [[package]]

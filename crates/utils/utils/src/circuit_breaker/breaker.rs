@@ -23,7 +23,7 @@ impl CircuitBreaker {
             last_failure_time_nanos: AtomicU64::new(0),
             last_access_time_nanos: AtomicU64::new(now_nanos),
             half_open_trial_count: AtomicU32::new(0),
-            config: config.clone(),
+            config: *config,
         }
     }
 

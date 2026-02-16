@@ -184,7 +184,7 @@ where
             breakers: Arc::clone(&self.breakers),
             active_count: Arc::clone(&self.active_count),
             capacity: self.capacity,
-            config: self.config.clone(),
+            config: self.config,
         }
     }
 }
