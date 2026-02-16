@@ -751,6 +751,26 @@ impl BlockTreeServiceInner {
             self.send_epoch_events(&epoch_block)?;
         }
 
+        // Handle fork-aware metadata persistence for reorgs: clear orphaned
+        // metadata and write metadata for ALL new fork blocks synchronously,
+        // BEFORE broadcasting the ReorgEvent to the mempool.
+        let handled_reorg = if let Some(ref event) = reorg_event {
+            if let Err(e) = self.block_migrator.clear_orphaned_metadata(&event.old_fork) {
+                error!("Failed to clear orphaned metadata during reorg: {}", e);
+            }
+            for block in event.new_fork.iter() {
+                if let Err(e) = self.block_migrator.persist_confirmed_metadata(block) {
+                    error!(
+                        "Failed to persist metadata for new fork block {}: {}",
+                        block.block_hash, e
+                    );
+                }
+            }
+            true
+        } else {
+            false
+        };
+
         // Now that the epoch events are sent, let the node know about the reorg
         if let Some(reorg_event) = reorg_event {
             // Broadcast reorg event using the shared sender
@@ -777,17 +797,18 @@ impl BlockTreeServiceInner {
             // the status endpoint survives node restarts even before the block is
             // fully migrated at migration_depth.
             //
-            // NOTE: This is NOT reorg-aware — stale metadata from an old fork is
-            // cleaned up by the mempool's reorg handler, which runs before the
-            // new tip's metadata is written here.
-            if let Err(e) = self
-                .block_migrator
-                .persist_confirmed_metadata(&markers.head)
-            {
-                error!(
-                    "Failed to persist confirmed metadata for block {}: {}",
-                    markers.head.block_hash, e
-                );
+            // During reorgs, metadata for the entire new fork was already written
+            // above (after clearing orphaned metadata), so we skip this here.
+            if !handled_reorg {
+                if let Err(e) = self
+                    .block_migrator
+                    .persist_confirmed_metadata(&markers.head)
+                {
+                    error!(
+                        "Failed to persist confirmed metadata for block {}: {}",
+                        markers.head.block_hash, e
+                    );
+                }
             }
 
             // Delegate migration to BlockMigrator (validates continuity internally)

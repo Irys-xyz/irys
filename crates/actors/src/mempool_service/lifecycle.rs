@@ -389,25 +389,15 @@ impl Inner {
             "Should always be able to get all orphaned commitment transactions"
         );
 
-        // Clear included_height for orphaned commitment transactions before resubmitting
+        // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
+        // DB metadata is already cleared by BlockMigrator::clear_orphaned_metadata() in BlockTreeService.
         for id in orphaned_commitment_tx_ids.iter() {
-            // Clear in-memory mempool state
             if self
                 .mempool_state
                 .clear_commitment_tx_included_height(*id)
                 .await
             {
                 tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
-            }
-
-            // Also clear the persisted included_height in the database
-            if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::clear_commitment_tx_metadata(tx, id)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            }) {
-                tracing::warn!(tx.id = %id, error = %e, "Failed to clear included_height in DB for orphaned commitment tx");
-            } else {
-                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in DB");
             }
         }
 
@@ -598,22 +588,6 @@ impl Inner {
             }
         }
 
-        // Clear promoted_height in database for publish-ledger txs orphaned by the reorg.
-        if !orphaned_confirmed_publish_txs.is_empty() {
-            if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_clear_data_tx_promoted_height(
-                    tx,
-                    &orphaned_confirmed_publish_txs,
-                )
-                .map_err(|e| eyre::eyre!("{:?}", e))
-            }) {
-                error!(
-                    "Failed to batch clear promoted_height in database during reorg: {}",
-                    e
-                );
-            }
-        }
-
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
 
         let published_in_both: Vec<IrysTransactionId> = old_fork_confirmed_reduction
@@ -633,8 +607,10 @@ impl Inner {
             .handle_get_data_tx_message(published_in_both.clone())
             .await;
 
+        // Update in-memory mempool state for txs promoted in both forks:
+        // ensure they have the ingress proofs from the new canonical fork.
+        // DB metadata is already handled by BlockMigrator (clear old fork + write new fork).
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
-        let mut promoted_height_updates: Vec<(H256, u64)> = Vec::new();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
                 let txid = tx.id;
@@ -647,9 +623,8 @@ impl Inner {
                 // Get the ingress proofs for this txid (also performs some validation)
                 let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
 
-                // Set promoted_height in metadata
+                // Set promoted_height in metadata (in-memory only)
                 tx.metadata_mut().promoted_height = Some(promoted_in_block.height);
-                promoted_height_updates.push((txid, promoted_in_block.height));
                 // update entry
                 self.mempool_state.update_submit_transaction(tx).await;
                 debug!(
@@ -661,42 +636,6 @@ impl Inner {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
                     &published_in_both.get(idx)
-                );
-            }
-        }
-
-        // Ensure the metadata table reflects the canonical promoted heights for txs published in both forks.
-        if !promoted_height_updates.is_empty() {
-            if let Err(e) = self.irys_db.update_eyre(|db_tx| {
-                for (tx_id, height) in &promoted_height_updates {
-                    irys_database::set_data_tx_promoted_height(db_tx, tx_id, *height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                Ok(())
-            }) {
-                error!(
-                    "Failed to update promoted_height in database during reorg reconciliation: {}",
-                    e
-                );
-            }
-        }
-
-        // Batch clear included_height in database for all orphaned data transactions
-        let all_orphaned_tx_ids: Vec<H256> = orphaned_confirmed_ledger_txs
-            .values()
-            .flat_map(|txs| txs.iter().copied())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        if !all_orphaned_tx_ids.is_empty() {
-            if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_clear_data_tx_metadata(tx, &all_orphaned_tx_ids)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            }) {
-                error!(
-                    "Failed to batch clear included_height in database during reorg: {}",
-                    e
                 );
             }
         }

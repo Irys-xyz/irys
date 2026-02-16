@@ -39,6 +39,51 @@ impl BlockMigrator {
         }
     }
 
+    /// Clears `included_height` and `promoted_height` metadata from the DB
+    /// for all transactions in the given orphaned blocks.
+    ///
+    /// This is the inverse of [`Self::persist_confirmed_metadata`]. Called
+    /// synchronously by `BlockTreeServiceInner` during a reorg, BEFORE the
+    /// new fork's metadata is written and BEFORE the `ReorgEvent` is broadcast
+    /// to the mempool. This ensures the DB never contains stale metadata from
+    /// an orphaned fork.
+    pub fn clear_orphaned_metadata(&self, old_fork: &[Arc<IrysBlockHeader>]) -> eyre::Result<()> {
+        let mut all_data_tx_ids: Vec<H256> = Vec::new();
+        let mut all_commitment_tx_ids: Vec<H256> = Vec::new();
+
+        for block in old_fork {
+            let submit_tx_ids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+            let publish_tx_ids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+
+            all_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
+            all_commitment_tx_ids.extend(commitment_tx_ids);
+        }
+
+        if !all_data_tx_ids.is_empty() {
+            self.db.update_eyre(|tx| {
+                irys_database::batch_clear_data_tx_metadata(tx, &all_data_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            })?;
+        }
+
+        if !all_commitment_tx_ids.is_empty() {
+            self.db.update_eyre(|tx| {
+                irys_database::batch_clear_commitment_tx_metadata(tx, &all_commitment_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            })?;
+        }
+
+        info!(
+            blocks = old_fork.len(),
+            data_txs = all_data_tx_ids.len(),
+            commitment_txs = all_commitment_tx_ids.len(),
+            "Cleared orphaned metadata from DB"
+        );
+
+        Ok(())
+    }
+
     /// Persists only `included_height` and `promoted_height` metadata to the DB
     /// for a confirmed block's transactions.
     ///
@@ -50,12 +95,9 @@ impl BlockMigrator {
     /// Unlike [`Self::persist_block_to_db`], this does NOT write tx headers,
     /// commitment txs, or block headers — those are deferred to migration.
     ///
-    /// NOTE: This write is NOT reorg-aware. During a reorg, the mempool's
-    /// reorg handler (`handle_confirmed_data_tx_reorg` / `handle_confirmed_commitment_tx_reorg`
-    /// in `lifecycle.rs`) is responsible for clearing stale metadata from the DB.
-    /// There is a brief window between the stale write and the reorg cleanup where
-    /// the DB may contain metadata for the old fork. This is acceptable because
-    /// the reorg handler runs synchronously before the new tip is confirmed.
+    /// During a reorg, [`Self::clear_orphaned_metadata`] is called first to
+    /// remove stale metadata, then this method is called for each block in
+    /// the new canonical fork.
     pub fn persist_confirmed_metadata(&self, block: &IrysBlockHeader) -> eyre::Result<()> {
         let block_height = block.height;
 
