@@ -1100,8 +1100,8 @@ impl BlockIndexItem {
 /// Used to pass pre-fetched transactions to block discovery.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockTransactions {
-    /// Commitment ledger transactions
-    pub commitment_txs: Vec<CommitmentTransaction>,
+    /// System transactions organized by ledger type (commitments, etc.)
+    pub system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>>,
     /// Data transactions organized by ledger type
     pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
 }
@@ -1118,6 +1118,19 @@ impl BlockTransactions {
     /// Iterate over all data transactions across all ledgers
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
+    }
+
+    /// Get transactions for a specific system ledger
+    pub fn get_ledger_system_txs(&self, ledger: SystemLedger) -> &[CommitmentTransaction] {
+        self.system_txs
+            .get(&ledger)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over all system transactions across all system ledgers
+    pub fn all_system_txs(&self) -> impl Iterator<Item = &CommitmentTransaction> {
+        self.system_txs.values().flatten()
     }
 }
 
@@ -1231,7 +1244,7 @@ impl SealedBlock {
         BlockBody {
             block_hash: self.header.block_hash,
             data_transactions: self.transactions.all_data_txs().cloned().collect(),
-            commitment_transactions: self.transactions.commitment_txs.clone(),
+            commitment_transactions: self.transactions.all_system_txs().cloned().collect(),
         }
     }
 
@@ -1292,35 +1305,41 @@ impl SealedBlock {
             result_data_txs.insert(ledger_type, ledger_txs);
         }
 
-        // Commitment transactions — each appears in exactly one ledger, so simple remove suffices
+        // System transactions — each appears in exactly one ledger, so simple remove suffices
         let mut commitment_tx_map: HashMap<H256, CommitmentTransaction> =
             HashMap::with_capacity(commitment_txs.len());
         for tx in commitment_txs {
             commitment_tx_map.insert(tx.id(), tx);
         }
 
-        let commitment_ledger = block_header
-            .system_ledgers
-            .iter()
-            .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
+        let mut result_system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>> =
+            HashMap::new();
+        for ledger in &block_header.system_ledgers {
+            let ledger_type = SystemLedger::try_from(ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "Invalid system ledger_id {} in block {:?}",
+                    ledger.ledger_id,
+                    block_header.block_hash
+                )
+            })?;
 
-        let mut ordered_commitment_txs =
-            Vec::with_capacity(commitment_ledger.map_or(0, |l| l.tx_ids.0.len()));
-        if let Some(ledger) = commitment_ledger {
+            let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
             for expected_id in &ledger.tx_ids.0 {
                 let tx = commitment_tx_map.remove(expected_id).ok_or_else(|| {
                     eyre::eyre!(
-                        "Header/body mismatch in block {:?}: commitment ledger missing tx {}",
+                        "Header/body mismatch in block {:?}: {:?} system ledger missing tx {}",
                         block_header.block_hash,
+                        ledger_type,
                         expected_id,
                     )
                 })?;
-                ordered_commitment_txs.push(tx);
+                ledger_txs.push(tx);
             }
+            result_system_txs.insert(ledger_type, ledger_txs);
         }
 
         Ok(BlockTransactions {
-            commitment_txs: ordered_commitment_txs,
+            system_txs: result_system_txs,
             data_txs: result_data_txs,
         })
     }

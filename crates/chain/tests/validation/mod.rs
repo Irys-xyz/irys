@@ -1131,7 +1131,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
 
     let body = BlockBody {
         block_hash: header.block_hash,
-        commitment_transactions: txs.commitment_txs.clone(),
+        commitment_transactions: txs.all_system_txs().cloned().collect(),
         data_transactions: txs.all_data_txs().cloned().collect(),
     };
     let sealed_block = Arc::new(SealedBlock::new(header.as_ref().clone(), body)?);

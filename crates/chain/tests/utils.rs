@@ -49,7 +49,7 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
     EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
-    H256, U256,
+    SystemLedger, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
@@ -2106,7 +2106,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         // Ingest commitment txs into peer's mempool
-        for commitment_tx in block_transactions.commitment_txs.iter() {
+        for commitment_tx in block_transactions.get_ledger_system_txs(SystemLedger::Commitment) {
             tracing::error!("{}", commitment_tx.id());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -3463,7 +3463,7 @@ pub fn build_sealed_block(
     let block_body = BlockBody {
         block_hash: header.block_hash,
         data_transactions: txs.all_data_txs().cloned().collect(),
-        commitment_transactions: txs.commitment_txs.clone(),
+        commitment_transactions: txs.all_system_txs().cloned().collect(),
     };
     Ok(Arc::new(SealedBlock::new(header, block_body)?))
 }

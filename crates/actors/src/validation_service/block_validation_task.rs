@@ -29,7 +29,7 @@ use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, SealedBlock};
+use irys_types::{BlockHash, SealedBlock, SystemLedger};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
@@ -465,7 +465,9 @@ impl BlockValidationTask {
                 config,
                 block,
                 &self.block_tree_guard,
-                &sealed_block_for_commitment.transactions().commitment_txs,
+                sealed_block_for_commitment
+                    .transactions()
+                    .get_ledger_system_txs(SystemLedger::Commitment),
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await

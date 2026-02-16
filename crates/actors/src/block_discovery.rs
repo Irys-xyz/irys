@@ -20,7 +20,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, SealedBlock,
-    TokioServiceHandle, H256,
+    SystemLedger, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -352,7 +352,7 @@ impl BlockDiscoveryServiceInner {
         // Get references to transactions for anchor validation
         let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
         let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
-        let commitment_txs = &transactions.commitment_txs;
+        let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
         let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
 
         if publish_txs.len() != publish_tx_ids_to_check.len() {

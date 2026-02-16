@@ -117,7 +117,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
         let body = BlockBody {
             block_hash: block.block_hash,
-            commitment_transactions: transactions.commitment_txs.clone(),
+            commitment_transactions: transactions.all_system_txs().cloned().collect(),
             data_transactions: transactions.all_data_txs().cloned().collect(),
         };
         let sealed_block = std::sync::Arc::new(SealedBlock::new(block.as_ref().clone(), body)?);

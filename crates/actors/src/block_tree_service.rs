@@ -20,7 +20,7 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
-    H256List, IrysAddress, IrysBlockHeader, SealedBlock, TokioServiceHandle, H256,
+    H256List, IrysAddress, IrysBlockHeader, SealedBlock, SystemLedger, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -542,7 +542,9 @@ impl BlockTreeServiceInner {
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
             block_header,
-            &block.transactions().commitment_txs,
+            block
+                .transactions()
+                .get_ledger_system_txs(SystemLedger::Commitment),
             &prev_commitment_snapshot,
             arc_epoch_snapshot.clone(),
             &self.config.consensus,
