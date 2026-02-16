@@ -1257,8 +1257,6 @@ impl SealedBlock {
         data_txs: Vec<DataTransactionHeader>,
         commitment_txs: Vec<CommitmentTransaction>,
     ) -> eyre::Result<BlockTransactions> {
-        use std::collections::HashMap;
-
         // Single lookup map for all body data transactions
         let mut data_tx_map: HashMap<H256, DataTransactionHeader> =
             HashMap::with_capacity(data_txs.len());

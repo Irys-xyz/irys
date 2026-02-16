@@ -1108,13 +1108,11 @@ impl BlockTree {
     // TODO: replace with reading canonical chain, minusing head block by not on chain count
     pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
         // Get the block with max cumulative difficulty
-        self.get_earliest_not_onchain_in_longest_chain()
-            .map(|(_entry, blocks, _time)| {
-                blocks
-                    .iter()
-                    .min_by(|a, b| a.header().height.cmp(&b.header().height))
-                    .map(|block| block.header().height)
-            })?
+        let (_entry, blocks, _time) = self.get_earliest_not_onchain_in_longest_chain()?;
+        blocks
+            .iter()
+            .min_by_key(|b| b.header().height)
+            .map(|block| block.header().height)
     }
 
     pub fn can_process_height(&self, height: u64) -> bool {
