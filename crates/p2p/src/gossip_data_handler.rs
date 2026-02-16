@@ -374,7 +374,7 @@ where
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             // This shouldn't happen, but we still should have a safeguard just in case
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
@@ -424,7 +424,7 @@ where
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
@@ -751,7 +751,7 @@ where
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);

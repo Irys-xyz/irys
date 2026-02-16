@@ -27,6 +27,15 @@ use tracing::{debug, error, warn};
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
 
+/// Builds the base gossip URL for a given peer address and protocol version,
+/// e.g. `http://<addr>/gossip` for V1 or `http://<addr>/gossip/v2` for V2.
+fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
+    match version {
+        ProtocolVersion::V1 => format!("http://{}/gossip", addr),
+        ProtocolVersion::V2 => format!("http://{}/gossip/v2", addr),
+    }
+}
+
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -625,14 +634,11 @@ impl GossipClient {
             return Err(GossipClientError::CircuitBreakerOpen(*peer_id));
         }
 
-        let url = match protocol_version {
-            ProtocolVersion::V1 => {
-                format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Health)
-            }
-            ProtocolVersion::V2 => {
-                format!("http://{}/gossip/v2{}", peer.gossip, GossipRoutes::Health)
-            }
-        };
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, protocol_version),
+            GossipRoutes::Health
+        );
         let peer_addr_str = peer.gossip.to_string();
 
         let response = match self.internal_client().get(&url).send().await {
@@ -888,10 +894,11 @@ impl GossipClient {
         for<'de> R: Deserialize<'de>,
     {
         // Construct URL based on protocol version
-        let url = match protocol_version {
-            ProtocolVersion::V1 => format!("http://{}/gossip{}", gossip_address, route),
-            ProtocolVersion::V2 => format!("http://{}/gossip/v2{}", gossip_address, route),
-        };
+        let url = format!(
+            "{}{}",
+            gossip_base_url(gossip_address, protocol_version),
+            route
+        );
 
         debug!("Sending data to {} using {:?}", url, protocol_version);
 
@@ -1638,18 +1645,11 @@ impl GossipClient {
                     "Attempting to fetch stake_and_pledge_whitelist from peer {} (attempt {}/5)",
                     peer.0, attempt
                 );
-                let url = match peer.1.protocol_version {
-                    ProtocolVersion::V1 => format!(
-                        "http://{}/gossip{}",
-                        peer.1.address.gossip,
-                        GossipRoutes::StakeAndPledgeWhitelist
-                    ),
-                    ProtocolVersion::V2 => format!(
-                        "http://{}/gossip/v2{}",
-                        peer.1.address.gossip,
-                        GossipRoutes::StakeAndPledgeWhitelist
-                    ),
-                };
+                let url = format!(
+                    "{}{}",
+                    gossip_base_url(&peer.1.address.gossip, peer.1.protocol_version),
+                    GossipRoutes::StakeAndPledgeWhitelist
+                );
 
                 let response = self
                     .client

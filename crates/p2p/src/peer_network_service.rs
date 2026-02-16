@@ -766,7 +766,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} reported invalid data for request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -774,7 +774,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rate limited the request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -782,7 +782,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} unable to verify our origin of request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -791,7 +791,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rejected data request {:?} with {:?}",
-                                        peer.0, data_request, reason
+                                        peer_id, data_request, reason
                                     )),
                                 ));
                             }
@@ -799,7 +799,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} has unsupported protocol version {}",
-                                        peer.0, unsupported_version
+                                        peer_id, unsupported_version
                                     )),
                                 ));
                             }
@@ -807,7 +807,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} does not support requested feature for {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
