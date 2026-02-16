@@ -1,0 +1,77 @@
+# Agent cluster — local 3-node Irys cluster for development.
+#
+# Managed by agent_cluster.sh. Configs live in ./configs/.
+# Uses local image with shell (required for peer bash entrypoints).
+
+services:
+  test-irys-1:
+    image: ${IMAGE_NAME:-irys:local}
+    pull_policy: never
+    container_name: test-irys-1
+    restart: unless-stopped
+    networks:
+      test_network:
+        ipv4_address: 172.21.0.2
+    ports:
+      - "19080:8080"
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./configs/irys-1.toml:/app/config.toml:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+    cap_add:
+      - NET_ADMIN
+
+  test-irys-2:
+    image: ${IMAGE_NAME:-irys:local}
+    pull_policy: never
+    container_name: test-irys-2
+    restart: unless-stopped
+    depends_on:
+      - test-irys-1
+    networks:
+      test_network:
+        ipv4_address: 172.21.0.3
+    ports:
+      - "19081:8080"
+    environment:
+      - RUST_LOG=debug
+      - MIN_HEIGHT=${MIN_HEIGHT:-40}
+    volumes:
+      - ./configs/irys-2.toml:/app/config.toml:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
+
+  test-irys-3:
+    image: ${IMAGE_NAME:-irys:local}
+    pull_policy: never
+    container_name: test-irys-3
+    restart: unless-stopped
+    depends_on:
+      - test-irys-1
+    networks:
+      test_network:
+        ipv4_address: 172.21.0.4
+    ports:
+      - "19082:8080"
+    environment:
+      - RUST_LOG=debug
+      - MIN_HEIGHT=${MIN_HEIGHT:-50}
+    volumes:
+      - ./configs/irys-3.toml:/app/config.toml:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
+
+networks:
+  test_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.21.0.0/16
