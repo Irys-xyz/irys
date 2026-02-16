@@ -389,6 +389,11 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&pledge_tx).await?;
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
+    // Wait for both transactions to be processed into the mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id(), pledge_tx.id()], 10)
+        .await?;
+
     // Mine a block to confirm the commitments
     genesis_node.mine_block().await.unwrap();
 

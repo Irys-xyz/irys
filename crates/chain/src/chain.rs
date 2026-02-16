@@ -89,7 +89,6 @@ use tokio::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
-    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
@@ -870,10 +869,11 @@ impl IrysNode {
             let storage_modules = ctx.storage_modules_guard.clone();
             let mempool_pledge_provider = ctx.mempool_pledge_provider.clone();
             let latest_block = Arc::clone(&latest_block);
-            // this is a task as we don't want to block startup, & it lets us gosip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
-            handle.spawn(async {
-                // sleep for a bit so that peers have a chance to gossip us blocks
-                sleep(Duration::from_secs(2)).await;
+            let sync_state = ctx.sync_state.clone();
+            // this is a task as we don't want to block startup, & it lets us gossip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
+            handle.spawn(async move {
+                // wait for sync to complete so gossiped blocks are pre-validated
+                let _ = sync_state.wait_for_sync().await;
                 let config = config;
                 let latest_block = latest_block;
                 let mut validation_tracker =
