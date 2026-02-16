@@ -164,12 +164,10 @@ impl InnerCacheTask {
             let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
 
             let found_block = canonical.iter().rev().find_map(|block_entry| {
-                let block_hash = block_entry.block_hash;
-                let block_tree = self.block_tree_guard.read();
-                let block = block_tree.get_block(&block_hash)?;
+                let block = block_entry.header();
                 let ledger_total_chunks = block.data_ledgers[ledger_id].total_chunks;
                 if ledger_total_chunks <= chunk_offset {
-                    Some((block_entry.height, ledger_total_chunks))
+                    Some((block_entry.height(), ledger_total_chunks))
                 } else {
                     None
                 }

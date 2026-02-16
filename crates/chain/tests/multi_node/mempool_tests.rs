@@ -819,12 +819,12 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     debug!("old_fork:  {:?}", old_fork);
     debug!("new_fork:  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash()]);
     assert_eq!(
         new_fork,
         vec![
-            canon.0[canon.0.len() - 2].block_hash,
-            canon.0.last().unwrap().block_hash
+            canon.0[canon.0.len() - 2].block_hash(),
+            canon.0.last().unwrap().block_hash()
         ]
     );
 
@@ -1132,7 +1132,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
         .await?;
 
-    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
@@ -1264,7 +1264,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .await?;
 
     // (a second check) assert that nothing is in the mempool
-    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
@@ -1511,7 +1511,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
         .await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
-    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
     assert_eq!(
@@ -1553,7 +1553,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     // assert that a_blk1_tx1 is no longer present in the mempool
     // (nothing should be in the mempool)
-    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());

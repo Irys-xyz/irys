@@ -305,13 +305,10 @@ impl Inner {
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
             let ema = tree
-                .get_ema_snapshot(&last_block_entry.block_hash)
+                .get_ema_snapshot(&last_block_entry.block_hash())
                 .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
-            let last_block = tree
-                .get_block(&last_block_entry.block_hash)
-                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
             // Convert block timestamp from millis to seconds
-            let timestamp_secs = last_block.timestamp_secs();
+            let timestamp_secs = last_block_entry.header().timestamp_secs();
             (ema, timestamp_secs)
         };
 
@@ -501,10 +498,7 @@ impl Inner {
             let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
-            let last_block = tree
-                .get_block(&last_block_entry.block_hash)
-                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
-            last_block.timestamp_secs()
+            last_block_entry.header().timestamp_secs()
         };
         let number_of_ingress_proofs_total = self
             .config
@@ -586,12 +580,12 @@ impl Inner {
         // This is just here to catch any oddities in the debug log. The optimistic
         // and canonical should always have the same results from my reading of the code.
         // if the tests are stable and this hasn't come up it can be removed.
-        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash {
+        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash() {
             debug!("Optimistic and Canonical have different heads");
         }
 
-        let block_hash = canonical_head_entry.block_hash;
-        let block_height = canonical_head_entry.height;
+        let block_hash = canonical_head_entry.block_hash();
+        let block_height = canonical_head_entry.height();
 
         // retrieve block from mempool or database
         // be aware that genesis starts its life immediately in the database

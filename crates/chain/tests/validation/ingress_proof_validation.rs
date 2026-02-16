@@ -303,17 +303,15 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
     let promoted_entry = canonical_chain
         .iter()
         .find(|entry| {
-            entry
-                .data_ledgers
-                .get(&irys_types::DataLedger::Publish)
-                .map(|ledger| ledger.0.contains(&tx.header.id))
-                .unwrap_or(false)
+            entry.header().data_ledgers[irys_types::DataLedger::Publish]
+                .tx_ids
+                .contains(&tx.header.id)
         })
         .expect("Transaction should have been promoted to a block");
 
     // Get the full block header to access the proofs
     let promoted_block = genesis_node
-        .get_block_by_height(promoted_entry.height)
+        .get_block_by_height(promoted_entry.height())
         .await
         .expect("Block at promoted height should exist");
 
