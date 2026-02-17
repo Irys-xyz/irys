@@ -215,8 +215,12 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     }
 
     // Verify all collected blocks are on-chain
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     for (idx, hash) in block_hashes.iter().enumerate() {
-        let state = read_block_from_state(&node.node_ctx, hash).await;
+        let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(
             state,
             BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
@@ -261,8 +265,12 @@ async fn slow_heavy3_mine_ten_blocks() -> eyre::Result<()> {
     }
 
     // Verify all collected blocks are on-chain
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     for (idx, hash) in block_hashes.iter().enumerate() {
-        let state = read_block_from_state(&node.node_ctx, hash).await;
+        let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(
             state,
             BlockValidationOutcome::StoredOnNode(ChainState::Onchain),

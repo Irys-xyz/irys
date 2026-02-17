@@ -16,7 +16,7 @@ use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFaca
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
     block_producer::BlockProducerCommand,
-    block_tree_service::ReorgEvent,
+    block_tree_service::{BlockStateUpdated, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     MempoolServiceFacadeImpl,
@@ -1340,9 +1340,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         BlockTransactions,
         BlockValidationOutcome,
     )> {
+        let event_rx = self
+            .node_ctx
+            .service_senders
+            .subscribe_block_state_updates();
         let (block, reth_payload, block_transactions) = self.mine_block_with_payload().await?;
         let block_hash = &block.block_hash;
-        let res = read_block_from_state(&self.node_ctx, block_hash).await;
+        let res = read_block_from_state(&self.node_ctx, block_hash, event_rx).await;
         Ok((block, reth_payload, block_transactions, res))
     }
 
@@ -3219,9 +3223,9 @@ pub fn assert_validation_error(
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,
     block_hash: &H256,
+    mut event_receiver: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
-    let mut event_receiver = node_ctx.service_senders.subscribe_block_state_updates();
 
     // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
