@@ -403,7 +403,7 @@ impl GossipServiceTestFixture {
             debug!("BlockTreeServiceMessage channel closed");
         });
 
-        let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
+        let (sync_tx, sync_rx) = mpsc::unbounded_channel();
 
         Self {
             _temp_dir: temp_dir,

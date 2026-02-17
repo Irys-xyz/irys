@@ -26,25 +26,22 @@ impl Inner {
         sealed_block: Arc<SealedBlock>,
     ) -> Result<(), TxIngressError> {
         let block = sealed_block.header();
-        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
-        let publish_txids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+        let submit_txids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+        let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
         let commitment_txids = block.get_commitment_ledger_tx_ids();
 
-        // Update in-memory mempool metadata for data transactions
         for txid in submit_txids.iter().chain(publish_txids.iter()) {
             self.mempool_state
                 .set_data_tx_included_height_overwrite(*txid, block.height)
                 .await;
         }
 
-        // Update in-memory mempool metadata for commitment transactions
         for txid in commitment_txids.iter() {
             self.mempool_state
                 .set_commitment_tx_included_height(*txid, block.height)
                 .await;
         }
 
-        // Update promoted_height in mempool for publish ledger txs (in-memory only)
         for txid in publish_txids.iter() {
             if self
                 .mempool_state
@@ -95,17 +92,6 @@ impl Inner {
         );
         let new_tip = event.new_tip;
 
-        // TODO: Implement mempool-specific reorg handling
-        // 1. Check to see that orphaned submit ledger tx are available in the mempool if not included in the new fork (canonical chain)
-        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
-        // 3. Filter out any invalidated transactions
-        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
-        // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
-        // 6. Similar work with commitment transactions (stake and pledge)
-        //    - This may require adding some features to the commitment_snapshot so that stake/pledge tx can be rolled back and new ones applied
-
-        // TODO: re-org support for migrated blocks
-
         self.handle_confirmed_data_tx_reorg(&event).await?;
 
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
@@ -147,22 +133,8 @@ impl Inner {
         Ok(())
     }
 
-    /// Clears the promotion state for a data transaction in the mempool when its prior
-    /// promotion occurred on an orphaned fork. This should only be invoked from reorg
-    /// handling code paths to ensure that promotion state is rolled back correctly for
-    /// transactions that are no longer promoted on the new canonical chain.
-    ///
-    /// Behavior:
-    /// - If the transaction header exists in `mempool_state.valid_submit_ledger_tx`, set
-    ///   `promoted_height` to `None` and update `recent_valid_tx`.
-    /// - If the header is not in the mempool, leave it unchanged; do not load or insert from DB.
-    /// - Logging: Emits debug logs whether the tx was updated or left unchanged.
-    ///
-    /// Notes:
-    /// - This method only mutates in-memory mempool state. It does not persist changes to the DB.
-    /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
-    /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
-    ///   revert promotion for txs promoted on orphaned forks.
+    /// Clears the promotion state (promoted_height) for a transaction in the mempool
+    /// during reorg handling. Only affects in-memory state; does not persist to DB.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
     async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
         // Try fast-path: clear in-place if present in the mempool
@@ -237,7 +209,6 @@ impl Inner {
                     .await
             };
 
-            // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
                 if self.should_prune_tx(current_height, &tx) {
                     self.mempool_state
@@ -261,7 +232,6 @@ impl Inner {
                 .valid_commitment_txs_cloned(&address)
                 .await;
 
-            // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
                     if self.should_prune_tx(current_height, &tx) {
@@ -356,9 +326,8 @@ impl Inner {
         let mut orphaned_full_commitment_txs =
             HashMap::<IrysTransactionId, CommitmentTransaction>::new();
         let orphaned_commitment_tx_ids = orphaned_system_txs
-            .get(&SystemLedger::Commitment)
-            .ok_or_eyre("Should be populated")?
-            .clone();
+            .remove(&SystemLedger::Commitment)
+            .ok_or_eyre("Should be populated")?;
 
         for block in old_fork.iter().rev() {
             let entry = self

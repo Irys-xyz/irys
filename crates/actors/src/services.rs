@@ -23,7 +23,6 @@ use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
 
-// Only contains senders, thread-safe to clone and share
 #[derive(Debug, Clone)]
 pub struct ServiceSenders(pub Arc<ServiceSendersInner>);
 
@@ -137,7 +136,6 @@ impl ServiceSendersInner {
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        // vdf channel for fast forwarding steps during node sync
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
@@ -153,7 +151,6 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockProducerCommand>();
         let (reth_service_sender, reth_service_receiver) =
             unbounded_channel::<RethServiceMessage>();
-        // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
@@ -208,7 +205,7 @@ impl ServiceSendersInner {
         (senders, receivers)
     }
 
-    /// Subscribe to reorg events - can be called multiple times
+    /// Subscribe to reorg events
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.reorg_events.subscribe()
     }

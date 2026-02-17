@@ -413,28 +413,10 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    // Handles the completion of full block validation.
+    /// Handles the completion of full block validation.
     ///
-    /// When a block passes validation:
-    /// 1. Updates the block's state in the cache to `ValidBlock`
-    /// 2. Moves the tip of the chain to this block if it is now the head of the longest chain
-    /// 3. If the tip moves, checks whether it's a simple extension or a reorganization:
-    /// 4. For reorgs, broadcasts a `ReorgEvent` containing:
-    ///    - Blocks from the old fork (now orphaned)
-    ///    - Blocks from the new fork (now canonical)
-    ///    - The common ancestor where the fork occurred
-    /// 5. Detects and sends epoch events for any epoch blocks found (both in extensions and reorgs)
-    /// 6. Notifies services of the new confirmed block
-    /// 7. Handles block migration (migrates chunks to disk and updates block index)
-    /// 8. Broadcasts `BlockStateUpdated` event to inform subscribers of the block's new state
-    ///
-    /// When a block fails validation:
-    /// 1. Logs the invalid block
-    /// 2. Removes the block from the cache (also removes any children)
-    /// 3. Broadcasts `BlockStateUpdated` event marking the block as discarded
-    ///
-    /// The function carefully manages cache locks to avoid deadlocks during async operations,
-    /// releasing the write lock before sending events that may trigger callbacks.
+    /// Successfully validated blocks update the canonical chain and may trigger a reorg.
+    /// Cache locks are released before async operations to prevent deadlocks.
     #[tracing::instrument(level = "trace", skip_all, err, fields(block_hash, validation_result))]
     async fn on_block_validation_finished(
         &mut self,
@@ -512,7 +494,7 @@ impl BlockTreeServiceInner {
             return Ok(());
         };
         debug!(
-            "\u{001b}[32mOn validation complete : result {} {:?} at height: {}\u{001b}[0m",
+            "On validation complete: result {} {:?} at height: {}",
             block_hash, validation_result, height
         );
 
@@ -536,7 +518,6 @@ impl BlockTreeServiceInner {
             let old_tip_block = cache
                 .get_block(&old_tip)
                 .ok_or_else(|| eyre::eyre!("old tip block {old_tip} not found in cache"))?
-                // todo: expensive clone here
                 .clone();
 
             // Mark block as validated in cache, this will update the canonical chain
@@ -550,17 +531,17 @@ impl BlockTreeServiceInner {
             else {
                 if block_hash == old_tip {
                     debug!(
-                    "\u{001b}[32mSame Tip Marked current tip {} cdiff: {} height: {}\u{001b}[0m",
-                    block_hash, old_tip_block.cumulative_diff, old_tip_block.height
-                );
+                        "Same Tip Marked current tip {} cdiff: {} height: {}",
+                        block_hash, old_tip_block.cumulative_diff, old_tip_block.height
+                    );
                 } else {
                     debug!(
-                    "\u{001b}[32mNo new tip found {}, current tip {} cdiff: {} height: {}\u{001b}[0m",
-                    block_hash,
-                    old_tip_block.block_hash,
-                    old_tip_block.cumulative_diff,
-                    old_tip_block.height
-                );
+                        "No new tip found {}, current tip {} cdiff: {} height: {}",
+                        block_hash,
+                        old_tip_block.block_hash,
+                        old_tip_block.cumulative_diff,
+                        old_tip_block.height
+                    );
                 }
                 return Ok(());
             };
@@ -613,9 +594,7 @@ impl BlockTreeServiceInner {
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
                 if is_reorg {
-                    // =====================================
-                    // BLOCKCHAIN REORGANIZATION HANDLING
-                    // =====================================
+                    // Handle blockchain reorganization
 
                     // Collect all blocks that are being orphaned (from the prior canonical chain)
                     let mut orphaned_blocks =
@@ -679,7 +658,7 @@ impl BlockTreeServiceInner {
                     let blocks_to_confirm = new_fork_blocks.clone();
 
                     debug!(
-                        "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
+                        "Reorg at block height {} with {}",
                         arc_block.height, arc_block.block_hash
                     );
                     metrics::record_reorg();
@@ -708,13 +687,13 @@ impl BlockTreeServiceInner {
                         blocks_to_confirm,
                     )
                 } else {
-                    // =====================================
-                    // NORMAL CHAIN EXTENSION
-                    // =====================================
-                    // New block extends the current longest chain without reorganization
+                    // Handle normal chain extension
                     debug!(
-                        "\u{001b}[32mExtending longest chain to height {} with {} parent: {} height: {}\u{001b}[0m",
-                        arc_block.height, arc_block.block_hash, old_tip_block.block_hash, old_tip_block.height
+                        "Extending longest chain to height {} with {} parent: {} height: {}",
+                        arc_block.height,
+                        arc_block.block_hash,
+                        old_tip_block.block_hash,
+                        old_tip_block.height
                     );
 
                     let new_epoch_block = if self.is_epoch_block(&arc_block) {

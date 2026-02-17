@@ -14,9 +14,6 @@ use tokio::sync::oneshot;
 use tracing::info;
 
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
-///
-/// Migrated transactions are removed from the mempool via anchor-expiry pruning
-/// in `prune_pending_txs`, not by an explicit cleanup message.
 #[derive(Debug)]
 pub struct BlockMigrator {
     db: DatabaseProvider,

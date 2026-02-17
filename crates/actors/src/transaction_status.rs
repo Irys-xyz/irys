@@ -14,10 +14,7 @@ pub async fn compute_transaction_status(
     current_head_height: u64,
     mempool_guard: &MempoolReadGuard,
 ) -> eyre::Result<Option<TransactionStatusResponse>> {
-    // First check mempool for metadata
     let mempool_metadata = mempool_guard.get_tx_metadata(tx_id).await;
-
-    // Check if in mempool
     let in_mempool = mempool_metadata.is_some() || mempool_guard.is_recent_valid_tx(tx_id).await;
 
     // Prefer DB metadata over mempool: BlockMigrator writes included_height
@@ -45,14 +42,8 @@ pub async fn compute_transaction_status(
                 )))
             }
         }
-        (_, true) => {
-            // In mempool but not included in any block
-            Ok(Some(TransactionStatusResponse::pending()))
-        }
-        _ => {
-            // Not found anywhere
-            Ok(None)
-        }
+        (_, true) => Ok(Some(TransactionStatusResponse::pending())),
+        _ => Ok(None),
     }
 }
 

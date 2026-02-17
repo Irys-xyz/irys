@@ -78,12 +78,8 @@ impl Config {
     }
 
     // validate configuration invariants
-    // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
-        // Ensures the block tree retains all unmigrated blocks. The cache keeps
-        // `block_tree_depth` blocks (tip + depth-1 ancestors via `cache.prune`),
-        // so migration_depth must be strictly less than block_tree_depth to
-        // guarantee the migration block is never pruned before it's processed.
+        // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
             "Block tree depth ({}) must be strictly greater than block migration depth ({}) - cache.prune(depth-1) retains exactly depth blocks, so equal values risk pruning the migration block",
