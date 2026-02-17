@@ -557,7 +557,6 @@ impl Inner {
         }
 
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
-
         let published_in_both: Vec<IrysTransactionId> = old_fork_confirmed_reduction
             .get(&DataLedger::Publish)
             .expect("data ledger entry")
@@ -571,8 +570,7 @@ impl Inner {
 
         debug!("published in both forks: {:?}", &published_in_both);
 
-        // Extract dual-published transactions directly from new fork sealed blocks,
-        // avoiding an expensive mempool/DB lookup.
+        // Extract dual-published transactions
         let mut published_tx_from_blocks = HashMap::new();
         for block in new_fork_confirmed.iter() {
             for tx in block.transactions().get_ledger_txs(DataLedger::Publish) {

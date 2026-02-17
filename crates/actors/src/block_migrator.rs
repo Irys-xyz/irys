@@ -39,71 +39,55 @@ impl BlockMigrator {
         blocks_to_clear: &[Arc<SealedBlock>],
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
-        let has_clears = blocks_to_clear.iter().any(|block| {
-            let h = block.header();
-            !h.data_ledgers[DataLedger::Submit].tx_ids.0.is_empty()
-                || !h.data_ledgers[DataLedger::Publish].tx_ids.0.is_empty()
-                || !h.commitment_tx_ids().is_empty()
-        });
-        let has_confirms = blocks_to_confirm.iter().any(|block| {
-            let h = block.header();
-            !h.data_ledgers[DataLedger::Submit].tx_ids.0.is_empty()
-                || !h.data_ledgers[DataLedger::Publish].tx_ids.0.is_empty()
-                || !h.commitment_tx_ids().is_empty()
-        });
+        self.db.update_eyre(|tx| {
+            // Phase 1: Clear orphaned metadata
+            for block in blocks_to_clear {
+                let header = block.header();
+                let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
+                let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
+                let commitment_ids = header.commitment_tx_ids();
 
-        if has_clears || has_confirms {
-            // Single atomic DB transaction for both clear + write
-            self.db.update_eyre(|tx| {
-                // Phase 1: Clear orphaned metadata
-                for block in blocks_to_clear {
-                    let header = block.header();
-                    let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
-                    let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
-                    let commitment_ids = header.commitment_tx_ids();
-
-                    if !submit_ids.is_empty() || !publish_ids.is_empty() {
-                        irys_database::batch_clear_data_tx_metadata(
-                            tx,
-                            submit_ids.iter().chain(publish_ids.iter()),
-                        )
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
-                    if !commitment_ids.is_empty() {
-                        irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
+                if !submit_ids.is_empty() || !publish_ids.is_empty() {
+                    irys_database::batch_clear_data_tx_metadata(
+                        tx,
+                        submit_ids.iter().chain(publish_ids.iter()),
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
-                // Phase 2: Write confirmed metadata
-                for block in blocks_to_confirm {
-                    let header = block.header();
-                    let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
-                    let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
-                    let commitment_ids = header.commitment_tx_ids();
-                    let height = header.height;
-
-                    if !submit_ids.is_empty() {
-                        irys_database::batch_set_data_tx_included_height(tx, submit_ids, height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
-                    if !publish_ids.is_empty() {
-                        irys_database::batch_set_data_tx_included_height(tx, publish_ids, height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                        irys_database::batch_set_data_tx_promoted_height(tx, publish_ids, height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
-                    if !commitment_ids.is_empty() {
-                        irys_database::batch_set_commitment_tx_included_height(
-                            tx,
-                            commitment_ids,
-                            height,
-                        )
+                if !commitment_ids.is_empty() {
+                    irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
                 }
-                Ok(())
-            })?;
-        }
+            }
+            // Phase 2: Write confirmed metadata
+            for block in blocks_to_confirm {
+                let header = block.header();
+                let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
+                let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
+                let commitment_ids = header.commitment_tx_ids();
+                let height = header.height;
+
+                if !submit_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(tx, submit_ids, height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                if !publish_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(tx, publish_ids, height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    irys_database::batch_set_data_tx_promoted_height(tx, publish_ids, height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                if !commitment_ids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        commitment_ids,
+                        height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+            }
+            Ok(())
+        })?;
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
