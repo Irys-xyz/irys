@@ -28,7 +28,7 @@ impl Inner {
         let block = sealed_block.header();
         let submit_txids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
         let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-        let commitment_txids = block.get_commitment_ledger_tx_ids();
+        let commitment_txids = block.commitment_tx_ids();
 
         for txid in submit_txids.iter().chain(publish_txids.iter()) {
             self.mempool_state

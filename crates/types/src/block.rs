@@ -462,19 +462,19 @@ impl IrysBlockHeaderV1 {
         block_height_to_use_for_price(self.height, blocks_in_price_adjustment_interval)
     }
 
-    /// get storage ledger txs from blocks data ledger
-    pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
-        let mut commitment_txids = Vec::new();
-        let commitment_ledger = self
-            .system_ledgers
+    /// Returns a borrowed slice of commitment ledger transaction IDs.
+    pub fn commitment_tx_ids(&self) -> &[H256] {
+        self.system_ledgers
             .iter()
-            .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
+            .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+            .unwrap_or_default()
+    }
 
-        if let Some(commitment_ledger) = commitment_ledger {
-            commitment_txids = commitment_ledger.tx_ids.0.clone();
-        }
-
-        commitment_txids
+    /// Returns a cloned Vec of commitment ledger transaction IDs.
+    #[deprecated(note = "use commitment_tx_ids() to avoid cloning")]
+    pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
+        self.commitment_tx_ids().to_vec()
     }
 
     /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
@@ -1165,11 +1165,8 @@ impl BlockBody {
             return Ok(false);
         }
 
-        let expected_commitment_tx_ids: HashSet<H256> = header
-            .get_commitment_ledger_tx_ids()
-            .iter()
-            .copied()
-            .collect();
+        let expected_commitment_tx_ids: HashSet<H256> =
+            header.commitment_tx_ids().iter().copied().collect();
         let expected_data_tx_ids: HashSet<H256> = header
             .data_ledgers
             .iter()
