@@ -83,22 +83,6 @@ fn gossip_error_type(err: &GossipError) -> &'static str {
     }
 }
 
-fn gossip_error_type(err: &GossipError) -> &'static str {
-    match err {
-        GossipError::Network(_) => "network",
-        GossipError::InvalidPeer(_) => "invalid_peer",
-        GossipError::Cache(_) => "cache",
-        GossipError::Internal(_) => "internal",
-        GossipError::InvalidData(_) => "invalid_data",
-        GossipError::BlockPool(_) => "block_pool",
-        GossipError::TransactionIsAlreadyHandled => "already_handled",
-        GossipError::CommitmentValidation(_) => "commitment_validation",
-        GossipError::PeerNetwork(_) => "peer_network",
-        GossipError::RateLimited => "rate_limited",
-        GossipError::Advisory(_) => "advisory",
-    }
-}
-
 impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
@@ -1283,7 +1267,7 @@ impl GossipClient {
                         .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
-                    record_gossip_outbound_error(gossip_error_type(&err));
+                    record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
                         ScoreDecreaseReason::Offline(format!(
