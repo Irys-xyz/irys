@@ -13,16 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
 use tracing::info;
 
-/// Plain struct that owns block migration orchestration and DB persistence logic.
-///
-/// Unlike the old `BlockMigrationService` actor, this struct has no message loop,
-/// no shutdown handling, and no spawn. It is called inline by `BlockTreeServiceInner`.
-///
-/// Responsibilities:
-/// - Validates migration continuity (height + chain linkage)
-/// - Collects blocks to migrate by walking the block tree
-/// - Persists all transaction data and block headers to the database
-/// - Notifies BlockIndexService (sync) and ChunkMigrationService (fire-and-forget)
+/// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 ///
 /// Migrated transactions are removed from the mempool via anchor-expiry pruning
 /// in `prune_pending_txs`, not by an explicit cleanup message.
@@ -33,7 +24,6 @@ pub struct BlockMigrator {
 }
 
 impl BlockMigrator {
-    /// Creates a new `BlockMigrator` with the given database provider and block index guard.
     pub const fn new(db: DatabaseProvider, block_index_guard: BlockIndexReadGuard) -> Self {
         Self {
             db,
@@ -44,11 +34,8 @@ impl BlockMigrator {
     /// Clears `included_height` and `promoted_height` metadata from the DB
     /// for all transactions in the given orphaned blocks.
     ///
-    /// This is the inverse of [`Self::persist_confirmed_metadata`]. Called
-    /// synchronously by `BlockTreeServiceInner` during a reorg, BEFORE the
-    /// new fork's metadata is written and BEFORE the `ReorgEvent` is broadcast
-    /// to the mempool. This ensures the DB never contains stale metadata from
-    /// an orphaned fork.
+    /// Called during a reorg before the new fork's metadata is written and
+    /// before `ReorgEvent` is broadcast, ensuring no stale metadata persists.
     pub fn clear_orphaned_metadata(&self, old_fork: &[Arc<IrysBlockHeader>]) -> eyre::Result<()> {
         let mut all_data_tx_ids: Vec<H256> = Vec::new();
         let mut all_commitment_tx_ids: Vec<H256> = Vec::new();
@@ -86,20 +73,11 @@ impl BlockMigrator {
         Ok(())
     }
 
-    /// Persists only `included_height` and `promoted_height` metadata to the DB
+    /// Persists `included_height` and `promoted_height` metadata to the DB
     /// for a confirmed block's transactions.
     ///
-    /// This is a lightweight write that runs at confirmation time (every new tip),
-    /// before the full block migration at `migration_depth`. It ensures the
-    /// `/v1/tx/{txId}/status` endpoint can report CONFIRMED status even after
-    /// a node restart or mempool wipe.
-    ///
-    /// Unlike [`Self::persist_block_to_db`], this does NOT write tx headers,
-    /// commitment txs, or block headers — those are deferred to migration.
-    ///
-    /// During a reorg, [`Self::clear_orphaned_metadata`] is called first to
-    /// remove stale metadata, then this method is called for each block in
-    /// the new canonical fork.
+    /// Runs at confirmation time (every new tip), before the full block
+    /// migration at `migration_depth`. Ensures tx status survives restarts.
     pub fn persist_confirmed_metadata(&self, block: &IrysBlockHeader) -> eyre::Result<()> {
         let block_height = block.height;
 
@@ -113,7 +91,6 @@ impl BlockMigrator {
             .copied()
             .collect();
 
-        // Persist all metadata atomically in a single DB transaction
         if !all_data_tx_ids.is_empty()
             || !commitment_tx_ids.is_empty()
             || !publish_tx_ids.is_empty()
@@ -157,25 +134,18 @@ impl BlockMigrator {
         Ok(())
     }
 
-    /// Synchronous preparation phase: validates continuity, collects blocks and their
-    /// transactions from the cache. Returns `(block, transactions)` pairs in oldest-first
-    /// order, ready for processing without further cache access.
+    /// Validates continuity and collects blocks with transactions from the cache.
     ///
-    /// This is separated from [`Self::process_migration`] so that the caller can hold a
-    /// `RwLockReadGuard<BlockTree>` for just this call, drop the guard, and then call
-    /// the async `process_migration` without the non-`Send` guard crossing an await.
+    /// Separated from [`Self::process_migration`] so the caller can drop the
+    /// non-`Send` `RwLockReadGuard<BlockTree>` before awaiting.
     pub fn prepare_migration(
         &self,
         migration_block: &Arc<IrysBlockHeader>,
         cache: &BlockTree,
     ) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, Arc<BlockTransactions>)>> {
-        // 1. Collect blocks to migrate (oldest first)
         let blocks_to_migrate = self.get_blocks_to_migrate(migration_block, cache)?;
-
-        // 2. Validate migration continuity
         self.validate_migration_continuity(&blocks_to_migrate)?;
 
-        // 3. Extract transactions and verify POA chunks for each block
         let mut prepared = Vec::with_capacity(blocks_to_migrate.len());
         for block_to_migrate in blocks_to_migrate {
             let transactions = cache
@@ -202,10 +172,7 @@ impl BlockMigrator {
         Ok(prepared)
     }
 
-    /// Async processing phase: persists each prepared block to DB and notifies downstream
-    /// services. Does not access the block tree cache.
-    ///
-    /// Call [`Self::prepare_migration`] first to obtain the `prepared` list.
+    /// Persists prepared blocks to DB and notifies downstream services.
     #[tracing::instrument(level = "trace", skip_all, fields(count = prepared.len()))]
     pub async fn process_migration(
         &self,
@@ -213,26 +180,20 @@ impl BlockMigrator {
         service_senders: &ServiceSenders,
     ) -> eyre::Result<()> {
         for (block_to_migrate, transactions) in prepared {
-            // Persist all transactions and block header to DB
             self.persist_block_to_db(&block_to_migrate, &transactions)?;
-
-            // Notify BlockIndexService (synchronous -- wait for completion)
             self.send_block_index_migration(&block_to_migrate, &transactions, service_senders)
                 .await?;
-
-            // Notify ChunkMigrationService (fire-and-forget)
             self.send_chunk_migration(&block_to_migrate, &transactions, service_senders)?;
         }
 
         Ok(())
     }
 
-    /// Ensures blocks can be migrated by verifying height continuity and chain linkage.
+    /// Validates height continuity and chain linkage across the migration slice.
     fn validate_migration_continuity(
         &self,
         blocks_to_migrate: &[Arc<IrysBlockHeader>],
     ) -> eyre::Result<()> {
-        // Nothing to validate if no blocks need migration
         let Some(first_block) = blocks_to_migrate.first() else {
             return Ok(());
         };
@@ -242,7 +203,6 @@ impl BlockMigrator {
             .get_latest_item()
             .ok_or_eyre("Block index is empty")?;
 
-        // Ensure continuous height progression from block index
         ensure!(
             block_index.latest_height() + 1 == first_block.height,
             "Height gap detected: block index at height {} ({}), trying to migrate height {} ({})",
@@ -251,8 +211,6 @@ impl BlockMigrator {
             &first_block.height,
             &first_block.block_hash
         );
-
-        // Ensure first block links to the indexed chain tip
         ensure!(
             latest_indexed.block_hash == first_block.previous_block_hash,
             "Chain break detected: migration block ({}) doesn't link to indexed chain ({})",
@@ -260,7 +218,6 @@ impl BlockMigrator {
             &first_block.previous_block_hash
         );
 
-        // Validate adjacency across the migration slice
         for pair in blocks_to_migrate.windows(2) {
             let prev = &pair[0];
             let curr = &pair[1];
@@ -283,23 +240,18 @@ impl BlockMigrator {
         Ok(())
     }
 
-    /// Collect blocks to migrate by walking backwards from the current migration block
-    /// to the head of the `block_index`.
+    /// Walks backward from `migration_block` to the block_index head, returning oldest-first.
     fn get_blocks_to_migrate(
         &self,
         migration_block: &Arc<IrysBlockHeader>,
         cache: &BlockTree,
     ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
         let mut blocks_to_migrate = vec![];
-
-        // Get the last migrated block hash
         let block_index = self.block_index_guard.read();
         let last_migrated = block_index
             .get_latest_item()
             .ok_or_eyre("must have at least a single item in block index")?;
         let last_migrated_hash = last_migrated.block_hash;
-
-        // Walk backwards from the given block to the last migrated block
         let mut current_hash = migration_block.block_hash;
 
         while current_hash != last_migrated_hash {
@@ -316,13 +268,11 @@ impl BlockMigrator {
             current_hash = current_block.previous_block_hash;
         }
 
-        // Reverse to get oldest-first order
         blocks_to_migrate.reverse();
         Ok(blocks_to_migrate)
     }
 
-    /// Persists commitment txs, data txs (submit + publish), metadata, and block header to DB
-    /// in a single atomic transaction.
+    /// Persists all block data to DB in a single atomic transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     fn persist_block_to_db(
         &self,
@@ -352,17 +302,12 @@ impl BlockMigrator {
         let migrated_block = (*block).clone();
 
         self.db.update_eyre(|tx| {
-            // Insert commitment transactions
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
             }
-
-            // Insert submit transactions
             for header in submit_txs {
                 insert_tx_header(tx, header)?;
             }
-
-            // Insert publish transactions (with promoted_height)
             for header in &mut publish_txs {
                 if header.promoted_height().is_none() {
                     header.metadata_mut().promoted_height = Some(block_height);
@@ -370,7 +315,6 @@ impl BlockMigrator {
                 insert_tx_header(tx, header)?;
             }
 
-            // Batch set metadata
             if !all_data_tx_ids.is_empty() {
                 irys_database::batch_set_data_tx_included_height(
                     tx,
@@ -392,7 +336,6 @@ impl BlockMigrator {
                     .map_err(|e| eyre::eyre!("{:?}", e))?;
             }
 
-            // Insert block header last
             irys_database::insert_block_header(tx, &migrated_block)?;
 
             Ok(())
