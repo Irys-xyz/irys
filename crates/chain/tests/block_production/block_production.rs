@@ -239,7 +239,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy3_mine_ten_blocks() -> eyre::Result<()> {
+async fn slow_heavy4_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining()?;
@@ -249,7 +249,7 @@ async fn slow_heavy3_mine_ten_blocks() -> eyre::Result<()> {
     let mut block_hashes = Vec::new();
 
     for i in 1..10 {
-        let _block_hash = node.wait_until_height(i + 1, 10).await?;
+        let _block_hash = node.wait_for_block_at_height(i + 1, 120).await?;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
