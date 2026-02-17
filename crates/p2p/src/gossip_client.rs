@@ -70,6 +70,7 @@ fn gossip_error_type(err: &GossipError) -> &'static str {
         GossipError::PeerNetwork(_) => "peer_network",
         GossipError::RateLimited => "rate_limited",
         GossipError::Advisory(_) => "advisory",
+        GossipError::CircuitBreakerOpen(_) => "circuit_breaker_open",
     }
 }
 
@@ -1075,7 +1076,7 @@ impl GossipClient {
                         .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
-                    record_gossip_outbound_error(gossip_error_type(&err));
+                    record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
                         ScoreDecreaseReason::Offline(format!(
