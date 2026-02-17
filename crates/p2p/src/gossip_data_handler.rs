@@ -356,7 +356,7 @@ where
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
         debug!("Pulling block {} from the network", block_hash);
-        let (source_address, irys_block) = match self
+        let (source_peer_id, irys_block) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await
@@ -371,11 +371,11 @@ where
             }
         };
 
-        let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
+        let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             // This shouldn't happen, but we still should have a safeguard just in case
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
-                source_address, block_hash
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
             self.sync_state.record_data_pull_error(error_msg.clone());
@@ -384,13 +384,13 @@ where
 
         debug!(
             "Pulled block {} from peer {}, sending for processing",
-            block_hash, source_address
+            block_hash, source_peer_id
         );
         // Get miner_address from the peer item
         let miner_address = peer_info.mining_address;
         self.handle_block_header(
             GossipRequestV2 {
-                peer_id: source_address,
+                peer_id: source_peer_id,
                 miner_address,
                 data: (*irys_block).clone(),
             },
@@ -424,7 +424,7 @@ where
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
@@ -734,14 +734,24 @@ where
             block_hash
         );
 
-        let (source_peer_id, irys_block_header) = self
+        let (source_peer_id, irys_block_header) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
