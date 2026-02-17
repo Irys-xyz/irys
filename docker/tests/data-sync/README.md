@@ -7,7 +7,7 @@ Remote data synchronization test for validating partition data sync across a mul
 - Docker and Docker Compose installed and running
 - Docker image built (see below)
 
-## Building the Docker Image
+## Building the Image
 
 ```bash
 ./build_image.sh
@@ -15,7 +15,19 @@ Remote data synchronization test for validating partition data sync across a mul
 
 This builds the debug image (`irys:debug`) which includes a shell required for the test scripts.
 
-## Running the Test Cluster
+With telemetry support (required for observability stack):
+
+```bash
+ENABLE_TELEMETRY=true ./build_image.sh
+```
+
+The image is tagged as `localhost/irys-test:latest` by default. Override with:
+
+```bash
+IMAGE_NAME=my-image:tag ./build_image.sh
+```
+
+## Running the Cluster
 
 ### Start the cluster
 
@@ -23,10 +35,12 @@ This builds the debug image (`irys:debug`) which includes a shell required for t
 ./start_cluster.sh
 ```
 
-This starts a 3-node cluster:
-- **test-irys-1** (Genesis node): <http://localhost:19080>
-- **test-irys-2** (Peer node): <http://localhost:19081>
-- **test-irys-3** (Peer node): <http://localhost:19082>
+This starts all 3 Irys nodes and the observability stack, then waits for nodes to be ready.
+
+Nodes are available at:
+- <http://localhost:19080> (Node 1 - Genesis)
+- <http://localhost:19081> (Node 2 - Peer)
+- <http://localhost:19082> (Node 3 - Peer)
 
 ### View logs
 
@@ -48,7 +62,7 @@ docker compose down -v
 ./run_test.sh
 ```
 
-This script automatically manages containers and runs the test.
+This script starts the cluster, runs the sync test, and cleans up on exit.
 
 ### Manual
 
@@ -58,10 +72,53 @@ NODE_URLS="http://localhost:19080,http://localhost:19081,http://localhost:19082"
 cargo test --package irys-chain --test mod sync_partition_data_remote_test -- --nocapture --ignored
 ```
 
+## Platform Notes
+
+### Linux Docker Engine
+
+On native Linux, `host.docker.internal` is not available by default. The compose file includes `extra_hosts: host.docker.internal:host-gateway` on all services to ensure consistent behavior across Linux and Docker Desktop (macOS/Windows).
+
 ## Configuration
+
+### Irys Nodes
 
 - 3 Irys nodes on ports 19080, 19081, 19082
 - Environment variables (can be overridden):
   - `IMAGE_NAME`: Docker image to use (default: `irys:debug`)
-  - `MIN_HEIGHT`: Height when peer nodes start (default: 40 for node 2, 50 for node 3)
+  - `MIN_HEIGHT`: Height when peer nodes start in the Docker compose (default: 40 for node 2, 50 for node 3)
   - `PEER_START_HEIGHT`: Height when rust test begins peer interaction (default: 60)
+  - `OTEL_REMOTE_HOST`: OTEL collector host (default: `51.38.53.126`, an external OVH endpoint requiring network access). Override for local/isolated environments:
+
+    ```bash
+    OTEL_REMOTE_HOST=host.docker.internal docker compose up
+    ```
+
+### Observability Stack
+
+This test environment includes the shared observability stack from `docker/observation/`. See [Observation README](../../observation/README.md) for full details.
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Grafana | 3000 | Visualization dashboards (credentials: admin/admin) |
+| Prometheus | 9090 | Metrics storage and querying |
+| Tempo | 3200 | Distributed tracing backend |
+| Elasticsearch | 9200 | Log storage with full-text search |
+| OTEL Collector | 4317 (gRPC), 4318 (HTTP) | OpenTelemetry receiver |
+
+**Accessing Grafana:**
+
+```text
+http://localhost:3000
+Username: admin
+Password: admin
+```
+
+**Telemetry Flow:**
+
+```text
+Irys Nodes → OTEL Collector → Tempo (traces)
+                            → Prometheus (metrics)
+                            → Elasticsearch (logs)
+```
+
+All Irys nodes are configured with `ENABLE_TELEMETRY=true` and export to the OTEL Collector.

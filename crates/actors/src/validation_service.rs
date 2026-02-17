@@ -14,6 +14,7 @@ use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
     block_validation::{is_seed_data_valid, ValidationError},
     mempool_guard::MempoolReadGuard,
+    metrics,
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
@@ -357,6 +358,10 @@ impl ValidationService {
                         vdf.pending = vdf_pending,
                         vdf.concurrent_active = concurrent_active,
                         "Validation pipeline status"
+                    );
+                    metrics::record_validation_pipeline(
+                        vdf_pending as u64,
+                        concurrent_active as u64,
                     );
                 }
             }

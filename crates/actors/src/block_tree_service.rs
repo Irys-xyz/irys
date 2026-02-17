@@ -3,6 +3,7 @@ use crate::{
     block_validation::PreValidationError,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    metrics,
     mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
@@ -877,6 +878,7 @@ impl BlockTreeServiceInner {
                         "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
                         arc_block.height, arc_block.block_hash
                     );
+                    metrics::record_reorg();
 
                     // Create reorg event with all necessary data for downstream processing
                     let event = ReorgEvent {
@@ -957,6 +959,7 @@ impl BlockTreeServiceInner {
                     block.timestamp_ms = arc_block.timestamp.as_millis(),
                     "New canonical tip",
                 );
+                metrics::record_canonical_tip_height(arc_block.height);
             }
 
             // Emit consensus events (only after we know migration will succeed)

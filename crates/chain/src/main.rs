@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 #[cfg(feature = "telemetry")]
-use irys_utils::telemetry;
+use irys_utils::init_telemetry;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -25,16 +25,21 @@ async fn main() -> eyre::Result<()> {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
     }
 
-    // init logging
     #[cfg(feature = "telemetry")]
     {
-        // Check if Axiom credentials are set
-        if std::env::var("AXIOM_API_TOKEN").is_ok() && std::env::var("AXIOM_DATASET").is_ok() {
-            info!("Axiom credentials detected, initializing OpenTelemetry");
-            telemetry::init_telemetry()?;
+        let telemetry_enabled = std::env::var("ENABLE_TELEMETRY")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false)
+            || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+
+        if telemetry_enabled {
+            init_telemetry()?;
+            info!("Telemetry enabled, OpenTelemetry initialized");
         } else {
-            info!("Axiom credentials not set, using standard tracing");
             init_tracing().expect("initializing tracing should work");
+            info!("Telemetry not enabled, using standard tracing");
         }
     }
     #[cfg(not(feature = "telemetry"))]

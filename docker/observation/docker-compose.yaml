@@ -1,0 +1,187 @@
+# Observability Stack
+# Reusable monitoring infrastructure for Irys development and testing
+#
+# Components:
+# - OpenTelemetry Collector: OTLP receiver for logs, traces, metrics
+# - Tempo: Distributed tracing backend
+# - Prometheus: Metrics storage
+# - Elasticsearch: Log storage with full-text search
+# - Grafana: Visualization dashboards
+#
+# Usage:
+#   Standalone: docker compose up -d
+#   Include in other compose files: see README.md
+
+volumes:
+  tempo-data:
+  prometheus-data:
+  grafana-data:
+  elasticsearch-data:
+
+services:
+  # OpenTelemetry Collector - OTLP receiver for logs, traces, and metrics
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: obs-otel-collector
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.100
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "8888:8888"  # OTEL collector telemetry metrics
+    volumes:
+      - ./configs/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    depends_on:
+      tempo:
+        condition: service_started
+      prometheus:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Tempo - Spans/tracing
+  tempo:
+    image: grafana/tempo:latest
+    container_name: obs-tempo
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.101
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"
+    volumes:
+      - ./configs/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    command:
+      - -config.file=/etc/tempo.yaml
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Prometheus - Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: obs-prometheus
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.103
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+      - --web.enable-lifecycle
+      - --web.enable-remote-write-receiver
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Elasticsearch - Log storage with full-text search
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: obs-elasticsearch
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.105
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}"
+      - cluster.name=${ES_CLUSTER_NAME:-observation-cluster}
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Elasticsearch ILM setup - configures log retention policy
+  elasticsearch-init:
+    image: curlimages/curl:latest
+    container_name: obs-elasticsearch-init
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.106
+    volumes:
+      - ./scripts/setup_elasticsearch_ilm.sh:/setup_elasticsearch_ilm.sh:ro
+      - ./configs/elasticsearch:/configs:ro
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - RETENTION_DAYS=${LOG_RETENTION_DAYS:-2}
+      - ES_REPLICAS=${ES_REPLICAS:-0}
+    entrypoint: ["/bin/sh", "/setup_elasticsearch_ilm.sh"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+
+  # Grafana - Visualization (Tempo, Prometheus, Elasticsearch)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: obs-grafana
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.104
+    ports:
+      - "${GRAFANA_BIND_HOST:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=${GRAFANA_ANON_ENABLED:-false}
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_DEFAULT_THEME=dark
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,correlations
+    volumes:
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - tempo
+      - prometheus
+      - elasticsearch
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  observation_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.23.0.0/16

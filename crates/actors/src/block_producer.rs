@@ -2,6 +2,7 @@ use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
+    metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
@@ -370,6 +371,7 @@ impl BlockProducerService {
                         block.height = block.header().height,
                         "Block publication completed successfully"
                     );
+                    metrics::record_block_produced();
 
                     if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
                         *remaining = remaining.saturating_sub(1);
@@ -618,6 +620,7 @@ pub trait BlockProdStrategy {
                 }
                 Err(BlockProductionError::Retryable { source }) => {
                     retry_count += 1;
+                    metrics::record_block_producer_retry();
                     if retry_count >= MAX_RETRY_ATTEMPTS {
                         error!(
                             solution.hash = %solution.solution_hash,
@@ -751,6 +754,7 @@ pub trait BlockProdStrategy {
                 block.rebuild_count = rebuild_attempts,
                 "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
             );
+            metrics::record_block_producer_rebuild(rebuild_attempts as u64);
         }
 
         if !block.header().data_ledgers[DataLedger::Publish]

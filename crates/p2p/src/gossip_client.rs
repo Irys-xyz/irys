@@ -2,6 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::metrics::record_gossip_outbound_error;
 use crate::types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
@@ -63,6 +64,23 @@ pub struct GossipClient {
     pub peer_id: IrysPeerId,
     client: Client,
     circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+}
+
+fn gossip_error_type(err: &GossipError) -> &'static str {
+    match err {
+        GossipError::Network(_) => "network",
+        GossipError::InvalidPeer(_) => "invalid_peer",
+        GossipError::Cache(_) => "cache",
+        GossipError::Internal(_) => "internal",
+        GossipError::InvalidData(_) => "invalid_data",
+        GossipError::BlockPool(_) => "block_pool",
+        GossipError::TransactionIsAlreadyHandled => "already_handled",
+        GossipError::CommitmentValidation(_) => "commitment_validation",
+        GossipError::PeerNetwork(_) => "peer_network",
+        GossipError::RateLimited => "rate_limited",
+        GossipError::Advisory(_) => "advisory",
+        GossipError::CircuitBreakerOpen(_) => "circuit_breaker_open",
+    }
 }
 
 impl GossipClient {
@@ -1034,6 +1052,7 @@ impl GossipClient {
                 .send_data_and_update_score_internal((&peer_id, &peer), &data, &peer_list)
                 .await
             {
+                record_gossip_outbound_error(gossip_error_type(&e));
                 error!("Error sending data to peer: {:?}", e);
             } else if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
                 error!("Error recording seen data in cache: {:?}", err);
@@ -1052,6 +1071,7 @@ impl GossipClient {
 
         tokio::spawn(async move {
             if let Err(e) = client.send_data(&peer, &data).await {
+                record_gossip_outbound_error(gossip_error_type(&e));
                 error!("Error sending data to peer: {}", e);
             }
         });
@@ -1077,6 +1097,7 @@ impl GossipClient {
                         .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
+                    record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
                         ScoreDecreaseReason::Offline(format!(
