@@ -103,7 +103,7 @@ async fn heavy_evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> 
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
@@ -160,7 +160,7 @@ async fn heavy_evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
@@ -229,7 +229,7 @@ async fn heavy_evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
@@ -307,7 +307,7 @@ async fn heavy_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<(
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
