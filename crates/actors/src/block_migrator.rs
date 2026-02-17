@@ -138,16 +138,17 @@ impl BlockMigrator {
     /// performing both operations in a single DB transaction.
     pub fn apply_reorg_metadata(
         &self,
-        old_fork: &[Arc<IrysBlockHeader>],
-        new_fork: &[Arc<IrysBlockHeader>],
+        old_fork: &[Arc<SealedBlock>],
+        new_fork: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
         // Collect all tx IDs from old fork (for clearing)
         let mut old_data_tx_ids: Vec<H256> = Vec::new();
         let mut old_commitment_tx_ids: Vec<H256> = Vec::new();
         for block in old_fork {
-            let submit_tx_ids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
-            let publish_tx_ids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+            let header = block.header();
+            let submit_tx_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
+            let publish_tx_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
+            let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
             old_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
             old_commitment_tx_ids.extend(commitment_tx_ids);
         }
@@ -162,16 +163,17 @@ impl BlockMigrator {
         let new_blocks: Vec<NewBlockInfo> = new_fork
             .iter()
             .map(|block| {
-                let submit_tx_ids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
-                let publish_tx_ids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
-                let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+                let header = block.header();
+                let submit_tx_ids = header.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+                let publish_tx_ids = header.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+                let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
                 let all_data_tx_ids: Vec<H256> = submit_tx_ids
                     .iter()
                     .chain(publish_tx_ids.iter())
                     .copied()
                     .collect();
                 NewBlockInfo {
-                    height: block.height,
+                    height: header.height,
                     all_data_tx_ids,
                     commitment_tx_ids,
                     publish_tx_ids,

@@ -79,8 +79,8 @@ pub struct BlockTreeServiceInner {
 
 #[derive(Debug, Clone)]
 pub struct ReorgEvent {
-    pub old_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
-    pub new_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
+    pub old_fork: Arc<Vec<Arc<SealedBlock>>>,
+    pub new_fork: Arc<Vec<Arc<SealedBlock>>>,
     pub fork_parent: Arc<IrysBlockHeader>,
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
@@ -275,10 +275,16 @@ impl BlockTreeServiceInner {
     }
 
     fn emit_block_confirmed(&self, markers: &ForkChoiceMarkers) {
-        let tip_block = Arc::clone(&markers.head);
+        let cache = self.cache.read().expect("block tree lock poisoned");
+        let sealed_block = cache
+            .blocks
+            .get(&markers.head.block_hash)
+            .map(|meta| Arc::clone(&meta.block))
+            .expect("confirmed block must be in block tree cache");
+        drop(cache);
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(tip_block))
+            .send(MempoolServiceMessage::BlockConfirmed(sealed_block))
             .expect("mempool service has unexpectedly become unreachable");
     }
 
@@ -673,23 +679,15 @@ impl BlockTreeServiceInner {
                         fork_height,
                     );
 
-                    // Prepare lightweight block headers for reorg event (remove heavy chunk data)
-                    let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
+                    // Pass sealed blocks directly (cheap Arc::clone, no deep copy)
+                    let old_fork_blocks: Vec<Arc<SealedBlock>> = old_fork
                         .iter()
-                        .map(|e| {
-                            let mut block = e.header().as_ref().clone();
-                            block.poa.chunk = None; // Remove chunk data to reduce memory footprint
-                            Arc::new(block)
-                        })
+                        .map(|e| Arc::clone(e.sealed_block()))
                         .collect();
 
-                    let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
+                    let new_fork_blocks: Vec<Arc<SealedBlock>> = new_fork
                         .iter()
-                        .map(|e| {
-                            let mut block = e.header().as_ref().clone();
-                            block.poa.chunk = None; // Remove chunk data to reduce memory footprint
-                            Arc::new(block)
-                        })
+                        .map(|e| Arc::clone(e.sealed_block()))
                         .collect();
 
                     debug!(
@@ -707,12 +705,12 @@ impl BlockTreeServiceInner {
                         db: Some(self.db.clone()),
                     };
 
-                    // Was there an new epoch block found in the reorg
+                    // Was there a new epoch block found in the reorg
                     let new_epoch_block = event
                         .new_fork
                         .iter()
-                        .find(|bh| self.is_epoch_block(bh))
-                        .cloned();
+                        .find(|sb| self.is_epoch_block(sb.header()))
+                        .map(|sb| Arc::clone(sb.header()));
 
                     (new_epoch_block, Some(event), new_fcu_markers)
                 } else {

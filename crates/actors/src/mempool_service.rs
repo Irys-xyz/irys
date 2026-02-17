@@ -39,7 +39,7 @@ use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -201,7 +201,7 @@ pub struct Inner {
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
-    BlockConfirmed(Arc<IrysBlockHeader>),
+    BlockConfirmed(Arc<SealedBlock>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
         UnpackedChunk,
@@ -310,10 +310,10 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::BlockConfirmed(block) => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
-                if let Err(e) = self.handle_block_confirmed_message(block).await {
+            MempoolServiceMessage::BlockConfirmed(sealed_block) => {
+                let block_hash = sealed_block.header().block_hash;
+                let block_height = sealed_block.header().height;
+                if let Err(e) = self.handle_block_confirmed_message(sealed_block).await {
                     tracing::error!(
                         "Failed to handle block confirmed message for block {} (height {}): {:#}",
                         block_hash,
