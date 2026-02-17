@@ -235,7 +235,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
+async fn slow_heavy3_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining()?;
