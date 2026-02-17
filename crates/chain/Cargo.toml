@@ -43,6 +43,7 @@ actix-web.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 modular-bitfield.workspace = true
 futures.workspace = true

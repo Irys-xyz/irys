@@ -11,6 +11,7 @@ pub mod commitment_refunds;
 pub mod data_sync_service;
 pub mod mempool_guard;
 pub mod mempool_service;
+pub(crate) mod metrics;
 pub mod mining_bus;
 pub mod packing_service;
 pub mod partition_mining_service;

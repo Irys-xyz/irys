@@ -31,8 +31,13 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY . .
 
 # Build the release binary with portable CPU target
-ENV RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=mold"
-RUN cargo build --release --bin irys -p irys-chain --locked
+ARG CARGO_FEATURES=""
+ENV RUSTFLAGS="-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold"
+RUN if [ -n "$CARGO_FEATURES" ]; then \
+      cargo build --release --bin irys -p irys-chain --locked --features "$CARGO_FEATURES"; \
+    else \
+      cargo build --release --bin irys -p irys-chain --locked; \
+    fi
 
 # Compute binary MD5 hash
 RUN md5sum /workspace/target/release/irys | awk '{print $1}' > /workspace/binary_md5.txt
@@ -45,6 +50,7 @@ ARG GIT_COMMIT=unknown
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     ca-certificates \
     curl \
     libgmp10 \
@@ -57,6 +63,9 @@ COPY --from=builder /workspace/binary_md5.txt /tmp/binary_md5.txt
 COPY docker/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/irys /app/entrypoint.sh
+
+# Create data directory with correct ownership before switching to non-root user
+RUN mkdir -p /app/data && chown irys:irys /app/data
 
 # Write build info
 RUN echo "commit=${GIT_COMMIT}" > /app/build-info.txt && \
