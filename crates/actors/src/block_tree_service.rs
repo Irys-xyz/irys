@@ -296,7 +296,7 @@ impl BlockTreeServiceInner {
 
         // Phase 2: async -- process without the cache lock
         self.block_migration_service
-            .process_migration(prepared, &self.service_senders)
+            .process_migration(prepared)
             .await
     }
 

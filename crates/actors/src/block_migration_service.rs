@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexServiceMessage,
-    chunk_migration_service::ChunkMigrationServiceMessage, services::ServiceSenders,
+    chunk_migration_service::ChunkMigrationServiceMessage,
 };
 use eyre::{ensure, OptionExt as _};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
@@ -10,7 +10,7 @@ use irys_types::{
     SystemLedger,
 };
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use tracing::info;
 
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
@@ -18,13 +18,22 @@ use tracing::info;
 pub struct BlockMigrationService {
     db: DatabaseProvider,
     block_index_guard: BlockIndexReadGuard,
+    block_index_sender: UnboundedSender<BlockIndexServiceMessage>,
+    chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
 }
 
 impl BlockMigrationService {
-    pub const fn new(db: DatabaseProvider, block_index_guard: BlockIndexReadGuard) -> Self {
+    pub fn new(
+        db: DatabaseProvider,
+        block_index_guard: BlockIndexReadGuard,
+        block_index_sender: UnboundedSender<BlockIndexServiceMessage>,
+        chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
+    ) -> Self {
         Self {
             db,
             block_index_guard,
+            block_index_sender,
+            chunk_migration_sender,
         }
     }
 
@@ -125,16 +134,11 @@ impl BlockMigrationService {
 
     /// Persists prepared blocks to DB and notifies downstream services.
     #[tracing::instrument(level = "trace", skip_all, fields(count = prepared.len()))]
-    pub async fn process_migration(
-        &self,
-        prepared: Vec<Arc<SealedBlock>>,
-        service_senders: &ServiceSenders,
-    ) -> eyre::Result<()> {
+    pub async fn process_migration(&self, prepared: Vec<Arc<SealedBlock>>) -> eyre::Result<()> {
         for sealed_block in prepared {
             self.persist_block_to_db(&sealed_block)?;
-            self.send_block_index_migration(&sealed_block, service_senders)
-                .await?;
-            self.send_chunk_migration(&sealed_block, service_senders)?;
+            self.send_block_index_migration(&sealed_block).await?;
+            self.send_chunk_migration(&sealed_block)?;
         }
 
         Ok(())
@@ -282,11 +286,7 @@ impl BlockMigrationService {
 
     /// Send migration notification to BlockIndexService (synchronous -- waits for response).
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
-    async fn send_block_index_migration(
-        &self,
-        sealed_block: &SealedBlock,
-        senders: &ServiceSenders,
-    ) -> eyre::Result<()> {
+    async fn send_block_index_migration(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
 
@@ -300,8 +300,7 @@ impl BlockMigrationService {
         );
 
         let (tx, rx) = oneshot::channel();
-        senders
-            .block_index
+        self.block_index_sender
             .send(BlockIndexServiceMessage::MigrateBlock {
                 block_header: Arc::clone(header),
                 all_txs: Arc::new(all_txs),
@@ -315,11 +314,7 @@ impl BlockMigrationService {
     }
 
     /// Notify ChunkMigrationService about the migrated block (fire-and-forget).
-    fn send_chunk_migration(
-        &self,
-        sealed_block: &SealedBlock,
-        senders: &ServiceSenders,
-    ) -> eyre::Result<()> {
+    fn send_chunk_migration(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
 
@@ -333,8 +328,7 @@ impl BlockMigrationService {
             transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
         );
 
-        senders
-            .chunk_migration
+        self.chunk_migration_sender
             .send(ChunkMigrationServiceMessage::BlockMigrated(
                 Arc::clone(header),
                 Arc::new(all_txs_map),
