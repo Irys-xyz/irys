@@ -71,7 +71,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
