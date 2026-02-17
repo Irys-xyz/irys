@@ -101,6 +101,29 @@ These are the primary polling utilities. All take `seconds_to_wait: usize` (1 ch
 | `node.wait_for_chunk(app, ledger, offset, secs).await?` | Wait for a chunk to be retrievable |
 | `node.wait_for_block(hash, secs).await?` | Wait for specific block hash in block tree |
 | `node.wait_for_evm_block(hash, secs).await?` | Wait for EVM block in Reth |
+| `node.wait_for_block_in_index(h, include_chunk, secs).await?` | Wait for block in index AND DB header |
+
+### Block Quiescence (Subscribe-Before-Act Pattern)
+
+`node.block_quiescence(idle, deadline)` subscribes to `BlockStateUpdated` events and returns a future that resolves once no events arrive for `idle` duration, bounded by `deadline`. Use this when you need to wait for all in-flight block processing to settle.
+
+**Critical**: call this *before* the action that produces events, then `.await` after — otherwise the subscription misses events that fire between the action and the subscribe call.
+
+```rust
+use std::time::Duration;
+
+// 1. Subscribe BEFORE the action
+let quiescent = peer_node.block_quiescence(
+    Duration::from_millis(500), // idle timeout between events
+    Duration::from_secs(10),    // max total wait
+);
+
+// 2. Perform the action that triggers block events
+genesis_node.gossip_block_to_peers(&Arc::new(tip_block))?;
+
+// 3. Await quiescence — all events from step 2 are captured
+quiescent.await;
+```
 
 ## Posting Transactions
 
@@ -241,3 +264,5 @@ let reorg_event = reorg_future.await?;
 - **`mine_blocks(n)` enables then disables mining** - it's deterministic, not concurrent with the VDF
 - **`post_data_tx` panics on failure** - use `post_publish_data_tx` if you need error handling (returns `Result`)
 - **`consensus.get_mut()` panics on non-Custom variants** - only works after `NodeConfig::testing()` which creates a `Custom` variant
+- **Subscribe to events before the action** - if you need to wait for block events produced by an action (gossip, sync, etc.), subscribe to `BlockStateUpdated` *before* triggering the action; see the `block_quiescence` pattern above
+- **Block index vs block tree race** - `wait_until_block_index_height` only checks the index height, not that the block header is in the DB; use `wait_for_block_in_index` which checks both

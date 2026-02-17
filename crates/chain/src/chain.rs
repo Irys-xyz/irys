@@ -856,6 +856,15 @@ impl IrysNode {
 
         );
 
+        // Subscribe before initial_sync so the receiver captures all block
+        // events produced during (and after) sync — prevents a race where
+        // events fire before we start listening.
+        let block_state_rx = ctx
+            .config
+            .node_config
+            .stake_pledge_drives
+            .then(|| ctx.service_senders.subscribe_block_state_updates());
+
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
         ctx.sync_service_facade.initial_sync().await?;
@@ -873,6 +882,20 @@ impl IrysNode {
             handle.spawn(async move {
                 // wait for sync to complete so gossiped blocks are pre-validated
                 let _ = sync_state.wait_for_sync().await;
+                // Wait until block events quiesce (no events for 500 ms, max 10 s).
+                // The receiver was subscribed before initial_sync so no events
+                // were missed.
+                if let Some(mut rx) = block_state_rx {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    while let Ok(Ok(Ok(_))) = tokio::time::timeout_at(
+                        deadline,
+                        tokio::time::timeout(Duration::from_millis(500), rx.recv()),
+                    )
+                    .await
+                    {
+                        // block event arrived — reset idle timer
+                    }
+                }
                 let config = config;
                 let latest_block = latest_block;
                 let mut validation_tracker =

@@ -652,6 +652,40 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Returns a future that resolves once no [`BlockStateUpdated`] events
+    /// arrive for `idle` duration, bounded by `deadline`.
+    ///
+    /// **Call this before the action that produces events** so the
+    /// subscription captures everything. Perform the action, then `.await`
+    /// the returned future.
+    ///
+    /// ```ignore
+    /// let quiescent = node.block_quiescence(
+    ///     Duration::from_millis(500),
+    ///     Duration::from_secs(10),
+    /// );
+    /// genesis.gossip_block_to_peers(&block)?;
+    /// quiescent.await;
+    /// ```
+    pub fn block_quiescence(
+        &self,
+        idle: Duration,
+        deadline: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let mut rx = self
+            .node_ctx
+            .service_senders
+            .subscribe_block_state_updates();
+        Box::pin(async move {
+            let deadline = tokio::time::Instant::now() + deadline;
+            while let Ok(Ok(Ok(_))) =
+                tokio::time::timeout_at(deadline, tokio::time::timeout(idle, rx.recv())).await
+            {
+                // block event arrived — reset idle timer
+            }
+        })
+    }
+
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         self.node_ctx
             .packing_waiter
