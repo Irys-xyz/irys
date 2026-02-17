@@ -47,6 +47,7 @@ async fn heavy_pd_transactions_rejected_before_sprite_hardfork() -> eyre::Result
             min_pd_transaction_cost: Amount::token(dec!(0.0)).expect("valid token amount"),
         }),
         aurora: None,
+        borealis: None,
     };
 
     // 2. Start node

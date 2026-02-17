@@ -2,6 +2,7 @@ use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
+    metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     pd_pricing::base_fee,
     services::ServiceSenders,
@@ -20,7 +21,7 @@ use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
-    ExponentialMarketAvgCalculation,
+    ExponentialMarketAvgCalculation, HardforkConfigExt as _,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -29,6 +30,7 @@ use irys_reth::{
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
+use irys_types::SystemLedger;
 use irys_types::{
     app_state::DatabaseProvider,
     block_production::SolutionContext,
@@ -37,9 +39,10 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    AdjustmentStats, Base64, BlockTransactions, CommitmentTransaction, Config, DataLedger,
+    AdjustmentStats, Base64, BlockBody, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader,
-    IrysTokenPrice, PoaData, Signature, SystemLedger, SystemTransactionLedger, TokioServiceHandle,
+    IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger,
+    TokioServiceHandle,
     UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -55,7 +58,7 @@ use reth::{
 };
 use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, error_span, info, warn, Instrument as _};
 
@@ -131,15 +134,7 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<
-            eyre::Result<
-                Option<(
-                    Arc<irys_types::IrysBlockHeader>,
-                    IrysBuiltPayload,
-                    BlockTransactions,
-                )>,
-            >,
-        >,
+        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -185,7 +180,7 @@ pub struct BlockProducerInner {
     /// Reth beacon engine handle
     pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
-    pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    pub block_index: BlockIndex,
     /// Read guard for mempool state
     pub mempool_guard: MempoolReadGuard,
 }
@@ -252,6 +247,9 @@ pub struct MempoolTxsBundle {
     pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
     /// Unstake refund events to emit on epoch blocks; empty on non-epoch blocks
     pub unstake_refund_events: Vec<UnstakeRefundEvent>,
+
+    /// Epoch snapshot for the parent block - used to resolve reward addresses
+    pub epoch_snapshot: Arc<EpochSnapshot>,
 }
 
 impl BlockProducerService {
@@ -301,18 +299,18 @@ impl BlockProducerService {
         );
         loop {
             tokio::select! {
-                biased; // enable bias so polling happens in definition order
+                biased;
 
-                // Check for shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block producer service");
                     break;
                 }
-                // Handle commands
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
-                            self.handle_command(cmd).await?;
+                            if self.handle_command(cmd).await? {
+                                break;
+                            }
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -327,8 +325,9 @@ impl BlockProducerService {
         Ok(())
     }
 
+    /// Handles a single command. Returns `true` if the service should shut down.
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
+    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<bool> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash;
@@ -346,7 +345,7 @@ impl BlockProducerService {
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
-                        return Ok(());
+                        return Ok(false);
                     }
                     debug!("Test blocks remaining: {}", blocks_remaining);
                 }
@@ -354,39 +353,44 @@ impl BlockProducerService {
                 let production_strategy = ProductionStrategy {
                     inner: self.inner.clone(),
                 };
-                let result = production_strategy
-                    .fully_produce_new_block(solution)
-                    .await?;
 
-                if let Some((irys_block_header, eth_built_payload, block_transactions)) = result {
+                // Race production against shutdown so we don't block graceful shutdown.
+                let result = tokio::select! {
+                    biased;
+                    _ = &mut self.shutdown => {
+                        info!("Shutdown during block production, cancelling");
+                        let _ = response.send(Ok(None));
+                        return Ok(true);
+                    }
+                    r = production_strategy.fully_produce_new_block(solution) => r?
+                };
+
+                if let Some((block, eth_built_payload)) = result {
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
                         let _ = response.send(Ok(None));
-                        return Ok(());
+                        return Ok(false);
                     }
 
                     info!(
-                        block.hash = %irys_block_header.block_hash,
-                        block.height = irys_block_header.height,
+                        block.hash = %block.header().block_hash,
+                        block.height = block.header().height,
                         "Block publication completed successfully"
                     );
+                    metrics::record_block_produced();
 
                     if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
                         *remaining = remaining.saturating_sub(1);
                         debug!("Test blocks remaining after publication: {}", *remaining);
                     }
 
-                    let _ = response.send(Ok(Some((
-                        irys_block_header,
-                        eth_built_payload,
-                        block_transactions,
-                    ))));
-                    return Ok(());
+                    let _ = response.send(Ok(Some((block, eth_built_payload))));
+                    return Ok(false);
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
                     let _ = response.send(Ok(None));
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
@@ -398,7 +402,7 @@ impl BlockProducerService {
                 self.blocks_remaining_for_test = remaining;
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -501,9 +505,8 @@ pub trait BlockProdStrategy {
         prev_block_ema_snapshot: Arc<EmaSnapshot>,
     ) -> Result<
         Option<(
-            Arc<IrysBlockHeader>,
+            Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            BlockTransactions,
             IrysBuiltPayload,
         )>,
         BlockProductionError,
@@ -577,29 +580,27 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
-        let Some((block, stats, transactions)) = block_result else {
+        let Some((block, stats)) = block_result else {
             return Ok(None);
         };
 
-        Ok(Some((block, stats, transactions, eth_built_payload)))
+        Ok(Some((block, stats, eth_built_payload)))
     }
 
     /// Selects the parent block for new block production.
     ///
     /// Targets the block with highest cumulative difficulty, but only if fully validated.
-    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
-    /// the latest validated block on timeout to ensure production continues.
+    /// Waits indefinitely for validation to complete, switching targets if a new block
+    /// with higher cumulative difficulty appears.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
     #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
         // Use BlockValidationTracker to select the parent block
         let parent_block_hash = BlockValidationTracker::new(
             inner.block_tree_guard.clone(),
             inner.service_senders.clone(),
-            MAX_WAIT_TIME,
         )
         .wait_for_validation()
         .await?;
@@ -618,9 +619,8 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
     ) -> Result<
         Option<(
-            Arc<IrysBlockHeader>,
+            Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            BlockTransactions,
             IrysBuiltPayload,
         )>,
         BlockProductionError,
@@ -652,6 +652,7 @@ pub trait BlockProdStrategy {
                 }
                 Err(BlockProductionError::Retryable { source }) => {
                     retry_count += 1;
+                    metrics::record_block_producer_retry();
                     if retry_count >= MAX_RETRY_ATTEMPTS {
                         error!(
                             solution.hash = %solution.solution_hash,
@@ -707,9 +708,8 @@ pub trait BlockProdStrategy {
         solution: SolutionContext,
     ) -> Result<
         Option<(
-            Arc<IrysBlockHeader>,
+            Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            BlockTransactions,
             IrysBuiltPayload,
         )>,
         BlockProductionError,
@@ -722,8 +722,8 @@ pub trait BlockProdStrategy {
             .await?;
 
         // Check if we need to rebuild on a new parent
-        while let Some((ref block, _, _, _)) = result {
-            let parent_hash = &block.previous_block_hash;
+        while let Some((ref block, _, _)) = result {
+            let parent_hash = &block.header().previous_block_hash;
 
             match self
                 .check_parent_and_solution_validity(parent_hash, &solution)
@@ -774,51 +774,55 @@ pub trait BlockProdStrategy {
             }
         }
 
-        let Some((block, stats, transactions, eth_built_payload)) = result else {
+        let Some((block, stats, eth_built_payload)) = result else {
             return Ok(None);
         };
 
         if rebuild_attempts > 0 {
             info!(
                 block.solution_hash = %solution.solution_hash,
-                block.final_parent = %block.previous_block_hash,
-                block.block_height = block.height,
+                block.final_parent = %block.header().previous_block_hash,
+                block.block_height = block.header().height,
                 block.rebuild_count = rebuild_attempts,
                 "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
             );
+            metrics::record_block_producer_rebuild(rebuild_attempts as u64);
         }
 
-        if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
+        if !block.header().data_ledgers[DataLedger::Publish]
+            .tx_ids
+            .is_empty()
+        {
             debug!(
                 "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?}",
-                block.block_hash,
-                block.height,
-                block.solution_hash,
-                block.vdf_limiter_info.global_step_number,
-                block.previous_block_hash,
-                block.data_ledgers[DataLedger::Publish].tx_ids,
+                block.header().block_hash,
+                block.header().height,
+                block.header().solution_hash,
+                block.header().vdf_limiter_info.global_step_number,
+                block.header().previous_block_hash,
+                block.header().data_ledgers[DataLedger::Publish].tx_ids,
             );
         }
 
-        Ok(Some((block, stats, transactions, eth_built_payload)))
+        Ok(Some((block, stats, eth_built_payload)))
     }
 
     /// Produces and broadcasts a new block. Kept for tests and direct strategies.
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)>> {
-        let Some((block, stats, transactions, eth_built_payload)) =
+    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>> {
+        let Some((block, stats, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
             return Ok(None);
         };
 
         let block = self
-            .broadcast_block(block, stats, transactions.clone(), &eth_built_payload)
+            .broadcast_block(block, stats, &eth_built_payload)
             .await?;
         let Some(block) = block else { return Ok(None) };
-        Ok(Some((block, eth_built_payload, transactions)))
+        Ok(Some((block, eth_built_payload)))
     }
 
     /// Extracts and collects all transactions that should be included in a block
@@ -858,6 +862,7 @@ pub trait BlockProdStrategy {
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
+            &mempool.epoch_snapshot,
         )?;
 
         let mut shadow_txs = Vec::new();
@@ -1028,13 +1033,7 @@ pub trait BlockProdStrategy {
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
-    ) -> eyre::Result<
-        Option<(
-            Arc<IrysBlockHeader>,
-            Option<AdjustmentStats>,
-            BlockTransactions,
-        )>,
-    > {
+    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
@@ -1213,29 +1212,32 @@ pub trait BlockProdStrategy {
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
 
-        let block = Arc::new(irys_block);
-
         // Build BlockTransactions from the mempool bundle
-        let block_transactions = BlockTransactions {
-            commitment_txs: mempool_bundle.commitment_txs,
-            data_txs: HashMap::from([
-                (DataLedger::Submit, mempool_bundle.submit_txs),
-                (DataLedger::Publish, mempool_bundle.publish_txs.txs),
-            ]),
+        let mut all_data_txs = Vec::new();
+        all_data_txs.extend(mempool_bundle.submit_txs);
+        all_data_txs.extend(mempool_bundle.publish_txs.txs);
+
+        let block_body = BlockBody {
+            block_hash: irys_block.block_hash,
+            commitment_transactions: mempool_bundle.commitment_txs,
+            data_transactions: all_data_txs,
         };
 
-        Ok(Some((block, stats, block_transactions)))
+        let sealed_block = IrysSealedBlock::new(irys_block, block_body)?;
+
+        Ok(Some((Arc::new(sealed_block), stats)))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
     async fn broadcast_block(
         &self,
-        block: Arc<IrysBlockHeader>,
+        block: Arc<IrysSealedBlock>,
         stats: Option<AdjustmentStats>,
-        transactions: BlockTransactions,
         eth_built_payload: &IrysBuiltPayload,
-    ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
+    ) -> eyre::Result<Option<Arc<IrysSealedBlock>>> {
         let mut is_difficulty_updated = false;
+        let block_header = block.header();
+
         if let Some(stats) = stats {
             if stats.is_adjusted {
                 info!(
@@ -1247,8 +1249,8 @@ pub trait BlockProdStrategy {
                 );
                 info!(
                     block.max_difficulty = ?U256::MAX,
-                    block.previous_cumulative_diff = ?block.previous_cumulative_diff,
-                    block.current_diff = ?block.diff,
+                    block.previous_cumulative_diff = ?block_header.previous_cumulative_diff,
+                    block.current_diff = ?block_header.diff,
                     "Difficulty data",
                 );
                 is_difficulty_updated = true;
@@ -1266,31 +1268,31 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block), transactions, false)
+            .handle_block(block.clone(), false)
             .await
         {
             Ok(()) => Ok(()),
             e @ Err(BlockDiscoveryError::InternalError(_)) => {
                 error!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash, &block.height, e
+                    &block_header.block_hash, &block_header.height, e
                 );
                 Err(eyre!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash,
-                    &block.height,
+                    &block_header.block_hash,
+                    &block_header.height,
                     e
                 ))
             }
             Err(e) => {
                 error!(
-                    "Newly produced block {} ({}) failed pre-validation: {:?}",
-                    &block.block_hash, &block.height, e
+                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
+                    &block_header.block_hash.0, &block_header.height, e
                 );
                 Err(eyre!(
-                    "Newly produced block {} ({}) failed pre-validation: {:?}",
-                    &block.block_hash,
-                    &block.height,
+                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
+                    &block_header.block_hash.0,
+                    &block_header.height,
                     e
                 ))
             }
@@ -1306,8 +1308,8 @@ pub trait BlockProdStrategy {
             .send(execution_payload_gossip_data)
         {
             error!(
-                block.hash = ?block.block_hash,
-                block.height = ?block.height,
+                block.hash = ?block.header().block_hash,
+                block.height = ?block.header().height,
                 payload.hash = ?eth_built_payload.block().hash(),
                 "Failed to broadcast execution payload: {:?}",
                 payload_broadcast_error
@@ -1317,13 +1319,13 @@ pub trait BlockProdStrategy {
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
-                .send_difficulty(BroadcastDifficultyUpdate(block.clone()));
+                .send_difficulty(BroadcastDifficultyUpdate(Arc::clone(block.header())));
         }
 
         info!(
-            block.height = ?block.height,
-            block.hash = ?block.block_hash,
-            block.timestamp_ms = block.timestamp.as_millis(),
+            block.height = ?block.header().height,
+            block.hash = ?block.header().block_hash(),
+            block.timestamp_ms = block.header().timestamp.as_millis(),
             "Finished producing block",
         );
 
@@ -1418,6 +1420,10 @@ pub trait BlockProdStrategy {
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
+        // Fetch epoch snapshot (needed for reward address resolution)
+        let (parent_epoch_snapshot, parent_commitment_snapshot) =
+            self.fetch_parent_snapshots(prev_block_header)?;
+
         if !is_epoch {
             // Filter commitments by version using block timestamp
             self.inner()
@@ -1429,6 +1435,22 @@ pub trait BlockProdStrategy {
                     block_timestamp.to_secs(),
                 );
 
+            // Filter UpdateRewardAddress by Borealis activation
+            if !self
+                .inner()
+                .config
+                .consensus
+                .hardforks
+                .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
+            {
+                mempool_txs.commitment_tx.retain(|tx| {
+                    !matches!(
+                        tx.commitment_type(),
+                        irys_types::CommitmentTypeV2::UpdateRewardAddress { .. }
+                    )
+                });
+            }
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs
@@ -1438,16 +1460,12 @@ pub trait BlockProdStrategy {
                     .collect::<Vec<_>>(),
                 "Selected best mempool txs"
             );
-            return Ok(self.build_non_epoch_bundle(mempool_txs));
+            return Ok(self.build_non_epoch_bundle(mempool_txs, parent_epoch_snapshot));
         }
 
         // =====
         // ONLY EPOCH BLOCK PROCESSING
         // =====
-
-        // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
-        let (parent_epoch_snapshot, parent_commitment_snapshot) =
-            self.fetch_parent_snapshots(prev_block_header)?;
 
         let aggregated_miner_fees = self
             .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
@@ -1472,6 +1490,7 @@ pub trait BlockProdStrategy {
             aggregated_miner_fees,
             commitment_refund_events,
             unstake_refund_events,
+            epoch_snapshot: parent_epoch_snapshot,
         })
     }
 
@@ -1547,7 +1566,11 @@ pub trait BlockProdStrategy {
         )
     }
 
-    fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
+    fn build_non_epoch_bundle(
+        &self,
+        mempool_txs: MempoolTxs,
+        epoch_snapshot: Arc<EpochSnapshot>,
+    ) -> MempoolTxsBundle {
         MempoolTxsBundle {
             commitment_txs_to_bill: mempool_txs.commitment_tx.clone(),
             commitment_txs: mempool_txs.commitment_tx,
@@ -1556,6 +1579,7 @@ pub trait BlockProdStrategy {
             aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
             commitment_refund_events: Vec::new(),
             unstake_refund_events: Vec::new(),
+            epoch_snapshot,
         }
     }
 
@@ -1628,7 +1652,7 @@ pub trait BlockProdStrategy {
             block_height,
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
-            Arc::clone(&self.inner().block_index),
+            self.inner().block_index.clone(),
             &self.inner().block_tree_guard,
             &self.inner().mempool_guard,
             &self.inner().db,

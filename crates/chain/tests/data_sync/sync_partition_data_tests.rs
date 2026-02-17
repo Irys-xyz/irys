@@ -300,11 +300,11 @@ fn validate_partition_assignments(
 
     let publish_count = partition_assignments
         .iter()
-        .filter(|pa| pa.ledger_id == Some(0))
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Publish.into()))
         .count();
     let submit_count = partition_assignments
         .iter()
-        .filter(|pa| pa.ledger_id == Some(1))
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Submit.into()))
         .count();
     let capacity_count = partition_assignments
         .iter()

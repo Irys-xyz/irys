@@ -1,4 +1,5 @@
 use eyre::{eyre, Result};
+use irys_domain::EpochSnapshot;
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, IrysUsdPriceUpdate, PdBaseFeeUpdate,
     ShadowTransaction, TransactionPacket, TreasuryDeposit, UnstakeDebit,
@@ -226,6 +227,7 @@ impl<'a> ShadowTxGenerator<'a> {
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
         unstake_refund_events: &[UnstakeRefundEvent],
+        epoch_snapshot: &EpochSnapshot,
     ) -> Result<Self> {
         // Validate pd_base_fee_per_chunk: if Sprite is active, it must be provided
         let is_sprite_active = config.hardforks.is_sprite_active(block_timestamp);
@@ -269,7 +271,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         tracing::debug!(
             "ShadowTxGenerator initialized with {} miner fee increments and {} user refund addresses",
-            ledger_expiry_balance_delta.miner_balance_increment.len(),
+            ledger_expiry_balance_delta.reward_balance_increment.len(),
             ledger_expiry_balance_delta.user_perm_fee_refunds.len()
         );
 
@@ -299,7 +301,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Initialize expired ledger iterator with all fee rewards and refunds
         let expired_ledger_txs = if !ledger_expiry_balance_delta
-            .miner_balance_increment
+            .reward_balance_increment
             .is_empty()
             || !ledger_expiry_balance_delta.user_perm_fee_refunds.is_empty()
         {
@@ -320,6 +322,7 @@ impl<'a> ShadowTxGenerator<'a> {
             publish_ledger,
             config,
             parent_block_timestamp_secs,
+            epoch_snapshot,
         )?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
             generator.create_publish_shadow_txs(aggregated_rewards)?
@@ -374,7 +377,7 @@ impl<'a> ShadowTxGenerator<'a> {
         let mut shadow_txs = Vec::new();
 
         // First process miner rewards for storing the expired data
-        for (address, (amount, rolling_hash)) in balance_delta.miner_balance_increment.iter() {
+        for (address, (amount, rolling_hash)) in balance_delta.reward_balance_increment.iter() {
             // Convert the rolling hash to FixedBytes<32> for irys_ref
             let hash_bytes = rolling_hash.to_bytes();
             let h256 = irys_types::H256::from(hash_bytes);
@@ -419,6 +422,7 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
         timestamp_secs: UnixTimestamp,
+        epoch_snapshot: &EpochSnapshot,
     ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
 
@@ -464,8 +468,11 @@ impl<'a> ShadowTxGenerator<'a> {
 
             // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
+                // Resolve to reward_address (falls back to miner address if no stake entry)
+                let reward_addr = epoch_snapshot.resolve_reward_address(charge.address);
+
                 let entry = rewards_map
-                    .entry(charge.address)
+                    .entry(reward_addr)
                     .or_insert((RewardAmount::zero(), RollingHash::zero()));
                 entry.0.add_assign(charge.amount); // Add to total amount
                                                    // XOR the rolling hash with the transaction ID
@@ -496,7 +503,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         match tx.commitment_type() {
-            irys_types::CommitmentTypeV1::Stake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: tx.value().into(),
@@ -507,7 +514,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Pledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: tx.value().into(),
@@ -518,7 +525,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Unpledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
@@ -529,7 +536,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Unstake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Unstake => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
@@ -540,6 +547,22 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
+            irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address } => {
+                Ok(ShadowMetadata {
+                    // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
+                    shadow_tx: ShadowTransaction::new_v1(
+                        TransactionPacket::UpdateRewardAddress(
+                            irys_reth::shadow_tx::UpdateRewardAddressDebit {
+                                target: tx.signer().into(),
+                                irys_ref: tx.id().into(),
+                                new_reward_address: new_reward_address.into(),
+                            },
+                        ),
+                        (*self.solution_hash).into(),
+                    ),
+                    transaction_fee: tx.fee() as u128,
+                })
+            }
         }
     }
 
@@ -672,8 +695,8 @@ impl<'a> ShadowTxGenerator<'a> {
         // Post-Sprite: EVM handles treasury accounting via handle_balance_decrement
         if !self.is_sprite_active {
             match tx.commitment_type() {
-                irys_types::CommitmentTypeV1::Stake
-                | irys_types::CommitmentTypeV1::Pledge { .. } => {
+                irys_types::CommitmentTypeV2::Stake
+                | irys_types::CommitmentTypeV2::Pledge { .. } => {
                     // Stake and Pledge lock funds in the treasury
                     self.treasury_balance = self
                         .treasury_balance
@@ -682,11 +705,14 @@ impl<'a> ShadowTxGenerator<'a> {
                             eyre!("Treasury balance overflow when adding commitment value")
                         })?;
                 }
-                irys_types::CommitmentTypeV1::Unstake => {
+                irys_types::CommitmentTypeV2::Unstake => {
                     // Unstake handled on epoch boundary
                 }
-                irys_types::CommitmentTypeV1::Unpledge { .. } => {
+                irys_types::CommitmentTypeV2::Unpledge { .. } => {
                     // Unpledge handled on epoch boundary
+                }
+                irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                    // No treasury movement - fee only
                 }
             }
         }
@@ -908,8 +934,34 @@ mod tests {
         ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
         Signature, H256,
     };
-    use irys_types::{BlockHash, CommitmentTransactionV2, CommitmentTypeV1};
+    use irys_types::{BlockHash, CommitmentStatus, CommitmentTransactionV2, CommitmentTypeV1};
     use itertools::Itertools as _;
+
+    fn test_epoch_snapshot() -> EpochSnapshot {
+        EpochSnapshot::default()
+    }
+
+    /// Creates an epoch snapshot with stake entries where reward_address can differ from signer.
+    /// miners_with_rewards is a slice of (signer, reward_address) tuples.
+    fn test_epoch_snapshot_with_reward_addresses(
+        miners_with_rewards: &[(IrysAddress, IrysAddress)],
+    ) -> EpochSnapshot {
+        use irys_domain::StakeEntry;
+        let mut snapshot = EpochSnapshot::default();
+        for (signer, reward_address) in miners_with_rewards {
+            snapshot.commitment_state.stake_commitments.insert(
+                *signer,
+                StakeEntry {
+                    id: H256::random(),
+                    commitment_status: CommitmentStatus::Active,
+                    signer: *signer,
+                    amount: U256::from(1000),
+                    reward_address: *reward_address,
+                },
+            );
+        }
+        snapshot
+    }
 
     fn create_test_commitment(
         commitment_type: CommitmentTypeV1,
@@ -1033,10 +1085,11 @@ mod tests {
         ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1054,6 +1107,7 @@ mod tests {
             &empty_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1187,10 +1241,11 @@ mod tests {
         ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1208,6 +1263,7 @@ mod tests {
             &empty_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1292,10 +1348,11 @@ mod tests {
         ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1313,6 +1370,7 @@ mod tests {
             &empty_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1356,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_one_publish_tx_with_aggregated_proofs() {
+    fn test_publish_tx_with_reward_address_redirection() {
         let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test
         config.hardforks.frontier.number_of_ingress_proofs_total = 4;
@@ -1417,7 +1475,7 @@ mod tests {
         let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Since perm_fee was calculated with 4 proofs in mind
-        let number_of_ingress_proofs_total = 4; // matches config.hardforks.frontier.number_of_ingress_proofs_total
+        let number_of_ingress_proofs_total = 4;
         let publish_charges = PublishFeeCharges::new(
             perm_fee.into(),
             term_fee.into(),
@@ -1438,10 +1496,27 @@ mod tests {
         let signer2_reward = base_reward_per_proof * U256::from(2);
         let signer3_reward = base_reward_per_proof;
 
-        // Sort signers by address for deterministic ordering
+        // Key difference: Create separate reward addresses for signers 1 and 2
+        let reward_dest1 = IrysAddress::random(); // Different from signer1
+        let reward_dest2 = IrysAddress::random(); // Different from signer2
+                                                  // signer3 keeps reward_address = signer (tests mixed scenario)
+
+        // Create epoch snapshot with reward redirection
+        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[
+            (proof_signer1.address(), reward_dest1),
+            (proof_signer2.address(), reward_dest2),
+            (proof_signer3.address(), proof_signer3.address()), // No redirection
+        ]);
+
+        // Build expected shadow txs with redirected addresses:
+        // - signer1's reward → reward_dest1
+        // - signer2's reward → reward_dest2
+        // - signer3's reward → proof_signer3.address()
+
+        // Sort by reward destination address for deterministic ordering
         let mut signer_rewards = [
-            (proof_signer1.address(), signer1_reward),
-            (proof_signer2.address(), signer2_reward),
+            (reward_dest1, signer1_reward),
+            (reward_dest2, signer2_reward),
             (proof_signer3.address(), signer3_reward),
         ];
         signer_rewards.sort_by_key(|(addr, _)| *addr);
@@ -1493,7 +1568,7 @@ mod tests {
                     .try_into()
                     .expect("Block producer reward should fit in u128"),
             },
-            // Ingress proof rewards (aggregated by signer, sorted by address)
+            // Ingress proof rewards (aggregated by reward_address, sorted by address)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::IngressProofReward(BalanceIncrement {
@@ -1530,7 +1605,7 @@ mod tests {
         ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
@@ -1551,6 +1626,7 @@ mod tests {
             &empty_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1587,13 +1663,13 @@ mod tests {
         let miner2_hash = RollingHash(U256::from_be_bytes([2_u8; 32]));
         let miner3_hash = RollingHash(U256::from_be_bytes([3_u8; 32]));
 
-        let mut miner_balance_increment = BTreeMap::new();
-        miner_balance_increment.insert(miner1, (miner1_reward, miner1_hash));
-        miner_balance_increment.insert(miner2, (miner2_reward, miner2_hash));
-        miner_balance_increment.insert(miner3, (miner3_reward, miner3_hash));
+        let mut reward_balance_increment = BTreeMap::new();
+        reward_balance_increment.insert(miner1, (miner1_reward, miner1_hash));
+        reward_balance_increment.insert(miner2, (miner2_reward, miner2_hash));
+        reward_balance_increment.insert(miner3, (miner3_reward, miner3_hash));
 
         let expired_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment,
+            reward_balance_increment,
             user_perm_fee_refunds: Vec::new(),
         };
 
@@ -1637,7 +1713,7 @@ mod tests {
         ];
 
         // Add miner rewards in sorted order (BTreeMap guarantees this)
-        for (miner, (reward, hash)) in expired_fees.miner_balance_increment.iter() {
+        for (miner, (reward, hash)) in expired_fees.reward_balance_increment.iter() {
             expected_shadow_txs.push(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::TermFeeReward(BalanceIncrement {
@@ -1652,6 +1728,7 @@ mod tests {
         }
 
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1669,6 +1746,7 @@ mod tests {
             &expired_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1721,7 +1799,7 @@ mod tests {
         user_perm_fee_refunds.sort_by_key(|(tx_id, _, _)| *tx_id);
 
         let expired_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds,
         };
 
@@ -1780,6 +1858,7 @@ mod tests {
         }
 
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1797,6 +1876,7 @@ mod tests {
             &expired_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1829,7 +1909,7 @@ mod tests {
 
         // Empty expired fees
         let expired_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
 
@@ -1870,6 +1950,7 @@ mod tests {
         ];
 
         let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1887,6 +1968,7 @@ mod tests {
             &expired_fees,
             &[],
             &[],
+            &epoch_snapshot,
         )
         .expect("Should create generator");
 
@@ -1917,7 +1999,7 @@ mod tests {
             proofs: None,
         };
         let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
+            reward_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
@@ -1940,6 +2022,7 @@ mod tests {
             &empty_fees,
             &[],
             &[],
+            &test_epoch_snapshot(),
         );
 
         assert!(result.is_err());

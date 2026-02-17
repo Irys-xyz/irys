@@ -1,0 +1,32 @@
+# Prometheus Configuration
+# Metrics storage with remote write receiver enabled
+# Data retention: 7 days (1 week) - configured in docker-compose.yaml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'irys-local'
+    environment: 'development'
+
+# Scrape configs
+scrape_configs:
+  # Self-scraping for Prometheus metrics
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Tempo metrics
+  - job_name: 'tempo'
+    static_configs:
+      - targets: ['tempo:3200']
+
+  # Grafana metrics
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['grafana:3000']
+
+  # OpenTelemetry Collector metrics
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8888']

@@ -1,4 +1,5 @@
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::mempool_service::metrics::{record_chunk_duplicate, record_chunk_ingested};
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
@@ -66,7 +67,7 @@ pub fn select_data_size_from_storage_modules(
 }
 
 impl Inner {
-    #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -94,6 +95,7 @@ impl Inner {
                 "Chunk {} already processed recently, skipping re-gossip",
                 &chunk_path_hash
             );
+            record_chunk_duplicate();
             return Ok(());
         }
 
@@ -399,6 +401,8 @@ impl Inner {
             .record_recent_valid_chunk(chunk_path_hash)
             .await;
 
+        record_chunk_ingested(chunk_len);
+
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
@@ -467,17 +471,22 @@ impl Inner {
         // if we have, update it's expiry height
 
         // Determine existing proof state and chunk count
-        let (chunk_count_opt, existing_local_proof) = self
+        let local_address = self.config.irys_signer().address();
+        let (chunk_count, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
-                let existing_local_proof: Option<IngressProof> = None;
+                let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
+                    tx,
+                    root_hash,
+                    local_address,
+                )?;
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-                Ok((Some(count), existing_local_proof))
+                Ok((count, existing_local_proof))
             })
             .map_err(|e| {
                 error!(
@@ -488,16 +497,13 @@ impl Inner {
             })?;
 
         // Early return if we have a valid existing local proof
-        if chunk_count_opt.is_none() && existing_local_proof.is_some() {
+        if existing_local_proof.is_some() {
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &root_hash
             );
             return Ok(());
         }
-
-        let chunk_count =
-            chunk_count_opt.expect("chunk_count present when proof missing or expired");
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
@@ -518,7 +524,7 @@ impl Inner {
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
             let cache_sender = self.service_senders.chunk_cache.clone();
             let _fut = self.exec.clone().spawn_blocking(async move {
-                if let Err(e) = generate_and_store_ingress_proof(
+                if let Err(error) = generate_and_store_ingress_proof(
                     &block_tree_read_guard,
                     &db,
                     &config,
@@ -527,7 +533,11 @@ impl Inner {
                     &gossip_sender,
                     &cache_sender,
                 ) {
-                    tracing::warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {e}");
+                    if error.is_benign() {
+                        debug!(proof.data_root = ?chunk_data_root, "Skipped ingress proof generation: {error}");
+                    } else {
+                        warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {error}");
+                    }
                 }
             }).in_current_span();
         }
@@ -620,7 +630,6 @@ pub enum ChunkIngressError {
 }
 
 impl ChunkIngressError {
-    /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.into()))
@@ -628,12 +637,23 @@ impl ChunkIngressError {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.into()))
         }
     }
-    /// Allows converting an error that implements Display into an Other error
+
     pub fn other_display(err: impl Display, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.to_string()))
         } else {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.to_string()))
+        }
+    }
+
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Self::Advisory(_))
+    }
+
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::Critical(e) => e.error_type(),
+            Self::Advisory(e) => e.error_type(),
         }
     }
 }
@@ -650,40 +670,52 @@ impl From<AdvisoryChunkIngressError> for ChunkIngressError {
     }
 }
 
-/// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone)]
 pub enum CriticalChunkIngressError {
-    /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
-    /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
-    /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
-    /// The tx_offset exceeds valid bounds for the data_size
     InvalidOffset(String),
-    /// Some database error occurred when reading or writing the chunk
     DatabaseError,
-    /// The service is uninitialized
     ServiceUninitialized,
-    /// Catch-all variant for other errors.
     Other(String),
 }
 
-// non-critical reasons why chunk ingress might fail
+impl CriticalChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidProof => "invalid_proof",
+            Self::InvalidDataHash => "invalid_data_hash",
+            Self::InvalidChunkSize => "invalid_chunk_size",
+            Self::InvalidDataSize => "invalid_data_size",
+            Self::InvalidOffset(_) => "invalid_offset",
+            Self::DatabaseError => "database_error",
+            Self::ServiceUninitialized => "service_uninitialized",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AdvisoryChunkIngressError {
-    /// Oversized chunk bytes submitted before header arrival
     PreHeaderOversizedBytes,
-    /// Oversized data_path submitted before header arrival
     PreHeaderOversizedDataPath,
-    /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
-    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
     PreHeaderInvalidOffset(String),
-    /// Catch-all variant for other errors.
     Other(String),
+}
+
+impl AdvisoryChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::PreHeaderOversizedBytes => "pre_header_oversized_bytes",
+            Self::PreHeaderOversizedDataPath => "pre_header_oversized_data_path",
+            Self::PreHeaderOffsetExceedsCap => "pre_header_offset_exceeds_cap",
+            Self::PreHeaderInvalidOffset(_) => "pre_header_invalid_offset",
+            Self::Other(_) => "other",
+        }
+    }
 }
 
 /// Generates an ingress proof for a specific `data_root`

@@ -14,13 +14,17 @@ use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
     block_validation::{is_seed_data_valid, ValidationError},
     mempool_guard::MempoolReadGuard,
+    metrics,
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
+use irys_domain::{
+    chain_sync_state::ChainSyncState, BlockIndexReadGuard, BlockTreeReadGuard,
+    ExecutionPayloadCache,
+};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    app_state::DatabaseProvider, BlockTransactions, Config, IrysBlockHeader, TokioServiceHandle,
+    app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, TokioServiceHandle,
 };
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
@@ -51,8 +55,7 @@ pub enum VdfValidationResult {
 pub enum ValidationServiceMessage {
     /// Validate a block
     ValidateBlock {
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
     },
 }
@@ -95,6 +98,8 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
+    /// Chain sync state for recording diagnostic info
+    pub(crate) chain_sync_state: ChainSyncState,
 }
 
 impl ValidationService {
@@ -112,6 +117,7 @@ impl ValidationService {
         execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<ValidationServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
+        chain_sync_state: ChainSyncState,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
         info!("Spawning validation service");
 
@@ -146,6 +152,7 @@ impl ValidationService {
                         db,
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
+                        chain_sync_state,
                     }),
                 };
 
@@ -199,10 +206,12 @@ impl ValidationService {
                 // Receive new validation messages
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(ValidationServiceMessage::ValidateBlock { block, transactions, skip_vdf_validation }) => {
+                        Some(ValidationServiceMessage::ValidateBlock {
+                            block,
+                            skip_vdf_validation,
+                        }) => {
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
-                                Arc::new(transactions),
                                 Arc::clone(&self.inner),
                                 self.inner.block_tree_guard.clone(),
                                 skip_vdf_validation,
@@ -262,9 +271,10 @@ impl ValidationService {
                 }
 
                 // Process concurrent task completions (only if there are tasks)
-                result = coordinator.concurrent_tasks.join_next(), if !coordinator.concurrent_tasks.is_empty() => {
+                result = coordinator.concurrent_tasks.join_next_with_id(), if !coordinator.concurrent_tasks.is_empty() => {
                     match result {
-                        Some(Ok(validation)) => {
+                        Some(Ok((id, validation))) => {
+                            coordinator.concurrent_task_blocks.remove(&id);
 
                             // Send the validation result to the block tree service
                             if let Err(e) = self.inner.service_senders.block_tree.send(
@@ -281,7 +291,42 @@ impl ValidationService {
                             }
                         }
                         Some(Err(e)) => {
-                            error!(custom.error = %e, "Concurrent task panicked");
+                            let block_hash = coordinator.concurrent_task_blocks.remove(&e.id());
+                            let message = if e.is_cancelled() {
+                                "Concurrent validation task was cancelled"
+                            } else {
+                                "Concurrent validation task panicked"
+                            };
+                            error!(
+                                block.hash = ?block_hash,
+                                custom.error = %e,
+                                message
+                            );
+                            if let Some(hash) = block_hash {
+                                if let Err(send_err) = self.inner.service_senders.block_tree.send(
+                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                        block_hash: hash,
+                                        validation_result: ValidationResult::Invalid(
+                                            ValidationError::TaskPanicked {
+                                                task: "concurrent_validation".to_string(),
+                                                details: e.to_string(),
+                                            },
+                                        ),
+                                    }
+                                ) {
+                                    error!(
+                                        block.hash = %hash,
+                                        custom.error = ?send_err,
+                                        "Failed to send panic result to block tree service"
+                                    );
+                                    // Block tree won't handle diagnostics since send failed,
+                                    // so record directly as a fallback.
+                                    self.inner.chain_sync_state.record_validation_finished(&hash);
+                                    self.inner.chain_sync_state.record_block_validation_error(
+                                        format!("block={} error=concurrent task panicked: {}", hash, e),
+                                    );
+                                }
+                            }
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()
@@ -301,7 +346,7 @@ impl ValidationService {
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
                         if let Some(current_vdf) = &coordinator.vdf_scheduler.current {
-                            (1, Some(current_vdf.hash), Some(current_vdf.block.height))
+                            (1, Some(current_vdf.hash), Some(current_vdf.sealed_block.header().height))
                         } else {
                             (0, None, None)
                         };
@@ -313,6 +358,10 @@ impl ValidationService {
                         vdf.pending = vdf_pending,
                         vdf.concurrent_active = concurrent_active,
                         "Validation pipeline status"
+                    );
+                    metrics::record_validation_pipeline(
+                        vdf_pending as u64,
+                        concurrent_active as u64,
                     );
                 }
             }

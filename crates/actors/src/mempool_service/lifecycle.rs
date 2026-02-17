@@ -831,83 +831,66 @@ impl Inner {
             migrated_block.poa.chunk.is_some(),
             "poa chunk must be present"
         );
-        let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
+
+        // Use transactions directly from the event instead of fetching from mempool
+        let transactions = &event.transactions;
 
         // stage 1: move commitment transactions from tree to index
-        let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
-        let commitments = self
-            .handle_get_commitment_tx_message(commitment_tx_ids.clone())
-            .await;
-
-        // Remove all commitments from mempool in one batch operation
-        self.mempool_state
-            .remove_commitment_txs(commitments.values().map(CommitmentTransaction::id))
-            .await;
+        // Use commitment transactions directly from the event
+        let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
+        let commitment_tx_ids: Vec<H256> = commitment_txs
+            .iter()
+            .map(irys_types::CommitmentTransaction::id)
+            .collect();
 
         // stage 1: insert commitment transactions into database
+        // Persist to DB before removing from mempool so txs aren't lost if the DB write fails
         self.irys_db.update_eyre(|tx| {
-            for commitment_tx in commitments.values() {
-                // Insert the commitment transaction in to the db, perform migration
+            for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
             }
             Ok(())
         })?;
 
-        // stage 2: move submit transactions from tree to index
-        let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
-        {
-            // FIXME: this next line is less efficient than it needs to be?
-            //        why would we read mdbx txs when we are migrating?
-            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
+        // Remove all commitments from mempool only after successful DB persist
+        self.mempool_state
+            .remove_commitment_txs(commitment_txs.iter().map(CommitmentTransaction::id))
+            .await;
 
+        // stage 2: move submit transactions from tree to index
+        // Use submit transactions directly from the event
+        let submit_txs = transactions
+            .data_txs
+            .get(&DataLedger::Submit)
+            .cloned()
+            .unwrap_or_default();
+        let submit_tx_ids: Vec<H256> = submit_txs.iter().map(|tx| tx.id).collect();
+        {
             self.irys_db.update_eyre(|tx| {
-                for (idx, maybe_header) in data_tx_headers.into_iter().enumerate() {
-                    match maybe_header {
-                        Some(header) => {
-                            if let Err(err) = insert_tx_header(tx, &header) {
-                                error!(
-                                    "Could not insert transaction header - txid: {} err: {}",
-                                    header.id, err
-                                );
-                            }
-                        }
-                        None => {
-                            error!(
-                                "Could not find transaction {} header in mempool",
-                                &submit_tx_ids[idx]
-                            );
-                        }
-                    }
+                for header in &submit_txs {
+                    insert_tx_header(tx, header)?;
                 }
                 Ok(())
             })?;
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
-        let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
+        // Use publish transactions directly from the event
+        let publish_txs = transactions
+            .data_txs
+            .get(&DataLedger::Publish)
+            .cloned()
+            .unwrap_or_default();
+        let publish_tx_ids: Vec<H256> = publish_txs.iter().map(|tx| tx.id).collect();
         {
-            let publish_tx_headers = self
-                .handle_get_data_tx_message(publish_tx_ids.clone())
-                .await;
-
             self.irys_db.update_eyre(|mut_tx| {
-                for mut header in publish_tx_headers.into_iter().flatten() {
+                for mut header in publish_txs {
                     if header.promoted_height().is_none() {
                         // Set promoted_height in metadata
                         header.metadata_mut().promoted_height = Some(event.block.height);
-                        eyre::bail!(
-                            "Migrating publish tx with no promoted_height {} at height {}",
-                            header.id,
-                            event.block.height
-                        );
                     }
 
-                    if let Err(err) = insert_tx_header(mut_tx, &header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            header.id, err
-                        );
-                    }
+                    insert_tx_header(mut_tx, &header)?;
                 }
                 Ok(())
             })?;

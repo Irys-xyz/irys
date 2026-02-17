@@ -319,12 +319,12 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     println!("old_fork:\n  {:?}", old_fork);
     println!("new_fork:\n  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash]);
+    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash()]);
     assert_eq!(
         new_fork,
         vec![
-            canon.0[canon.0.len() - 2].block_hash,
-            canon.0.last().unwrap().block_hash
+            canon.0[canon.0.len() - 2].block_hash(),
+            canon.0.last().unwrap().block_hash()
         ]
     );
 
@@ -503,7 +503,9 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             let block_tree_guard = node.node_ctx.block_tree_guard.read();
             let (canonical_entries, _) = block_tree_guard.get_canonical_chain();
             let last_entry = canonical_entries.first().unwrap();
-            let last_entry = block_tree_guard.get_block(&last_entry.block_hash).unwrap();
+            let last_entry = block_tree_guard
+                .get_block(&last_entry.block_hash())
+                .unwrap();
             assert_eq!(
                 last_entry.height,
                 prune_height + 1,
@@ -903,8 +905,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Stage 0: SETUP AND STARTUP
     //
 
-    // config variables
-    let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
+    let num_blocks_in_epoch = 3;
     let seconds_to_wait = 15;
     const DATA_CHUNK_SIZE: usize = 32;
 
@@ -936,68 +937,77 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     let config_b = node_a.testing_peer_with_signer(&b_signer);
     let config_c = node_a.testing_peer_with_signer(&c_signer);
 
-    // start peer nodes
-    let node_b = IrysNodeTest::new(config_b)
-        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
-        .await;
-    let node_c = IrysNodeTest::new(config_c)
-        .start_and_wait_for_packing("NODE_C", seconds_to_wait)
-        .await;
+    let node_b = node_a
+        .testing_peer_with_assignments_and_name(config_b, "NODE_B")
+        .await?;
+    let node_c = node_a
+        .testing_peer_with_assignments_and_name(config_c, "NODE_C")
+        .await?;
 
     // Expected state at end of stage 0:
     //  Nodes A, B, C started
-    //  Nodes A, B, C at block height 0
+    //  Nodes B, C are staked and have partition assignments
 
     //
     // Stage 1: STARTING STATE CHECKS
     //
 
-    // check peer heights match genesis - i.e. that we are all in sync
-    let current_height = node_a.get_canonical_chain_height().await;
-    assert_eq!(current_height, 0);
+    // After testing_peer_with_assignments_and_name, all nodes should be synced
+    // and at or past the first epoch boundary with peers B and C staked.
+    let base_height = node_a.get_canonical_chain_height().await;
     node_b
-        .wait_until_height(current_height, seconds_to_wait)
+        .wait_until_height(base_height, seconds_to_wait)
         .await?;
     node_c
-        .wait_until_height(current_height, seconds_to_wait)
+        .wait_until_height(base_height, seconds_to_wait)
         .await?;
 
-    // get genesis block
-    let genesis_block = node_a.get_block_by_height(0).await?;
+    // get the block at base_height to use for balance checks
+    // Note: After testing_peer_with_assignments_and_name, peers B and C have staked and
+    // spent fees, so we capture their balances at base_height (after staking)
+    let base_block = node_a.get_block_by_height(base_height).await?;
 
-    // get starting balances
-    let signer_b_genesis_balance: U256 = node_a
-        .get_balance(b_signer.address(), genesis_block.evm_block_hash)
+    // get starting balances after staking (from base_height block)
+    let signer_b_starting_balance: U256 = node_a
+        .get_balance(b_signer.address(), base_block.evm_block_hash)
         .await;
-    let signer_c_genesis_balance: U256 = node_a
-        .get_balance(c_signer.address(), genesis_block.evm_block_hash)
+    let signer_c_starting_balance: U256 = node_a
+        .get_balance(c_signer.address(), base_block.evm_block_hash)
         .await;
 
-    // check balances match genesis account balances i.e. they are not zero
-    assert_ne!(U256::from(0), signer_b_genesis_balance);
-    assert_ne!(U256::from(0), signer_c_genesis_balance);
+    // check balances are not zero (they should have remaining balance after staking)
+    assert_ne!(U256::from(0), signer_b_starting_balance);
+    assert_ne!(U256::from(0), signer_c_starting_balance);
 
     // Expected state at end of stage 1:
-    //  Unchanged from Stage 0
+    //  All nodes synced to base_height (past epoch boundary)
+    //  Peers B and C are staked in epoch snapshot
 
     //
     // Stage 2: MINE BLOCK
     //
 
-    // mine a single block, and let everyone sync so future txs start at block height 1.
+    // mine a single block, and let everyone sync so future txs use this block's height as anchor.
     node_a.mine_block().await?; // mine block a1
-    node_a.wait_until_height(1, seconds_to_wait).await?;
-    let a_block1 = node_a.get_block_by_height(1).await?; // get block a1
+    let block1_height = base_height + 1;
+    node_a
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
+    let a_block1 = node_a.get_block_by_height(block1_height).await?; // get block a1
     node_b
         .wait_for_block(&a_block1.block_hash, seconds_to_wait)
         .await?;
     node_c
         .wait_for_block(&a_block1.block_hash, seconds_to_wait)
         .await?;
-    node_b.wait_until_height(1, seconds_to_wait).await?;
-    let b_block1 = node_b.get_block_by_height(1).await?; // get block b1
-    node_c.wait_until_height(1, seconds_to_wait).await?;
-    let c_block1 = node_c.get_block_by_height(1).await?; // get block c1
+    node_b
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
+    let b_block1 = node_b.get_block_by_height(block1_height).await?; // get block b1
+    node_c
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
+    let c_block1 = node_c.get_block_by_height(block1_height).await?; // get block c1
 
     assert_eq!(
         a_block1.data_ledgers[DataLedger::Publish].tx_ids.len(),
@@ -1017,37 +1027,37 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_a
             .get_balance(b_signer.address(), a_block1.evm_block_hash)
             .await,
-        signer_b_genesis_balance
+        signer_b_starting_balance
     );
     assert_eq!(
         node_a
             .get_balance(c_signer.address(), a_block1.evm_block_hash)
             .await,
-        signer_c_genesis_balance
+        signer_c_starting_balance
     );
     assert_eq!(
         node_b
             .get_balance(b_signer.address(), b_block1.evm_block_hash)
             .await,
-        signer_b_genesis_balance
+        signer_b_starting_balance
     );
     assert_eq!(
         node_b
             .get_balance(c_signer.address(), b_block1.evm_block_hash)
             .await,
-        signer_c_genesis_balance
+        signer_c_starting_balance
     );
     assert_eq!(
         node_c
             .get_balance(b_signer.address(), c_block1.evm_block_hash)
             .await,
-        signer_b_genesis_balance
+        signer_b_starting_balance
     );
     assert_eq!(
         node_c
             .get_balance(c_signer.address(), c_block1.evm_block_hash)
             .await,
-        signer_c_genesis_balance
+        signer_c_starting_balance
     );
 
     // check block 1 mining reward is not 0
@@ -1166,7 +1176,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_a
             .get_balance(b_signer.address(), a_block2.evm_block_hash)
             .await,
-        signer_b_genesis_balance,
+        signer_b_starting_balance,
         "Address: {:?}",
         b_signer.address()
     );
@@ -1174,7 +1184,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_a
             .get_balance(c_signer.address(), a_block2.evm_block_hash)
             .await,
-        signer_c_genesis_balance,
+        signer_c_starting_balance,
         "Address: {:?}",
         c_signer.address()
     );
@@ -1195,7 +1205,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_b
             .get_balance(b_signer.address(), b_block2.evm_block_hash)
             .await,
-        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee
+        signer_b_starting_balance + b_block2.reward_amount - peer_b_total_fee
             + block_producer_reward,
         "Address: {:?}",
         b_signer.address()
@@ -1204,7 +1214,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_b
             .get_balance(c_signer.address(), b_block2.evm_block_hash)
             .await,
-        signer_c_genesis_balance,
+        signer_c_starting_balance,
         "Address: {:?}",
         c_signer.address()
     );
@@ -1237,7 +1247,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_b
             .get_balance(b_signer.address(), b_block3.evm_block_hash)
             .await,
-        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+        signer_b_starting_balance + b_block2.reward_amount + b_block3.reward_amount
             - peer_b_total_fee
             + block_producer_reward
             + publish_rewards,
@@ -1248,7 +1258,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_b
             .get_balance(c_signer.address(), b_block3.evm_block_hash)
             .await,
-        signer_c_genesis_balance,
+        signer_c_starting_balance,
         "Address: {:?}",
         c_signer.address()
     );
@@ -1257,7 +1267,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     //  Node A is now at block height 2
     //  Node B is now at block height 3
     //  Node C remains at block height 1
-    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - peer_b_total_fee + block_producer_reward + publish_rewards
+    //  Signer B balance is now equal to signer_b_starting_balance + b_block2.reward_amount + b_block3.reward_amount - peer_b_total_fee + block_producer_reward + publish_rewards
     //  Signer C balance remains at genesis balance
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
@@ -1313,27 +1323,41 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     //  Node C is now at block height 3 and reorgs having received two blocks from Node B
 
     //
-    // Stage 7: MINE FORK C TO HEIGHT 4
+    // Stage 7: MINE FORK C TO HEIGHT block1_height + 3
     //
 
     // Node C mines on top of B's chain and does not gossip it back to B
     // Node C has the non canon txs from it's now non canon block 2.
     // Node C will choose to include these txs in block C4
-    if let Err(does_not_reach_height) = node_c.wait_until_height(3, seconds_to_wait).await {
+    let block3_height = block1_height + 2;
+    let block4_height = block1_height + 3;
+    if let Err(does_not_reach_height) = node_c
+        .wait_until_height(block3_height, seconds_to_wait)
+        .await
+    {
         tracing::error!(
-            "Node C Failed to reach block height 3: {:?}",
+            "Node C Failed to reach block height {}: {:?}",
+            block3_height,
             does_not_reach_height
         );
         Err(does_not_reach_height)?
     }
     let (c_block4, c_block4_payload, c_block4_txs) = node_c.mine_block_without_gossip().await?;
-    if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
+    if let Err(does_not_reach_height) = node_c
+        .wait_until_height(block4_height, seconds_to_wait)
+        .await
+    {
         tracing::error!(
-            "Node C Failed to reach block height 4: {:?}",
+            "Node C Failed to reach block height {}: {:?}",
+            block4_height,
             does_not_reach_height
         );
     }
-    assert_eq!(c_block4.height, 4, "Node C Failed to reach block height 4"); // block c4
+    assert_eq!(
+        c_block4.height, block4_height,
+        "Node C Failed to reach block height {}",
+        block4_height
+    ); // block c4
 
     //
     // Stage 8: FINAL SYNC / RE-ORGs
@@ -1372,11 +1396,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
             // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
             // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            let a_block2_sealed =
+                crate::utils::build_sealed_block(a_block2.as_ref().clone(), &a_block2_txs)?;
             node_a
-                .send_block_to_peer(&node_b, &a_block2, a_block2_txs.clone())
+                .send_block_to_peer(&node_b, Arc::clone(&a_block2_sealed))
                 .await?;
             node_a
-                .send_block_to_peer(&node_c, &a_block2, a_block2_txs.clone())
+                .send_block_to_peer(&node_c, Arc::clone(&a_block2_sealed))
                 .await?;
         } else {
             // Gossip all blocks so everyone syncs
@@ -1462,29 +1488,31 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         }
 
         // check correct txs made it into specific canon blocks, that are now synced across every node
+        // Heights are relative to base_height (epoch_height from Stage 1.5)
+        let block2_height = block1_height + 1;
         for node in [&node_a, &node_b, &node_c] {
             assert_eq!(
-                sorted_data_txs_at(node, 1, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, block1_height, DataLedger::Submit).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(node, 1, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, block1_height, DataLedger::Publish).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(node, 2, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, block2_height, DataLedger::Submit).await?,
                 peer_b_submit_txs
             );
             assert_eq!(
-                sorted_data_txs_at(node, 2, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, block2_height, DataLedger::Publish).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(node, 3, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, block3_height, DataLedger::Submit).await?,
                 vec![]
             );
             assert_eq!(
-                sorted_data_txs_at(node, 3, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, block3_height, DataLedger::Publish).await?,
                 peer_b_submit_txs // promoted from previous block
             );
             // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
@@ -1492,12 +1520,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
             // As they arrive with proofs in block 4, they appear in both the submit and publish ledgers.
             assert_eq!(
-                sorted_data_txs_at(node, 4, DataLedger::Submit).await?,
+                sorted_data_txs_at(node, block4_height, DataLedger::Submit).await?,
                 peer_c_submit_txs
             );
 
             assert_eq!(
-                sorted_data_txs_at(node, 4, DataLedger::Publish).await?,
+                sorted_data_txs_at(node, block4_height, DataLedger::Publish).await?,
                 peer_c_submit_txs
             );
         }
@@ -1507,13 +1535,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             node_a
                 .get_balance(b_signer.address(), c_block1.evm_block_hash)
                 .await,
-            signer_b_genesis_balance,
+            signer_b_starting_balance,
         );
         assert_eq!(
             node_a
                 .get_balance(c_signer.address(), c_block1.evm_block_hash)
                 .await,
-            signer_c_genesis_balance,
+            signer_c_starting_balance,
         );
         // assert final balances
         // Calculate fee components for peer C's transaction
@@ -1545,7 +1573,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             node_a
                 .get_balance(b_signer.address(), c_block4.evm_block_hash)
                 .await,
-            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+            signer_b_starting_balance + b_block2.reward_amount + b_block3.reward_amount
                 - peer_b_total_fee
                 + block_producer_reward
                 + publish_rewards, // Include the publish rewards from b_block3
@@ -1554,7 +1582,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             node_a
                 .get_balance(c_signer.address(), c_block4.evm_block_hash)
                 .await,
-            signer_c_genesis_balance + c_block4.reward_amount
+            signer_c_starting_balance + c_block4.reward_amount
                 - peer_c_b2_submit_tx.header.total_cost()
                 + peer_c_block_producer_reward
                 + peer_c_publish_rewards,

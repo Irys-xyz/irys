@@ -6,9 +6,9 @@ pub use crate::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
-    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, Compact, ConsensusConfig,
-    DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset,
-    UnpackedChunk, H256, U256,
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
+    ConsensusConfig, DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature,
+    TxChunkOffset, UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;
@@ -22,6 +22,7 @@ use tracing::error;
 pub mod bounded_fee;
 pub mod fee_distribution;
 
+use crate::DataLedger;
 pub use bounded_fee::BoundedFee;
 
 pub type IrysTransactionId = H256;
@@ -58,6 +59,9 @@ pub enum CommitmentValidationError {
     InvalidUnpledgeCountZero,
     #[error("Signer address is not allowed to stake/pledge")]
     ForbiddenSigner,
+    /// Invalid update reward address value (must be zero)
+    #[error("Invalid update reward address value: {provided} (must be 0)")]
+    InvalidUpdateRewardAddressValue { provided: U256 },
 }
 
 // Wrapper struct to hold transaction + metadata
@@ -408,7 +412,7 @@ impl DataTransactionHeaderV1 {
             header_size: 0,
             term_fee: BoundedFee::zero(),
             perm_fee: None,
-            ledger_id: 0,
+            ledger_id: DataLedger::Publish.into(),
             bundle_format: None,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
@@ -546,10 +550,11 @@ impl CommitmentTransaction {
 
     pub fn total_cost(&self) -> U256 {
         let additional_fee = match &self.commitment_type() {
-            CommitmentTypeV1::Stake => self.value(),
-            CommitmentTypeV1::Pledge { .. } => self.value(),
-            CommitmentTypeV1::Unpledge { .. } => U256::zero(),
-            CommitmentTypeV1::Unstake => U256::zero(),
+            CommitmentTypeV2::Stake => self.value(),
+            CommitmentTypeV2::Pledge { .. } => self.value(),
+            CommitmentTypeV2::Unpledge { .. } => U256::zero(),
+            CommitmentTypeV2::Unstake => U256::zero(),
+            CommitmentTypeV2::UpdateRewardAddress { .. } => U256::zero(),
         };
         U256::from(self.fee()).saturating_add(additional_fee)
     }
@@ -807,7 +812,7 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner};
+    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner, DataLedger};
 
     use alloy_rlp::Decodable as _;
     use k256::ecdsa::SigningKey;
@@ -885,7 +890,7 @@ mod tests {
             header_size: 0,
             term_fee: BoundedFee::from(100_u64),
             perm_fee: Some(BoundedFee::from(200_u64)),
-            ledger_id: 1,
+            ledger_id: DataLedger::Submit.into(),
             bundle_format: None,
             chain_id: 1,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
@@ -1185,7 +1190,7 @@ mod tests {
                 header_size: 0,
                 term_fee: BoundedFee::from(100_u64),
                 perm_fee: Some(BoundedFee::from(200_u64)),
-                ledger_id: 1,
+                ledger_id: DataLedger::Submit.into(),
                 bundle_format: None,
                 chain_id: config.chain_id,
                 signature: Signature::test_signature().into(),
@@ -1354,7 +1359,7 @@ mod pledge_decay_parametrized_tests {
             CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer, ph).await;
 
         match tx.commitment_type() {
-            CommitmentTypeV1::Unpledge {
+            CommitmentTypeV2::Unpledge {
                 partition_hash,
                 pledge_count_before_executing,
             } => {

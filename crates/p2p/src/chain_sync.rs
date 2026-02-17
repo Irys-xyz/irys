@@ -41,6 +41,9 @@ impl From<GossipError> for ChainSyncError {
         match err {
             GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
             GossipError::Network(msg) => Self::Network(msg),
+            GossipError::CircuitBreakerOpen(peer_id) => {
+                Self::Network(format!("Circuit breaker open for peer {}", peer_id))
+            }
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
             GossipError::Internal(internal_err) => {
@@ -289,20 +292,19 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             for orphaned_block in orphaned_blocks {
                 info!(
                     "Start processing orphaned ancestor block: {:?}",
-                    orphaned_block.header.block_hash
+                    orphaned_block.block.header().block_hash
                 );
                 let block_pool = self.block_pool.clone();
-                let block_header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
-                let block_body = orphaned_block.block_body;
+                let orphaned_block_arc = Arc::clone(&orphaned_block.block);
                 futures.push(async move {
                     debug!(
-                        "Using cached block body for orphaned ancestor: {:?}",
-                        block_header.block_hash
+                        "Using cached block for orphaned ancestor: {:?}",
+                        orphaned_block_arc.header().block_hash
                     );
 
                     block_pool
-                        .process_block(block_header, block_body, is_fast_tracking)
+                        .process_block(orphaned_block_arc, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -590,8 +592,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                         if let Err(e) = inner
                             .block_pool
                             .process_block(
-                                cached_block.header,
-                                cached_block.block_body,
+                                Arc::clone(&cached_block.block),
                                 cached_block.is_fast_tracking,
                             )
                             .await
@@ -656,6 +657,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     let sync_mode = config.node_config.sync_mode;
     let block_batch_size = config.node_config.sync.block_batch_size;
     let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
+    let wait_queue_slot_timeout_secs = config.node_config.sync.wait_queue_slot_timeout_secs;
+    let wait_queue_slot_max_attempts = config.node_config.sync.wait_queue_slot_max_attempts;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -792,88 +795,91 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         if sync_state.is_queue_full() {
             debug!("Sync task: Block queue is full, waiting for an empty slot");
 
-            // Retry logic for wait_for_an_empty_queue_slot
-            let retry_attempts = 3;
-            let mut wait_success = false;
+            // Use validation-aware wait that considers active validations
+            // This will only fail if max attempts are exceeded AND no validations are running
+            match sync_state
+                .wait_for_an_empty_queue_slot_with_validation_awareness(
+                    Duration::from_secs(wait_queue_slot_timeout_secs),
+                    wait_queue_slot_max_attempts,
+                )
+                .await
+            {
+                Ok(()) => {
+                    debug!("Sync task: Queue slot became available");
+                }
+                Err(e) => {
+                    // All attempts failed with no active validations - try to trigger processing
+                    warn!(
+                        "Sync task: Wait failed ({}), attempting to trigger block processing",
+                        e
+                    );
 
-            for attempt in 1..=retry_attempts {
-                debug!("Sync task: Wait attempt {} for empty queue slot", attempt);
+                    let retry_height = sync_state.highest_processed_block() + 1;
+                    debug!(
+                        "Sync task: Attempting to request block at height {} to trigger processing",
+                        retry_height
+                    );
 
-                match sync_state.wait_for_an_empty_queue_slot().await {
-                    Ok(()) => {
-                        debug!(
-                            "Sync task: Queue slot became available on attempt {}",
-                            attempt
-                        );
-                        wait_success = true;
-                        break;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Sync task: Timeout on attempt {} waiting for queue slot",
-                            attempt
-                        );
+                    match get_block_index(
+                        peer_list,
+                        gossip_client,
+                        retry_height,
+                        1, // Just get one block
+                        3, // 3 retries for the network call
+                        is_trusted_mode,
+                    )
+                    .await
+                    {
+                        Ok(retry_index) if !retry_index.is_empty() => {
+                            let retry_block = &retry_index[0];
+                            debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                        if attempt < retry_attempts {
-                            // Try to request the block at height = last synced + 1 to trigger processing
-                            let retry_height = sync_state.highest_processed_block() + 1;
-                            debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
-
-                            match get_block_index(
-                                peer_list,
-                                gossip_client,
-                                retry_height,
-                                1, // Just get one block
-                                3, // 3 retries for the network call
-                                is_trusted_mode,
+                            // Try to reprocess the last prevalidated block
+                            match timeout(
+                                Duration::from_secs(retry_block_request_timeout_secs),
+                                gossip_data_handler.pull_and_process_block(
+                                    retry_block.block_hash,
+                                    sync_state.is_syncing_from_a_trusted_peer(),
+                                ),
                             )
                             .await
                             {
-                                Ok(retry_index) if !retry_index.is_empty() => {
-                                    let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
-
-                                    // Try to reprocess the last prevalidated block
-                                    match timeout(
-                                        Duration::from_secs(retry_block_request_timeout_secs),
-                                        gossip_data_handler.pull_and_process_block(
-                                            retry_block.block_hash,
-                                            sync_state.is_syncing_from_a_trusted_peer(),
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(())) => {
-                                            debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
-                                        }
-                                        Ok(Err(e)) => {
-                                            warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
-                                        }
-                                        Err(_) => {
-                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
-                                        }
-                                    }
+                                Ok(Ok(())) => {
+                                    debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
+                                    // Give some time for validation to start, then continue the loop
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
-                                Ok(_) => {
-                                    warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                                Ok(Err(e)) => {
+                                    warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
                                 }
-                                Err(e) => {
-                                    warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, e);
+                                Err(_) => {
+                                    warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
                                 }
                             }
-
-                            // Wait a bit before next retry
-                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                        Ok(_) => {
+                            warn!(
+                                "Sync task: Retry attempt returned empty index for height {}",
+                                retry_height
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Sync task: Failed to get retry block index for height {}: {}",
+                                retry_height, err
+                            );
                         }
                     }
-                }
-            }
 
-            if !wait_success {
-                error!("Sync task: All wait attempts failed, exiting sync");
-                return Err(ChainSyncError::Internal(
-                    "Failed to get queue slot after timeout and retries".to_string(),
-                ));
+                    // Final check: if still no active validations and queue is still full, fail
+                    // Use atomic check to avoid TOCTOU
+                    if sync_state.queue_full_with_no_active_validations() {
+                        error!("Sync task: Queue still full with no active validations after retry, exiting sync");
+                        return Err(ChainSyncError::Internal(
+                            "Failed to get queue slot after timeout and retries with no active validations".to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -1545,8 +1551,13 @@ mod tests {
                             GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
+                            let random_signer = NodeConfig::testing().new_random_signer();
+                            let mut mock_header = IrysBlockHeader::new_mock_header();
+                            random_signer
+                                .sign_block_header(&mut mock_header)
+                                .expect("to sign mock header");
                             GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
-                                IrysBlockHeader::new_mock_header(),
+                                mock_header,
                             ))))
                         }
                     }
@@ -1625,7 +1636,7 @@ mod tests {
             );
 
             let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
+                data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -1656,13 +1667,18 @@ mod tests {
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
-            // Wait for spawned tasks to complete their retries.
-            // pull_data_from_network sleeps 100ms between retry attempts, so we need
-            // to wait longer to ensure the retry for the first block completes.
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Wait for all block requests to complete (with timeout)
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(5);
+            while start.elapsed() < timeout {
+                let len = block_requests_clone.lock().unwrap().len();
+                if len >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
 
             let block_requests = block_requests_clone.lock().unwrap();
-            assert_eq!(block_requests.len(), 3);
             let requested_first_block = block_requests
                 .iter()
                 .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
@@ -1733,7 +1749,7 @@ mod tests {
                 true,
             );
 
-            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone());
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -1765,8 +1781,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, NodeInfo,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
+            Config, DatabaseProvider, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1798,7 +1814,7 @@ mod tests {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
                     GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
-                        IrysBlockHeader::new_mock_header(),
+                        irys_testing_utils::new_mock_signed_header(),
                     ))))
                 }
                 _ => GossipResponse::Accepted(None),
@@ -1886,8 +1902,7 @@ mod tests {
 
             // Build data handler
             let db = db.clone();
-            let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list_guard, db, sync_state.clone());
 
             // Execute helper
             pull_unique_highest_blocks::<_, _>(
@@ -2014,8 +2029,7 @@ mod tests {
             peer_list_guard.add_or_update_peer(peer2, true);
 
             let db = db.clone();
-            let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list_guard, db, sync_state.clone());
 
             pull_unique_highest_blocks::<_, _>(
                 &peer_list_guard,

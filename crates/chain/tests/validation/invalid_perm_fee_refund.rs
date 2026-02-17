@@ -10,11 +10,8 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, IrysAddress};
-use irys_types::{
-    DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
-    U256,
-};
+use irys_types::IrysAddress;
+use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256};
 use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
@@ -51,11 +48,12 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -77,24 +75,24 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_config = genesis_node.testing_peer_with_signer(&test_signer);
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
-    // Create a data transaction that appears promoted
-    let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-        tx: DataTransactionHeaderV1 {
-            id: H256::random(),
-            anchor: H256::zero(),
-            signer: test_signer.address(),
-            data_root: H256::random(),
-            data_size: 1024,
-            header_size: 0,
-            term_fee: U256::from(1000).into(),
-            perm_fee: Some(U256::from(2000).into()),
-            ledger_id: DataLedger::Submit as u32,
-            bundle_format: Some(0),
-            chain_id: 1,
-            signature: Default::default(),
-        },
-        metadata: irys_types::DataTransactionMetadata::with_promoted_height(2), // Mark as promoted!
-    });
+    // Create a properly signed data transaction that appears promoted
+    use irys_types::IrysTransactionCommon as _;
+    let mut data_tx = DataTransactionHeader::new(&genesis_config.consensus_config());
+    data_tx.data_root = H256::random();
+    data_tx.data_size = 1024;
+    data_tx.term_fee = U256::from(1000).into();
+    data_tx.perm_fee = Some(U256::from(2000).into());
+    data_tx.ledger_id = DataLedger::Submit as u32;
+
+    // Sign the transaction
+    data_tx = data_tx
+        .sign(&test_signer)
+        .expect("Failed to sign transaction");
+
+    // Wrap in V1 with promoted metadata
+    let DataTransactionHeader::V1(mut tx_with_meta) = data_tx;
+    tx_with_meta.metadata = irys_types::DataTransactionMetadata::with_promoted_height(2);
+    let data_tx = DataTransactionHeader::V1(tx_with_meta);
 
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (
@@ -112,20 +110,14 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -133,16 +125,10 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(
-        &peer_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), false).await?;
 
     // Verify the PEER node rejected the block
-    let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&peer_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -151,7 +137,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
     // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
-    let reth_block_result = peer_node.get_evm_block_by_hash(block.evm_block_hash);
+    let reth_block_result = peer_node.get_evm_block_by_hash(block.header().evm_block_hash);
     assert!(
         reth_block_result.is_err(),
         "Block should not exist in peer's reth - shadow validation should have prevented submission"
@@ -195,11 +181,12 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -236,20 +223,14 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -257,16 +238,10 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(
-        &peer_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), false).await?;
 
     // Verify the PEER node rejected the block
-    let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&peer_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -275,7 +250,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
     // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
-    let reth_block_result = peer_node.get_evm_block_by_hash(block.evm_block_hash);
+    let reth_block_result = peer_node.get_evm_block_by_hash(block.header().evm_block_hash);
     assert!(
         reth_block_result.is_err(),
         "Block should not exist in peer's reth - shadow validation should have prevented submission"

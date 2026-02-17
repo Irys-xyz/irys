@@ -5,6 +5,7 @@ pub mod peer_stats;
 
 use crate::{
     chunk_fetcher::ChunkFetcherFactory,
+    metrics,
     packing_service::types::{UnpackingPriority, UnpackingRequest},
     services::ServiceSenders,
 };
@@ -100,6 +101,7 @@ impl DataSyncServiceInner {
                 peer_address: peer_addr,
                 chunk,
             } => {
+                metrics::record_data_sync_chunk_completed();
                 if let Err(e) = self
                     .on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
                     .await
@@ -115,6 +117,7 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_addr,
             } => {
+                metrics::record_data_sync_chunk_failure();
                 if let Err(e) = self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr) {
                     error!(
                         "Failed to handle chunk failure for storage_module {} chunk_offset {} from peer {}: {e:?}",
@@ -127,6 +130,7 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_address: peer_addr,
             } => {
+                metrics::record_data_sync_chunk_failure();
                 if let Err(e) = self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr) {
                     error!(
                         "Failed to handle chunk timeout for storage_module {} chunk_offset {} from peer {}: {e:?}",
@@ -340,6 +344,9 @@ impl DataSyncServiceInner {
         self.sync_peer_partition_assignments();
         self.create_chunk_orchestrators();
         self.update_orchestrator_peers();
+        metrics::record_data_sync_active_peers(
+            self.active_peer_bandwidth_managers.read().unwrap().len() as u64,
+        );
     }
 
     /// Synchronizes peer bandwidth managers with current network peers and local

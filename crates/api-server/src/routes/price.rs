@@ -63,18 +63,15 @@ pub async fn get_price(
                 .last()
                 .ok_or(("Empty canonical chain", StatusCode::BAD_REQUEST))?;
             let ema = tree
-                .get_ema_snapshot(&last_block_entry.block_hash)
+                .get_ema_snapshot(&last_block_entry.block_hash())
                 .ok_or(("EMA snapshot not available", StatusCode::BAD_REQUEST))?;
             // Get the actual block to access its timestamp
-            let last_block = tree
-                .get_block(&last_block_entry.block_hash)
-                .ok_or(("Block not found", StatusCode::BAD_REQUEST))?;
             // Convert block timestamp from millis to seconds for hardfork params
-            let latest_block_timestamp_secs = last_block.timestamp_secs();
+            let latest_block_timestamp_secs = last_block_entry.header().timestamp_secs();
             drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = last_block_entry.height;
+            let tip_height = last_block_entry.height();
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -151,6 +148,16 @@ pub async fn get_price(
         }
         // TODO: support other term ledgers here
         DataLedger::Submit => Err(("Term ledger not supported", StatusCode::BAD_REQUEST).into()),
+        DataLedger::OneYear => Err((
+            "OneYear term ledger pricing not implemented",
+            StatusCode::BAD_REQUEST,
+        )
+            .into()),
+        DataLedger::ThirtyDay => Err((
+            "ThirtyDay term ledger pricing not implemented",
+            StatusCode::BAD_REQUEST,
+        )
+            .into()),
     }
 }
 

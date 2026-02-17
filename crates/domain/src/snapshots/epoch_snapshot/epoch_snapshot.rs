@@ -1,16 +1,15 @@
-use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
+use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{ExpiringPartitionInfo, Ledgers};
-use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
+    CommitmentStatus, DataLedger, IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
+    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, IrysAddress,
     PartitionChunkOffset,
 };
 use openssl::sha;
@@ -104,6 +103,9 @@ pub enum EpochSnapshotError {
     /// Unstake attempted while pledges still active
     #[error("unstake for signer {signer:?} has active pledges: {remaining}")]
     UnstakeHasActivePledges { signer: IrysAddress, remaining: u64 },
+    /// UpdateRewardAddress signer does not have an active stake
+    #[error("update reward address signer {signer:?} is not currently staked")]
+    UpdateRewardAddressSignerNotStaked { signer: IrysAddress },
 }
 
 impl EpochSnapshot {
@@ -139,6 +141,17 @@ impl EpochSnapshot {
         let _storage_module_info = new_self.map_storage_modules_to_partition_assignments();
 
         new_self
+    }
+
+    /// Resolves a miner address to their configured reward address.
+    /// Returns the reward_address from the stake entry if present, falling back to miner_address
+    /// if there is no stake entry.
+    pub fn resolve_reward_address(&self, miner_address: IrysAddress) -> IrysAddress {
+        self.commitment_state
+            .stake_commitments
+            .get(&miner_address)
+            .map(|entry| entry.reward_address)
+            .unwrap_or(miner_address)
     }
 
     pub fn replay_epoch_data(
@@ -298,6 +311,8 @@ impl EpochSnapshot {
 
         self.apply_unstakes(&new_epoch_commitments)?;
 
+        self.apply_update_reward_addresses(&new_epoch_commitments)?;
+
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
@@ -318,7 +333,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentTypeV1::Unstake = &commitment.commitment_type() else {
+            let irys_types::CommitmentTypeV2::Unstake = &commitment.commitment_type() else {
                 continue;
             };
             let signer = commitment.signer();
@@ -341,6 +356,50 @@ impl EpochSnapshot {
             }
 
             debug!(tx.signer = %signer, "unstake_applied");
+        }
+        Ok(())
+    }
+
+    /// Applies update reward address operations found in a set of epoch commitments.
+    ///
+    /// Behavior:
+    /// - Verifies the signer has an active stake before applying.
+    /// - Updates the stake entry's reward_address field to the new address.
+    /// - Panics if duplicate signers are detected (CommitmentSnapshot guarantees uniqueness).
+    pub fn apply_update_reward_addresses(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> Result<(), EpochSnapshotError> {
+        let mut seen_signers: HashSet<IrysAddress> = HashSet::new();
+
+        for commitment in commitments {
+            let irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address } =
+                &commitment.commitment_type()
+            else {
+                continue;
+            };
+            let signer = commitment.signer();
+
+            // Panic on duplicate - CommitmentSnapshot should guarantee uniqueness
+            assert!(
+                seen_signers.insert(signer),
+                "Data consistency fault: multiple UpdateRewardAddress transactions for signer {}",
+                signer
+            );
+
+            let stake_entry = self
+                .commitment_state
+                .stake_commitments
+                .get_mut(&signer)
+                .ok_or(EpochSnapshotError::UpdateRewardAddressSignerNotStaked { signer })?;
+
+            stake_entry.reward_address = *new_reward_address;
+
+            debug!(
+                tx.signer = %signer,
+                tx.new_reward_address = %new_reward_address,
+                "update_reward_address_applied"
+            );
         }
         Ok(())
     }
@@ -575,25 +634,24 @@ impl EpochSnapshot {
     /// Computes active capacity partitions available for pledges based on
     /// data partitions and scaling factor
     pub fn get_num_capacity_partitions(num_data_partitions: u64, config: &ConsensusConfig) -> u64 {
+        use num_bigfloat::BigFloat;
+
         // Every ledger needs at least one slot filled with data partitions
         let min_count = DataLedger::ALL.len() as u64 * config.num_partitions_per_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
 
-        // Deterministic computation using rug with fixed precision and explicit rounding
-        let p: u32 = 128;
-        let base_f = rug::Float::with_val(p, base_count);
-        let log10 = rug::Float::with_val(p, base_f.log10());
-        let trunc = rug_truncate_to_3_decimals(&log10);
+        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
+        let base_f = BigFloat::from_u64(base_count);
+        let log10 = base_f.log10();
+        let trunc = bigfloat_truncate_to_3_decimals(&log10);
 
-        let scalar = rug::Float::with_val(p, config.epoch.capacity_scalar);
-        let scaled = rug::Float::with_val(p, trunc * scalar);
-        let scaled_trunc = rug_truncate_to_3_decimals(&scaled);
+        let scalar = BigFloat::from_u64(config.epoch.capacity_scalar);
+        let scaled = trunc * scalar;
+        let scaled_trunc = bigfloat_truncate_to_3_decimals(&scaled);
 
         // Deterministic ceil to integer, then convert to u64
-        let (ceil_int, _) = scaled_trunc
-            .to_integer_round(rug::float::Round::Up)
-            .expect("value must be finite (not NaN/Inf)");
-        ceil_int
+        scaled_trunc
+            .ceil()
             .to_u64()
             .expect("ceiled value must be in 0..=u64::MAX")
     }
@@ -749,14 +807,16 @@ impl EpochSnapshot {
         let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments.iter() {
             match commitment_tx.commitment_type() {
-                irys_types::CommitmentTypeV1::Stake => stake_commitments.push(commitment_tx),
-                irys_types::CommitmentTypeV1::Pledge { .. } => {
+                irys_types::CommitmentTypeV2::Stake => stake_commitments.push(commitment_tx),
+                irys_types::CommitmentTypeV2::Pledge { .. } => {
                     pledge_commitments.push(commitment_tx)
                 }
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
-                irys_types::CommitmentTypeV1::Unpledge { .. } => {}
+                irys_types::CommitmentTypeV2::Unpledge { .. } => {}
                 // Unstakes are applied in `apply_unstakes()` after pledges have been processed
-                irys_types::CommitmentTypeV1::Unstake => {}
+                irys_types::CommitmentTypeV2::Unstake => {}
+                // UpdateRewardAddress is handled by `apply_update_reward_addresses()` during epoch processing
+                irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {}
             }
         }
 
@@ -764,12 +824,13 @@ impl EpochSnapshot {
         for stake_commitment in stake_commitments {
             // Register the commitment in the state
             // Assumption: Commitments are pre-validated, so we don't check for duplicates
-            let value = CommitmentStateEntry {
+            let value = StakeEntry {
                 id: stake_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer: stake_commitment.signer(),
                 amount: stake_commitment.value(),
+                // Initialize reward_address to signer - can be updated via UpdateRewardAddress tx
+                reward_address: stake_commitment.signer(),
             };
             self.commitment_state
                 .stake_commitments
@@ -792,12 +853,12 @@ impl EpochSnapshot {
             }
 
             // Create the state entry for the pledge commitment
-            let value = CommitmentStateEntry {
+            let value = PledgeEntry {
                 id: pledge_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer: pledge_commitment.signer(),
                 amount: pledge_commitment.value(),
+                partition_hash: None, // Assigned later via assign_partition_hashes_to_pledges
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
@@ -825,7 +886,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentTypeV1::Unpledge { partition_hash, .. } =
+            let irys_types::CommitmentTypeV2::Unpledge { partition_hash, .. } =
                 &commitment.commitment_type()
             else {
                 continue;
@@ -929,7 +990,7 @@ impl EpochSnapshot {
         let mut unassigned_parts: VecDeque<H256> = unassigned_partition_hashes.into();
 
         // Make a list of all the active pledges with no assigned partition hash
-        let mut unassigned_pledges: Vec<CommitmentStateEntry> = self
+        let mut unassigned_pledges: Vec<PledgeEntry> = self
             .commitment_state
             .pledge_commitments
             .values()
@@ -1290,33 +1351,14 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
     Ok(result)
 }
 
-/// Truncate a `rug::Float` value to exactly 3 decimal places deterministically.
+/// Truncate a `BigFloat` value to exactly 3 decimal places deterministically.
 ///
-/// Implementation details:
-/// - Uses the input's precision (`value.prec()`) to construct all intermediates,
-///   ensuring we don't accidentally lower precision during scaling.
-/// - Multiplies by 1000 to shift the third decimal place to the integer part.
-/// - Applies `Round::Down` (i.e., truncation toward negative infinity) to get the integer,
-///   which matches our previous "truncate" semantics and is deterministic across platforms.
-/// - Divides by 1000 to shift back to the original scale.
-///
-/// Why not round? We deliberately do not use rounding here because the capacity
-/// computation must be stable at 3-decimal granularity and avoid cross-platform
-/// f64 rounding/ULP differences. Truncation via MPFR (`rug`) with explicit
-/// `Round::Down` guarantees the same result on all platforms for the same input
-/// and precision.
-fn rug_truncate_to_3_decimals(value: &rug::Float) -> rug::Float {
-    // Preserve the input's precision for all intermediate calculations
-    let p = value.prec();
-
-    // Multiply by 1000 to bring 3 decimal places into the integer domain without allocating a Float
-
-    // Multiply and then truncate toward -inf to implement "truncate" semantics
-    let tmp = rug::Float::with_val(p, value * 1000);
-    let (int, _) = tmp.to_integer_round(rug::float::Round::Down).unwrap();
-
-    // Scale back down to 3-decimal fixed point
-    rug::Float::with_val(p, int) / 1000
+/// Multiplies by 1000, floors to integer, divides by 1000. Pure-Rust
+/// `num-bigfloat` (~40 decimal digits) is deterministic across all platforms.
+fn bigfloat_truncate_to_3_decimals(value: &num_bigfloat::BigFloat) -> num_bigfloat::BigFloat {
+    let thousand = num_bigfloat::BigFloat::from_u32(1000);
+    let tmp = *value * thousand;
+    tmp.floor() / thousand
 }
 
 #[cfg(test)]
@@ -1442,7 +1484,7 @@ mod tests {
     mod unpledge_processing {
         use super::*;
         use irys_types::CommitmentStatus;
-        use irys_types::{transaction::CommitmentTypeV1, U256};
+        use irys_types::{transaction::CommitmentTypeV2, U256};
 
         fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
             let mut snapshot = EpochSnapshot::default();
@@ -1481,12 +1523,12 @@ mod tests {
             snapshot.all_active_partitions.push(ph);
 
             // Seed a pledge entry tied to the partition hash
-            let pledge_entry = CommitmentStateEntry {
+            let pledge_entry = PledgeEntry {
                 id: H256::zero(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: Some(ph),
                 signer: miner,
                 amount: U256::zero(),
+                partition_hash: Some(ph),
             };
             snapshot
                 .commitment_state
@@ -1505,7 +1547,7 @@ mod tests {
         ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);
             tx.set_signer(signer);
-            tx.set_commitment_type(CommitmentTypeV1::Unpledge {
+            tx.set_commitment_type(CommitmentTypeV2::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: ph,
             });

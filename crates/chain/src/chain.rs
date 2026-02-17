@@ -1,4 +1,5 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
+use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
@@ -32,7 +33,6 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::reth_db::DatabaseError;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
@@ -167,6 +167,7 @@ impl IrysNodeCtx {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
+        metrics::record_node_shutdown(reason.as_label());
 
         // Cancel the backfill task for graceful shutdown
         self.backfill_cancel.cancel();
@@ -219,7 +220,7 @@ impl IrysNodeCtx {
 
             match tokio::time::timeout(
                 Duration::from_secs(15),
-                tokio::task::spawn_blocking(irys_utils::telemetry::flush_telemetry),
+                tokio::task::spawn_blocking(irys_utils::flush_telemetry),
             )
             .await
             {
@@ -408,11 +409,11 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        // Initialize database early to get/create peer_id
-        let irys_db = init_irys_db(&node_config)?;
+        // Get or create peer_id from file
+        let peer_id = get_or_create_peer_id(&node_config)?;
 
-        // Get or create peer_id from database
-        let peer_id = get_or_create_peer_id(&irys_db)?;
+        // Initialize database
+        let irys_db = init_irys_db(&node_config)?;
 
         let config = Config::new(node_config, peer_id);
         config.validate()?;
@@ -676,7 +677,7 @@ impl IrysNode {
         genesis_block: &IrysBlockHeader,
         genesis_commitments: &[CommitmentTransaction],
         irys_db: &DatabaseProvider,
-        block_index: &mut BlockIndex,
+        block_index: &BlockIndex,
     ) -> eyre::Result<()> {
         info!("Initializing database with genesis block and commitments");
 
@@ -716,25 +717,43 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis)
     #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
-    pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
-        // Determine node startup mode
-        let config = &self.config;
-        let node_mode = &config.node_config.node_mode;
+    pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
+        // Determine node startup mode (Copy, avoids borrowing self.config)
+        let node_mode = self.config.node_config.node_mode;
 
         // Use the irys_db already initialized in new()
         let irys_db = self.irys_db.clone();
-        let mut block_index = BlockIndex::new(&config.node_config)
-            .await
+        let block_index = BlockIndex::new(&self.config.node_config, irys_db.clone())
             .expect("initializing a new block index should be doable");
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments, reth_chainspec) = self
-            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
+            .get_or_create_genesis_info(&node_mode, &irys_db, &block_index)
             .await?;
 
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
         info!("Node starting with genesis hash: {}", genesis_hash);
+
+        // Genesis node: now that the genesis hash is known, set expected_genesis_hash
+        // so our consensus config hash matches peer nodes during P2P handshakes.
+        if self.config.consensus.expected_genesis_hash.is_none() {
+            info!(
+                "Setting expected_genesis_hash to {} (was None)",
+                genesis_hash
+            );
+            self.config = self.config.clone().with_expected_genesis_hash(genesis_hash);
+            info!(
+                "Consensus config hash after update: {}",
+                self.config.consensus.keccak256_hash()
+            );
+        } else {
+            info!(
+                "expected_genesis_hash already set to {:?}, consensus hash: {}",
+                self.config.consensus.expected_genesis_hash,
+                self.config.consensus.keccak256_hash()
+            );
+        }
 
         // Persist the genesis block to the block_index and db if it's not there already
         if block_index.num_blocks() == 0 {
@@ -742,7 +761,7 @@ impl IrysNode {
                 &genesis_block,
                 &genesis_commitments,
                 &irys_db,
-                &mut block_index,
+                &block_index,
             )?;
         }
 
@@ -862,12 +881,8 @@ impl IrysNode {
                 sleep(Duration::from_secs(2)).await;
                 let config = config;
                 let latest_block = latest_block;
-                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-                let mut validation_tracker = BlockValidationTracker::new(
-                    block_tree_guard.clone(),
-                    service_senders,
-                    MAX_WAIT_TIME,
-                );
+                let mut validation_tracker =
+                    BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
                 // wait for any pending blocks to finish validating
                 let latest_hash = validation_tracker
                     .wait_for_validation()
@@ -879,7 +894,7 @@ impl IrysNode {
                     let btrg = block_tree_guard.read();
                     debug!(
                         "Checking stakes & pledges at height {}, latest hash: {}",
-                        btrg.get_canonical_chain().0.last().unwrap().height,
+                        btrg.get_canonical_chain().0.last().unwrap().height(),
                         &latest_hash
                     );
                 };
@@ -898,8 +913,7 @@ impl IrysNode {
             });
         }
 
-        // spawn a task to periodically log system info, but not in tests
-        #[cfg(not(test))]
+        // spawn a task to periodically log system info
         {
             use irys_actors::MempoolServiceMessage;
 
@@ -917,6 +931,8 @@ impl IrysNode {
                 .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
+            let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
+            let storage_modules_guard = ctx.storage_modules_guard.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -946,7 +962,28 @@ impl IrysNode {
                     info!(
                     target = "node-state",
                     "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
-                )
+                );
+
+                    metrics::record_block_height(info.height);
+                    metrics::record_peer_count(info.peer_count as u64);
+                    metrics::record_pending_chunks(mempool_status.pending_chunks_count as u64);
+                    metrics::record_pending_data_txs(mempool_status.data_tx_count as u64);
+                    metrics::record_sync_state(!info.is_syncing);
+                    metrics::record_node_up();
+                    metrics::record_node_uptime();
+                    metrics::record_vdf_mining_enabled(
+                        is_vdf_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    let modules = storage_modules_guard.read();
+                    let total = modules.len() as u64;
+                    let assigned = modules
+                        .iter()
+                        .filter(|sm| sm.partition_assignment().is_some())
+                        .count() as u64;
+                    drop(modules);
+                    metrics::record_storage_modules_total(total);
+                    metrics::record_partitions_assigned(assigned);
+                    metrics::record_partitions_unassigned(total - assigned);
                 }
             });
         }
@@ -984,8 +1021,6 @@ impl IrysNode {
                 move || {
                     rt_handle.block_on(
                         async move {
-                            let block_index = Arc::new(RwLock::new(block_index));
-
                             // start the rest of the services
                             let (
                                 irys_node,
@@ -1173,7 +1208,7 @@ impl IrysNode {
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
         vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
         task_exec: &TaskExecutor,
@@ -1351,6 +1386,7 @@ impl IrysNode {
             &storage_submodules_config,
             &config,
             &service_senders,
+            sync_state.clone(),
             runtime_handle.clone(),
         );
 
@@ -1474,6 +1510,7 @@ impl IrysNode {
             execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
+            sync_state.clone(),
         );
 
         // create the block reward curve
@@ -1559,6 +1596,7 @@ impl IrysNode {
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
+        metrics::record_vdf_global_step(global_step_number);
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
@@ -1593,6 +1631,7 @@ impl IrysNode {
             vdf_state,
             atomic_global_step_number,
             block_status_provider,
+            sync_state.clone(),
         );
 
         // set up chunk provider
@@ -1616,7 +1655,7 @@ impl IrysNode {
         let fcu_markers = {
             let block_index = block_index_guard.read();
             ForkChoiceMarkers::from_index(
-                &block_index,
+                block_index,
                 &irys_db,
                 config.consensus.block_migration_depth as usize,
                 config.consensus.block_tree_depth as usize,
@@ -1645,6 +1684,7 @@ impl IrysNode {
             fcu.finalized = %fcu_markers.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
+        metrics::record_reth_fcu_head_height(fcu_markers.head.height);
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
@@ -1825,6 +1865,7 @@ impl IrysNode {
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
+        chain_sync_state: ChainSyncState,
     ) -> JoinHandle<()> {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
@@ -1872,6 +1913,7 @@ impl IrysNode {
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
+                    chain_sync_state,
                 )
             }
         });
@@ -1958,7 +2000,7 @@ impl IrysNode {
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -2123,7 +2165,6 @@ fn read_latest_block_data(
     // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
-        .cloned()
         .expect("block index must have at least one entry");
     let latest_block_height = block_index.latest_height();
     let latest_block = Arc::new(
@@ -2228,19 +2269,51 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
     Ok(irys_db)
 }
 
-/// Gets the peer_id from the database, or generates a new one and stores it.
-pub fn get_or_create_peer_id(db: &DatabaseProvider) -> eyre::Result<irys_types::IrysPeerId> {
-    let peer_id = db.update(|tx| -> Result<irys_types::IrysPeerId, DatabaseError> {
-        if let Some(existing_peer_id) = database::get_peer_id(tx)? {
-            info!("Loaded peer_id from database: {:?}", existing_peer_id);
-            return Ok(existing_peer_id);
-        }
+/// Gets the peer_id from the peer key file, or generates a new keypair and stores it.
+///
+/// The private key is stored as raw 32 bytes in `<peer_info_dir>/peer_key.bin`.
+/// The PeerId is derived from the key using standard secp256k1 address derivation.
+pub fn get_or_create_peer_id(node_config: &NodeConfig) -> eyre::Result<irys_types::IrysPeerId> {
+    let peer_info_dir = node_config.peer_info_dir();
+    let key_path = peer_info_dir.join("peer_key.bin");
 
-        let new_peer_id = irys_types::IrysPeerId::random();
-        database::set_peer_id(tx, new_peer_id)?;
-        info!("Generated new peer_id: {:?}", new_peer_id);
-        Ok(new_peer_id)
-    })??;
+    let signing_key = match std::fs::read(&key_path) {
+        Ok(bytes) => {
+            let key = k256::ecdsa::SigningKey::from_slice(&bytes)
+                .with_context(|| "Failed to parse peer key file as secp256k1 private key")?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!("Loaded peer_id from {}: {:?}", key_path.display(), peer_id);
+            key
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use rand::rngs::OsRng;
+            let key = k256::ecdsa::SigningKey::random(&mut OsRng);
+            std::fs::create_dir_all(&peer_info_dir).with_context(|| {
+                format!(
+                    "Failed to create peer info directory {}",
+                    peer_info_dir.display()
+                )
+            })?;
+            std::fs::write(&key_path, key.to_bytes().as_slice())
+                .with_context(|| format!("Failed to write peer key to {}", key_path.display()))?;
+            let peer_id =
+                irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+            info!(
+                "Generated new peer_id, key saved to {}: {:?}",
+                key_path.display(),
+                peer_id
+            );
+            key
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read peer key from {}", key_path.display()));
+        }
+    };
+
+    let peer_id =
+        irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&signing_key));
     Ok(peer_id)
 }
 
@@ -2363,6 +2436,7 @@ async fn stake_and_pledge(
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         total_cost += pledge_tx.total_cost();
+        metrics::record_pledge_tx_posted();
 
         debug!(
             "Posted pledge tx {}/{} {:?} (value: {}, fee {})",
