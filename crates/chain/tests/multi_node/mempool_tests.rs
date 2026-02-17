@@ -876,7 +876,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn slow_heavy_mempool_publish_fork_recovery_test(
+async fn slow_heavy3_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     std::env::set_var(
@@ -993,10 +993,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     network_height = a_node.get_canonical_chain_height().await;
 
     b_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     c_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
 
     // disable P2P/gossip
@@ -1091,7 +1091,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     );
 
     b_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     b_node
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
@@ -1118,7 +1118,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         // wait for a reorg event
         let _a1_b2_reorg = a1_b2_reorg_fut.await?;
         a_node
-            .wait_until_height(network_height, seconds_to_wait)
+            .wait_for_block_at_height(network_height, seconds_to_wait)
             .await?;
         assert_eq!(
             a_node.get_block_by_height(network_height).await?,
@@ -1252,7 +1252,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
     // wait for height and index on node a
     a_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     a_node
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
@@ -1940,7 +1940,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
+async fn slow_heavy3_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -2047,8 +2047,8 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     genesis.mine_block().await.unwrap();
 
     // Wait for peers to sync and start packing
-    let _block_hash = peer1.wait_until_height(2, seconds_to_wait).await?;
-    let _block_hash = peer2.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_for_block_at_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_for_block_at_height(2, seconds_to_wait).await?;
     peer1.wait_for_packing(seconds_to_wait).await;
     peer2.wait_for_packing(seconds_to_wait).await;
 
