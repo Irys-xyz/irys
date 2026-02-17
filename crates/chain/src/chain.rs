@@ -1,4 +1,5 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
+use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
@@ -163,6 +164,7 @@ impl IrysNodeCtx {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
+        metrics::record_node_shutdown(reason.as_label());
 
         // Cancel the backfill task for graceful shutdown
         self.backfill_cancel.cancel();
@@ -215,7 +217,7 @@ impl IrysNodeCtx {
 
             match tokio::time::timeout(
                 Duration::from_secs(15),
-                tokio::task::spawn_blocking(irys_utils::telemetry::flush_telemetry),
+                tokio::task::spawn_blocking(irys_utils::flush_telemetry),
             )
             .await
             {
@@ -930,8 +932,7 @@ impl IrysNode {
             });
         }
 
-        // spawn a task to periodically log system info, but not in tests
-        #[cfg(not(test))]
+        // spawn a task to periodically log system info
         {
             use irys_actors::MempoolServiceMessage;
 
@@ -949,6 +950,8 @@ impl IrysNode {
                 .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
+            let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
+            let storage_modules_guard = ctx.storage_modules_guard.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -978,7 +981,28 @@ impl IrysNode {
                     info!(
                     target = "node-state",
                     "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
-                )
+                );
+
+                    metrics::record_block_height(info.height);
+                    metrics::record_peer_count(info.peer_count as u64);
+                    metrics::record_pending_chunks(mempool_status.pending_chunks_count as u64);
+                    metrics::record_pending_data_txs(mempool_status.data_tx_count as u64);
+                    metrics::record_sync_state(!info.is_syncing);
+                    metrics::record_node_up();
+                    metrics::record_node_uptime();
+                    metrics::record_vdf_mining_enabled(
+                        is_vdf_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    let modules = storage_modules_guard.read();
+                    let total = modules.len() as u64;
+                    let assigned = modules
+                        .iter()
+                        .filter(|sm| sm.partition_assignment().is_some())
+                        .count() as u64;
+                    drop(modules);
+                    metrics::record_storage_modules_total(total);
+                    metrics::record_partitions_assigned(assigned);
+                    metrics::record_partitions_unassigned(total - assigned);
                 }
             });
         }
@@ -1569,6 +1593,7 @@ impl IrysNode {
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
+        metrics::record_vdf_global_step(global_step_number);
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
@@ -1652,6 +1677,7 @@ impl IrysNode {
             fcu.finalized = %fcu_markers.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
+        metrics::record_reth_fcu_head_height(fcu_markers.head.height);
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
@@ -2399,6 +2425,7 @@ async fn stake_and_pledge(
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         total_cost += pledge_tx.total_cost();
+        metrics::record_pledge_tx_posted();
 
         debug!(
             "Posted pledge tx {}/{} {:?} (value: {}, fee {})",

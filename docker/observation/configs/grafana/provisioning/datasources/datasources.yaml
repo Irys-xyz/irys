@@ -1,0 +1,57 @@
+# Grafana Data Sources Configuration
+# Auto-provisions Tempo, Prometheus, and Elasticsearch
+
+apiVersion: 1
+
+datasources:
+  # Tempo - Traces
+  - name: Tempo
+    type: tempo
+    access: proxy
+    uid: tempo
+    url: http://tempo:3200
+    isDefault: false
+    editable: true
+    jsonData:
+      httpMethod: GET
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+        tags: [{key: 'service.name', value: 'service'}]
+      serviceMap:
+        datasourceUid: prometheus
+      search:
+        hide: false
+      nodeGraph:
+        enabled: true
+
+  # Elasticsearch - Logs (full-text search via OTLP)
+  - name: Elasticsearch
+    type: elasticsearch
+    access: proxy
+    uid: elasticsearch
+    url: http://elasticsearch:9200
+    isDefault: true
+    editable: true
+    jsonData:
+      index: "irys-logs*"
+      timeField: "@timestamp"
+      esVersion: "8.17.0"
+      logMessageField: message
+      logLevelField: log.level
+      maxConcurrentShardRequests: 5
+
+  # Prometheus - Metrics
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: false
+    editable: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo

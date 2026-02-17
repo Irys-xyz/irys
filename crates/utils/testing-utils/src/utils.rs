@@ -132,8 +132,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         // Flush OpenTelemetry before calling original hook
         #[cfg(feature = "telemetry")]
         {
-            use irys_utils::telemetry;
-            if telemetry::flush_telemetry().is_ok() {
+            if irys_utils::flush_telemetry().is_ok() {
                 // Give batch processor time to send data
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }

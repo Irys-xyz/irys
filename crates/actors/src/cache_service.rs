@@ -2,6 +2,7 @@ use crate::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
 use crate::mempool_service::Inner;
+use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
 };
@@ -218,6 +219,7 @@ impl InnerCacheTask {
             (chunk_cache_size / GIGABYTE as u64),
             ingress_proof_count
         );
+        metrics::record_cache_stats(chunk_cache_count, chunk_cache_size);
 
         // Attempt pruning cache only if we're above `prune_at_capacity_percent`% of max capacity.
         let max_cache_size_bytes = self.config.node_config.cache.max_cache_size_bytes;
