@@ -1656,10 +1656,10 @@ impl Inner {
         self.mempool_state.wipe_blacklists().await;
     }
 
-    /// After restoring the mempool from disk, reconstruct metadata fields (promoted_height)
-    /// from the database. The `#[serde(skip)]` on `DataTransactionMetadata` means these
-    /// fields are lost during serialization. The DB is authoritative since `BlockMigrator`
-    /// persists them at confirmation time.
+    /// After restoring the mempool from disk, reconstruct metadata fields (included_height,
+    /// promoted_height) from the database. The `#[serde(skip)]` on `DataTransactionMetadata`
+    /// means these fields are lost during serialization. The DB is authoritative since
+    /// `BlockMigrator` persists them at confirmation time.
     pub async fn reconstruct_metadata_from_db(&self) {
         let mut state = self.mempool_state.0.write().await;
         let mut reconstructed = 0_u64;
@@ -1674,8 +1674,16 @@ impl Inner {
                 }
             };
             if let Some(meta) = db_meta {
+                let mut changed = false;
+                if meta.included_height.is_some() {
+                    tx_header.metadata_mut().included_height = meta.included_height;
+                    changed = true;
+                }
                 if meta.promoted_height.is_some() {
                     tx_header.metadata_mut().promoted_height = meta.promoted_height;
+                    changed = true;
+                }
+                if changed {
                     reconstructed += 1;
                 }
             }
@@ -1683,7 +1691,7 @@ impl Inner {
         if reconstructed > 0 {
             tracing::info!(
                 reconstructed,
-                "Reconstructed promoted_height from DB for mempool txs"
+                "Reconstructed metadata (included_height, promoted_height) from DB for mempool txs"
             );
         }
     }

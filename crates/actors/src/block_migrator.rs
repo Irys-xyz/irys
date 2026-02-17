@@ -131,6 +131,104 @@ impl BlockMigrator {
         Ok(())
     }
 
+    /// Atomically clears orphaned metadata and writes new fork metadata.
+    /// Called during reorgs to ensure DB consistency — if clearing old fork
+    /// metadata succeeds but writing new fork metadata fails, the DB would
+    /// be left in an inconsistent state. This method prevents that by
+    /// performing both operations in a single DB transaction.
+    pub fn apply_reorg_metadata(
+        &self,
+        old_fork: &[Arc<IrysBlockHeader>],
+        new_fork: &[Arc<IrysBlockHeader>],
+    ) -> eyre::Result<()> {
+        // Collect all tx IDs from old fork (for clearing)
+        let mut old_data_tx_ids: Vec<H256> = Vec::new();
+        let mut old_commitment_tx_ids: Vec<H256> = Vec::new();
+        for block in old_fork {
+            let submit_tx_ids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+            let publish_tx_ids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+            old_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
+            old_commitment_tx_ids.extend(commitment_tx_ids);
+        }
+
+        // Collect per-block info from new fork (for writing)
+        struct NewBlockInfo {
+            height: u64,
+            all_data_tx_ids: Vec<H256>,
+            commitment_tx_ids: Vec<H256>,
+            publish_tx_ids: Vec<H256>,
+        }
+        let new_blocks: Vec<NewBlockInfo> = new_fork
+            .iter()
+            .map(|block| {
+                let submit_tx_ids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+                let publish_tx_ids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+                let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+                let all_data_tx_ids: Vec<H256> = submit_tx_ids
+                    .iter()
+                    .chain(publish_tx_ids.iter())
+                    .copied()
+                    .collect();
+                NewBlockInfo {
+                    height: block.height,
+                    all_data_tx_ids,
+                    commitment_tx_ids,
+                    publish_tx_ids,
+                }
+            })
+            .collect();
+
+        // Single atomic DB transaction for both clear + write
+        self.db.update_eyre(|tx| {
+            // Clear old fork metadata
+            if !old_data_tx_ids.is_empty() {
+                irys_database::batch_clear_data_tx_metadata(tx, &old_data_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+            if !old_commitment_tx_ids.is_empty() {
+                irys_database::batch_clear_commitment_tx_metadata(tx, &old_commitment_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+            // Write new fork metadata
+            for info in &new_blocks {
+                if !info.all_data_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(
+                        tx,
+                        &info.all_data_tx_ids,
+                        info.height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                if !info.commitment_tx_ids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        &info.commitment_tx_ids,
+                        info.height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                if !info.publish_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_promoted_height(
+                        tx,
+                        &info.publish_tx_ids,
+                        info.height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+            }
+            Ok(())
+        })?;
+
+        info!(
+            old_blocks = old_fork.len(),
+            new_blocks = new_fork.len(),
+            "Atomically applied reorg metadata to DB"
+        );
+
+        Ok(())
+    }
+
     /// Validates continuity and collects sealed blocks from the cache.
     ///
     /// Separated from [`Self::process_migration`] so the caller can drop the

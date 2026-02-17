@@ -115,6 +115,14 @@ impl Inner {
 
         self.reprocess_all_txs().await?;
 
+        // Re-apply in-memory metadata for all blocks in the new fork.
+        // DB metadata was already written by BlockMigrator::persist_confirmed_metadata,
+        // but the mempool's in-memory state only gets BlockConfirmed for the tip.
+        for block in event.new_fork.iter() {
+            self.handle_block_confirmed_message(Arc::clone(block))
+                .await?;
+        }
+
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
     }

@@ -763,10 +763,7 @@ impl BlockTreeServiceInner {
         // BEFORE broadcasting the ReorgEvent to the mempool.
         let handled_reorg = if let Some(ref event) = reorg_event {
             self.block_migrator
-                .clear_orphaned_metadata(&event.old_fork)?;
-            for block in event.new_fork.iter() {
-                self.block_migrator.persist_confirmed_metadata(block)?;
-            }
+                .apply_reorg_metadata(&event.old_fork, &event.new_fork)?;
             true
         } else {
             false
@@ -776,7 +773,10 @@ impl BlockTreeServiceInner {
         if let Some(reorg_event) = reorg_event {
             // Broadcast reorg event using the shared sender
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
-                debug!("No reorg subscribers: {:?}", e);
+                error!(
+                    "Failed to broadcast reorg event - mempool state may be stale: {:?}",
+                    e
+                );
             }
         }
 
@@ -801,15 +801,8 @@ impl BlockTreeServiceInner {
             // During reorgs, metadata for the entire new fork was already written
             // above (after clearing orphaned metadata), so we skip this here.
             if !handled_reorg {
-                if let Err(e) = self
-                    .block_migrator
-                    .persist_confirmed_metadata(&markers.head)
-                {
-                    error!(
-                        "Failed to persist confirmed metadata for block {}: {}",
-                        markers.head.block_hash, e
-                    );
-                }
+                self.block_migrator
+                    .persist_confirmed_metadata(&markers.head)?;
             }
 
             // Delegate migration to BlockMigrator (validates continuity internally)
