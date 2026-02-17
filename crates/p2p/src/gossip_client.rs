@@ -23,7 +23,7 @@ use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
@@ -750,11 +750,11 @@ impl GossipClient {
             ),
             GossipDataV2::BlockHeader(header) => (
                 GossipRoutes::Block,
-                serde_json::to_vec(&self.create_request_v2((**header).clone())),
+                serde_json::to_vec(&self.create_request_v2(header.clone())),
             ),
             GossipDataV2::BlockBody(body) => (
                 GossipRoutes::BlockBody,
-                serde_json::to_vec(&self.create_request_v2((**body).clone())),
+                serde_json::to_vec(&self.create_request_v2(body.clone())),
             ),
             GossipDataV2::ExecutionPayload(payload) => (
                 GossipRoutes::ExecutionPayload,
@@ -765,7 +765,13 @@ impl GossipClient {
                 serde_json::to_vec(&self.create_request_v2(proof.clone())),
             ),
         };
-        json_result.map(|b| (route, bytes::Bytes::from(b))).ok()
+        match json_result {
+            Ok(b) => Some((route, bytes::Bytes::from(b))),
+            Err(e) => {
+                warn!(?route, "Failed to pre-serialize gossip data: {}", e);
+                None
+            }
+        }
     }
 
     /// Send pre-serialized JSON body to a V2 peer. Skips serialization — posts raw bytes.
@@ -839,6 +845,10 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
+            if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                record_gossip_outbound_error(gossip_error_type(&e));
+                return;
+            }
             let result = client
                 .send_preserialized(&peer.address.gossip, route, body)
                 .await;
@@ -1028,6 +1038,7 @@ impl GossipClient {
         }
     }
 
+    #[instrument(name = "send_data_internal", skip_all, fields(%route, ?protocol_version))]
     async fn send_data_internal<T, R>(
         &self,
         gossip_address: &SocketAddr,

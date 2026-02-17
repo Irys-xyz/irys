@@ -43,8 +43,8 @@ services:
       elasticsearch:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/otelcol-contrib", "--version"]
-      interval: 30s
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
       timeout: 5s
       retries: 3
       start_period: 15s
@@ -148,14 +148,14 @@ services:
 
   # Grafana Image Renderer - server-side PNG/PDF export
   grafana-image-renderer:
-    image: grafana/grafana-image-renderer:latest
+    image: grafana/grafana-image-renderer:5.5.1
     container_name: obs-grafana-image-renderer
     restart: unless-stopped
     networks:
       observation_network:
         ipv4_address: 172.23.0.107
     ports:
-      - "8081:8081"
+      - "${RENDERER_BIND_HOST:-127.0.0.1}:${RENDERER_PORT:-8081}:8081"
     environment:
       - ENABLE_METRICS=true
     healthcheck:
@@ -190,10 +190,14 @@ services:
       - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - tempo
-      - prometheus
-      - elasticsearch
-      - grafana-image-renderer
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      grafana-image-renderer:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 10s

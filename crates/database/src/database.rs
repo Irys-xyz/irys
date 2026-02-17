@@ -242,40 +242,14 @@ type IsDuplicate = bool;
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_root;
-    // Check if the data root exists
-    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+    if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            data_root
+            chunk.data_root
         ));
     }
 
-    let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
-    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
-        warn!(
-            "Chunk {} of {} is already cached, skipping..",
-            &chunk_path_hash, &data_root
-        );
-        return Ok(true);
-    }
-    let value = CachedChunkIndexEntry {
-        index: chunk.tx_offset,
-        meta: CachedChunkIndexMetadata {
-            chunk_path_hash,
-            updated_at: UnixTimestamp::now()
-                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
-        },
-    };
-
-    debug!(
-        "Caching chunk {} ({}) of {}",
-        &chunk.tx_offset, &chunk_path_hash, &data_root
-    );
-
-    tx.put::<CachedChunksIndex>(data_root, value)?;
-    tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
-    Ok(false)
+    cache_chunk_verified(tx, chunk)
 }
 
 /// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].

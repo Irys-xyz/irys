@@ -266,7 +266,7 @@ pub fn init_telemetry() -> Result<()> {
     let _ = TRACER_PROVIDER.set(tracer_provider.clone());
     let _ = METER_PROVIDER.set(meter_provider.clone());
 
-    opentelemetry::global::set_meter_provider(meter_provider.clone());
+    opentelemetry::global::set_meter_provider(meter_provider);
 
     // NOTE: We do NOT install a metrics recorder here because Reth's internal
     // EngineNodeLauncher calls install_prometheus_recorder() and will panic

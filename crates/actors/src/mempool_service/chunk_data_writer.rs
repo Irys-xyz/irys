@@ -10,7 +10,7 @@ const MAX_BATCH_SIZE: usize = 64;
 
 enum WriterCommand {
     WriteChunk(UnpackedChunk),
-    Flush(oneshot::Sender<()>),
+    Flush(oneshot::Sender<Result<(), QueueError>>),
 }
 
 /// Async write-behind buffer for chunk MDBX writes.
@@ -30,7 +30,7 @@ pub struct ChunkDataWriter {
 impl ChunkDataWriter {
     /// Spawn the background writer task and return the writer handle.
     pub fn spawn(db: DatabaseProvider, buffer_size: usize) -> Self {
-        let (tx, rx) = mpsc::channel(buffer_size);
+        let (tx, rx) = mpsc::channel(buffer_size.max(1));
         let pending_hashes = Arc::new(DashSet::new());
         let pending_chunk_counts = Arc::new(DashMap::new());
 
@@ -57,10 +57,15 @@ impl ChunkDataWriter {
         if !self.pending_hashes.insert(hash) {
             return Ok(true);
         }
-        self.tx
+        if self
+            .tx
             .send(WriterCommand::WriteChunk(chunk.clone()))
             .await
-            .map_err(|_| QueueError::ChannelClosed)?;
+            .is_err()
+        {
+            self.pending_hashes.remove(&hash);
+            return Err(QueueError::ChannelClosed);
+        }
         Ok(false)
     }
 
@@ -89,7 +94,7 @@ impl ChunkDataWriter {
             .send(WriterCommand::Flush(done_tx))
             .await
             .map_err(|_| QueueError::ChannelClosed)?;
-        done_rx.await.map_err(|_| QueueError::ChannelClosed)
+        done_rx.await.map_err(|_| QueueError::ChannelClosed)?
     }
 }
 
@@ -97,6 +102,8 @@ impl ChunkDataWriter {
 pub enum QueueError {
     #[error("writer channel closed")]
     ChannelClosed,
+    #[error("batch write failed")]
+    WriteFailed,
 }
 
 struct BackgroundWriter {
@@ -123,11 +130,14 @@ impl BackgroundWriter {
             match cmd {
                 WriterCommand::WriteChunk(chunk) => batch.push(chunk),
                 WriterCommand::Flush(done) => {
-                    if !batch.is_empty() {
-                        self.write_batch(&batch);
+                    let result = if !batch.is_empty() {
+                        let r = self.write_batch(&batch);
                         batch.clear();
-                    }
-                    let _ = done.send(());
+                        r
+                    } else {
+                        Ok(())
+                    };
+                    let _ = done.send(result);
                     continue;
                 }
             }
@@ -137,10 +147,9 @@ impl BackgroundWriter {
                 match self.rx.try_recv() {
                     Ok(WriterCommand::WriteChunk(chunk)) => batch.push(chunk),
                     Ok(WriterCommand::Flush(done)) => {
-                        // Flush arrived mid-batch: write what we have, then signal.
-                        self.write_batch(&batch);
+                        let result = self.write_batch(&batch);
                         batch.clear();
-                        let _ = done.send(());
+                        let _ = done.send(result);
                         break;
                     }
                     Err(_) => break,
@@ -148,24 +157,25 @@ impl BackgroundWriter {
             }
 
             if !batch.is_empty() {
-                self.write_batch(&batch);
+                let _ = self.write_batch(&batch);
                 batch.clear();
             }
         }
 
         // Flush any remaining chunks.
         if !batch.is_empty() {
-            self.write_batch(&batch);
+            let _ = self.write_batch(&batch);
         }
     }
 
-    fn write_batch(&self, batch: &[UnpackedChunk]) {
+    fn write_batch(&self, batch: &[UnpackedChunk]) -> Result<(), QueueError> {
         if batch.is_empty() {
-            return;
+            return Ok(());
         }
 
+        // Track per-chunk write outcomes inside the MDBX transaction.
         let result = self.db.update(|tx| {
-            let mut written = 0_u64;
+            let mut newly_written = Vec::with_capacity(batch.len());
             for chunk in batch {
                 match cache_chunk_verified(tx, chunk) {
                     Ok(is_duplicate) => {
@@ -175,8 +185,9 @@ impl BackgroundWriter {
                                 chunk.chunk_path_hash(),
                                 chunk.data_root
                             );
+                            newly_written.push(false);
                         } else {
-                            written += 1;
+                            newly_written.push(true);
                         }
                     }
                     Err(e) => {
@@ -186,35 +197,46 @@ impl BackgroundWriter {
                             chunk.data_root,
                             e
                         );
+                        newly_written.push(false);
                     }
                 }
             }
-            Ok::<u64, eyre::Report>(written)
+            Ok::<Vec<bool>, eyre::Report>(newly_written)
         });
 
         match result {
-            Ok(Ok(written)) => {
+            Ok(Ok(newly_written)) => {
+                let written: usize = newly_written.iter().filter(|&&w| w).count();
                 debug!(
                     "ChunkDataWriter committed batch of {} ({} written)",
                     batch.len(),
                     written
                 );
+                for (chunk, was_new) in batch.iter().zip(newly_written.iter()) {
+                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                    if *was_new {
+                        *self
+                            .pending_chunk_counts
+                            .entry(chunk.data_root)
+                            .or_insert(0) += 1;
+                    }
+                }
+                Ok(())
             }
             Ok(Err(e)) => {
                 error!("ChunkDataWriter batch inner error: {:?}", e);
+                for chunk in batch {
+                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                }
+                Err(QueueError::WriteFailed)
             }
             Err(e) => {
                 error!("ChunkDataWriter MDBX transaction error: {:?}", e);
+                for chunk in batch {
+                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                }
+                Err(QueueError::WriteFailed)
             }
-        }
-
-        // Remove pending hashes and update chunk counts after the write.
-        for chunk in batch {
-            self.pending_hashes.remove(&chunk.chunk_path_hash());
-            *self
-                .pending_chunk_counts
-                .entry(chunk.data_root)
-                .or_insert(0) += 1;
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
 use crate::mempool_service::metrics::{
-    record_chunk_duplicate, record_chunk_ingested, record_storage_duration,
+    record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
     record_validation_duration,
 };
 use crate::mempool_service::Inner;
@@ -104,6 +104,7 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
+        let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
         let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
@@ -167,6 +168,8 @@ impl Inner {
                 }
             }
         };
+
+        drop(_fetch_size_span);
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -396,7 +399,12 @@ impl Inner {
         // write-behind writer, avoiding a synchronous MDBX transaction on the
         // hot ingress path.
         let storage_start = Instant::now();
-        match self.chunk_data_writer.queue_write(&chunk).await {
+        match self
+            .chunk_data_writer
+            .queue_write(&chunk)
+            .instrument(info_span!("chunk.cache_write"))
+            .await
+        {
             Ok(true) => {
                 record_chunk_duplicate();
             }
@@ -409,7 +417,7 @@ impl Inner {
                 return Err(CriticalChunkIngressError::DatabaseError.into());
             }
         }
-        record_storage_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
+        record_enqueue_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
 
         // Add to recent valid chunks cache to prevent re-processing
         mempool_state
@@ -475,6 +483,8 @@ impl Inner {
                 "Failed to flush chunk data writer before ingress proof check: {:?}",
                 e
             );
+            record_flush_failure();
+            return Ok(());
         }
 
         let root_hash: H256 = root_hash.into();

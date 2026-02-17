@@ -2680,105 +2680,6 @@ impl AtomicMempoolState {
             .collect()
     }
 
-    /// Batch set included_height on data transactions with overwrite.
-    /// Single WRITE lock for all txids.
-    pub async fn batch_set_data_tx_included_height_overwrite(&self, tx_ids: &[H256], height: u64) {
-        let mut state = self.write().await;
-        for tx_id in tx_ids {
-            if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(tx_id) {
-                wrapped_tx.metadata_mut().included_height = Some(height);
-                state.recent_valid_tx.put(*tx_id, ());
-            }
-        }
-    }
-
-    /// Batch set included_height on commitment transactions.
-    /// Single WRITE lock; searches valid_commitment_tx then pending_pledges.
-    pub async fn batch_set_commitment_tx_included_height(&self, tx_ids: &[H256], height: u64) {
-        let mut state = self.write().await;
-        for tx_id in tx_ids {
-            let mut found = false;
-            for txs in state.valid_commitment_tx.values_mut() {
-                if let Some(tx) = txs.iter_mut().find(|t| t.id() == *tx_id) {
-                    tx.metadata_mut().included_height = Some(height);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                for (_, pledges_cache) in state.pending_pledges.iter_mut() {
-                    if let Some(tx) = pledges_cache.get_mut(tx_id) {
-                        tx.metadata_mut().included_height = Some(height);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Batch set promoted_height on data transactions.
-    /// Single WRITE lock. Returns `(tx_id, Some(header))` for txs found in
-    /// mempool, `(tx_id, None)` for txs not found (need DB fallback).
-    pub async fn batch_set_promoted_height(
-        &self,
-        tx_ids: &[H256],
-        height: u64,
-    ) -> Vec<(H256, Option<DataTransactionHeader>)> {
-        let mut state = self.write().await;
-        tx_ids
-            .iter()
-            .map(|tx_id| {
-                if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(tx_id) {
-                    if wrapped_header.promoted_height().is_none() {
-                        wrapped_header.metadata_mut().promoted_height = Some(height);
-                    }
-                    let result = wrapped_header.clone();
-                    state.recent_valid_tx.put(*tx_id, ());
-                    (*tx_id, Some(result))
-                } else {
-                    (*tx_id, None)
-                }
-            })
-            .collect()
-    }
-
-    /// Batch remove data transactions and mark as invalid.
-    /// Single WRITE lock. Caller should log prune reasons before calling.
-    pub async fn batch_prune_data_txs(&self, prune_list: &[(H256, H256)]) {
-        if prune_list.is_empty() {
-            return;
-        }
-        let mut state = self.write().await;
-        for (tx_id, _anchor) in prune_list {
-            state.valid_submit_ledger_tx.remove(tx_id);
-            state.recent_invalid_tx.put(*tx_id, ());
-            state.recent_valid_tx.pop(tx_id);
-        }
-    }
-
-    /// Batch remove commitment transactions and mark as invalid.
-    /// Single WRITE lock.
-    pub async fn batch_prune_commitment_txs(&self, tx_ids: &[H256]) {
-        if tx_ids.is_empty() {
-            return;
-        }
-        let txids_set: HashSet<H256> = tx_ids.iter().copied().collect();
-        let mut state = self.write().await;
-        for tx_id in tx_ids {
-            state.recent_invalid_tx.put(*tx_id, ());
-            state.recent_valid_tx.pop(tx_id);
-        }
-        let addresses: Vec<IrysAddress> = state.valid_commitment_tx.keys().copied().collect();
-        for address in addresses {
-            if let Some(txs) = state.valid_commitment_tx.get_mut(&address) {
-                txs.retain(|tx| !txids_set.contains(&tx.id()));
-                if txs.is_empty() {
-                    state.valid_commitment_tx.remove(&address);
-                }
-            }
-        }
-    }
-
     /// Do not call this function from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
     async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
@@ -3196,6 +3097,7 @@ impl MempoolService {
         let config = config.clone();
         let mempool_config = &config.mempool;
         let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
@@ -3213,8 +3115,10 @@ impl MempoolService {
                 let mut stake_and_pledge_whitelist = HashSet::new();
                 stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
-                let chunk_data_writer =
-                    chunk_data_writer::ChunkDataWriter::spawn(irys_db.clone(), 4096);
+                let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
+                    irys_db.clone(),
+                    chunk_writer_buffer_size,
+                );
 
                 let mempool_service = Self {
                     shutdown: shutdown_rx,

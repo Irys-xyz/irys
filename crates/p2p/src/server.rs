@@ -73,10 +73,16 @@ where
         peer_list: PeerList,
         max_concurrent_chunks: usize,
     ) -> Self {
+        let effective_limit = if max_concurrent_chunks == 0 {
+            warn!("max_concurrent_gossip_chunks is 0, treating as unlimited");
+            tokio::sync::Semaphore::MAX_PERMITS
+        } else {
+            max_concurrent_chunks
+        };
         Self {
             data_handler: gossip_server_data_handler,
             peer_list,
-            chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_chunks)),
+            chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(effective_limit)),
         }
     }
 

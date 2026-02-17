@@ -1667,7 +1667,7 @@ impl IrysNode {
             fcu.finalized = %fcu_markers.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
-        metrics::record_reth_fcu_head_height(fcu_markers.head.height);
+        irys_actors::record_reth_fcu_head_height(fcu_markers.head.height);
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {

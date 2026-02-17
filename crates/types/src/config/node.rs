@@ -696,6 +696,10 @@ pub struct MempoolNodeConfig {
 
     /// Maximum number of concurrent handlers for the mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Backpressure channel capacity for the async chunk write-behind buffer.
+    /// Controls how many chunk writes can be queued before the sender blocks.
+    pub chunk_writer_buffer_size: usize,
 }
 
 impl Default for MempoolNodeConfig {
@@ -714,6 +718,7 @@ impl Default for MempoolNodeConfig {
             max_valid_commitment_addresses: 1_000,
             max_commitments_per_address: 5,
             max_concurrent_mempool_tasks: 30,
+            chunk_writer_buffer_size: 4096,
         }
     }
 }
@@ -885,6 +890,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                chunk_writer_buffer_size: 4096,
             },
 
             vdf: VdfNodeConfig {
@@ -1030,6 +1036,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                chunk_writer_buffer_size: 4096,
             },
 
             vdf: VdfNodeConfig {

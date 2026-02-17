@@ -36,7 +36,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -251,6 +251,7 @@ impl P2PService {
         ))
     }
 
+    #[instrument(name = "broadcast_data", skip_all)]
     async fn broadcast_data(
         &self,
         broadcast_message: GossipBroadcastMessageV2,

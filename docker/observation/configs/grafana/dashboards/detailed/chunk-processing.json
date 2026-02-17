@@ -1,6 +1,6 @@
 {
   "title": "Chunk Processing",
-  "uid": "irys-chunk-processing",
+  "uid": "irys-chunk-processing-detailed",
   "tags": ["irys", "chunks", "ingestion", "gossip"],
   "timezone": "browser",
   "schemaVersion": 38,
@@ -652,7 +652,7 @@
     {
       "type": "timeseries",
       "title": "Ingress Phase Latency (p95)",
-      "description": "p95 latency of each sub-phase within chunk ingress, stacked to show total breakdown",
+      "description": "p95 latency of each sub-phase within chunk ingress, overlaid to show total breakdown",
       "gridPos": { "x": 0, "y": 50, "w": 12, "h": 8 },
       "targets": [
         {
@@ -678,12 +678,6 @@
           "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"chunk.write_storage_modules\"}[$__rate_interval])))",
           "legendFormat": "write_storage_modules",
           "refId": "D"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"chunk.ingress_proof_check\"}[$__rate_interval])))",
-          "legendFormat": "ingress_proof_check",
-          "refId": "E"
         }
       ],
       "fieldConfig": {
@@ -694,7 +688,7 @@
             "drawStyle": "line",
             "fillOpacity": 30,
             "lineWidth": 2,
-            "stacking": { "mode": "normal" }
+            "stacking": { "mode": "none" }
           }
         }
       }
@@ -819,8 +813,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Per-Peer Send Rate",
-      "description": "Gossip sends per second to individual peers",
+      "title": "Total Gossip Send Rate",
+      "description": "Aggregate gossip sends per second across all peers",
       "gridPos": { "x": 0, "y": 67, "w": 12, "h": 8 },
       "targets": [
         {
@@ -844,8 +838,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Per-Peer Send Latency by Node",
-      "description": "Gossip send latency (p95) grouped by node to compare per-node gossip performance",
+      "title": "Gossip Send Latency by Node (p95)",
+      "description": "Gossip send latency (p95) grouped by node to compare gossip performance",
       "gridPos": { "x": 12, "y": 67, "w": 12, "h": 8 },
       "targets": [
         {

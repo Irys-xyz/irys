@@ -29,7 +29,7 @@
         "refresh": 2,
         "includeAll": true,
         "allValue": ".*",
-        "multi": false,
+        "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
@@ -508,12 +508,24 @@
       }
     },
     {
+      "type": "row",
+      "title": "Storage Modules",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
       "type": "timeseries",
       "title": "Storage Modules Total",
       "description": "Number of storage modules over time",
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 27,
         "w": 24,
         "h": 6
       },

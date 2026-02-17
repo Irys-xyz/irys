@@ -41,7 +41,6 @@ datasources:
       logMessageField: message
       logLevelField: log.level
       maxConcurrentShardRequests: 5
-    database: "irys-logs*"
 
   # Prometheus - Metrics
   - name: Prometheus
