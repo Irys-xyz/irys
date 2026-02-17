@@ -3,8 +3,10 @@ use crate::SyncChainServiceMessage;
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
-use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
+use irys_types::v3::GossipBroadcastMessageV3;
+use irys_types::{
+    BlockHash, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
+};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;
@@ -25,7 +27,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
+    let data = GossipBroadcastMessageV3::from(generate_test_tx().header);
 
     // Service 1 receives a message through the message bus from a system's component
     gossip_service1_message_bus
@@ -134,7 +136,7 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
+    let data = GossipBroadcastMessageV3::from(generate_test_tx().header);
 
     // Send same data multiple times
     for _ in 0_i32..3_i32 {
@@ -181,7 +183,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     // Create and send chunk data
     let chunks = create_test_chunks(&generate_test_tx());
     #[expect(clippy::indexing_slicing, reason = "just a test")]
-    let data = GossipBroadcastMessageV2::from(chunks[0].clone());
+    let data = GossipBroadcastMessageV3::from(chunks[0].clone());
 
     gossip_service1_message_bus
         .send(data)
@@ -219,7 +221,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
+    let data = GossipBroadcastMessageV3::from(generate_test_tx().header);
 
     // Should not panic when peer is offline
     gossip_service1_message_bus
@@ -273,7 +275,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block_header)))
+        .send(GossipBroadcastMessageV3::from(Arc::new(block_header)))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -327,7 +329,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block)))
+        .send(GossipBroadcastMessageV3::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
@@ -429,7 +431,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block.clone())))
+        .send(GossipBroadcastMessageV3::from(Arc::new(block.clone())))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and receive the execution payload with a timeout of 10 seconds

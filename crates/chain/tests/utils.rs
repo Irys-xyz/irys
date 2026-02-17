@@ -52,7 +52,7 @@ use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v3::GossipBroadcastMessageV3;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
@@ -1913,7 +1913,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV2::from(Arc::clone(block_header)))?;
+            .send(GossipBroadcastMessageV3::from(Arc::clone(block_header)))?;
 
         Ok(())
     }
@@ -1925,7 +1925,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV2::from((block).clone()))?;
+            .send(GossipBroadcastMessageV3::from((block).clone()))?;
 
         Ok(())
     }
@@ -2594,10 +2594,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                     .post_handshake_v1(dst.get_gossip_addr(), vr)
                     .await?;
             }
-            ProtocolVersion::V2 => {
+            ProtocolVersion::V2 | ProtocolVersion::V3 => {
                 let vr = self.build_handshake_request_v2();
                 self.get_gossip_client()
-                    .post_handshake_v2(dst.get_gossip_addr(), vr)
+                    .post_handshake_v2(dst.get_gossip_addr(), vr, protocol_version)
                     .await?;
             }
         }

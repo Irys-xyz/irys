@@ -21,9 +21,9 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
-    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem,
-    PeerScore, ProtocolVersion, UnpackedChunk,
+    GossipRequest, GossipRequestV2, GossipRequestV3, HandshakeRequest, HandshakeRequestV2,
+    HandshakeResponse, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysPeerId, PdChunkMessage, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -933,6 +933,127 @@ where
     // End V2 Handlers
     // ============================================================================
 
+    // ============================================================================
+    // V3 Handlers - Thin wrappers that convert V3 requests to V2 and delegate
+    // ============================================================================
+
+    async fn handle_chunk_v3(
+        server: Data<Self>,
+        chunk_json: web::Json<GossipRequestV3<UnpackedChunk>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<UnpackedChunk> = chunk_json.0.into();
+        Self::handle_chunk_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_block_header_v3(
+        server: Data<Self>,
+        block_json: web::Json<GossipRequestV3<IrysBlockHeader>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<IrysBlockHeader> = block_json.0.into();
+        Self::handle_block_header_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_block_body_v3(
+        server: Data<Self>,
+        block_body_json: web::Json<GossipRequestV3<BlockBody>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<BlockBody> = block_body_json.0.into();
+        Self::handle_block_body_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_transaction_v3(
+        server: Data<Self>,
+        tx_json: web::Json<GossipRequestV3<DataTransactionHeader>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<DataTransactionHeader> = tx_json.0.into();
+        Self::handle_transaction_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_commitment_tx_v3(
+        server: Data<Self>,
+        tx_json: web::Json<GossipRequestV3<CommitmentTransaction>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<CommitmentTransaction> = tx_json.0.into();
+        Self::handle_commitment_tx_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_execution_payload_v3(
+        server: Data<Self>,
+        payload_json: web::Json<GossipRequestV3<Block>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<Block> = payload_json.0.into();
+        Self::handle_execution_payload_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_ingress_proof_v3(
+        server: Data<Self>,
+        proof_json: web::Json<GossipRequestV3<IngressProof>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<IngressProof> = proof_json.0.into();
+        Self::handle_ingress_proof_v2(server, web::Json(v2_request), req).await
+    }
+
+    async fn handle_handshake_v3(
+        server: Data<Self>,
+        req: actix_web::HttpRequest,
+        body: web::Json<HandshakeRequestV2>,
+    ) -> HttpResponse {
+        // V3 reuses the V2 handshake
+        Self::handle_handshake_v2(server, req, body).await
+    }
+
+    async fn handle_pd_chunk_v3(
+        server: Data<Self>,
+        pd_chunk_json: web::Json<GossipRequestV3<PdChunkMessage>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring PD chunk",
+                node_id
+            );
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+
+        let v2_request: GossipRequestV2<PdChunkMessage> = pd_chunk_json.0.into();
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
+
+        match Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            source_peer_id,
+            source_miner_address,
+        ) {
+            Ok(_) => {}
+            Err(error_response) => return error_response,
+        };
+        server.peer_list.set_is_online(&source_miner_address, true);
+
+        if let Err(error) = server.data_handler.handle_pd_chunk(v2_request).await {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            error!("Failed to handle PD chunk: {}", error);
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+        }
+
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+    }
+
+    // ============================================================================
+    // End V3 Handlers
+    // ============================================================================
+
     #[expect(
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
@@ -1478,6 +1599,73 @@ where
 
     pub fn routes() -> impl HttpServiceFactory {
         web::scope("/gossip")
+            .service(
+                web::scope("/v3")
+                    .route(
+                        GossipRoutes::Transaction.as_str(),
+                        web::post().to(Self::handle_transaction_v3),
+                    )
+                    .route(
+                        GossipRoutes::CommitmentTx.as_str(),
+                        web::post().to(Self::handle_commitment_tx_v3),
+                    )
+                    .route(
+                        GossipRoutes::Chunk.as_str(),
+                        web::post().to(Self::handle_chunk_v3),
+                    )
+                    .route(
+                        GossipRoutes::Block.as_str(),
+                        web::post().to(Self::handle_block_header_v3),
+                    )
+                    .route(
+                        GossipRoutes::BlockBody.as_str(),
+                        web::post().to(Self::handle_block_body_v3),
+                    )
+                    .route(
+                        GossipRoutes::IngressProof.as_str(),
+                        web::post().to(Self::handle_ingress_proof_v3),
+                    )
+                    .route(
+                        GossipRoutes::ExecutionPayload.as_str(),
+                        web::post().to(Self::handle_execution_payload_v3),
+                    )
+                    .route(
+                        GossipRoutes::GetData.as_str(),
+                        web::post().to(Self::handle_data_request),
+                    )
+                    .route(
+                        GossipRoutes::PullData.as_str(),
+                        web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::Handshake.as_str(),
+                        web::post().to(Self::handle_handshake_v3),
+                    )
+                    .route(
+                        GossipRoutes::Health.as_str(),
+                        web::get().to(Self::handle_health_check),
+                    )
+                    .route(
+                        GossipRoutes::StakeAndPledgeWhitelist.as_str(),
+                        web::get().to(Self::handle_stake_and_pledge_whitelist),
+                    )
+                    .route(
+                        GossipRoutes::Info.as_str(),
+                        web::get().to(Self::handle_info),
+                    )
+                    .route(
+                        GossipRoutes::PeerList.as_str(),
+                        web::get().to(Self::handle_peer_list),
+                    )
+                    .route(
+                        GossipRoutes::BlockIndex.as_str(),
+                        web::get().to(Self::handle_block_index),
+                    )
+                    .route(
+                        GossipRoutes::PdChunk.as_str(),
+                        web::post().to(Self::handle_pd_chunk_v3),
+                    ),
+            )
             .service(
                 web::scope("/v2")
                     .route(

@@ -970,10 +970,10 @@ impl PeerNetworkService {
                     .post_handshake_v1(gossip_address, handshake_request)
                     .await
             }
-            ProtocolVersion::V2 => {
+            ProtocolVersion::V2 | ProtocolVersion::V3 => {
                 let handshake_request = inner.create_handshake_request_v2().await;
                 gossip_client
-                    .post_handshake_v2(gossip_address, handshake_request)
+                    .post_handshake_v2(gossip_address, handshake_request, protocol_version)
                     .await
             }
         }

@@ -25,7 +25,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v3::GossipBroadcastMessageV3;
 use irys_types::{Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -102,7 +102,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageV2>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageV3>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
@@ -125,7 +125,7 @@ impl P2PService {
     pub fn new(
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
-        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV3>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -214,7 +214,7 @@ impl P2PService {
         let server = server.run(listener)?;
         let server_handle = server.handle();
 
-        let mempool_data_receiver =
+        let broadcast_data_receiver =
             self.broadcast_data_receiver
                 .take()
                 .ok_or(GossipError::Internal(
@@ -228,7 +228,7 @@ impl P2PService {
         let service_arc = Arc::new(self);
 
         let broadcast_task_handle = spawn_broadcast_task(
-            mempool_data_receiver,
+            broadcast_data_receiver,
             Arc::clone(&service_arc),
             task_executor,
             peer_list,
@@ -247,7 +247,7 @@ impl P2PService {
 
     async fn broadcast_data(
         &self,
-        broadcast_message: GossipBroadcastMessageV2,
+        broadcast_message: GossipBroadcastMessageV3,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
         // Check if gossip broadcast is enabled
@@ -257,7 +257,7 @@ impl P2PService {
         }
 
         let message_type_and_id = broadcast_message.data_type_and_id();
-        let GossipBroadcastMessageV2 { key, data } = broadcast_message;
+        let GossipBroadcastMessageV3 { key, data } = broadcast_message;
         let broadcast_data = Arc::new(data);
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
@@ -319,7 +319,7 @@ impl P2PService {
 }
 
 fn spawn_broadcast_task(
-    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+    mut broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV3>,
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
@@ -330,7 +330,7 @@ fn spawn_broadcast_task(
             let peer_list = peer_list.clone();
             loop {
                 tokio::select! {
-                    maybe_data = mempool_data_receiver.recv() => {
+                    maybe_data = broadcast_data_receiver.recv() => {
                         match maybe_data {
                             Some(broadcast_message) => {
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other

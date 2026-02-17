@@ -1,12 +1,21 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk, H256,
+    range_specifier::ChunkRangeSpecifier, BlockHash, ChunkPathHash, CommitmentTransaction,
+    DataTransactionHeader, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
+    IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+
+/// Message for gossiping unpacked PD (Programmable Data) chunks between V3 peers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdChunkMessage {
+    pub chunk: UnpackedChunk,
+    pub range_specifier: ChunkRangeSpecifier,
+    pub timestamp: u64,
+}
 
 pub mod v1 {
     use crate::{
@@ -384,6 +393,180 @@ pub mod v2 {
     }
 }
 
+pub mod v3 {
+    use super::PdChunkMessage;
+    use crate::{
+        BlockBody, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, IngressProof,
+        IrysBlockHeader, UnpackedChunk,
+    };
+    use reth_primitives::Block;
+    use reth_primitives_traits::SealedBlock;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug)]
+    pub struct GossipBroadcastMessageV3 {
+        pub key: GossipCacheKey,
+        pub data: GossipDataV3,
+    }
+
+    impl GossipBroadcastMessageV3 {
+        pub fn new(key: GossipCacheKey, data: GossipDataV3) -> Self {
+            Self { key, data }
+        }
+
+        pub fn data_type_and_id(&self) -> String {
+            self.data.data_type_and_id()
+        }
+    }
+
+    impl From<SealedBlock<Block>> for GossipBroadcastMessageV3 {
+        fn from(sealed_block: SealedBlock<Block>) -> Self {
+            let key = GossipCacheKey::sealed_evm_block(&sealed_block);
+            let value = GossipDataV3::from(sealed_block);
+            Self::new(key, value)
+        }
+    }
+
+    impl From<UnpackedChunk> for GossipBroadcastMessageV3 {
+        fn from(chunk: UnpackedChunk) -> Self {
+            let key = GossipCacheKey::chunk(&chunk);
+            Self::new(key, GossipDataV3::Chunk(chunk))
+        }
+    }
+
+    impl From<DataTransactionHeader> for GossipBroadcastMessageV3 {
+        fn from(transaction: DataTransactionHeader) -> Self {
+            let key = GossipCacheKey::transaction(&transaction);
+            Self::new(key, GossipDataV3::Transaction(transaction))
+        }
+    }
+
+    impl From<CommitmentTransaction> for GossipBroadcastMessageV3 {
+        fn from(commitment_tx: CommitmentTransaction) -> Self {
+            let key = GossipCacheKey::commitment_transaction(&commitment_tx);
+            Self::new(key, GossipDataV3::CommitmentTransaction(commitment_tx))
+        }
+    }
+
+    impl From<IngressProof> for GossipBroadcastMessageV3 {
+        fn from(ingress_proof: IngressProof) -> Self {
+            let key = GossipCacheKey::ingress_proof(&ingress_proof);
+            Self::new(key, GossipDataV3::IngressProof(ingress_proof))
+        }
+    }
+
+    impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessageV3 {
+        fn from(block: Arc<IrysBlockHeader>) -> Self {
+            let key = GossipCacheKey::irys_block(&block);
+            Self::new(key, GossipDataV3::BlockHeader(block))
+        }
+    }
+
+    impl From<PdChunkMessage> for GossipBroadcastMessageV3 {
+        fn from(msg: PdChunkMessage) -> Self {
+            let key = GossipCacheKey::chunk(&msg.chunk);
+            Self::new(key, GossipDataV3::PdChunk(msg))
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum GossipDataV3 {
+        Chunk(UnpackedChunk),
+        Transaction(DataTransactionHeader),
+        CommitmentTransaction(CommitmentTransaction),
+        BlockHeader(Arc<IrysBlockHeader>),
+        BlockBody(Arc<BlockBody>),
+        ExecutionPayload(Block),
+        IngressProof(IngressProof),
+        PdChunk(PdChunkMessage),
+    }
+
+    impl From<SealedBlock<Block>> for GossipDataV3 {
+        fn from(sealed_block: SealedBlock<Block>) -> Self {
+            Self::ExecutionPayload(sealed_block.into_block())
+        }
+    }
+
+    impl GossipDataV3 {
+        pub fn to_v2(&self) -> Option<super::v2::GossipDataV2> {
+            match self {
+                Self::Chunk(chunk) => Some(super::v2::GossipDataV2::Chunk(chunk.clone())),
+                Self::Transaction(tx) => Some(super::v2::GossipDataV2::Transaction(tx.clone())),
+                Self::CommitmentTransaction(tx) => {
+                    Some(super::v2::GossipDataV2::CommitmentTransaction(tx.clone()))
+                }
+                Self::BlockHeader(block) => {
+                    Some(super::v2::GossipDataV2::BlockHeader(block.clone()))
+                }
+                Self::BlockBody(body) => Some(super::v2::GossipDataV2::BlockBody(body.clone())),
+                Self::ExecutionPayload(payload) => {
+                    Some(super::v2::GossipDataV2::ExecutionPayload(payload.clone()))
+                }
+                Self::IngressProof(proof) => {
+                    Some(super::v2::GossipDataV2::IngressProof(proof.clone()))
+                }
+                Self::PdChunk(_) => None, // PdChunk does not exist in V2
+            }
+        }
+
+        pub fn to_v1(&self) -> Option<super::v1::GossipDataV1> {
+            match self {
+                Self::Chunk(chunk) => Some(super::v1::GossipDataV1::Chunk(chunk.clone())),
+                Self::Transaction(tx) => Some(super::v1::GossipDataV1::Transaction(tx.clone())),
+                Self::CommitmentTransaction(tx) => {
+                    Some(super::v1::GossipDataV1::CommitmentTransaction(tx.clone()))
+                }
+                Self::BlockHeader(block) => Some(super::v1::GossipDataV1::Block(block.clone())),
+                Self::ExecutionPayload(payload) => {
+                    Some(super::v1::GossipDataV1::ExecutionPayload(payload.clone()))
+                }
+                Self::IngressProof(proof) => {
+                    Some(super::v1::GossipDataV1::IngressProof(proof.clone()))
+                }
+                Self::BlockBody(_) => None, // BlockBody does not exist in V1
+                Self::PdChunk(_) => None,   // PdChunk does not exist in V1
+            }
+        }
+
+        pub fn data_type_and_id(&self) -> String {
+            match self {
+                Self::Chunk(chunk) => {
+                    format!("chunk data root {}", chunk.data_root)
+                }
+                Self::Transaction(tx) => {
+                    format!("transaction {}", tx.id)
+                }
+                Self::CommitmentTransaction(commitment_tx) => {
+                    format!("commitment transaction {}", commitment_tx.id())
+                }
+                Self::BlockHeader(block) => {
+                    format!("block {} height: {}", block.block_hash, block.height)
+                }
+                Self::BlockBody(block_body) => {
+                    format!("block body for block {}", block_body.block_hash)
+                }
+                Self::ExecutionPayload(execution_payload_data) => {
+                    format!(
+                        "execution payload for EVM block number {:?}",
+                        execution_payload_data.number
+                    )
+                }
+                Self::IngressProof(ingress_proof) => {
+                    format!(
+                        "ingress proof for data_root: {:?} from {:?}",
+                        ingress_proof.data_root,
+                        ingress_proof.recover_signer()
+                    )
+                }
+                Self::PdChunk(pd_chunk) => {
+                    format!("pd chunk data root {}", pd_chunk.chunk.data_root)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GossipCacheKey {
     Chunk(ChunkPathHash),
@@ -435,6 +618,14 @@ pub struct GossipRequestV2<T> {
     pub data: T,
 }
 
+/// V3 GossipRequest
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipRequestV3<T> {
+    pub peer_id: IrysPeerId,
+    pub miner_address: IrysAddress,
+    pub data: T,
+}
+
 /// Legacy type alias for backward compatibility - maps to V1
 pub type GossipRequest<T> = GossipRequestV1<T>;
 
@@ -444,6 +635,17 @@ impl<T> From<GossipRequestV2<T>> for GossipRequestV1<T> {
         Self {
             miner_address: v2.miner_address,
             data: v2.data,
+        }
+    }
+}
+
+/// Conversion from V3 to V2
+impl<T> From<GossipRequestV3<T>> for GossipRequestV2<T> {
+    fn from(v3: GossipRequestV3<T>) -> Self {
+        Self {
+            peer_id: v3.peer_id,
+            miner_address: v3.miner_address,
+            data: v3.data,
         }
     }
 }

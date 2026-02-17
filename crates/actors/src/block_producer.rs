@@ -101,7 +101,7 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v3::GossipBroadcastMessageV3;
 
 /// Result of checking parent validity and solution compatibility
 #[derive(Debug)]
@@ -1299,7 +1299,7 @@ pub trait BlockProdStrategy {
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
-            GossipBroadcastMessageV2::from(eth_built_payload.block().clone());
+            GossipBroadcastMessageV3::from(eth_built_payload.block().clone());
         if let Err(payload_broadcast_error) = self
             .inner()
             .service_senders
