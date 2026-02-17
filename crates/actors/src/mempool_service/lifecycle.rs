@@ -98,8 +98,6 @@ impl Inner {
 
         self.reprocess_all_txs().await?;
 
-        // BlockConfirmed events for the new fork are emitted by the block tree service after reorg.
-
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
     }
@@ -500,8 +498,7 @@ impl Inner {
             }
         }
 
-        // Extract full orphaned submit transactions directly from old fork sealed blocks,
-        // avoiding an expensive mempool/DB lookup.
+        // Extract full orphaned submit transactions
         let mut orphaned_submit_tx_map = HashMap::new();
         for block in old_fork_confirmed.iter() {
             for tx in block.transactions().get_ledger_txs(DataLedger::Submit) {

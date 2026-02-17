@@ -51,39 +51,12 @@ impl BlockMigrator {
             clear_commitment_tx_ids.extend(commitment_tx_ids);
         }
 
-        // Collect per-block info from blocks to confirm
-        struct ConfirmBlockInfo {
-            height: u64,
-            all_data_tx_ids: Vec<H256>,
-            commitment_tx_ids: Vec<H256>,
-            publish_tx_ids: Vec<H256>,
-        }
-        let confirm_blocks: Vec<ConfirmBlockInfo> = blocks_to_confirm
-            .iter()
-            .map(|block| {
-                let header = block.header();
-                let submit_tx_ids = header.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
-                let publish_tx_ids = header.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
-                let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
-                let all_data_tx_ids: Vec<H256> = submit_tx_ids
-                    .iter()
-                    .chain(publish_tx_ids.iter())
-                    .copied()
-                    .collect();
-                ConfirmBlockInfo {
-                    height: header.height,
-                    all_data_tx_ids,
-                    commitment_tx_ids,
-                    publish_tx_ids,
-                }
-            })
-            .collect();
-
         let has_clears = !clear_data_tx_ids.is_empty() || !clear_commitment_tx_ids.is_empty();
-        let has_confirms = confirm_blocks.iter().any(|b| {
-            !b.all_data_tx_ids.is_empty()
-                || !b.commitment_tx_ids.is_empty()
-                || !b.publish_tx_ids.is_empty()
+        let has_confirms = blocks_to_confirm.iter().any(|block| {
+            let h = block.header();
+            !h.data_ledgers[DataLedger::Submit].tx_ids.0.is_empty()
+                || !h.data_ledgers[DataLedger::Publish].tx_ids.0.is_empty()
+                || !h.get_commitment_ledger_tx_ids().is_empty()
         });
 
         if has_clears || has_confirms {
@@ -99,28 +72,36 @@ impl BlockMigrator {
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
                 // Phase 2: Write confirmed metadata
-                for info in &confirm_blocks {
-                    if !info.all_data_tx_ids.is_empty() {
+                for block in blocks_to_confirm {
+                    let header = block.header();
+                    let submit_tx_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
+                    let publish_tx_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
+                    let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
+                    let height = header.height;
+
+                    if !submit_tx_ids.is_empty() {
+                        irys_database::batch_set_data_tx_included_height(tx, submit_tx_ids, height)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    if !publish_tx_ids.is_empty() {
                         irys_database::batch_set_data_tx_included_height(
                             tx,
-                            &info.all_data_tx_ids,
-                            info.height,
+                            publish_tx_ids,
+                            height,
                         )
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
-                    if !info.commitment_tx_ids.is_empty() {
-                        irys_database::batch_set_commitment_tx_included_height(
-                            tx,
-                            &info.commitment_tx_ids,
-                            info.height,
-                        )
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
-                    if !info.publish_tx_ids.is_empty() {
                         irys_database::batch_set_data_tx_promoted_height(
                             tx,
-                            &info.publish_tx_ids,
-                            info.height,
+                            publish_tx_ids,
+                            height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    if !commitment_tx_ids.is_empty() {
+                        irys_database::batch_set_commitment_tx_included_height(
+                            tx,
+                            &commitment_tx_ids,
+                            height,
                         )
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
                     }
