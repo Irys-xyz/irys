@@ -17,6 +17,8 @@ static NODE_UPTIME: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_START_TIME: OnceLock<Instant> = OnceLock::new();
 static VDF_MINING_ENABLED: OnceLock<Gauge<u64>> = OnceLock::new();
 static STORAGE_MODULES_TOTAL: OnceLock<Gauge<u64>> = OnceLock::new();
+static PARTITIONS_ASSIGNED: OnceLock<Gauge<u64>> = OnceLock::new();
+static PARTITIONS_UNASSIGNED: OnceLock<Gauge<u64>> = OnceLock::new();
 static VDF_GLOBAL_STEP: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_SHUTDOWN: OnceLock<Counter<u64>> = OnceLock::new();
 static PLEDGE_TX_POSTED: OnceLock<Counter<u64>> = OnceLock::new();
@@ -129,6 +131,28 @@ pub(crate) fn record_storage_modules_total(count: u64) {
             meter()
                 .u64_gauge("irys.storage.modules_total")
                 .with_description("Total number of storage modules")
+                .build()
+        })
+        .record(count, &[]);
+}
+
+pub(crate) fn record_partitions_assigned(count: u64) {
+    PARTITIONS_ASSIGNED
+        .get_or_init(|| {
+            meter()
+                .u64_gauge("irys.storage.partitions_assigned")
+                .with_description("Number of storage modules with a partition assigned")
+                .build()
+        })
+        .record(count, &[]);
+}
+
+pub(crate) fn record_partitions_unassigned(count: u64) {
+    PARTITIONS_UNASSIGNED
+        .get_or_init(|| {
+            meter()
+                .u64_gauge("irys.storage.partitions_unassigned")
+                .with_description("Number of storage modules without a partition assigned")
                 .build()
         })
         .record(count, &[]);

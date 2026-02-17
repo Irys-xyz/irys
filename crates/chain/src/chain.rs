@@ -971,9 +971,16 @@ impl IrysNode {
                     metrics::record_vdf_mining_enabled(
                         is_vdf_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
                     );
-                    metrics::record_storage_modules_total(
-                        storage_modules_guard.read().len() as u64,
-                    );
+                    let modules = storage_modules_guard.read();
+                    let total = modules.len() as u64;
+                    let assigned = modules
+                        .iter()
+                        .filter(|sm| sm.partition_assignment().is_some())
+                        .count() as u64;
+                    drop(modules);
+                    metrics::record_storage_modules_total(total);
+                    metrics::record_partitions_assigned(assigned);
+                    metrics::record_partitions_unassigned(total - assigned);
                 }
             });
         }
