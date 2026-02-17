@@ -1664,7 +1664,7 @@ impl Inner {
     /// After restoring the mempool from disk, reconstruct metadata fields (included_height,
     /// promoted_height) from the database. The `#[serde(skip)]` on `DataTransactionMetadata`
     /// means these fields are lost during serialization. The DB is authoritative since
-    /// `BlockMigrator` persists them at confirmation time.
+    /// `BlockMigrationService` persists them at confirmation time.
     pub async fn reconstruct_metadata_from_db(&self) {
         let mut state = self.mempool_state.0.write().await;
         let mut reconstructed = 0_u64;

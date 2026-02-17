@@ -1,5 +1,5 @@
 use crate::{
-    block_migrator::BlockMigrator,
+    block_migration_service::BlockMigrationService,
     block_validation::PreValidationError,
     mempool_service::MempoolServiceMessage,
     metrics,
@@ -72,8 +72,8 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
-    /// Inline block migration logic (replaces the old BlockMigrationService actor)
-    block_migrator: BlockMigrator,
+    /// Block migration orchestration and DB persistence
+    block_migration_service: BlockMigrationService,
     /// Chain sync state for diagnostics
     pub chain_sync_state: ChainSyncState,
 }
@@ -110,6 +110,7 @@ impl BlockTreeService {
         config: &Config,
         service_senders: &ServiceSenders,
         chain_sync_state: ChainSyncState,
+        block_migration_service: BlockMigrationService,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -144,7 +145,7 @@ impl BlockTreeService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner: BlockTreeServiceInner {
-                        block_migrator: BlockMigrator::new(db.clone(), bi_guard.clone()),
+                        block_migration_service,
                         db,
                         cache: Arc::new(RwLock::new(cache)),
                         miner_address,
@@ -275,25 +276,26 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
-    /// Migrates a block using the `BlockMigrator`.
+    /// Migrates a block using the `BlockMigrationService`.
     ///
     /// Split into two phases so the `RwLockReadGuard` is dropped before any `.await`:
     /// 1. `prepare_migration` (sync) -- reads all needed data from the cache
     /// 2. `process_migration` (async) -- persists to DB and notifies services
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating block via BlockMigrator");
+        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating block via BlockMigrationService");
 
         // Phase 1: synchronous -- hold the read lock only for preparation
         let prepared = {
             let cache = self.cache.read().expect("block tree lock poisoned");
-            self.block_migrator.prepare_migration(block, &cache)?
+            self.block_migration_service
+                .prepare_migration(block, &cache)?
         }; // RwLockReadGuard dropped here
 
         debug!(block.hash = %block.block_hash, block.height = block.height, "prepared {} block(s) for migration", prepared.len());
 
         // Phase 2: async -- process without the cache lock
-        self.block_migrator
+        self.block_migration_service
             .process_migration(prepared, &self.service_senders)
             .await
     }
@@ -743,7 +745,7 @@ impl BlockTreeServiceInner {
             let old_fork: &[Arc<SealedBlock>] = reorg_event
                 .as_ref()
                 .map_or(&[] as &[_], |e| e.old_fork.as_ref());
-            self.block_migrator
+            self.block_migration_service
                 .persist_metadata(old_fork, &blocks_to_confirm)?;
         }
 
@@ -781,7 +783,7 @@ impl BlockTreeServiceInner {
                     .expect("mempool service has unexpectedly become unreachable");
             }
 
-            // Delegate migration to BlockMigrator (validates continuity internally)
+            // Delegate migration to BlockMigrationService (validates continuity internally)
             if tip_changed {
                 self.migrate_block(&markers.migration_block).await?;
             }

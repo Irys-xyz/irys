@@ -15,12 +15,12 @@ use tracing::info;
 
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 #[derive(Debug)]
-pub struct BlockMigrator {
+pub struct BlockMigrationService {
     db: DatabaseProvider,
     block_index_guard: BlockIndexReadGuard,
 }
 
-impl BlockMigrator {
+impl BlockMigrationService {
     pub const fn new(db: DatabaseProvider, block_index_guard: BlockIndexReadGuard) -> Self {
         Self {
             db,

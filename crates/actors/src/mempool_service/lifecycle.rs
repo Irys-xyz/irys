@@ -15,7 +15,7 @@ impl Inner {
     /// Updates in-memory mempool state for a confirmed block.
     ///
     /// DB persistence of included_height and promoted_height happens at confirmation
-    /// time (via `BlockMigrator::persist_metadata`). Full tx header
+    /// time (via `BlockMigrationService::persist_metadata`). Full tx header
     /// persistence is deferred to migration time. This handler only updates:
     /// - In-memory metadata (included_height, promoted_height)
     /// - `CachedDataRoots` DB cache (needed for chunk ingress validation)
@@ -354,7 +354,7 @@ impl Inner {
         );
 
         // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
-        // DB metadata is already cleared by BlockMigrator::persist_metadata() in BlockTreeService.
+        // DB metadata is already cleared by BlockMigrationService::persist_metadata() in BlockTreeService.
         for id in orphaned_commitment_tx_ids.iter() {
             if self
                 .mempool_state
@@ -580,7 +580,7 @@ impl Inner {
 
         // Update in-memory mempool state for txs promoted in both forks:
         // ensure they have the ingress proofs from the new canonical fork.
-        // DB metadata is already handled by BlockMigrator (clear old fork + write new fork).
+        // DB metadata is already handled by BlockMigrationService (clear old fork + write new fork).
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
         for txid in published_in_both.iter() {
             if let Some(mut tx) = published_tx_from_blocks.remove(txid) {

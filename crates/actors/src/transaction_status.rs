@@ -17,7 +17,7 @@ pub async fn compute_transaction_status(
     let mempool_metadata = mempool_guard.get_tx_metadata(tx_id).await;
     let in_mempool = mempool_metadata.is_some() || mempool_guard.is_recent_valid_tx(tx_id).await;
 
-    // Prefer DB metadata over mempool: BlockMigrator writes included_height
+    // Prefer DB metadata over mempool: BlockMigrationService writes included_height
     // to DB synchronously at confirmation time, so it is always authoritative.
     // Mempool metadata is the fallback for pending txs not yet in the DB.
     let metadata = db_metadata.or(mempool_metadata);
