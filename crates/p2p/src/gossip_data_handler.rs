@@ -356,7 +356,7 @@ where
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
         debug!("Pulling block {} from the network", block_hash);
-        let (source_address, irys_block) = match self
+        let (source_peer_id, irys_block) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await
@@ -371,11 +371,11 @@ where
             }
         };
 
-        let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
+        let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             // This shouldn't happen, but we still should have a safeguard just in case
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
-                source_address, block_hash
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
             self.sync_state.record_data_pull_error(error_msg.clone());
@@ -384,13 +384,13 @@ where
 
         debug!(
             "Pulled block {} from peer {}, sending for processing",
-            block_hash, source_address
+            block_hash, source_peer_id
         );
         // Get miner_address from the peer item
         let miner_address = peer_info.mining_address;
         self.handle_block_header(
             GossipRequestV2 {
-                peer_id: source_address,
+                peer_id: source_peer_id,
                 miner_address,
                 data: (*irys_block).clone(),
             },
@@ -424,7 +424,7 @@ where
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
@@ -734,14 +734,24 @@ where
             block_hash
         );
 
-        let (source_peer_id, irys_block_header) = self
+        let (source_peer_id, irys_block_header) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             let error_msg = format!(
-                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
@@ -926,8 +936,13 @@ where
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
                 );
-                let block_body =
-                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
+                let block_body = get_block_body(
+                    &block_hash,
+                    &self.block_pool,
+                    &self.mempool,
+                    &self.block_tree,
+                )
+                .await?;
 
                 if let Some(block_body) = block_body {
                     let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
@@ -1034,8 +1049,13 @@ where
                 Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
             GossipDataRequestV2::BlockBody(block_hash) => {
-                let maybe_block_body =
-                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
+                let maybe_block_body = get_block_body(
+                    &block_hash,
+                    &self.block_pool,
+                    &self.mempool,
+                    &self.block_tree,
+                )
+                .await?;
                 Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::clone(&body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
@@ -1295,39 +1315,47 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     block_hash: &BlockHash,
     block_pool: &BlockPool<B, M>,
     mempool: &M,
+    block_tree: &BlockTreeReadGuard,
 ) -> GossipResult<Option<Arc<BlockBody>>> {
-    let maybe_block_body =
-        if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
-            Some(block_body)
-        } else {
-            let maybe_block_header = block_pool.get_block_header(block_hash).await?;
-            if let Some(block_header) = &maybe_block_header {
-                let block_body = build_block_body_for_processed_block_header(
-                    block_header,
-                    &mempool.get_internal_read_guard().await,
-                    &block_pool.db,
-                )
-                .await
-                .map_err(|err| {
-                    error!(
-                        "Error building block body for block {:?}: {:?}",
-                        block_hash, err
-                    );
-                    GossipError::Internal(InternalGossipError::Unknown(format!(
-                        "Error building block body for block {}: {}",
-                        block_hash, err
-                    )))
-                })?;
-                debug!("Successfully built block body for block {:?}", block_hash);
-                Some(Arc::new(block_body))
-            } else {
-                warn!(
-                    "Didn't find the block header to build the block body for the block {:?}",
-                    block_hash
-                );
-                None
-            }
-        };
+    // Check the pool caches (in-flight + recently-processed)
+    if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
+        return Ok(Some(block_body));
+    }
 
-    Ok(maybe_block_body)
+    // Check the block tree (code block to drop the guard)
+    {
+        let from_tree = block_tree.read().get_sealed_block(block_hash);
+        if let Some(sealed) = from_tree {
+            return Ok(Some(Arc::new(sealed.to_block_body())));
+        }
+    }
+
+    // Expensive path: reconstruct from mempool/DB
+    let maybe_block_header = block_pool.get_block_header(block_hash).await?;
+    if let Some(block_header) = &maybe_block_header {
+        let block_body = build_block_body_for_processed_block_header(
+            block_header,
+            &mempool.get_internal_read_guard().await,
+            &block_pool.db,
+        )
+        .await
+        .map_err(|err| {
+            error!(
+                "Error building block body for block {:?}: {:?}",
+                block_hash, err
+            );
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Error building block body for block {}: {}",
+                block_hash, err
+            )))
+        })?;
+        debug!("Successfully built block body for block {:?}", block_hash);
+        Ok(Some(Arc::new(block_body)))
+    } else {
+        warn!(
+            "Didn't find the block header to build the block body for the block {:?}",
+            block_hash
+        );
+        Ok(None)
+    }
 }
