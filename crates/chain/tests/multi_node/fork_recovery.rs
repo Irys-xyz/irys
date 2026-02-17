@@ -845,7 +845,8 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
             let mut txs = node
                 .get_block_by_height(height)
                 .await?
-                .get_commitment_ledger_tx_ids();
+                .commitment_tx_ids()
+                .to_vec();
             txs.sort();
             Ok(txs)
         }
@@ -1791,7 +1792,8 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             let mut txs = node
                 .get_block_by_height(height)
                 .await?
-                .get_commitment_ledger_tx_ids();
+                .commitment_tx_ids()
+                .to_vec();
             txs.sort();
             Ok(txs)
         }

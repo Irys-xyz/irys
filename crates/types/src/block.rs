@@ -471,12 +471,6 @@ impl IrysBlockHeaderV1 {
             .unwrap_or_default()
     }
 
-    /// Returns a cloned Vec of commitment ledger transaction IDs.
-    #[deprecated(note = "use commitment_tx_ids() to avoid cloning")]
-    pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
-        self.commitment_tx_ids().to_vec()
-    }
-
     /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
     /// to ensure the txids are ordered identically to their order in the block.
     pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, Vec<H256>> {
