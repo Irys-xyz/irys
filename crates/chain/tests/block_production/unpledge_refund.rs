@@ -635,6 +635,11 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let inclusion_block = peer_node.mine_block().await?;
 
+    // Wait for genesis node to receive the block via gossip before querying its Reth provider
+    genesis_node
+        .wait_for_block_at_height(inclusion_block.height, seconds_to_wait)
+        .await?;
+
     let inclusion_hashes = assigned_sm_hashes(&genesis_node);
     assert_eq!(
         inclusion_hashes, pre_hashes,
