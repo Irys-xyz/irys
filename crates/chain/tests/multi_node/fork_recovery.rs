@@ -462,7 +462,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
     let prune_height = chain_tip_height.saturating_sub(prune_depth_u64);
 
     genesis_node
-        .wait_until_block_index_height(migration_height, seconds_to_wait)
+        .wait_for_block_in_index(migration_height, false, seconds_to_wait)
         .await?;
 
     let head_block = genesis_node.get_block_by_height(chain_tip_height).await?;
