@@ -311,10 +311,18 @@ impl BlockTreeServiceInner {
 
         // Let the chunk_migration_service know about the block migration.
         // During shutdown, chunk_migration may have already exited — this is expected.
-        if let Err(e) = self.service_senders.chunk_migration.send(
-            ChunkMigrationServiceMessage::BlockMigrated(arc_block, Arc::new(all_txs_map)),
-        ) {
-            warn!("chunk_migration channel closed, skipping migration send: {}", e);
+        if let Err(e) =
+            self.service_senders
+                .chunk_migration
+                .send(ChunkMigrationServiceMessage::BlockMigrated(
+                    arc_block,
+                    Arc::new(all_txs_map),
+                ))
+        {
+            warn!(
+                "chunk_migration channel closed, skipping migration send: {}",
+                e
+            );
         }
 
         Ok(())

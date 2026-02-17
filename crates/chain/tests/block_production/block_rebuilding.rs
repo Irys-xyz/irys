@@ -161,9 +161,7 @@ async fn heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Wait for node1 to receive all of node2's blocks via gossip before resuming,
     // so node1 sees the advanced chain state and correctly rejects the stale solution
     let node2_height = node2.get_canonical_chain_height().await;
-    node1
-        .wait_for_block_at_height(node2_height, 10)
-        .await?;
+    node1.wait_for_block_at_height(node2_height, 10).await?;
 
     // Resume block production
     resume_tx.send(()).unwrap();

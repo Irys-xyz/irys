@@ -1200,11 +1200,7 @@ mod peer_sync_recovery {
 
         // Step 7: Wait for Peer Block Migration and Validate
         peer_node
-            .wait_for_block_in_index(
-                post_aurora_migrated_height,
-                true,
-                SECONDS_TO_WAIT * 2,
-            )
+            .wait_for_block_in_index(post_aurora_migrated_height, true, SECONDS_TO_WAIT * 2)
             .await?;
         info!(
             "Peer block index migrated to height {}",
