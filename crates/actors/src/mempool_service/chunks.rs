@@ -467,6 +467,16 @@ impl Inner {
         }
 
         // ==== INGRESS PROOFS ====
+        // Flush the write-behind writer so that the chunk we just queued (and
+        // any others in the buffer) are committed to MDBX before we count
+        // chunks for ingress proof generation.
+        if let Err(e) = self.chunk_data_writer.flush().await {
+            error!(
+                "Failed to flush chunk data writer before ingress proof check: {:?}",
+                e
+            );
+        }
+
         let root_hash: H256 = root_hash.into();
         let cached_data_root = self
             .irys_db

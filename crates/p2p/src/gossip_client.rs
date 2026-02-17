@@ -83,22 +83,6 @@ fn gossip_error_type(err: &GossipError) -> &'static str {
     }
 }
 
-fn gossip_error_type(err: &GossipError) -> &'static str {
-    match err {
-        GossipError::Network(_) => "network",
-        GossipError::InvalidPeer(_) => "invalid_peer",
-        GossipError::Cache(_) => "cache",
-        GossipError::Internal(_) => "internal",
-        GossipError::InvalidData(_) => "invalid_data",
-        GossipError::BlockPool(_) => "block_pool",
-        GossipError::TransactionIsAlreadyHandled => "already_handled",
-        GossipError::CommitmentValidation(_) => "commitment_validation",
-        GossipError::PeerNetwork(_) => "peer_network",
-        GossipError::RateLimited => "rate_limited",
-        GossipError::Advisory(_) => "advisory",
-    }
-}
-
 impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
@@ -855,11 +839,10 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
-            let peer_miner_address = peer.mining_address;
             let result = client
                 .send_preserialized(&peer.address.gossip, route, body)
                 .await;
-            Self::handle_score(&peer_list, &result, &peer_miner_address);
+            Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
             match result {
                 Ok(_) => {
                     if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
@@ -1242,7 +1225,7 @@ impl GossipClient {
                         .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
-                    record_gossip_outbound_error(gossip_error_type(&err));
+                    record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
                         ScoreDecreaseReason::Offline(format!(

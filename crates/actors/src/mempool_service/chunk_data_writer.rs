@@ -3,10 +3,15 @@ use irys_database::cache_chunk_verified;
 use irys_types::{ChunkPathHash, DataRoot, DatabaseProvider, UnpackedChunk};
 use reth_db::Database as _;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
 
 const MAX_BATCH_SIZE: usize = 64;
+
+enum WriterCommand {
+    WriteChunk(UnpackedChunk),
+    Flush(oneshot::Sender<()>),
+}
 
 /// Async write-behind buffer for chunk MDBX writes.
 ///
@@ -17,7 +22,7 @@ const MAX_BATCH_SIZE: usize = 64;
 /// for ingress proof threshold checks without hitting the database.
 #[derive(Debug)]
 pub struct ChunkDataWriter {
-    tx: mpsc::Sender<UnpackedChunk>,
+    tx: mpsc::Sender<WriterCommand>,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
     pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
 }
@@ -53,7 +58,7 @@ impl ChunkDataWriter {
             return Ok(true);
         }
         self.tx
-            .send(chunk.clone())
+            .send(WriterCommand::WriteChunk(chunk.clone()))
             .await
             .map_err(|_| QueueError::ChannelClosed)?;
         Ok(false)
@@ -74,22 +79,17 @@ impl ChunkDataWriter {
 
     /// Drain all pending writes before returning.
     ///
-    /// Used before ingress proof generation to ensure all queued chunks
-    /// are committed to MDBX.
+    /// Sends a flush sentinel through the channel and waits for the
+    /// background writer to acknowledge it. Because the channel is FIFO,
+    /// all chunks queued before the flush are guaranteed to be committed
+    /// to MDBX by the time this returns.
     pub async fn flush(&self) -> Result<(), QueueError> {
-        // Acquiring a send permit blocks until the receiver has consumed all
-        // prior messages.  Drop the permit without sending.
-        let _permit = self
-            .tx
-            .reserve()
+        let (done_tx, done_rx) = oneshot::channel();
+        self.tx
+            .send(WriterCommand::Flush(done_tx))
             .await
             .map_err(|_| QueueError::ChannelClosed)?;
-        drop(_permit);
-
-        // Yield to let the writer finish its current batch.
-        tokio::task::yield_now().await;
-
-        Ok(())
+        done_rx.await.map_err(|_| QueueError::ChannelClosed)
     }
 }
 
@@ -100,7 +100,7 @@ pub enum QueueError {
 }
 
 struct BackgroundWriter {
-    rx: mpsc::Receiver<UnpackedChunk>,
+    rx: mpsc::Receiver<WriterCommand>,
     db: DatabaseProvider,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
     pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
@@ -111,25 +111,46 @@ impl BackgroundWriter {
         let mut batch: Vec<UnpackedChunk> = Vec::with_capacity(MAX_BATCH_SIZE);
 
         loop {
-            // Block until at least one chunk arrives.
-            match self.rx.recv().await {
-                Some(chunk) => batch.push(chunk),
+            // Block until at least one command arrives.
+            let cmd = match self.rx.recv().await {
+                Some(cmd) => cmd,
                 None => {
                     debug!("ChunkDataWriter channel closed, flushing remaining");
                     break;
+                }
+            };
+
+            match cmd {
+                WriterCommand::WriteChunk(chunk) => batch.push(chunk),
+                WriterCommand::Flush(done) => {
+                    if !batch.is_empty() {
+                        self.write_batch(&batch);
+                        batch.clear();
+                    }
+                    let _ = done.send(());
+                    continue;
                 }
             }
 
             // Drain up to MAX_BATCH_SIZE without blocking.
             while batch.len() < MAX_BATCH_SIZE {
                 match self.rx.try_recv() {
-                    Ok(chunk) => batch.push(chunk),
+                    Ok(WriterCommand::WriteChunk(chunk)) => batch.push(chunk),
+                    Ok(WriterCommand::Flush(done)) => {
+                        // Flush arrived mid-batch: write what we have, then signal.
+                        self.write_batch(&batch);
+                        batch.clear();
+                        let _ = done.send(());
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
 
-            self.write_batch(&batch);
-            batch.clear();
+            if !batch.is_empty() {
+                self.write_batch(&batch);
+                batch.clear();
+            }
         }
 
         // Flush any remaining chunks.
