@@ -1017,7 +1017,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height, pre_activation_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index(pre_aurora_migrated_height, true, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Pre-Aurora blocks migrated to height {}",
@@ -1126,7 +1126,7 @@ mod peer_sync_recovery {
             post_aurora_migrated_height, final_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index(post_aurora_migrated_height, true, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Post-Aurora blocks migrated to height {}",
@@ -1200,7 +1200,11 @@ mod peer_sync_recovery {
 
         // Step 7: Wait for Peer Block Migration and Validate
         peer_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_in_index(
+                post_aurora_migrated_height,
+                true,
+                SECONDS_TO_WAIT * 2,
+            )
             .await?;
         info!(
             "Peer block index migrated to height {}",

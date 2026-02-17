@@ -205,7 +205,9 @@ impl BlockTreeService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+            if let Err(e) = self.inner.handle_message(msg).await {
+                debug!("Error handling message during shutdown drain (expected if services are stopping): {}", e);
+            }
         }
 
         tracing::info!("shutting down BlockTree service gracefully");
@@ -307,14 +309,13 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
             .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
-        // Let the chunk_migration_service know about the block migration
-        self.service_senders
-            .chunk_migration
-            .send(ChunkMigrationServiceMessage::BlockMigrated(
-                arc_block,
-                Arc::new(all_txs_map),
-            ))
-            .map_err(|e| eyre::eyre!("Failed to send BlockMigrated message: {}", e))?;
+        // Let the chunk_migration_service know about the block migration.
+        // During shutdown, chunk_migration may have already exited — this is expected.
+        if let Err(e) = self.service_senders.chunk_migration.send(
+            ChunkMigrationServiceMessage::BlockMigrated(arc_block, Arc::new(all_txs_map)),
+        ) {
+            warn!("chunk_migration channel closed, skipping migration send: {}", e);
+        }
 
         Ok(())
     }
