@@ -275,30 +275,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
-    fn emit_block_confirmed(&self, markers: &ForkChoiceMarkers) {
-        let cache = self.cache.read().expect("block tree lock poisoned");
-        let sealed_block = cache
-            .blocks
-            .get(&markers.head.block_hash)
-            .map(|meta| Arc::clone(&meta.block))
-            .expect("confirmed block must be in block tree cache");
-        drop(cache);
-        self.service_senders
-            .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(sealed_block))
-            .expect("mempool service has unexpectedly become unreachable");
-    }
-
-    /// Migrates a block inline using the `BlockMigrator`.
-    ///
-    /// This replaces the old approach of delegating to a separate `BlockMigrationService` actor.
-    /// The migrator handles:
-    /// - Continuity validation
-    /// - Block collection (walking backwards from migration block)
-    /// - DB persistence (txs, metadata, block headers)
-    /// - BlockIndex update (synchronous)
-    /// - ChunkMigration notification (fire-and-forget)
-    /// - Mempool cleanup (fire-and-forget)
+    /// Migrates a block using the `BlockMigrator`.
     ///
     /// Split into two phases so the `RwLockReadGuard` is dropped before any `.await`:
     /// 1. `prepare_migration` (sync) -- reads all needed data from the cache
@@ -539,7 +516,15 @@ impl BlockTreeServiceInner {
             block_hash, validation_result, height
         );
 
-        let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_markers) = {
+        let (
+            arc_block,
+            epoch_block,
+            reorg_event,
+            tip_changed,
+            state,
+            new_canonical_markers,
+            blocks_to_confirm,
+        ) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -609,7 +594,7 @@ impl BlockTreeServiceInner {
                 }
             };
 
-            let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
+            let (epoch_block, reorg_event, fcu_markers, blocks_to_confirm) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
                 let markers = ForkChoiceMarkers::from_block_tree(
                     &cache,
@@ -691,6 +676,8 @@ impl BlockTreeServiceInner {
                         .map(|e| Arc::clone(e.sealed_block()))
                         .collect();
 
+                    let blocks_to_confirm = new_fork_blocks.clone();
+
                     debug!(
                         "\u{001b}[32mReorg at block height {} with {}\u{001b}[0m",
                         arc_block.height, arc_block.block_hash
@@ -714,7 +701,12 @@ impl BlockTreeServiceInner {
                         .find(|sb| self.is_epoch_block(sb.header()))
                         .map(|sb| Arc::clone(sb.header()));
 
-                    (new_epoch_block, Some(event), new_fcu_markers)
+                    (
+                        new_epoch_block,
+                        Some(event),
+                        new_fcu_markers,
+                        blocks_to_confirm,
+                    )
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -731,10 +723,18 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (new_epoch_block, None, new_fcu_markers)
+                    let tip_sealed = cache
+                        .blocks
+                        .get(&block_hash)
+                        .map(|meta| Arc::clone(&meta.block))
+                        .expect("confirmed block must be in block tree cache");
+                    let blocks_to_confirm = vec![tip_sealed];
+
+                    (new_epoch_block, None, new_fcu_markers, blocks_to_confirm)
                 }
             } else {
-                (None, None, None)
+                let blocks_to_confirm: Vec<Arc<SealedBlock>> = vec![];
+                (None, None, None, blocks_to_confirm)
             };
 
             let state = cache
@@ -749,6 +749,7 @@ impl BlockTreeServiceInner {
                 tip_changed,
                 state,
                 fcu_markers,
+                blocks_to_confirm,
             )
         }; // RwLockWriteGuard is dropped here, before the await
 
@@ -758,20 +759,17 @@ impl BlockTreeServiceInner {
             self.send_epoch_events(&epoch_block)?;
         }
 
-        // Handle fork-aware metadata persistence for reorgs: clear orphaned
-        // metadata and write metadata for ALL new fork blocks synchronously,
-        // BEFORE broadcasting the ReorgEvent to the mempool.
-        let handled_reorg = if let Some(ref event) = reorg_event {
+        // Persist metadata atomically (same code path for both normal blocks and reorgs)
+        {
+            let old_fork: &[Arc<SealedBlock>] = reorg_event
+                .as_ref()
+                .map_or(&[] as &[_], |e| e.old_fork.as_ref());
             self.block_migrator
-                .apply_reorg_metadata(&event.old_fork, &event.new_fork)?;
-            true
-        } else {
-            false
-        };
+                .persist_metadata(old_fork, &blocks_to_confirm)?;
+        }
 
-        // Now that the epoch events are sent, let the node know about the reorg
+        // Broadcast reorg event if applicable
         if let Some(reorg_event) = reorg_event {
-            // Broadcast reorg event using the shared sender
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 error!(
                     "Failed to broadcast reorg event - mempool state may be stale: {:?}",
@@ -793,17 +791,15 @@ impl BlockTreeServiceInner {
 
             // Emit consensus events
             self.emit_fcu(markers).await?;
-            self.emit_block_confirmed(markers);
 
-            // Persist tx metadata (included_height, promoted_height) to the DB so
-            // the status endpoint survives node restarts even before the block is
-            // fully migrated at migration_depth.
-            //
-            // During reorgs, metadata for the entire new fork was already written
-            // above (after clearing orphaned metadata), so we skip this here.
-            if !handled_reorg {
-                self.block_migrator
-                    .persist_confirmed_metadata(&markers.head)?;
+            // Emit block confirmations for all relevant blocks
+            for sealed_block in &blocks_to_confirm {
+                self.service_senders
+                    .mempool
+                    .send(MempoolServiceMessage::BlockConfirmed(Arc::clone(
+                        sealed_block,
+                    )))
+                    .expect("mempool service has unexpectedly become unreachable");
             }
 
             // Delegate migration to BlockMigrator (validates continuity internally)

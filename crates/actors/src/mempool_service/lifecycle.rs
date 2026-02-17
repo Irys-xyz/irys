@@ -15,7 +15,7 @@ impl Inner {
     /// Updates in-memory mempool state for a confirmed block.
     ///
     /// DB persistence of included_height and promoted_height happens at confirmation
-    /// time (via `BlockMigrator::persist_confirmed_metadata`). Full tx header
+    /// time (via `BlockMigrator::persist_metadata`). Full tx header
     /// persistence is deferred to migration time. This handler only updates:
     /// - In-memory metadata (included_height, promoted_height)
     /// - `CachedDataRoots` DB cache (needed for chunk ingress validation)
@@ -112,13 +112,7 @@ impl Inner {
 
         self.reprocess_all_txs().await?;
 
-        // Re-apply in-memory metadata for all blocks in the new fork.
-        // DB metadata was already written by BlockMigrator::persist_confirmed_metadata,
-        // but the mempool's in-memory state only gets BlockConfirmed for the tip.
-        for sealed_block in event.new_fork.iter() {
-            self.handle_block_confirmed_message(Arc::clone(sealed_block))
-                .await?;
-        }
+        // BlockConfirmed events for the new fork are emitted by the block tree service after reorg.
 
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
@@ -393,7 +387,7 @@ impl Inner {
         );
 
         // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
-        // DB metadata is already cleared by BlockMigrator::clear_orphaned_metadata() in BlockTreeService.
+        // DB metadata is already cleared by BlockMigrator::persist_metadata() in BlockTreeService.
         for id in orphaned_commitment_tx_ids.iter() {
             if self
                 .mempool_state

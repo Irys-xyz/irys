@@ -31,136 +31,37 @@ impl BlockMigrator {
         }
     }
 
-    /// Clears `included_height` and `promoted_height` metadata from the DB
-    /// for all transactions in the given orphaned blocks.
+    /// Atomically persists tx metadata (included_height, promoted_height) to the DB.
     ///
-    /// Called during a reorg before the new fork's metadata is written and
-    /// before `ReorgEvent` is broadcast, ensuring no stale metadata persists.
-    pub fn clear_orphaned_metadata(&self, old_fork: &[Arc<IrysBlockHeader>]) -> eyre::Result<()> {
-        let mut all_data_tx_ids: Vec<H256> = Vec::new();
-        let mut all_commitment_tx_ids: Vec<H256> = Vec::new();
-
-        for block in old_fork {
-            let submit_tx_ids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
-            let publish_tx_ids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-
-            all_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
-            all_commitment_tx_ids.extend(commitment_tx_ids);
-        }
-
-        if !all_data_tx_ids.is_empty() {
-            self.db.update_eyre(|tx| {
-                irys_database::batch_clear_data_tx_metadata(tx, &all_data_tx_ids)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            })?;
-        }
-
-        if !all_commitment_tx_ids.is_empty() {
-            self.db.update_eyre(|tx| {
-                irys_database::batch_clear_commitment_tx_metadata(tx, &all_commitment_tx_ids)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            })?;
-        }
-
-        info!(
-            blocks = old_fork.len(),
-            data_txs = all_data_tx_ids.len(),
-            commitment_txs = all_commitment_tx_ids.len(),
-            "Cleared orphaned metadata from DB"
-        );
-
-        Ok(())
-    }
-
-    /// Persists `included_height` and `promoted_height` metadata to the DB
-    /// for a confirmed block's transactions.
-    ///
-    /// Runs at confirmation time (every new tip), before the full block
-    /// migration at `migration_depth`. Ensures tx status survives restarts.
-    pub fn persist_confirmed_metadata(&self, block: &IrysBlockHeader) -> eyre::Result<()> {
-        let block_height = block.height;
-
-        let submit_tx_ids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
-        let publish_tx_ids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
-        let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-
-        let all_data_tx_ids: Vec<H256> = submit_tx_ids
-            .iter()
-            .chain(publish_tx_ids.iter())
-            .copied()
-            .collect();
-
-        if !all_data_tx_ids.is_empty() || !commitment_tx_ids.is_empty() {
-            self.db.update_eyre(|tx| {
-                if !all_data_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(
-                        tx,
-                        &all_data_tx_ids,
-                        block_height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                if !commitment_tx_ids.is_empty() {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        &commitment_tx_ids,
-                        block_height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                if !publish_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_promoted_height(
-                        tx,
-                        &publish_tx_ids,
-                        block_height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                Ok(())
-            })?;
-        }
-
-        info!(
-            block.height = block_height,
-            data_txs = all_data_tx_ids.len(),
-            commitment_txs = commitment_tx_ids.len(),
-            "Persisted confirmed metadata to DB"
-        );
-
-        Ok(())
-    }
-
-    /// Atomically clears orphaned metadata and writes new fork metadata.
-    /// Called during reorgs to ensure DB consistency — if clearing old fork
-    /// metadata succeeds but writing new fork metadata fails, the DB would
-    /// be left in an inconsistent state. This method prevents that by
-    /// performing both operations in a single DB transaction.
-    pub fn apply_reorg_metadata(
+    /// For normal blocks: `blocks_to_clear` is empty, `blocks_to_confirm` contains just the tip.
+    /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
+    /// the new canonical fork blocks. Both operations happen in a single DB transaction to
+    /// prevent inconsistent metadata state.
+    pub fn persist_metadata(
         &self,
-        old_fork: &[Arc<SealedBlock>],
-        new_fork: &[Arc<SealedBlock>],
+        blocks_to_clear: &[Arc<SealedBlock>],
+        blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
-        // Collect all tx IDs from old fork (for clearing)
-        let mut old_data_tx_ids: Vec<H256> = Vec::new();
-        let mut old_commitment_tx_ids: Vec<H256> = Vec::new();
-        for block in old_fork {
+        // Collect all tx IDs from blocks to clear
+        let mut clear_data_tx_ids: Vec<H256> = Vec::new();
+        let mut clear_commitment_tx_ids: Vec<H256> = Vec::new();
+        for block in blocks_to_clear {
             let header = block.header();
             let submit_tx_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
             let publish_tx_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
             let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
-            old_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
-            old_commitment_tx_ids.extend(commitment_tx_ids);
+            clear_data_tx_ids.extend(submit_tx_ids.iter().chain(publish_tx_ids.iter()));
+            clear_commitment_tx_ids.extend(commitment_tx_ids);
         }
 
-        // Collect per-block info from new fork (for writing)
-        struct NewBlockInfo {
+        // Collect per-block info from blocks to confirm
+        struct ConfirmBlockInfo {
             height: u64,
             all_data_tx_ids: Vec<H256>,
             commitment_tx_ids: Vec<H256>,
             publish_tx_ids: Vec<H256>,
         }
-        let new_blocks: Vec<NewBlockInfo> = new_fork
+        let confirm_blocks: Vec<ConfirmBlockInfo> = blocks_to_confirm
             .iter()
             .map(|block| {
                 let header = block.header();
@@ -172,7 +73,7 @@ impl BlockMigrator {
                     .chain(publish_tx_ids.iter())
                     .copied()
                     .collect();
-                NewBlockInfo {
+                ConfirmBlockInfo {
                     height: header.height,
                     all_data_tx_ids,
                     commitment_tx_ids,
@@ -181,51 +82,60 @@ impl BlockMigrator {
             })
             .collect();
 
-        // Single atomic DB transaction for both clear + write
-        self.db.update_eyre(|tx| {
-            // Clear old fork metadata
-            if !old_data_tx_ids.is_empty() {
-                irys_database::batch_clear_data_tx_metadata(tx, &old_data_tx_ids)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-            }
-            if !old_commitment_tx_ids.is_empty() {
-                irys_database::batch_clear_commitment_tx_metadata(tx, &old_commitment_tx_ids)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-            }
-            // Write new fork metadata
-            for info in &new_blocks {
-                if !info.all_data_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(
-                        tx,
-                        &info.all_data_tx_ids,
-                        info.height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+        let has_clears = !clear_data_tx_ids.is_empty() || !clear_commitment_tx_ids.is_empty();
+        let has_confirms = confirm_blocks.iter().any(|b| {
+            !b.all_data_tx_ids.is_empty()
+                || !b.commitment_tx_ids.is_empty()
+                || !b.publish_tx_ids.is_empty()
+        });
+
+        if has_clears || has_confirms {
+            // Single atomic DB transaction for both clear + write
+            self.db.update_eyre(|tx| {
+                // Phase 1: Clear orphaned metadata
+                if !clear_data_tx_ids.is_empty() {
+                    irys_database::batch_clear_data_tx_metadata(tx, &clear_data_tx_ids)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
-                if !info.commitment_tx_ids.is_empty() {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        &info.commitment_tx_ids,
-                        info.height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                if !clear_commitment_tx_ids.is_empty() {
+                    irys_database::batch_clear_commitment_tx_metadata(tx, &clear_commitment_tx_ids)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
-                if !info.publish_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_promoted_height(
-                        tx,
-                        &info.publish_tx_ids,
-                        info.height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                // Phase 2: Write confirmed metadata
+                for info in &confirm_blocks {
+                    if !info.all_data_tx_ids.is_empty() {
+                        irys_database::batch_set_data_tx_included_height(
+                            tx,
+                            &info.all_data_tx_ids,
+                            info.height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    if !info.commitment_tx_ids.is_empty() {
+                        irys_database::batch_set_commitment_tx_included_height(
+                            tx,
+                            &info.commitment_tx_ids,
+                            info.height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    if !info.publish_tx_ids.is_empty() {
+                        irys_database::batch_set_data_tx_promoted_height(
+                            tx,
+                            &info.publish_tx_ids,
+                            info.height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
 
         info!(
-            old_blocks = old_fork.len(),
-            new_blocks = new_fork.len(),
-            "Atomically applied reorg metadata to DB"
+            cleared_blocks = blocks_to_clear.len(),
+            confirmed_blocks = blocks_to_confirm.len(),
+            "Persisted metadata to DB"
         );
 
         Ok(())
