@@ -10,10 +10,8 @@ irys_utils::define_metrics! {
     counter BYTES_RECEIVED("irys.api.chunks.bytes_received_total", "Total bytes received in chunk payloads");
     counter CHUNK_ERRORS("irys.api.chunks.errors_total", "Chunk processing errors by type");
     histogram CHUNK_PROCESSING_MS("irys.api.chunks.processing_duration_ms", "Chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
-}
-
-fn meter() -> opentelemetry::metrics::Meter {
-    opentelemetry::global::meter("irys-api-server")
+    histogram REQUEST_DURATION_MS("irys.api.http.request_duration_ms", "HTTP request processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    counter REQUESTS_TOTAL("irys.api.http.requests_total", "Total HTTP requests by method, path, and status");
 }
 
 pub fn record_chunk_received(bytes: u64) {
@@ -94,15 +92,8 @@ where
                 KeyValue::new("status", status),
             ];
 
-            let m = meter();
-            m.f64_histogram("irys.api.http.request_duration_ms")
-                .with_description("HTTP request processing latency in milliseconds")
-                .build()
-                .record(duration_ms, &attrs);
-            m.u64_counter("irys.api.http.requests_total")
-                .with_description("Total HTTP requests by method, path, and status")
-                .build()
-                .add(1, &attrs);
+            REQUEST_DURATION_MS.record(duration_ms, &attrs);
+            REQUESTS_TOTAL.add(1, &attrs);
 
             Ok(res)
         })
