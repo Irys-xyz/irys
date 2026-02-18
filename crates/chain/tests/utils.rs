@@ -549,7 +549,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Wait for peer to sync the commitment block
         peer_node
-            .wait_until_height(height_before_commitment + 1, seconds_to_wait)
+            .wait_for_block_at_height(height_before_commitment + 1, seconds_to_wait)
             .await
             .expect("peer to sync commitment block");
 
@@ -571,7 +571,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Wait for peer to sync after each block to prevent race conditions
             peer_node
-                .wait_until_height(height_before_mining + 1, seconds_to_wait)
+                .wait_for_block_at_height(height_before_mining + 1, seconds_to_wait)
                 .await
                 .expect("peer to sync to current height");
         }
@@ -580,10 +580,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Wait for the peer to receive & process the epoch block
         peer_node
-            .wait_until_height(final_height, seconds_to_wait)
+            .wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .expect("peer to sync to epoch height");
-        self.wait_until_height(final_height, seconds_to_wait)
+        self.wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .unwrap();
 

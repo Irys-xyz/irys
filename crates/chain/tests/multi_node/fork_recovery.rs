@@ -905,7 +905,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
+async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     initialize_tracing();
@@ -965,10 +965,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // and at or past the first epoch boundary with peers B and C staked.
     let base_height = node_a.get_canonical_chain_height().await;
     node_b
-        .wait_until_height(base_height, seconds_to_wait)
+        .wait_for_block_at_height(base_height, seconds_to_wait)
         .await?;
     node_c
-        .wait_until_height(base_height, seconds_to_wait)
+        .wait_for_block_at_height(base_height, seconds_to_wait)
         .await?;
 
     // get the block at base_height to use for balance checks
@@ -1000,7 +1000,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     node_a.mine_block().await?; // mine block a1
     let block1_height = base_height + 1;
     node_a
-        .wait_until_height(block1_height, seconds_to_wait)
+        .wait_for_block_at_height(block1_height, seconds_to_wait)
         .await?;
     let a_block1 = node_a.get_block_by_height(block1_height).await?; // get block a1
     node_b
@@ -1010,11 +1010,11 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         .wait_for_block(&a_block1.block_hash, seconds_to_wait)
         .await?;
     node_b
-        .wait_until_height(block1_height, seconds_to_wait)
+        .wait_for_block_at_height(block1_height, seconds_to_wait)
         .await?;
     let b_block1 = node_b.get_block_by_height(block1_height).await?; // get block b1
     node_c
-        .wait_until_height(block1_height, seconds_to_wait)
+        .wait_for_block_at_height(block1_height, seconds_to_wait)
         .await?;
     let c_block1 = node_c.get_block_by_height(block1_height).await?; // get block c1
 
@@ -1124,12 +1124,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Mine competing blocks on A and B without gossip
     let (a_block2, _, a_block2_txs) = node_a.mine_block_without_gossip().await?; // block a2
     node_a
-        .wait_until_height(a_block2.height, seconds_to_wait)
+        .wait_for_block_at_height(a_block2.height, seconds_to_wait)
         .await?;
 
     let (b_block2, b_block2_payload, b_block2_txs) = node_b.mine_block_without_gossip().await?; // block b2
     node_b
-        .wait_until_height(b_block2.height, seconds_to_wait)
+        .wait_for_block_at_height(b_block2.height, seconds_to_wait)
         .await?;
 
     // post chunks so txs go from submit ledger to publish ledger in block 3
@@ -1143,7 +1143,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Mine the heightest block on any node so far, on Node B
     let (b_block3, b_block3_payload, b_block3_txs) = node_b.mine_block_without_gossip().await?; // block b3
     node_b
-        .wait_until_height(b_block3.height, seconds_to_wait)
+        .wait_for_block_at_height(b_block3.height, seconds_to_wait)
         .await?;
 
     // check how many txs made it into each block, we expect no more than 1
@@ -1341,7 +1341,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     let block3_height = block1_height + 2;
     let block4_height = block1_height + 3;
     if let Err(does_not_reach_height) = node_c
-        .wait_until_height(block3_height, seconds_to_wait)
+        .wait_for_block_at_height(block3_height, seconds_to_wait)
         .await
     {
         tracing::error!(
@@ -1353,7 +1353,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     }
     let (c_block4, c_block4_payload, c_block4_txs) = node_c.mine_block_without_gossip().await?;
     if let Err(does_not_reach_height) = node_c
-        .wait_until_height(block4_height, seconds_to_wait)
+        .wait_for_block_at_height(block4_height, seconds_to_wait)
         .await
     {
         tracing::error!(
@@ -1428,13 +1428,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // confirm all three nodes are at the same and expected height "4"
     {
         node_a
-            .wait_until_height(c_block4.height, seconds_to_wait)
+            .wait_for_block_at_height(c_block4.height, seconds_to_wait)
             .await?;
         node_b
-            .wait_until_height(c_block4.height, seconds_to_wait)
+            .wait_for_block_at_height(c_block4.height, seconds_to_wait)
             .await?;
         node_c
-            .wait_until_height(c_block4.height, seconds_to_wait)
+            .wait_for_block_at_height(c_block4.height, seconds_to_wait)
             .await?;
 
         // confirm chain has identical and expected height on all three nodes
