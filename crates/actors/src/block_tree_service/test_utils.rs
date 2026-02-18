@@ -271,17 +271,17 @@ pub fn create_and_apply_fork(
             )
             .unwrap();
 
-            new_fork_blocks.push(Arc::new(header));
+            new_fork_blocks.push(Arc::clone(&sealed));
         }
 
         // Mark the new tip as the canonical chain
         let is_new_tip = tree
-            .mark_tip(&new_fork_blocks.last().unwrap().block_hash)
+            .mark_tip(&new_fork_blocks.last().unwrap().header().block_hash)
             .unwrap();
         assert!(is_new_tip);
     }
 
-    let new_tip = new_fork_blocks.last().unwrap().block_hash;
+    let new_tip = new_fork_blocks.last().unwrap().header().block_hash;
 
     let data = block_tree_guard.read();
     assert_eq!(

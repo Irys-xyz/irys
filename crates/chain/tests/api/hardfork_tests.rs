@@ -157,7 +157,7 @@ async fn find_tx_in_blocks(
 
         for height in 1..=max_height {
             if let Ok(block) = node.get_block_by_height(height).await {
-                if block.get_commitment_ledger_tx_ids().contains(tx_id) {
+                if block.commitment_tx_ids().contains(tx_id) {
                     return Some(height);
                 }
             } else {
@@ -304,7 +304,7 @@ mod mixed_versions {
         node.mine_blocks(1).await?;
 
         let block = node.get_block_by_height(1).await?;
-        let commitments = block.get_commitment_ledger_tx_ids();
+        let commitments = block.commitment_tx_ids();
 
         assert!(commitments.contains(&v1_tx.id()), "Block should contain V1");
         assert!(commitments.contains(&v2_tx.id()), "Block should contain V2");
@@ -332,7 +332,7 @@ mod mixed_versions {
         node.mine_blocks(1).await?;
 
         let block = node.get_block_by_height(1).await?;
-        let commitments = block.get_commitment_ledger_tx_ids();
+        let commitments = block.commitment_tx_ids();
 
         assert!(
             !commitments.contains(&v1_tx.id()),
@@ -416,7 +416,7 @@ mod configuration {
         node.mine_blocks(1).await?;
 
         let block = node.get_block_by_height(1).await?;
-        let commitments = block.get_commitment_ledger_tx_ids();
+        let commitments = block.commitment_tx_ids();
 
         assert!(commitments.contains(&v1_tx.id()), "V1 should be in block");
         assert!(commitments.contains(&v2_tx.id()), "V2 should be in block");
@@ -1246,7 +1246,7 @@ mod peer_sync_recovery {
                 }
             }
             // Verify all commitment txs in this block are in the peer's database
-            for tx_id in peer_block.get_commitment_ledger_tx_ids() {
+            for &tx_id in peer_block.commitment_tx_ids() {
                 let commitment_tx = peer_node
                     .node_ctx
                     .db

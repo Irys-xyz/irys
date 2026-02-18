@@ -220,7 +220,7 @@ impl GossipClient {
         header: &IrysBlockHeader,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
-        let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
+        let commitment_tx_ids = header.commitment_tx_ids();
         let data_tx_ids_map = header.get_data_ledger_tx_ids();
         let data_tx_ids: Vec<H256> = data_tx_ids_map.values().flatten().copied().collect();
 
@@ -228,7 +228,7 @@ impl GossipClient {
         let mut data_transactions = Vec::new();
 
         // Pull commitment transactions
-        for tx_id in commitment_tx_ids {
+        for &tx_id in commitment_tx_ids {
             match self
                 .pull_transaction_from_peer(tx_id, peer, peer_list)
                 .await

@@ -1,4 +1,3 @@
-use crate::block_tree_service::BlockMigratedEvent;
 use crate::mempool_service::{
     ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
@@ -6,13 +5,11 @@ use crate::services::ServiceSenders;
 use crate::{CriticalChunkIngressError, MempoolReadGuard};
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, BlockTransactions, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, H256,
+    chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
 };
 use irys_types::{IngressProof, IrysAddress, TxKnownStatus};
 use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc::UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
@@ -48,11 +45,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         block_hash: H256,
         include_chunk: bool,
     ) -> Result<Option<IrysBlockHeader>, TxReadError>;
-    async fn migrate_block(
-        &self,
-        irys_block_header: Arc<IrysBlockHeader>,
-        transactions: Arc<BlockTransactions>,
-    ) -> Result<usize, TxIngressError>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 
@@ -77,18 +69,11 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub struct MempoolServiceFacadeImpl {
     service: UnboundedSender<MempoolServiceMessage>,
-    migration_sender: broadcast::Sender<BlockMigratedEvent>,
 }
 
 impl MempoolServiceFacadeImpl {
-    pub fn new(
-        service: UnboundedSender<MempoolServiceMessage>,
-        migration_sender: broadcast::Sender<BlockMigratedEvent>,
-    ) -> Self {
-        Self {
-            service,
-            migration_sender,
-        }
+    pub fn new(service: UnboundedSender<MempoolServiceMessage>) -> Self {
+        Self { service }
     }
 }
 
@@ -96,7 +81,6 @@ impl From<&ServiceSenders> for MempoolServiceFacadeImpl {
     fn from(value: &ServiceSenders) -> Self {
         Self {
             service: value.mempool.clone(),
-            migration_sender: value.block_migrated_events.clone(),
         }
     }
 }
@@ -272,19 +256,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 block_hash
             ))
         })
-    }
-
-    async fn migrate_block(
-        &self,
-        irys_block_header: Arc<IrysBlockHeader>,
-        transactions: Arc<BlockTransactions>,
-    ) -> Result<usize, TxIngressError> {
-        self.migration_sender
-            .send(BlockMigratedEvent {
-                block: irys_block_header,
-                transactions,
-            })
-            .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
     }
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {

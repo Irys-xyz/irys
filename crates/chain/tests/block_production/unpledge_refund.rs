@@ -91,7 +91,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Assert (inclusion): UNPLEDGE only, fee-only debit ----------
     // First, verify the Irys commitment ledger actually contains the unpledge tx id
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     warn!(
         custom.inclusion_commitments = ?inclusion_commitments,
         tx.expected_unpledge = ?unpledge_tx.id(),
@@ -407,7 +407,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         );
     }
 
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),
@@ -646,7 +646,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         "Inclusion block must not change storage module assignments"
     );
 
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),

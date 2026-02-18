@@ -10,6 +10,7 @@ use irys_actors::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
     },
+    block_migration_service::BlockMigrationService,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
     cache_service::ChunkCacheService,
@@ -1382,6 +1383,12 @@ impl IrysNode {
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
+        let block_migration_service = BlockMigrationService::new(
+            irys_db.clone(),
+            block_index_guard.clone(),
+            service_senders.block_index.clone(),
+            service_senders.chunk_migration.clone(),
+        );
         let block_tree_handle = BlockTreeService::spawn_service(
             receivers.block_tree,
             irys_db.clone(),
@@ -1391,6 +1398,7 @@ impl IrysNode {
             &config,
             &service_senders,
             sync_state.clone(),
+            block_migration_service,
             runtime_handle.clone(),
         );
 

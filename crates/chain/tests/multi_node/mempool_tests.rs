@@ -794,8 +794,16 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .read()
         .get_canonical_chain();
 
-    let old_fork_hashes: Vec<_> = reorg_event.old_fork.iter().map(|b| b.block_hash).collect();
-    let new_fork_hashes: Vec<_> = reorg_event.new_fork.iter().map(|b| b.block_hash).collect();
+    let old_fork_hashes: Vec<_> = reorg_event
+        .old_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
+    let new_fork_hashes: Vec<_> = reorg_event
+        .new_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
 
     debug!(
         "ReorgEvent:\n fork_parent: {:?}\n old_fork: {:?}\n new_fork:{:?}",
@@ -811,13 +819,13 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let old_fork: Vec<_> = reorg_event
         .old_fork
         .iter()
-        .map(|bh| bh.block_hash)
+        .map(|bh| bh.header().block_hash)
         .collect();
 
     let new_fork: Vec<_> = reorg_event
         .new_fork
         .iter()
-        .map(|bh| bh.block_hash)
+        .map(|bh| bh.header().block_hash)
         .collect();
 
     debug!("fork_parent: {:?}", reorg_event.fork_parent.block_hash);

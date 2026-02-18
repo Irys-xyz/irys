@@ -49,9 +49,9 @@ pub fn clear_commitment_tx_metadata(
 }
 
 /// Batch operation: Set included_height for multiple commitment transactions
-pub fn batch_set_commitment_tx_included_height(
+pub fn batch_set_commitment_tx_included_height<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
     height: u64,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
@@ -61,9 +61,9 @@ pub fn batch_set_commitment_tx_included_height(
 }
 
 /// Batch operation: Clear commitment transaction metadata (re-org handling)
-pub fn batch_clear_commitment_tx_metadata(
+pub fn batch_clear_commitment_tx_metadata<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_commitment_tx_metadata(tx, tx_id)?;
@@ -150,9 +150,9 @@ pub fn clear_data_tx_promoted_height(
 }
 
 /// Batch operation: Set included_height for multiple data transactions
-pub fn batch_set_data_tx_included_height(
+pub fn batch_set_data_tx_included_height<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
     height: u64,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
@@ -162,9 +162,9 @@ pub fn batch_set_data_tx_included_height(
 }
 
 /// Batch set the promoted_height for a list of data transactions
-pub fn batch_set_data_tx_promoted_height(
+pub fn batch_set_data_tx_promoted_height<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
     height: u64,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
@@ -174,9 +174,9 @@ pub fn batch_set_data_tx_promoted_height(
 }
 
 /// Batch operation: Clear data transaction metadata (re-org handling)
-pub fn batch_clear_data_tx_metadata(
+pub fn batch_clear_data_tx_metadata<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_data_tx_metadata(tx, tx_id)?;
@@ -185,9 +185,9 @@ pub fn batch_clear_data_tx_metadata(
 }
 
 /// Batch clear the promoted_height for a list of data transactions
-pub fn batch_clear_data_tx_promoted_height(
+pub fn batch_clear_data_tx_promoted_height<'a>(
     tx: &(impl DbTxMut + DbTx),
-    tx_ids: &[H256],
+    tx_ids: impl IntoIterator<Item = &'a H256>,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_data_tx_promoted_height(tx, tx_id)?;

@@ -1376,11 +1376,11 @@ pub fn build_current_commitment_snapshot_from_index(
             .unwrap()
             .expect("block_index block to be in database");
 
-        let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+        let commitment_tx_ids = block.commitment_tx_ids();
         if !commitment_tx_ids.is_empty() {
             // If so, retrieve the full commitment transactions
             for txid in commitment_tx_ids {
-                let commitment_tx = commitment_tx_by_txid(&tx, &txid)
+                let commitment_tx = commitment_tx_by_txid(&tx, txid)
                     .unwrap()
                     .expect("commitment transactions to be in database");
 
@@ -1466,7 +1466,7 @@ fn load_commitment_transactions(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+    let commitment_tx_ids = block.commitment_tx_ids();
     if commitment_tx_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1474,7 +1474,7 @@ fn load_commitment_transactions(
     // Startup: query database directly
     let mut txs = Vec::new();
     let db_tx = db.tx().expect("to create a read only tx for the db");
-    for tx_id in &commitment_tx_ids {
+    for tx_id in commitment_tx_ids {
         if let Some(header) =
             commitment_tx_by_txid(&db_tx, tx_id).expect("to retrieve tx header from db")
         {
