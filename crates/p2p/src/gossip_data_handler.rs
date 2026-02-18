@@ -1195,7 +1195,7 @@ where
         let block_hash = header.block_hash;
 
         // Try fetching from the source peer first (the peer that sent us the header)
-        if let Some(source_peer_item) = self.peer_list.peer_by_id(&source_peer_id) {
+        if let Some(source_peer_item) = self.peer_list.get_peer(&source_peer_id) {
             debug!(
                 "Trying to fetch block body for block {} height {} from source peer {}",
                 block_hash, header.height, source_peer_id
@@ -1242,6 +1242,11 @@ where
                     );
                 }
             }
+        } else {
+            debug!(
+                "Source peer {} not found in peer list, skipping source-first fetch for block {} height {}",
+                source_peer_id, block_hash, header.height
+            );
         }
 
         debug!(
@@ -1263,12 +1268,12 @@ where
                 )
                 .await
             {
-                Ok((source_peer_id, irys_block_body)) => {
+                Ok((body_source_peer, irys_block_body)) => {
                     match irys_block_body.tx_ids_match_the_header(header) {
                         Ok(true) => {
                             debug!(
                                 "Fetched block body for block {} height {} from peer {:?}",
-                                block_hash, header.height, source_peer_id
+                                block_hash, header.height, body_source_peer
                             );
                             return Ok(irys_block_body);
                         }
@@ -1282,17 +1287,17 @@ where
                                 InvalidDataError::BlockBodyTransactionsMismatch,
                             );
                             self.peer_list.decrease_peer_score_by_peer_id(
-                                &source_peer_id,
+                                &body_source_peer,
                                 ScoreDecreaseReason::BogusData(
                                     "Mismatching transactions between header and body".into(),
                                 ),
                             );
                             debug!(
                                 "Penalized peer {} for serving bad block body",
-                                source_peer_id
+                                body_source_peer
                             );
 
-                            failed_attempts.push((Some(source_peer_id), error));
+                            failed_attempts.push((Some(body_source_peer), error));
                         }
                         Err(e) => {
                             warn!(
@@ -1302,7 +1307,7 @@ where
                             let error = GossipError::Internal(InternalGossipError::Unknown(
                                 format!("Error checking block body match: {}", e),
                             ));
-                            failed_attempts.push((Some(source_peer_id), error));
+                            failed_attempts.push((Some(body_source_peer), error));
                         }
                     }
                 }
