@@ -288,6 +288,7 @@ impl GossipServiceTestFixture {
         let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
         let gossip_broadcast_rx = service_receivers.gossip_broadcast;
         let block_tree_rx = service_receivers.block_tree;
+        let chunk_ingress_rx = service_receivers.chunk_ingress;
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
@@ -363,6 +364,40 @@ impl GossipServiceTestFixture {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
             }
             debug!("BlockTreeServiceMessage channel closed");
+        });
+
+        // Consume chunk ingress messages (previously handled by MempoolStub)
+        let chunk_store = Arc::clone(&mempool_chunks);
+        let mut chunk_ingress_receiver = chunk_ingress_rx;
+        tokio::spawn(async move {
+            use irys_actors::ChunkIngressMessage;
+            while let Some(message) = chunk_ingress_receiver.recv().await {
+                match message {
+                    ChunkIngressMessage::IngestChunk(chunk, reply) => {
+                        debug!("Received chunk ingress: data_root {:?}", chunk.data_root);
+                        chunk_store
+                            .write()
+                            .expect("to unlock chunk store")
+                            .push(chunk);
+                        let _ = reply.send(Ok(()));
+                    }
+                    ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
+                        debug!("Received fire-and-forget chunk: data_root {:?}", chunk.data_root);
+                        chunk_store
+                            .write()
+                            .expect("to unlock chunk store")
+                            .push(chunk);
+                    }
+                    ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
+                        debug!("Received ingress proof (test stub)");
+                        let _ = reply.send(Ok(()));
+                    }
+                    ChunkIngressMessage::ProcessPendingChunks(data_root) => {
+                        debug!("Received ProcessPendingChunks for {:?} (test stub)", data_root);
+                    }
+                }
+            }
+            debug!("ChunkIngress receiver channel closed");
         });
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
