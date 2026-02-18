@@ -16,7 +16,7 @@ You will always receive a **GitHub Actions run URL** (e.g., `https://github.com/
 ## When NOT to Use
 
 - **Assertion failures** — logic bug, use systematic-debugging instead
-- **Panics** — code bug, not flakiness
+- **Panics** — code bug, not flakiness (`Address already in use` during restart is auto-retried by the harness)
 - **Consistent failures** (fails every time, locally too) — not flaky, just broken
 
 ## Step 1: Pull CI Logs
@@ -53,6 +53,8 @@ digraph classify {
 }
 ```
 
+**When retries are disabled** (`retries = 0` in nextest config): You won't see TMT→PASS patterns. Instead, classify TIMEOUT failures by checking: does the test use polling waits + have fewer threads than nodes? → Pattern 1.
+
 ## Step 3: Read the Test Source
 
 Locate the test in `crates/chain/tests/` and identify:
@@ -60,6 +62,7 @@ Locate the test in `crates/chain/tests/` and identify:
 1. **Mining**: manual (`mine_block()`) vs autonomous (`start_mining()`)
 2. **Waiting**: polling (`wait_until_height`) vs event-driven (`wait_for_block_at_height`)
 3. **Event subscriptions**: is `subscribe_block_state_updates()` called BEFORE the event-producing action?
+4. **Helper methods**: check `testing_peer_with_assignments_and_name` and similar helpers — they may use polling waits internally, amplifying CPU starvation even when the test body looks clean
 
 ## Step 4: Check Nextest Prefix
 
@@ -128,6 +131,7 @@ If `flaky` still shows failures, the fix is incomplete. Go back to Step 5.
 | Bumping threads without switching to event-driven waits | Half-fix — still wastes time polling, just has more CPU to waste |
 | Subscribing to broadcast events after the triggering action | Race condition — event fires before subscriber exists |
 | Using `wait_until_height` in new tests | Legacy polling API — always use `wait_for_block_at_height` instead |
+| Only checking the test body for polling waits | Helper methods like `testing_peer_with_assignments_and_name` use polling internally — check those too |
 
 ## Wait Methods Reference
 
