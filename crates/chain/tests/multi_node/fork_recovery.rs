@@ -270,8 +270,16 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
         .read()
         .get_canonical_chain();
 
-    let old_fork_hashes: Vec<_> = reorg_event.old_fork.iter().map(|b| b.block_hash).collect();
-    let new_fork_hashes: Vec<_> = reorg_event.new_fork.iter().map(|b| b.block_hash).collect();
+    let old_fork_hashes: Vec<_> = reorg_event
+        .old_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
+    let new_fork_hashes: Vec<_> = reorg_event
+        .new_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
 
     println!(
         "\nReorgEvent:\n fork_parent: {:?}\n old_fork: {:?}\n new_fork:{:?}",
@@ -306,13 +314,13 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     let old_fork: Vec<_> = reorg_event
         .old_fork
         .iter()
-        .map(|bh| bh.block_hash)
+        .map(|bh| bh.header().block_hash)
         .collect();
 
     let new_fork: Vec<_> = reorg_event
         .new_fork
         .iter()
-        .map(|bh| bh.block_hash)
+        .map(|bh| bh.header().block_hash)
         .collect();
 
     println!("\nfork_parent: {:?}", reorg_event.fork_parent.block_hash);
@@ -837,7 +845,8 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
             let mut txs = node
                 .get_block_by_height(height)
                 .await?
-                .get_commitment_ledger_tx_ids();
+                .commitment_tx_ids()
+                .to_vec();
             txs.sort();
             Ok(txs)
         }
@@ -1783,7 +1792,8 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             let mut txs = node
                 .get_block_by_height(height)
                 .await?
-                .get_commitment_ledger_tx_ids();
+                .commitment_tx_ids()
+                .to_vec();
             txs.sort();
             Ok(txs)
         }

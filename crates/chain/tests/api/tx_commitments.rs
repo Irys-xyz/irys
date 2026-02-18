@@ -92,7 +92,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         debug!(
             "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
-            genesis_block.get_commitment_ledger_tx_ids(),
+            genesis_block.commitment_tx_ids(),
             stakes.unwrap().id,
             pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
         );
@@ -124,7 +124,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Block height: 1 should have two stake and two pledge commitments
         let expected_ids = [stake_tx1.id(), stake_tx2.id(), pledge1.id(), pledge2.id()];
         let block_1 = node.get_block_by_height(1).await.unwrap();
-        let commitments_1 = block_1.get_commitment_ledger_tx_ids();
+        let commitments_1 = block_1.commitment_tx_ids();
         debug!(
             "Block commitments - height: {:?}\n{:#?}",
             block_1.height, commitments_1,
@@ -134,7 +134,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Block height: 2 is an epoch block and should have the same commitments and no more
         let block_2 = node.get_block_by_height(2).await.unwrap();
-        let commitments_2 = block_2.get_commitment_ledger_tx_ids();
+        let commitments_2 = block_2.commitment_tx_ids();
         debug!(
             "Block commitments - height: {:?}\n{:#?}",
             block_2.height, commitments_2
@@ -218,7 +218,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         node.mine_blocks(num_blocks_in_epoch + 2).await?;
 
         let block_3 = node.get_block_by_height(3).await.unwrap();
-        let commitments_3 = block_3.get_commitment_ledger_tx_ids();
+        let commitments_3 = block_3.commitment_tx_ids();
         debug!("Block - height: {:?}\n{:#?}", block_3.height, commitments_3);
 
         // Block height: 3 should have 1 pledge commitment
@@ -801,7 +801,7 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     node.wait_for_mempool(update_tx_mid_fee.id(), 5).await?;
 
     let block = node.mine_block().await?;
-    let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+    let commitment_tx_ids = block.commitment_tx_ids();
 
     // Verify fee-ascending order: idx 0=low fee, idx 1=mid fee, idx 2=high fee
     assert_eq!(commitment_tx_ids[0], update_tx_low_fee.id());

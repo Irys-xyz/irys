@@ -412,7 +412,7 @@ impl BlockDiscoveryServiceInner {
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
             new_block_header.block_hash,
             new_block_header.height,
-            new_block_header.get_commitment_ledger_tx_ids(),
+            new_block_header.commitment_tx_ids(),
             new_block_header.get_data_ledger_tx_ids()
         );
 

@@ -72,7 +72,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(unpledge_inclusion.height)
         .await?;
 
-    let inclusion_commitments = unpledge_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = unpledge_block.commitment_tx_ids();
     for tx in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),
@@ -856,7 +856,7 @@ fn assert_commitment_in_ledger(
     tx_id: irys_types::H256,
     message: &str,
 ) {
-    let commitments = block.get_commitment_ledger_tx_ids();
+    let commitments = block.commitment_tx_ids();
     assert!(commitments.contains(&tx_id), "{}", message);
 }
 
@@ -866,7 +866,7 @@ fn assert_commitment_not_in_ledger(
     tx_id: irys_types::H256,
     message: &str,
 ) {
-    let commitments = block.get_commitment_ledger_tx_ids();
+    let commitments = block.commitment_tx_ids();
     assert!(!commitments.contains(&tx_id), "{}", message);
 }
 

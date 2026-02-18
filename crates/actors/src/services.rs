@@ -3,9 +3,7 @@ use crate::{
     block_discovery::BlockDiscoveryMessage,
     block_index_service::BlockIndexServiceMessage,
     block_producer::BlockProducerCommand,
-    block_tree_service::{
-        BlockMigratedEvent, BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent,
-    },
+    block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
@@ -25,7 +23,6 @@ use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
 
-// Only contains senders, thread-safe to clone and share
 #[derive(Debug, Clone)]
 pub struct ServiceSenders(pub Arc<ServiceSendersInner>);
 
@@ -40,10 +37,6 @@ impl Deref for ServiceSenders {
 impl ServiceSenders {
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.0.subscribe_reorgs()
-    }
-
-    pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
-        self.0.subscribe_block_migrated()
     }
 
     pub fn subscribe_block_state_updates(&self) -> broadcast::Receiver<BlockStateUpdated> {
@@ -107,7 +100,6 @@ pub struct ServiceReceivers {
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
-    pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
     pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
@@ -130,7 +122,6 @@ pub struct ServiceSendersInner {
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
-    pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
@@ -145,7 +136,6 @@ impl ServiceSendersInner {
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        // vdf channel for fast forwarding steps during node sync
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
@@ -161,10 +151,7 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockProducerCommand>();
         let (reth_service_sender, reth_service_receiver) =
             unbounded_channel::<RethServiceMessage>();
-        // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
-        let (block_migrated_sender, block_migrated_receiver) =
-            broadcast::channel::<BlockMigratedEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
         let (peer_events_sender, peer_events_receiver) = broadcast::channel::<PeerEvent>(100);
@@ -188,7 +175,6 @@ impl ServiceSendersInner {
             block_producer: block_producer_sender,
             reth_service: reth_service_sender,
             reorg_events: reorg_sender,
-            block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
@@ -210,7 +196,6 @@ impl ServiceSendersInner {
             block_producer: block_producer_receiver,
             reth_service: reth_service_receiver,
             reorg_events: reorg_receiver,
-            block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
             peer_events: peer_events_receiver,
             peer_network: peer_network_receiver,
@@ -220,13 +205,9 @@ impl ServiceSendersInner {
         (senders, receivers)
     }
 
-    /// Subscribe to reorg events - can be called multiple times
+    /// Subscribe to reorg events
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.reorg_events.subscribe()
-    }
-
-    pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
-        self.block_migrated_events.subscribe()
     }
 
     pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<Arc<MiningBroadcastEvent>> {

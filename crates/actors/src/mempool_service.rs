@@ -17,7 +17,7 @@ use irys_database::db_cache::CachedDataRoot;
 pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
+use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
@@ -40,7 +40,7 @@ use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -202,7 +202,7 @@ pub struct Inner {
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
-    BlockConfirmed(Arc<IrysBlockHeader>),
+    BlockConfirmed(Arc<SealedBlock>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
         UnpackedChunk,
@@ -311,10 +311,10 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::BlockConfirmed(block) => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
-                if let Err(e) = self.handle_block_confirmed_message(block).await {
+            MempoolServiceMessage::BlockConfirmed(sealed_block) => {
+                let block_hash = sealed_block.header().block_hash;
+                let block_height = sealed_block.header().height;
+                if let Err(e) = self.handle_block_confirmed_message(sealed_block).await {
                     tracing::error!(
                         "Failed to handle block confirmed message for block {} (height {}): {:#}",
                         block_hash,
@@ -1659,6 +1659,46 @@ impl Inner {
         }
 
         self.mempool_state.wipe_blacklists().await;
+    }
+
+    /// After restoring the mempool from disk, reconstruct metadata fields (included_height,
+    /// promoted_height) from the database. The `#[serde(skip)]` on `DataTransactionMetadata`
+    /// means these fields are lost during serialization. The DB is authoritative since
+    /// `BlockMigrationService` persists them at confirmation time.
+    pub async fn reconstruct_metadata_from_db(&self) {
+        let mut state = self.mempool_state.0.write().await;
+        let mut reconstructed = 0_u64;
+        for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
+            let db_meta = match self.irys_db.view_eyre(|tx| {
+                irys_database::get_data_tx_metadata(tx, txid).map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::error!(tx.id = %txid, "Failed to read tx metadata from DB: {e}");
+                    None
+                }
+            };
+            if let Some(meta) = db_meta {
+                let mut changed = false;
+                if meta.included_height.is_some() {
+                    tx_header.metadata_mut().included_height = meta.included_height;
+                    changed = true;
+                }
+                if meta.promoted_height.is_some() {
+                    tx_header.metadata_mut().promoted_height = meta.promoted_height;
+                    changed = true;
+                }
+                if changed {
+                    reconstructed += 1;
+                }
+            }
+        }
+        if reconstructed > 0 {
+            tracing::info!(
+                reconstructed,
+                "Reconstructed metadata (included_height, promoted_height) from DB for mempool txs"
+            );
+        }
     }
 
     // Helper to verify signature
@@ -3007,7 +3047,6 @@ pub struct MempoolService {
     shutdown: Shutdown,
     msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
-    block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
     inner: Arc<Inner>,
 }
 
@@ -3045,7 +3084,6 @@ impl MempoolService {
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
         let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
@@ -3063,7 +3101,6 @@ impl MempoolService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    block_migrated_rx,
                     inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
@@ -3098,6 +3135,7 @@ impl MempoolService {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
+        self.inner.reconstruct_metadata_from_db().await;
 
         let mut shutdown_future = pin!(self.shutdown);
         loop {
@@ -3183,14 +3221,6 @@ impl MempoolService {
                         self.inner.handle_reorg(event).await?;
                     }
                 }
-
-                // Handle block migrated events
-                 migrated_result = self.block_migrated_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(migrated_result, "BlockMigrated") {
-                        self.inner.handle_block_migrated(event).await?;
-                    }
-                }
-
 
                 // Handle shutdown signal
                 _ = &mut shutdown_future => {
