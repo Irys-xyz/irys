@@ -1609,7 +1609,7 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
+async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
@@ -1647,7 +1647,7 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     let current_height = node_a.get_canonical_chain_height().await;
     assert_eq!(current_height, 0);
     node_b
-        .wait_until_height(current_height, seconds_to_wait)
+        .wait_for_block_at_height(current_height, seconds_to_wait)
         .await?;
 
     //
@@ -1656,10 +1656,10 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
 
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
-    node_a.wait_until_height(1, seconds_to_wait).await?;
+    node_a.wait_for_block_at_height(1, seconds_to_wait).await?;
     let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
     node_b
-        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .wait_for_block_at_height(1, seconds_to_wait)
         .await?;
 
     assert_eq!(
@@ -1753,10 +1753,10 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
 
     // confirm both nodes are at the same and expected height
     node_a
-        .wait_until_height(b_last.height, seconds_to_wait)
+        .wait_for_block_at_height(b_last.height, seconds_to_wait)
         .await?;
     node_b
-        .wait_until_height(b_last.height, seconds_to_wait)
+        .wait_for_block_at_height(b_last.height, seconds_to_wait)
         .await?;
 
     // confirm chain has identical and expected height on all nodes

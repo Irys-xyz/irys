@@ -2281,7 +2281,7 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 /// expect valid tx to ingress successfully
-async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2548,7 +2548,7 @@ async fn commitment_tx_valid_higher_fee_test(
 /// see what txs get included (assert its count is equal to `initial_commitments` + 1)
 /// transfer the user enough funds to afford the remaining commitments
 /// produce another block, make sure it includes the rest
-async fn commitment_tx_cumulative_fee_validation_test(
+async fn slow_commitment_tx_cumulative_fee_validation_test(
     #[case] starting_balance: irys_types::U256,
     #[case] initial_commitments: u64,
     #[case] total_pledge_count: u64,
