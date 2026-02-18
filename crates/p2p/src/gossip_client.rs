@@ -1057,6 +1057,40 @@ impl GossipClient {
         .await
     }
 
+    /// Pull a block body from a specific peer, updating its score accordingly.
+    pub async fn pull_block_body_from_peer(
+        &self,
+        header: &IrysBlockHeader,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+        let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
+        match self
+            .pull_data_and_update_the_score(peer, data_request, Some(header), peer_list)
+            .await
+        {
+            Ok(response) => match response {
+                GossipResponse::Accepted(Some(data)) => match data {
+                    GossipDataV2::BlockBody(body) => Ok((peer.0, body)),
+                    _ => Err(PeerNetworkError::UnexpectedData(format!(
+                        "Expected BlockBody, got {:?}",
+                        data.data_type_and_id()
+                    ))),
+                },
+                GossipResponse::Accepted(None) => Err(PeerNetworkError::FailedToRequestData(
+                    format!("Peer {} did not have the requested block body", peer.0),
+                )),
+                GossipResponse::Rejected(reason) => Err(PeerNetworkError::FailedToRequestData(
+                    format!("Peer {} rejected block body request: {:?}", peer.0, reason),
+                )),
+            },
+            Err(err) => match err {
+                GossipError::PeerNetwork(e) => Err(e),
+                other => Err(PeerNetworkError::FailedToRequestData(other.to_string())),
+            },
+        }
+    }
+
     pub async fn pull_payload_from_network(
         &self,
         evm_payload_hash: B256,
