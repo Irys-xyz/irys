@@ -328,11 +328,24 @@ impl IrysNodeTest<()> {
         }
     }
 
-    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
 
-        let node = IrysNode::new(self.cfg).unwrap();
+        // Retry with fresh random ports if the previous ports are still held by the OS
+        // (common after stop/start cycles when the socket hasn't fully released).
+        let node = match IrysNode::new(self.cfg.clone()) {
+            Ok(node) => node,
+            Err(e) if e.to_string().contains("Address already in use") => {
+                tracing::warn!("Port still in use after stop, retrying with fresh ports");
+                self.cfg.http.bind_port = 0;
+                self.cfg.http.public_port = 0;
+                self.cfg.gossip.bind_port = 0;
+                self.cfg.gossip.public_port = 0;
+                IrysNode::new(self.cfg).unwrap()
+            }
+            Err(e) => panic!("Failed to create IrysNode: {e}"),
+        };
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),
