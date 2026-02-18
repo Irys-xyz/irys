@@ -551,9 +551,9 @@ where
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
 
-        // Pull block body with retries (pull_block_body handles retry logic internally)
+        // Pull block body, trying the sender first before falling back to network
         let block_body = self
-            .pull_block_body(&block_header, use_trusted_peers_only)
+            .pull_block_body(&block_header, use_trusted_peers_only, source_peer_id)
             .await?;
 
         self.block_pool
@@ -1190,8 +1190,64 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
+        source_peer_id: IrysPeerId,
     ) -> GossipResult<Arc<BlockBody>> {
         let block_hash = header.block_hash;
+
+        // Try fetching from the source peer first (the peer that sent us the header)
+        if let Some(source_peer_item) = self.peer_list.get_peer(&source_peer_id) {
+            debug!(
+                "Trying to fetch block body for block {} height {} from source peer {}",
+                block_hash, header.height, source_peer_id
+            );
+            let source_peer = (source_peer_id, source_peer_item);
+            match self
+                .gossip_client
+                .pull_block_body_from_peer(header, &source_peer, &self.peer_list)
+                .await
+            {
+                Ok((_peer_id, irys_block_body)) => {
+                    match irys_block_body.tx_ids_match_the_header(header) {
+                        Ok(true) => {
+                            debug!(
+                                "Fetched block body for block {} height {} from source peer {}",
+                                block_hash, header.height, source_peer_id
+                            );
+                            return Ok(irys_block_body);
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "Source peer {} served mismatching block body for block {} height {}",
+                                source_peer_id, block_hash, header.height
+                            );
+                            self.peer_list.decrease_peer_score_by_peer_id(
+                                &source_peer_id,
+                                ScoreDecreaseReason::BogusData(
+                                    "Mismatching transactions between header and body".into(),
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Error checking block body from source peer {} for block {} height {}: {}",
+                                source_peer_id, block_hash, header.height, e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to fetch block body from source peer {} for block {} height {}: {}",
+                        source_peer_id, block_hash, header.height, e
+                    );
+                }
+            }
+        } else {
+            debug!(
+                "Source peer {} not found in peer list, skipping source-first fetch for block {} height {}",
+                source_peer_id, block_hash, header.height
+            );
+        }
 
         debug!(
             "Fetching block body for block {} height {} from the network",
@@ -1212,12 +1268,12 @@ where
                 )
                 .await
             {
-                Ok((source_peer_id, irys_block_body)) => {
+                Ok((body_source_peer, irys_block_body)) => {
                     match irys_block_body.tx_ids_match_the_header(header) {
                         Ok(true) => {
                             debug!(
                                 "Fetched block body for block {} height {} from peer {:?}",
-                                block_hash, header.height, source_peer_id
+                                block_hash, header.height, body_source_peer
                             );
                             return Ok(irys_block_body);
                         }
@@ -1231,17 +1287,17 @@ where
                                 InvalidDataError::BlockBodyTransactionsMismatch,
                             );
                             self.peer_list.decrease_peer_score_by_peer_id(
-                                &source_peer_id,
+                                &body_source_peer,
                                 ScoreDecreaseReason::BogusData(
                                     "Mismatching transactions between header and body".into(),
                                 ),
                             );
                             debug!(
                                 "Penalized peer {} for serving bad block body",
-                                source_peer_id
+                                body_source_peer
                             );
 
-                            failed_attempts.push((Some(source_peer_id), error));
+                            failed_attempts.push((Some(body_source_peer), error));
                         }
                         Err(e) => {
                             warn!(
@@ -1251,7 +1307,7 @@ where
                             let error = GossipError::Internal(InternalGossipError::Unknown(
                                 format!("Error checking block body match: {}", e),
                             ));
-                            failed_attempts.push((Some(source_peer_id), error));
+                            failed_attempts.push((Some(body_source_peer), error));
                         }
                     }
                 }

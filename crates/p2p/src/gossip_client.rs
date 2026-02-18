@@ -1057,6 +1057,83 @@ impl GossipClient {
         .await
     }
 
+    /// Pull a block body from a specific peer, updating its score accordingly.
+    pub async fn pull_block_body_from_peer(
+        &self,
+        header: &IrysBlockHeader,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+        let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
+        for attempt in 0..2 {
+            match self
+                .pull_data_and_update_the_score(peer, data_request.clone(), Some(header), peer_list)
+                .await
+            {
+                Ok(response) => match response {
+                    GossipResponse::Accepted(Some(data)) => match data {
+                        GossipDataV2::BlockBody(body) => return Ok((peer.0, body)),
+                        _ => {
+                            return Err(PeerNetworkError::UnexpectedData(format!(
+                                "Expected BlockBody, got {:?}",
+                                data.data_type_and_id()
+                            )))
+                        }
+                    },
+                    GossipResponse::Accepted(None) => {
+                        return Err(PeerNetworkError::FailedToRequestData(format!(
+                            "Peer {} did not have the requested block body",
+                            peer.0
+                        )))
+                    }
+                    GossipResponse::Rejected(reason) => {
+                        warn!(
+                            "Peer {:?} rejected block body request: {:?}",
+                            peer.0, reason
+                        );
+                        match reason {
+                            RejectionReason::HandshakeRequired(reason) => {
+                                warn!("Block body request requires handshake: {:?}", reason);
+                                peer_list.initiate_handshake(
+                                    peer.1.address.api,
+                                    peer.1.address.gossip,
+                                    true,
+                                );
+                                if attempt == 0 {
+                                    debug!("Waiting for handshake to complete...");
+                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
+                                    continue;
+                                }
+                            }
+                            RejectionReason::GossipDisabled => {
+                                peer_list.set_is_online_by_peer_id(&peer.0, false);
+                            }
+                            RejectionReason::InvalidCredentials
+                            | RejectionReason::ProtocolMismatch => {
+                                warn!(
+                                    "Peer {:?} rejected block body request with {:?}",
+                                    peer.0, reason
+                                );
+                            }
+                            _ => {}
+                        }
+                        return Err(PeerNetworkError::FailedToRequestData(format!(
+                            "Peer {:?} rejected block body request: {:?}",
+                            peer.0, reason
+                        )));
+                    }
+                },
+                Err(err) => match err {
+                    GossipError::PeerNetwork(e) => return Err(e),
+                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
+                },
+            }
+        }
+        Err(PeerNetworkError::FailedToRequestData(
+            "Failed to pull block body from peer after handshake retry".to_string(),
+        ))
+    }
+
     pub async fn pull_payload_from_network(
         &self,
         evm_payload_hash: B256,
