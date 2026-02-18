@@ -299,45 +299,6 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     Ok(false)
 }
 
-/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
-///
-/// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
-/// callers (e.g. the write-behind writer) that have already validated the data root.
-/// Returns `true` if the chunk was a duplicate and was not inserted.
-pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
-    tx: &T,
-    chunk: &UnpackedChunk,
-) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_root;
-    let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
-
-    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
-        warn!(
-            "Chunk {} of {} is already cached, skipping..",
-            &chunk_path_hash, &data_root
-        );
-        return Ok(true);
-    }
-
-    let value = CachedChunkIndexEntry {
-        index: chunk.tx_offset,
-        meta: CachedChunkIndexMetadata {
-            chunk_path_hash,
-            updated_at: UnixTimestamp::now()
-                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
-        },
-    };
-
-    debug!(
-        "Caching chunk {} ({}) of {}",
-        &chunk.tx_offset, &chunk_path_hash, &data_root
-    );
-
-    tx.put::<CachedChunksIndex>(data_root, value)?;
-    tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
-    Ok(false)
-}
-
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,

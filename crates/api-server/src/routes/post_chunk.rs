@@ -83,7 +83,7 @@ pub async fn post_chunk(
                     }
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 },
-                ChunkIngressError::Advisory(_) => StatusCode::OK,
+                ChunkIngressError::Advisory(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             Err((format!("{err:?}"), status).into())
         };

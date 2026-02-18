@@ -2684,18 +2684,27 @@ impl AtomicMempoolState {
     /// Single WRITE lock for all txids.
     pub async fn batch_set_data_tx_included_height_overwrite(&self, tx_ids: &[H256], height: u64) {
         let mut state = self.write().await;
+        let mut updated = 0_usize;
         for tx_id in tx_ids {
             if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(tx_id) {
                 wrapped_tx.metadata_mut().included_height = Some(height);
                 state.recent_valid_tx.put(*tx_id, ());
+                updated += 1;
             }
         }
+        tracing::trace!(
+            updated,
+            total = tx_ids.len(),
+            height,
+            "batch_set_data_tx_included_height_overwrite"
+        );
     }
 
     /// Batch set included_height on commitment transactions.
     /// Single WRITE lock; searches valid_commitment_tx then pending_pledges.
     pub async fn batch_set_commitment_tx_included_height(&self, tx_ids: &[H256], height: u64) {
         let mut state = self.write().await;
+        let mut updated = 0_usize;
         for tx_id in tx_ids {
             let mut found = false;
             for txs in state.valid_commitment_tx.values_mut() {
@@ -2709,11 +2718,21 @@ impl AtomicMempoolState {
                 for (_, pledges_cache) in state.pending_pledges.iter_mut() {
                     if let Some(tx) = pledges_cache.get_mut(tx_id) {
                         tx.metadata_mut().included_height = Some(height);
+                        found = true;
                         break;
                     }
                 }
             }
+            if found {
+                updated += 1;
+            }
         }
+        tracing::trace!(
+            updated,
+            total = tx_ids.len(),
+            height,
+            "batch_set_commitment_tx_included_height"
+        );
     }
 
     /// Batch set promoted_height on data transactions.
@@ -2725,7 +2744,7 @@ impl AtomicMempoolState {
         height: u64,
     ) -> Vec<(H256, Option<DataTransactionHeader>)> {
         let mut state = self.write().await;
-        tx_ids
+        let results: Vec<_> = tx_ids
             .iter()
             .map(|tx_id| {
                 if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(tx_id) {
@@ -2739,7 +2758,15 @@ impl AtomicMempoolState {
                     (*tx_id, None)
                 }
             })
-            .collect()
+            .collect();
+        let updated = results.iter().filter(|(_, h)| h.is_some()).count();
+        tracing::trace!(
+            updated,
+            total = tx_ids.len(),
+            height,
+            "batch_set_promoted_height"
+        );
+        results
     }
 
     /// Batch remove data transactions and mark as invalid.
