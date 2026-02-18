@@ -46,6 +46,13 @@ const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 /// Timeout to wait for handshake completion before retrying
 const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// Control flow outcome for `handle_peer_pull_response`.
+enum PeerPullOutcome<T> {
+    Ok((IrysPeerId, T)),
+    Err(PeerNetworkError),
+    RetryAfterHandshake,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
     #[error("Get request to {0} failed with reason {1}")]
@@ -1173,73 +1180,14 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
-        for attempt in 0..2 {
-            match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), Some(header), peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(Some(data)) => match data {
-                        GossipDataV2::BlockBody(body) => return Ok((peer.0, body)),
-                        _ => {
-                            return Err(PeerNetworkError::UnexpectedData(format!(
-                                "Expected BlockBody, got {:?}",
-                                data.data_type_and_id()
-                            )))
-                        }
-                    },
-                    GossipResponse::Accepted(None) => {
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {} did not have the requested block body",
-                            peer.0
-                        )))
-                    }
-                    GossipResponse::Rejected(reason) => {
-                        warn!(
-                            "Peer {:?} rejected block body request: {:?}",
-                            peer.0, reason
-                        );
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Block body request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!(
-                                    "Peer {:?} rejected block body request with {:?}",
-                                    peer.0, reason
-                                );
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected block body request: {:?}",
-                            peer.0, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
-            }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull block body from peer after handshake retry".to_string(),
-        ))
+        self.pull_data_from_peer_with_retry(
+            data_request,
+            Some(header),
+            peer,
+            peer_list,
+            Self::block_body,
+        )
+        .await
     }
 
     pub async fn pull_payload_from_network(
@@ -1284,63 +1232,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        for attempt in 0..2 {
-            match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), None, peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(maybe_data) => match maybe_data {
-                        Some(data) => {
-                            let header = Self::block(data)?;
-                            return Ok((peer.0, header));
-                        }
-                        None => {
-                            return Err(PeerNetworkError::FailedToRequestData(
-                                "Peer did not have the requested block".to_string(),
-                            ))
-                        }
-                    },
-                    GossipResponse::Rejected(reason) => {
-                        warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Block request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!("Peer {:?} rejected block request with {:?}", peer.0, reason);
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected the block {:?} request: {:?}",
-                            peer.0, block_hash, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
-            }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull block from peer after handshake retry".to_string(),
-        ))
+        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block)
+            .await
     }
 
     pub async fn pull_transaction_from_peer(
@@ -1350,66 +1243,15 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, IrysTransactionResponse), PeerNetworkError> {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
-        for attempt in 0..2 {
-            match self
-                .pull_primitive_data_and_update_the_score(peer, data_request.clone(), peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(maybe_data) => match maybe_data {
-                        Some(data) => {
-                            let tx = Self::transaction(data)?;
-                            return Ok((peer.0, tx));
-                        }
-                        None => {
-                            return Err(PeerNetworkError::FailedToRequestData(
-                                "Peer did not have the requested transaction".to_string(),
-                            ))
-                        }
-                    },
-                    GossipResponse::Rejected(reason) => {
-                        warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Transaction request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!(
-                                    "Peer {:?} rejected transaction request with {:?}",
-                                    peer.0, reason
-                                );
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected the transaction {:?} request: {:?}",
-                            peer.0, tx_id, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
-            }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull transaction from peer after handshake retry".to_string(),
-        ))
+        // Use primitive fetch to avoid recursion: pull_data_and_update_the_score
+        // can call pull_block_body_from_v1_peer which calls pull_transaction_from_peer.
+        self.pull_primitive_data_from_peer_with_retry(
+            data_request,
+            peer,
+            peer_list,
+            Self::transaction,
+        )
+        .await
     }
 
     fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
@@ -1440,6 +1282,162 @@ impl GossipClient {
                 "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
+        }
+    }
+
+    fn block_body(gossip_data: GossipDataV2) -> Result<Arc<BlockBody>, PeerNetworkError> {
+        match gossip_data {
+            GossipDataV2::BlockBody(body) => Ok(body),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected BlockBody, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    /// Pull data from a specific peer with a single handshake retry.
+    ///
+    /// Uses `pull_data_and_update_the_score` which includes circuit breaker
+    /// checks and V1 BlockBody compatibility handling.
+    /// Used by `pull_block_body_from_peer` and `pull_block_header_from_peer`.
+    async fn pull_data_from_peer_with_retry<T>(
+        &self,
+        data_request: GossipDataRequestV2,
+        fallback_header: Option<&IrysBlockHeader>,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+    ) -> Result<(IrysPeerId, T), PeerNetworkError> {
+        for attempt in 0..2 {
+            let result = self
+                .pull_data_and_update_the_score(
+                    peer,
+                    data_request.clone(),
+                    fallback_header,
+                    peer_list,
+                )
+                .await;
+            match Self::handle_peer_pull_response(
+                result,
+                &data_request,
+                peer,
+                peer_list,
+                map_data,
+                attempt,
+            )
+            .await
+            {
+                PeerPullOutcome::Ok(val) => return Ok(val),
+                PeerPullOutcome::Err(e) => return Err(e),
+                PeerPullOutcome::RetryAfterHandshake => continue,
+            }
+        }
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to pull {:?} from peer after handshake retry",
+            data_request
+        )))
+    }
+
+    /// Like `pull_data_from_peer_with_retry` but uses
+    /// `pull_primitive_data_and_update_the_score` to avoid the recursive cycle
+    /// through `pull_block_body_from_v1_peer` → `pull_transaction_from_peer`.
+    /// Used by `pull_transaction_from_peer`.
+    async fn pull_primitive_data_from_peer_with_retry<T>(
+        &self,
+        data_request: GossipDataRequestV2,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+    ) -> Result<(IrysPeerId, T), PeerNetworkError> {
+        for attempt in 0..2 {
+            let result = self
+                .pull_primitive_data_and_update_the_score(peer, data_request.clone(), peer_list)
+                .await;
+            match Self::handle_peer_pull_response(
+                result,
+                &data_request,
+                peer,
+                peer_list,
+                map_data,
+                attempt,
+            )
+            .await
+            {
+                PeerPullOutcome::Ok(val) => return Ok(val),
+                PeerPullOutcome::Err(e) => return Err(e),
+                PeerPullOutcome::RetryAfterHandshake => continue,
+            }
+        }
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to pull {:?} from peer after handshake retry",
+            data_request
+        )))
+    }
+
+    /// Shared response handling for single-peer pull retries.
+    async fn handle_peer_pull_response<T>(
+        result: GossipResult<GossipResponse<Option<GossipDataV2>>>,
+        data_request: &GossipDataRequestV2,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        attempt: u32,
+    ) -> PeerPullOutcome<T> {
+        match result {
+            Ok(response) => match response {
+                GossipResponse::Accepted(Some(data)) => match map_data(data) {
+                    Ok(mapped) => PeerPullOutcome::Ok((peer.0, mapped)),
+                    Err(e) => PeerPullOutcome::Err(e),
+                },
+                GossipResponse::Accepted(None) => {
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {} did not have the requested {:?}",
+                        peer.0, data_request
+                    )))
+                }
+                GossipResponse::Rejected(reason) => {
+                    warn!(
+                        "Peer {:?} rejected {:?} request: {:?}",
+                        peer.0, data_request, reason
+                    );
+                    match reason {
+                        RejectionReason::HandshakeRequired(reason) => {
+                            warn!("Request {:?} requires handshake: {:?}", data_request, reason);
+                            peer_list.initiate_handshake(
+                                peer.1.address.api,
+                                peer.1.address.gossip,
+                                true,
+                            );
+                            if attempt == 0 {
+                                debug!("Waiting for handshake to complete...");
+                                tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
+                                return PeerPullOutcome::RetryAfterHandshake;
+                            }
+                        }
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online_by_peer_id(&peer.0, false);
+                        }
+                        RejectionReason::InvalidCredentials
+                        | RejectionReason::ProtocolMismatch => {
+                            warn!(
+                                "Peer {:?} rejected {:?} with {:?}",
+                                peer.0, data_request, reason
+                            );
+                        }
+                        _ => {}
+                    }
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {:?} rejected {:?} request: {:?}",
+                        peer.0, data_request, reason
+                    )))
+                }
+            },
+            Err(err) => match err {
+                GossipError::PeerNetwork(e) => PeerPullOutcome::Err(e),
+                other => PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(
+                    other.to_string(),
+                )),
+            },
         }
     }
 
