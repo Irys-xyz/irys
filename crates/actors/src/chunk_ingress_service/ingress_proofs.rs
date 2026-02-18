@@ -1,5 +1,5 @@
+use super::ChunkIngressServiceInner;
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
-use crate::mempool_service::{IngressProofError, IngressProofGenerationError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::{
@@ -9,11 +9,58 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{Config, DataRoot, DatabaseProvider, IngressProof, H256};
+use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, H256};
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, instrument, warn};
 
-impl Inner {
+/// Errors that can occur when ingesting an external ingress proof.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofError {
+    /// The proofs signature is invalid
+    #[error("Ingress proof signature is invalid")]
+    InvalidSignature,
+    /// There was a database error storing the proof
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    /// The proof does not come from a staked address
+    #[error("Unstaked address")]
+    UnstakedAddress,
+    /// The ingress proof is anchored to an unknown/expired anchor
+    #[error("Invalid anchor: {0}")]
+    InvalidAnchor(BlockHash),
+    /// Catch-all variant for other errors.
+    #[error("Ingress proof error: {0}")]
+    Other(String),
+}
+
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+    }
+}
+
+impl ChunkIngressServiceInner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
     pub fn handle_ingest_ingress_proof(
         &self,
@@ -332,7 +379,7 @@ pub fn generate_and_store_ingress_proof(
     // Notify start of proof generation
     let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
 
-    let proof_res = crate::mempool_service::chunks::generate_ingress_proof(
+    let proof_res = super::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
         data_size,
@@ -453,7 +500,12 @@ pub fn gossip_ingress_proof(
     config: &Config,
 ) {
     // Validate anchor freshness prior to broadcast
-    match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, ingress_proof) {
+    match ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
+        block_tree_guard,
+        db,
+        config,
+        ingress_proof,
+    ) {
         Ok(()) => {
             let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send(msg) {

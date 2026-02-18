@@ -140,6 +140,7 @@ impl IrysNodeCtx {
     pub fn get_api_state(&self) -> ApiState {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
+            chunk_ingress: self.service_senders.chunk_ingress.clone(),
             mempool_guard: self.mempool_guard.clone(),
             chunk_provider: self.chunk_provider.clone(),
             peer_list: self.peer_list.clone(),
@@ -1423,11 +1424,22 @@ impl IrysNode {
         let execution_payload_cache =
             ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
 
+        // Spawn chunk ingress service
+        let chunk_ingress_handle =
+            irys_actors::chunk_ingress_service::ChunkIngressService::spawn_service(
+                irys_db.clone(),
+                storage_modules_guard.clone(),
+                &block_tree_guard,
+                receivers.chunk_ingress,
+                &config,
+                &service_senders,
+                runtime_handle.clone(),
+            );
+
         // Spawn mempool service
         let mempool_handle = MempoolService::spawn_service(
             irys_db.clone(),
             reth_node_adapter.clone(),
-            storage_modules_guard.clone(),
             &block_tree_guard,
             receivers.mempool,
             &config,
@@ -1761,6 +1773,7 @@ impl IrysNode {
             // 7. State management
             services.push(block_index_handle);
             services.push(mempool_handle);
+            services.push(chunk_ingress_handle);
 
             // 8. Core infrastructure (shutdown last)
             services.push(peer_network_handle);
@@ -1770,6 +1783,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
+                chunk_ingress: service_senders.chunk_ingress.clone(),
                 mempool_guard: mempool_guard.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_guard,

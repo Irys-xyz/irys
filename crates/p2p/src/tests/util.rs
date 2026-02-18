@@ -14,10 +14,7 @@ use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
 use irys_actors::services::ServiceSenders;
-use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
-    IngressProofError, MempoolFacade,
-};
+use irys_actors::{block_discovery::BlockDiscoveryFacade, MempoolFacade};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
@@ -30,10 +27,10 @@ use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2
 use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
-    IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle,
-    TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IrysBlockHeader,
+    IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
+    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle, TxChunkOffset,
+    TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -125,34 +122,6 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_chunk_ingress(
-        &self,
-        chunk: UnpackedChunk,
-    ) -> std::result::Result<(), ChunkIngressError> {
-        let mut guard = self.chunks.write().expect("to unlock mempool chunks");
-
-        if guard
-            .iter()
-            .any(|existing_chunk| existing_chunk.data_path == chunk.data_path)
-        {
-            return Err(ChunkIngressError::Advisory(
-                AdvisoryChunkIngressError::Other("Already exists".into()),
-            ));
-        } else {
-            guard.push(chunk.clone());
-
-            // Pretend that we've validated the chunk and we're ready to gossip it
-            let message_bus = self.internal_message_bus.clone();
-            tokio::runtime::Handle::current().spawn(async move {
-                message_bus
-                    .send(GossipBroadcastMessageV2::from(chunk))
-                    .expect("to send chunk");
-            });
-        }
-
-        Ok(())
-    }
-
     async fn is_known_data_transaction(
         &self,
         tx_id: H256,
@@ -185,13 +154,6 @@ impl MempoolFacade for MempoolStub {
         } else {
             Ok(TxKnownStatus::Unknown)
         }
-    }
-
-    async fn handle_ingest_ingress_proof(
-        &self,
-        _ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
-        Ok(())
     }
 
     async fn get_block_header(
@@ -1004,6 +966,8 @@ pub(crate) fn data_handler_stub(
     };
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+    let chunk_ingress =
+        irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     let block_pool_stub = Arc::new(BlockPool::new(
         db,
         block_discovery_stub,
@@ -1026,6 +990,7 @@ pub(crate) fn data_handler_stub(
     let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
+        chunk_ingress,
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(
@@ -1071,9 +1036,12 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
     info!("Created GossipDataHandler stub");
+    let chunk_ingress =
+        irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
+        chunk_ingress,
         block_pool,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(

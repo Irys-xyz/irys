@@ -1,4 +1,4 @@
-use crate::mempool_service::metrics::record_chunk_error;
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
@@ -87,7 +87,18 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         self.mempool_state.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
-        self.process_pending_chunks_for_root(tx.data_root).await?;
+        // Notify the ChunkIngressService to process any pending chunks for this data root
+        if let Err(e) = self
+            .service_senders
+            .chunk_ingress
+            .send(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
+        {
+            tracing::error!(
+                "Failed to send ProcessPendingChunks message for data_root {:?}: {:?}",
+                tx.data_root,
+                e
+            );
+        }
         self.broadcast_tx_gossip(tx);
         metrics::record_data_tx_ingested();
         Ok(())
@@ -437,36 +448,6 @@ impl Inner {
                 );
             }
         };
-    }
-
-    /// Processes any pending chunks that arrived before their parent transaction.
-    #[tracing::instrument(level = "trace", skip_all, fields(chunk.data_root = ?data_root))]
-    async fn process_pending_chunks_for_root(&self, data_root: H256) -> Result<(), TxIngressError> {
-        let option_chunks_map = self
-            .mempool_state
-            .pop_pending_chunks_cache(&data_root)
-            .await;
-
-        if let Some(chunks_map) = option_chunks_map {
-            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            for chunk in chunks {
-                let msg_result = self.handle_chunk_ingress_message(chunk).await;
-
-                if let Err(err) = msg_result {
-                    record_chunk_error(err.error_type(), err.is_advisory());
-                    tracing::error!(
-                        "Failed to handle chunk ingress for data_root {:?}: {:?}",
-                        data_root,
-                        err
-                    );
-                    return Err(TxIngressError::Other(format!(
-                        "Failed to handle chunk ingress for data_root {:?}",
-                        data_root
-                    )));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Broadcasts the transaction over gossip, with error logging.

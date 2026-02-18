@@ -2076,11 +2076,9 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 let verify_tx_offset = unpacked.tx_offset;
 
                                 let (ctx, crx) = tokio::sync::oneshot::channel();
-                                let _ = peer
-                                    .node_ctx
-                                    .service_senders
-                                    .mempool
-                                    .send(MempoolServiceMessage::IngestChunk(unpacked, ctx));
+                                let _ = peer.node_ctx.service_senders.chunk_ingress.send(
+                                    irys_actors::ChunkIngressMessage::IngestChunk(unpacked, ctx),
+                                );
                                 let _ = crx.await;
 
                                 // Verify the chunk is present on the peer DB (small retry loop)
@@ -2586,13 +2584,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_ingress_proof(&self, ingress_proof: IngressProof) -> eyre::Result<()> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        self.node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestIngressProof(
-                ingress_proof,
-                oneshot_tx,
-            ))?;
+        self.node_ctx.service_senders.chunk_ingress.send(
+            irys_actors::ChunkIngressMessage::IngestIngressProof(ingress_proof, oneshot_tx),
+        )?;
 
         Ok(oneshot_rx.await??)
     }

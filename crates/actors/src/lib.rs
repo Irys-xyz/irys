@@ -26,6 +26,11 @@ pub mod transaction_status;
 pub mod validation_service;
 
 pub use block_producer::*;
+pub use chunk_ingress_service::{
+    AdvisoryChunkIngressError, ChunkIngressError, ChunkIngressMessage, ChunkIngressService,
+    ChunkIngressServiceInner, CriticalChunkIngressError, IngressProofError,
+    IngressProofGenerationError, PriorityPendingChunks,
+};
 pub use data_sync_service::*;
 pub use mempool_guard::*;
 pub use mempool_service::*;

@@ -11,7 +11,7 @@ static BYTES_INGESTED: OnceLock<Counter<u64>> = OnceLock::new();
 static DUPLICATES: OnceLock<Counter<u64>> = OnceLock::new();
 static ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
 
-pub(super) fn record_chunk_ingested(bytes: u64) {
+pub(crate) fn record_chunk_ingested(bytes: u64) {
     let chunks = CHUNKS_INGESTED.get_or_init(|| {
         meter()
             .u64_counter("irys.mempool.chunks.ingested_total")
@@ -28,7 +28,7 @@ pub(super) fn record_chunk_ingested(bytes: u64) {
     bytes_counter.add(bytes, &[]);
 }
 
-pub(super) fn record_chunk_duplicate() {
+pub(crate) fn record_chunk_duplicate() {
     DUPLICATES
         .get_or_init(|| {
             meter()
@@ -39,7 +39,7 @@ pub(super) fn record_chunk_duplicate() {
         .add(1, &[]);
 }
 
-pub(super) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
+pub(crate) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
     ERRORS
         .get_or_init(|| {
             meter()

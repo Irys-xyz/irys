@@ -1,22 +1,29 @@
+pub mod chunks;
+pub mod facade;
+pub mod ingress_proofs;
+pub mod pending_chunks;
+
+pub use chunks::{AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError};
+pub use ingress_proofs::{IngressProofError, IngressProofGenerationError};
+pub use pending_chunks::PriorityPendingChunks;
+
 use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 
-use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
+use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, ChunkPathHash, Config, DataRoot,
-    TokioServiceHandle,
+    TokioServiceHandle, H256,
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::mempool_service::{
-    ChunkIngressError, CriticalChunkIngressError, IngressProofError, PriorityPendingChunks,
-};
 use crate::services::ServiceSenders;
 
 /// Messages handled by the ChunkIngressService
@@ -54,25 +61,91 @@ pub struct ChunkIngressService {
 }
 
 impl ChunkIngressServiceInner {
-    fn handle_message(&self, msg: ChunkIngressMessage) {
+    async fn handle_message(&self, msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, response) => {
-                warn!("ChunkIngressService: IngestChunk not yet implemented");
-                let _ = response.send(Err(ChunkIngressError::Critical(
-                    CriticalChunkIngressError::ServiceUninitialized,
-                )));
+            ChunkIngressMessage::IngestChunk(chunk, response) => {
+                let result = self.handle_chunk_ingress_message(chunk).await;
+                if let Err(ref e) = result {
+                    crate::mempool_service::metrics::record_chunk_error(
+                        e.error_type(),
+                        e.is_advisory(),
+                    );
+                }
+                let _ = response.send(result);
             }
-            ChunkIngressMessage::IngestChunkFireAndForget(_) => {
-                warn!("ChunkIngressService: IngestChunkFireAndForget not yet implemented");
+            ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
+                if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
+                    crate::mempool_service::metrics::record_chunk_error(
+                        e.error_type(),
+                        e.is_advisory(),
+                    );
+                }
             }
-            ChunkIngressMessage::IngestIngressProof(_, response) => {
-                warn!("ChunkIngressService: IngestIngressProof not yet implemented");
-                let _ = response.send(Err(IngressProofError::Other(
-                    "ChunkIngressService not yet implemented".to_string(),
-                )));
+            ChunkIngressMessage::IngestIngressProof(proof, response) => {
+                let result = self.handle_ingest_ingress_proof(proof);
+                let _ = response.send(result);
             }
-            ChunkIngressMessage::ProcessPendingChunks(_) => {
-                warn!("ChunkIngressService: ProcessPendingChunks not yet implemented");
+            ChunkIngressMessage::ProcessPendingChunks(data_root) => {
+                self.process_pending_chunks_for_root(data_root).await;
+            }
+        }
+    }
+
+    /// Helper to get the latest block height from the canonical chain.
+    pub fn get_latest_block_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+    ) -> Result<u64, String> {
+        let canon_chain = block_tree_read_guard.read().get_canonical_chain();
+        let latest = canon_chain
+            .0
+            .last()
+            .ok_or_else(|| "unable to get canonical chain from block tree".to_owned())?;
+        Ok(latest.height())
+    }
+
+    /// Resolves an anchor (block hash) to its height.
+    /// If it couldn't find the anchor, returns None.
+    /// Set canonical to true to enforce that the anchor must be part of the current canonical chain.
+    pub fn get_anchor_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+        irys_db: &DatabaseProvider,
+        anchor: H256,
+        canonical: bool,
+    ) -> eyre::Result<Option<u64>> {
+        if let Some(height) = {
+            let guard = block_tree_read_guard.read();
+            if canonical {
+                guard
+                    .get_canonical_chain()
+                    .0
+                    .iter()
+                    .find(|b| b.block_hash() == anchor)
+                    .map(BlockTreeEntry::height)
+            } else {
+                guard.get_block(&anchor).map(|h| h.height)
+            }
+        } {
+            Ok(Some(height))
+        } else if let Some(hdr) =
+            irys_db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
+        {
+            Ok(Some(hdr.height))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
+        let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
+        if let Some(chunks_map) = option_chunks_map {
+            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+            for chunk in chunks {
+                if let Err(err) = self.handle_chunk_ingress_message(chunk).await {
+                    error!(
+                        "Failed to handle pending chunk ingress for data_root {:?}: {:?}",
+                        data_root, err
+                    );
+                }
             }
         }
     }
@@ -155,7 +228,7 @@ impl ChunkIngressService {
                 }
                 msg = msg_rx.recv() => {
                     match msg {
-                        Some(msg) => inner.handle_message(msg),
+                        Some(msg) => inner.handle_message(msg).await,
                         None => {
                             warn!("ChunkIngressService receiver channel closed");
                             break;

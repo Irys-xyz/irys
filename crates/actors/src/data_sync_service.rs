@@ -257,11 +257,13 @@ impl DataSyncServiceInner {
         if sm.write_data_chunk(&unpacked_chunk).is_err() {
             // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
             self.service_senders
-                .mempool
-                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
-                    unpacked_chunk,
-                ))
-                .expect("to send MempoolServiceMessage");
+                .chunk_ingress
+                .send(
+                    crate::chunk_ingress_service::ChunkIngressMessage::IngestChunkFireAndForget(
+                        unpacked_chunk,
+                    ),
+                )
+                .expect("to send ChunkIngressMessage");
         }
 
         Ok(())
