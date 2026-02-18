@@ -1,7 +1,8 @@
-use crate::{
-    block_index_service::BlockIndexServiceMessage,
-    chunk_migration_service::ChunkMigrationServiceMessage,
-};
+mod block_index_writer;
+
+pub use block_index_writer::BlockIndexWriter;
+
+use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockTree};
@@ -9,16 +10,20 @@ use irys_types::{
     app_state::DatabaseProvider, DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock,
     SystemLedger,
 };
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
-use tracing::info;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tokio::sync::mpsc::UnboundedSender;
+use tracing::{debug, info};
 
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 #[derive(Debug)]
 pub struct BlockMigrationService {
     db: DatabaseProvider,
     block_index_guard: BlockIndexReadGuard,
-    block_index_sender: UnboundedSender<BlockIndexServiceMessage>,
+    block_index_writer: BlockIndexWriter,
+    cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
 }
 
@@ -26,13 +31,15 @@ impl BlockMigrationService {
     pub fn new(
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
-        block_index_sender: UnboundedSender<BlockIndexServiceMessage>,
+        block_index_writer: BlockIndexWriter,
+        cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
     ) -> Self {
         Self {
             db,
             block_index_guard,
-            block_index_sender,
+            block_index_writer,
+            cache,
             chunk_migration_sender,
         }
     }
@@ -107,38 +114,40 @@ impl BlockMigrationService {
         Ok(())
     }
 
-    /// Validates continuity and collects sealed blocks from the cache.
+    /// Collects blocks from the cache, validates continuity, persists to DB,
+    /// writes to the block index, and notifies downstream services.
     ///
-    /// Separated from [`Self::process_migration`] so the caller can drop the
-    /// non-`Send` `RwLockReadGuard<BlockTree>` before awaiting.
-    pub fn prepare_migration(
-        &self,
-        migration_block: &Arc<IrysBlockHeader>,
-        cache: &BlockTree,
-    ) -> eyre::Result<Vec<Arc<SealedBlock>>> {
-        let blocks = self.get_blocks_to_migrate(migration_block, cache)?;
-        self.validate_migration_continuity(&blocks)?;
+    /// The cache read lock is held only while collecting blocks, then released
+    /// before performing DB writes and block index mutations.
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %migration_block.block_hash, block.height = migration_block.height))]
+    pub fn migrate_blocks(&mut self, migration_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+        debug!("migrating block via BlockMigrationService");
 
-        for block in &blocks {
-            let header = block.header();
-            eyre::ensure!(
-                header.poa.chunk.is_some(),
-                "poa chunk must be present for block {} at height {}",
-                header.block_hash,
-                header.height
-            );
-        }
+        // Collect blocks under the cache read lock, then release it.
+        let prepared = {
+            let cache = self.cache.read().expect("block tree lock poisoned");
+            let blocks = self.get_blocks_to_migrate(migration_block, &cache)?;
+            self.validate_migration_continuity(&blocks)?;
 
-        Ok(blocks)
-    }
+            for block in &blocks {
+                let header = block.header();
+                eyre::ensure!(
+                    header.poa.chunk.is_some(),
+                    "poa chunk must be present for block {} at height {}",
+                    header.block_hash,
+                    header.height
+                );
+            }
 
-    /// Persists prepared blocks to DB and notifies downstream services.
-    #[tracing::instrument(level = "trace", skip_all, fields(count = prepared.len()))]
-    pub async fn process_migration(&self, prepared: Vec<Arc<SealedBlock>>) -> eyre::Result<()> {
-        for sealed_block in prepared {
-            self.persist_block_to_db(&sealed_block)?;
-            self.send_block_index_migration(&sealed_block).await?;
-            self.send_chunk_migration(&sealed_block)?;
+            blocks
+        }; // RwLockReadGuard dropped here
+
+        debug!("prepared {} block(s) for migration", prepared.len());
+
+        for sealed_block in &prepared {
+            self.persist_block(sealed_block)?;
+            self.block_index_writer.update_supply_state(sealed_block)?;
+            self.send_chunk_migration(sealed_block)?;
         }
 
         Ok(())
@@ -226,9 +235,9 @@ impl BlockMigrationService {
         Ok(blocks_to_migrate)
     }
 
-    /// Persists all block data to DB in a single atomic transaction.
+    /// Persists block data and block index in a single atomic DB transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
-    fn persist_block_to_db(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
+    fn persist_block(&mut self, sealed_block: &SealedBlock) -> eyre::Result<()> {
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
 
@@ -243,6 +252,7 @@ impl BlockMigrationService {
 
         let migrated_block = (**header).clone();
 
+        let writer = &mut self.block_index_writer;
         self.db.update_eyre(|tx| {
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
@@ -278,37 +288,10 @@ impl BlockMigrationService {
 
             irys_database::insert_block_header(tx, &migrated_block)?;
 
+            writer.write_block_index(tx, sealed_block)?;
+
             Ok(())
         })?;
-
-        Ok(())
-    }
-
-    /// Send migration notification to BlockIndexService (synchronous -- waits for response).
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
-    async fn send_block_index_migration(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
-        let header = sealed_block.header();
-        let transactions = sealed_block.transactions();
-
-        let mut all_txs = Vec::new();
-        all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Publish));
-        all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Submit));
-
-        info!(
-            "Migrating to block_index - hash: {} height: {}",
-            &header.block_hash, &header.height
-        );
-
-        let (tx, rx) = oneshot::channel();
-        self.block_index_sender
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: Arc::clone(header),
-                all_txs: Arc::new(all_txs),
-                response: tx,
-            })?;
-        rx.await
-            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
-            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
         Ok(())
     }

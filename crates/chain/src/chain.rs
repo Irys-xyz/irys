@@ -10,7 +10,7 @@ use irys_actors::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
     },
-    block_migration_service::BlockMigrationService,
+    block_migration_service::{BlockIndexWriter, BlockMigrationService},
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
     cache_service::ChunkCacheService,
@@ -38,9 +38,10 @@ use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
-    reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
-    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
+    reth_provider, BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider,
+    ChunkType, EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner,
+    PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState,
+    SupplyStateReadGuard,
 };
 use irys_p2p::{
     spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
@@ -1236,15 +1237,6 @@ impl IrysNode {
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
-        // start block index service (tokio)
-        let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
-            receivers.block_index,
-            block_index.clone(),
-            Some(supply_state.clone()),
-            &config.consensus,
-            runtime_handle.clone(),
-        );
-
         // start reth service
         let reth_service_task = init_reth_service(
             &irys_db,
@@ -1279,14 +1271,7 @@ impl IrysNode {
 
         let config = Config::new(node_config, config.peer_id());
 
-        let (block_index_tx, block_index_rx) = oneshot::channel();
-        service_senders
-            .block_index
-            .send(irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard { response: block_index_tx })
-            .expect("BlockIndex service should be running");
-        let block_index_guard = block_index_rx
-            .await
-            .expect("to receive BlockIndexReadGuard from BlockIndex service");
+        let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
 
         // Create cancellation token for graceful shutdown of backfill task
         let backfill_cancel = CancellationToken::new();
@@ -1357,23 +1342,37 @@ impl IrysNode {
         );
         let sync_state = p2p_service.sync_state.clone();
 
-        // start the block tree service
+        // Restore the block tree cache (synchronous DB read during startup)
+        let block_tree_cache = Arc::new(RwLock::new(BlockTree::restore_from_db(
+            block_index_guard.clone(),
+            replay_data,
+            irys_db.clone(),
+            &storage_submodules_config,
+            config.clone(),
+        )?));
+
+        // Construct the block migration service
+        let block_index_writer =
+            BlockIndexWriter::new(Some(supply_state.clone()), &config.consensus);
         let block_migration_service = BlockMigrationService::new(
             irys_db.clone(),
             block_index_guard.clone(),
-            service_senders.block_index.clone(),
+            block_index_writer,
+            Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
         );
+
+        // Start the block tree service
         let block_tree_handle = BlockTreeService::spawn_service(
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
-            &replay_data,
             &storage_submodules_config,
             &config,
             &service_senders,
             sync_state.clone(),
             block_migration_service,
+            block_tree_cache,
             runtime_handle.clone(),
         );
 
@@ -1759,7 +1758,6 @@ impl IrysNode {
             services.push(block_tree_handle);
 
             // 7. State management
-            services.push(block_index_handle);
             services.push(mempool_handle);
 
             // 8. Core infrastructure (shutdown last)

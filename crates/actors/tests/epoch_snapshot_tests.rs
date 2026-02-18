@@ -756,18 +756,11 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
     let db_env =
         irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
             .expect("to create DB");
     let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
-    let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
-        block_index_rx,
-        BlockIndex::new_for_testing(db),
-        None, // No supply state needed for tests
-        &config.consensus,
-        tokio::runtime::Handle::current(),
-    );
+    let block_index = BlockIndex::new_for_testing(db);
 
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -793,18 +786,8 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    block_index_tx
-        .send(
-            irys_actors::block_index_service::BlockIndexServiceMessage::MigrateBlock {
-                block_header: Arc::new(genesis_block.clone()),
-                all_txs: Arc::new(vec![]),
-                response: tx,
-            },
-        )
-        .expect("send migrate block");
-    rx.await
-        .expect("Failed to receive migration result")
+    block_index
+        .push_block(&genesis_block, &[], config.consensus.chunk_size)
         .expect("Failed to index genesis block");
 
     {
@@ -894,15 +877,8 @@ async fn epoch_blocks_reinitialization_test() {
 
     // partitions_guard.read().print_assignments();
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    block_index_tx
-        .send(
-            irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard {
-                response: tx,
-            },
-        )
-        .expect("send get block index guard");
-    let block_index_guard = rx.await.unwrap();
+    let block_index_guard =
+        irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index.clone());
 
     debug!(
         "num blocks in block_index: {}",

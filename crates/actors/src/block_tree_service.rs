@@ -15,7 +15,7 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
     forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry, BlockState, BlockTree,
-    BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
+    BlockTreeEntry, BlockTreeReadGuard, ChainState,
 };
 use irys_types::{
     BlockHash, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
@@ -105,54 +105,37 @@ impl BlockTreeService {
         rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
-        epoch_replay_data: &EpochReplayData,
         storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
         service_senders: &ServiceSenders,
         chain_sync_state: ChainSyncState,
         block_migration_service: BlockMigrationService,
+        cache: Arc<RwLock<BlockTree>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
-        let bi_guard = block_index_guard;
-        let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
 
         let handle = runtime_handle.spawn(
             async move {
-                let cache = match BlockTree::restore_from_db(
-                    bi_guard.clone(),
-                    epoch_replay_data,
-                    db.clone(),
-                    &storage_submodules_config,
-                    config.clone(),
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // Choosing to panic and stop the node, if we cannot restore BlockTree, we cannot continue
-                        panic!("Failed to restore BlockTree from DB: {}", e);
-                    }
-                };
-
                 let block_tree_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner: BlockTreeServiceInner {
                         block_migration_service,
                         db,
-                        cache: Arc::new(RwLock::new(cache)),
+                        cache,
                         miner_address,
-                        block_index_guard: bi_guard,
+                        block_index_guard,
                         config,
                         service_senders,
-                        storage_submodules_config: storage_submodules_config.clone(),
+                        storage_submodules_config,
                         chain_sync_state,
                     },
                 };
@@ -276,28 +259,9 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
-    /// Migrates a block using the `BlockMigrationService`.
-    ///
-    /// Split into two phases so the `RwLockReadGuard` is dropped before any `.await`:
-    /// 1. `prepare_migration` (sync) -- reads all needed data from the cache
-    /// 2. `process_migration` (async) -- persists to DB and notifies services
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
-    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating block via BlockMigrationService");
-
-        // Phase 1: synchronous -- hold the read lock only for preparation
-        let prepared = {
-            let cache = self.cache.read().expect("block tree lock poisoned");
-            self.block_migration_service
-                .prepare_migration(block, &cache)?
-        }; // RwLockReadGuard dropped here
-
-        debug!(block.hash = %block.block_hash, block.height = block.height, "prepared {} block(s) for migration", prepared.len());
-
-        // Phase 2: async -- process without the cache lock
-        self.block_migration_service
-            .process_migration(prepared)
-            .await
+    /// Migrates finalized blocks into the block index and DB via `BlockMigrationService`.
+    fn migrate_block(&mut self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+        self.block_migration_service.migrate_blocks(block)
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -785,7 +749,7 @@ impl BlockTreeServiceInner {
 
             // Delegate migration to BlockMigrationService (validates continuity internally)
             if tip_changed {
-                self.migrate_block(&markers.migration_block).await?;
+                self.migrate_block(&markers.migration_block)?;
             }
         }
 
