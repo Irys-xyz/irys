@@ -697,6 +697,7 @@ pub fn generate_ingress_proof(
     signer: IrysSigner,
     chain_id: ChainId,
     anchor: H256,
+    enable_shadow_kzg_logging: bool,
 ) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
@@ -773,7 +774,77 @@ pub fn generate_ingress_proof(
 
     db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
+    if enable_shadow_kzg_logging {
+        if let Err(e) = shadow_log_kzg_commitments(&db, data_root) {
+            warn!(
+                data_root = %data_root,
+                error = %e,
+                "[shadow-kzg] computation failed"
+            );
+        }
+    }
+
     Ok(proof)
+}
+
+/// Compute KZG commitments in shadow mode: re-reads chunks from DB, computes
+/// per-chunk KZG commitments, and logs results. Errors are informational only.
+fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<()> {
+    use irys_types::kzg::{compute_chunk_commitment, default_kzg_settings};
+    use std::time::Instant;
+
+    let settings = default_kzg_settings();
+    let start = Instant::now();
+
+    db.view_eyre(|tx| {
+        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+
+        for (i, entry) in dup_walker.into_iter().enumerate() {
+            let (_root_hash, index_entry) = entry?;
+            let chunk = tx
+                .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
+                .ok_or(eyre!("missing chunk for shadow KZG"))?;
+            let chunk_bin = chunk
+                .chunk
+                .ok_or(eyre!("missing chunk body for shadow KZG"))?
+                .0;
+
+            let chunk_start = Instant::now();
+            match compute_chunk_commitment(&chunk_bin, settings) {
+                Ok(commitment) => {
+                    let hex: String = commitment
+                        .as_ref()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    info!(
+                        data_root = %data_root,
+                        chunk_index = i,
+                        commitment = %hex,
+                        chunk_time_ms = chunk_start.elapsed().as_millis(),
+                        "[shadow-kzg] computed chunk commitment"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        data_root = %data_root,
+                        chunk_index = i,
+                        error = %e,
+                        "[shadow-kzg] chunk commitment failed"
+                    );
+                }
+            }
+        }
+
+        info!(
+            data_root = %data_root,
+            total_time_ms = start.elapsed().as_millis(),
+            "[shadow-kzg] completed all chunk commitments"
+        );
+
+        Ok(())
+    })
 }
 
 #[cfg(test)]

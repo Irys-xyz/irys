@@ -155,6 +155,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # These should be kept in lockstep with the Reth dependencies - for compatability and build times
 revm = { version = "33.1.0", default-features = false }
 
+blst = "0.3.16"
+c-kzg = { version = "2.1.5", features = ["ethereum_kzg_settings"] }
 alloy-dyn-abi = "1.1.0"
 alloy-evm = { version = "0.24.2", default-features = false }
 alloy-primitives = { version = "1.4.1", default-features = false, features = [
@@ -171,7 +173,7 @@ alloy-sol-types = { version = "1", default-features = false }
 alloy-consensus = { version = "1", default-features = false }
 alloy-contract = { version = "1", default-features = false }
 alloy-core = { version = "1", default-features = false }
-alloy-eips = { version = "1", default-features = false }
+alloy-eips = { version = "1", default-features = false, features = ["kzg"] }
 alloy-genesis = { version = "1", default-features = false }
 revm-primitives = "21"
 revm-interpreter = "21"
