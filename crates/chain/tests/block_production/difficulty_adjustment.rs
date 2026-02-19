@@ -95,17 +95,10 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
     // temp disable block validation
     genesis_node.node_ctx.set_validation_enabled(false);
 
-    tracing::error!("...");
-    tracing::error!("...");
-    tracing::error!("...fc1");
-    tracing::error!("...");
     fork_creator_2.gossip_disable();
     fork_creator_1.gossip_disable();
     genesis_node.gossip_disable();
 
-    tracing::error!("...");
-    tracing::error!("...");
-    tracing::error!("...");
     tracing::error!("...broadcasting");
     let order = [
         (&fork_creator_1.mine_block_without_gossip().await?, true),
@@ -128,23 +121,27 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
         send_block_to_block_tree(&genesis_node.node_ctx, sealed_block, false).await?;
     }
 
-    tracing::error!("...");
-    tracing::error!("...");
-    tracing::error!("...");
-    tracing::error!("...validating");
-    genesis_node.node_ctx.set_validation_enabled(true);
+    // Subscribe BEFORE enabling validation to avoid missing events that fire
+    // between re-enable and subscribe.
     let mut block_state_rx = genesis_node
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
+
+    tracing::error!("...validating");
+    genesis_node.node_ctx.set_validation_enabled(true);
+
+    // Feed execution payloads one at a time to control the validation order.
+    // After each block validates, assert whether it became the new tip.
     for ((block, eth_block, _), new_tip) in order.iter() {
-        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        tracing::error!(block_height = block.height, ?block.cumulative_diff, "feeding payload");
         genesis_node
             .node_ctx
             .block_pool
             .execution_payload_provider
             .add_payload_to_cache(eth_block.block().clone())
             .await;
+
         wait_for_block_event(&mut block_state_rx, 120, |ev| {
             ev.block_hash == block.block_hash
                 && matches!(ev.validation_result, ValidationResult::Valid)
@@ -154,12 +151,16 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
         if *new_tip {
             assert_eq!(
                 genesis_node.node_ctx.block_tree_guard.read().tip,
-                block.block_hash
+                block.block_hash,
+                "block at height {} should be the new tip",
+                block.height,
             );
         } else {
             assert_ne!(
                 genesis_node.node_ctx.block_tree_guard.read().tip,
-                block.block_hash
+                block.block_hash,
+                "block at height {} should NOT be the tip",
+                block.height,
             );
         }
     }
