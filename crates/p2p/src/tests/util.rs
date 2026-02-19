@@ -993,7 +993,7 @@ pub(crate) fn data_handler_stub(
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
-    let (service_senders, _service_receivers) =
+    let (service_senders, service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
@@ -1012,6 +1012,26 @@ pub(crate) fn data_handler_stub(
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
+    // Keep the chunk_ingress receiver alive so the channel remains open.
+    let mut chunk_ingress_rx = service_receivers.chunk_ingress;
+    tokio::spawn(async move {
+        use irys_actors::ChunkIngressMessage;
+        while let Some(message) = chunk_ingress_rx.recv().await {
+            match message {
+                ChunkIngressMessage::IngestChunk(_chunk, reply) => {
+                    let _ = reply.send(Ok(()));
+                }
+                ChunkIngressMessage::IngestChunkFireAndForget(_chunk) => {}
+                ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
+                    let _ = reply.send(Ok(()));
+                }
+                ChunkIngressMessage::ProcessPendingChunks(_data_root) => {}
+                ChunkIngressMessage::GetPendingChunksCount(reply) => {
+                    let _ = reply.send(0);
+                }
+            }
+        }
+    });
     let block_pool_stub = Arc::new(BlockPool::new(
         db,
         block_discovery_stub,
@@ -1062,7 +1082,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
     config: &Config,
     db: DatabaseProvider,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
-    let (service_senders, _service_receivers) =
+    let (service_senders, service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let mempool_config = MempoolConfig::testing();
@@ -1082,6 +1102,26 @@ pub(crate) fn data_handler_with_stubbed_pool(
     info!("Created GossipDataHandler stub");
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
+    // Keep the chunk_ingress receiver alive so the channel remains open.
+    let mut chunk_ingress_rx = service_receivers.chunk_ingress;
+    tokio::spawn(async move {
+        use irys_actors::ChunkIngressMessage;
+        while let Some(message) = chunk_ingress_rx.recv().await {
+            match message {
+                ChunkIngressMessage::IngestChunk(_chunk, reply) => {
+                    let _ = reply.send(Ok(()));
+                }
+                ChunkIngressMessage::IngestChunkFireAndForget(_chunk) => {}
+                ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
+                    let _ = reply.send(Ok(()));
+                }
+                ChunkIngressMessage::ProcessPendingChunks(_data_root) => {}
+                ChunkIngressMessage::GetPendingChunksCount(reply) => {
+                    let _ = reply.send(0);
+                }
+            }
+        }
+    });
     let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,

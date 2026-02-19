@@ -13,6 +13,7 @@ pub use types::*;
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
+use crate::chunk_ingress_service::{ChunkIngressMessage, ChunkIngressServiceInner};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -422,13 +423,23 @@ impl Inner {
 
         // Query the real pending chunks count from ChunkIngressService
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self
+        if let Err(e) = self
             .service_senders
             .chunk_ingress
-            .send(crate::chunk_ingress_service::ChunkIngressMessage::GetPendingChunksCount(tx))
-            .is_ok()
+            .send(ChunkIngressMessage::GetPendingChunksCount(tx))
         {
-            status.pending_chunks_count = rx.await.unwrap_or(0);
+            warn!(
+                "Failed to send GetPendingChunksCount to chunk ingress channel: {:?}",
+                e
+            );
+        } else {
+            match rx.await {
+                Ok(count) => status.pending_chunks_count = count,
+                Err(e) => warn!(
+                    "Failed to receive pending chunks count from chunk ingress service: {:?}",
+                    e
+                ),
+            }
         }
 
         Ok(status)
@@ -1241,12 +1252,13 @@ impl Inner {
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
                     .filter(|(_root, cached_proof)| {
-                        let expired = crate::chunk_ingress_service::ChunkIngressServiceInner::is_ingress_proof_expired_static(
+                        let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
                             &self.block_tree_read_guard,
                             &self.irys_db,
                             &self.config,
                             &cached_proof.proof,
-                        ).expired_or_invalid;
+                        )
+                        .expired_or_invalid;
                         !expired
                     })
                     .collect::<Vec<_>>();

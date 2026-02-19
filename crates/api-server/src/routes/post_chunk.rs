@@ -14,7 +14,7 @@ use irys_types::UnpackedChunk;
 use std::time::Instant;
 use tracing::{info, instrument, warn};
 
-/// Handles the HTTP POST request for adding a chunk to the mempool.
+/// Handles the HTTP POST request for adding a chunk to the chunk ingress service.
 /// This function takes in a JSON payload of a `Chunk` type, encapsulates it
 /// into a `ChunkIngressMessage` for further processing by the chunk ingress service,
 /// and manages error handling based on the results of message delivery and validation.

@@ -30,7 +30,12 @@ impl ChunkIngressFacadeImpl {
                     chunk_data_root, chunk_tx_offset
                 ))
             })?;
-        oneshot_rx.await.expect("to process ChunkIngressMessage")
+        oneshot_rx.await.map_err(|_| {
+            ChunkIngressError::Critical(CriticalChunkIngressError::Other(format!(
+                "ChunkIngressService dropped response channel for chunk data_root {:?} tx_offset {}",
+                chunk_data_root, chunk_tx_offset
+            )))
+        })?
     }
 
     pub async fn handle_ingest_ingress_proof(
@@ -50,9 +55,12 @@ impl ChunkIngressFacadeImpl {
                     data_root
                 ))
             })?;
-        oneshot_rx
-            .await
-            .expect("to process IngestIngressProof message")
+        oneshot_rx.await.map_err(|_| {
+            IngressProofError::Other(format!(
+                "ChunkIngressService dropped response channel for ingress proof data_root {:?}",
+                data_root
+            ))
+        })?
     }
 }
 

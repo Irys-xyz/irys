@@ -226,10 +226,12 @@ impl ChunkIngressServiceInner {
 
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                let current_chunk_count = self
-                    .pending_chunks
-                    .read()
-                    .await
+
+                // Acquire a single write lock so the count check and the insert are
+                // atomic with respect to concurrent ingress calls, eliminating the
+                // TOCTOU race that could allow the per-item cap to be exceeded.
+                let mut pending_chunks_guard = self.pending_chunks.write().await;
+                let current_chunk_count = pending_chunks_guard
                     .get(&chunk.data_root)
                     .map(lru::LruCache::len)
                     .unwrap_or(0);
@@ -244,10 +246,7 @@ impl ChunkIngressServiceInner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.pending_chunks
-                    .write()
-                    .await
-                    .put(Arc::unwrap_or_clone(chunk));
+                pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
                 return Ok(());
             }
         };

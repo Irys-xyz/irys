@@ -249,14 +249,17 @@ where
             .map_err(GossipError::from)
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
-                debug!("Ingress Proof sent to mempool");
+                debug!("Ingress Proof sent to chunk ingress");
                 // Only record as seen after successful validation
                 self.cache
                     .record_seen(source_peer_id, GossipCacheKey::IngressProof(proof_hash))?;
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending ingress proof to mempool: {}", error);
+                error!(
+                    "Error when sending ingress proof to chunk ingress: {}",
+                    error
+                );
                 Err(error)
             }
         }

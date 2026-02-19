@@ -62,17 +62,17 @@ impl ChunkIngressMessage {
     }
 }
 
-pub struct ChunkIngressServiceInner {
-    pub block_tree_read_guard: BlockTreeReadGuard,
-    pub config: Config,
-    pub exec: TaskExecutor,
-    pub irys_db: DatabaseProvider,
-    pub message_handler_semaphore: Arc<Semaphore>,
-    pub service_senders: ServiceSenders,
-    pub storage_modules_guard: StorageModulesReadGuard,
-    pub recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
-    pub pending_chunks: tokio::sync::RwLock<PriorityPendingChunks>,
-    pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+pub(crate) struct ChunkIngressServiceInner {
+    pub(crate) block_tree_read_guard: BlockTreeReadGuard,
+    pub(crate) config: Config,
+    pub(crate) exec: TaskExecutor,
+    pub(crate) irys_db: DatabaseProvider,
+    pub(crate) message_handler_semaphore: Arc<Semaphore>,
+    pub(crate) service_senders: ServiceSenders,
+    pub(crate) storage_modules_guard: StorageModulesReadGuard,
+    pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
+    pub(crate) pending_chunks: tokio::sync::RwLock<PriorityPendingChunks>,
+    pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
 pub struct ChunkIngressService {
@@ -283,29 +283,25 @@ impl ChunkIngressService {
                                     }
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
-                                        Ok(permit_result) => {
-                                            match permit_result {
-                                                Ok(permit) => {
-                                                    runtime_handle.spawn(async move {
-                                                        let _permit = permit;
-                                                        let task_info = format!("Chunk ingress message handler for {}", msg_type);
-                                                        wait_with_progress(
-                                                            inner.handle_message(msg),
-                                                            20,
-                                                            &task_info,
-                                                        ).await;
-                                                    }.instrument(span));
-                                                }
-                                                Err(err) => {
-                                                    error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
-                                                }
+                                    runtime_handle.spawn(async move {
+                                        match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                            Ok(Ok(permit)) => {
+                                                let _permit = permit;
+                                                let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                                wait_with_progress(
+                                                    inner.handle_message(msg),
+                                                    20,
+                                                    &task_info,
+                                                ).await;
+                                            }
+                                            Ok(Err(err)) => {
+                                                error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
+                                            }
+                                            Err(_) => {
+                                                warn!("Timed out waiting for chunk ingress message handler permit");
                                             }
                                         }
-                                        Err(_) => {
-                                            error!("Timed out waiting for chunk ingress message handler permit");
-                                        }
-                                    }
+                                    }.instrument(span));
                                 }
                             }
                         }
@@ -362,7 +358,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let _ = span.enter();
+                let _guard = span.enter();
                 warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {
