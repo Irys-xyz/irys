@@ -30,6 +30,7 @@ pub enum PeerResponse {
 pub enum ProtocolVersion {
     V1 = 1,
     V2 = 2,
+    VersionPD = 9000,
 }
 
 impl Default for ProtocolVersion {
@@ -43,6 +44,7 @@ impl From<u32> for ProtocolVersion {
         match v {
             1 => Self::V1,
             2 => Self::V2,
+            9000 => Self::VersionPD,
             _ => Self::default(),
         }
     }
@@ -50,15 +52,15 @@ impl From<u32> for ProtocolVersion {
 
 impl ProtocolVersion {
     pub const fn current() -> Self {
-        Self::V2
+        Self::VersionPD
     }
 
     pub fn supported_versions() -> &'static [Self] {
-        &[Self::V1, Self::V2]
+        &[Self::V1, Self::V2, Self::VersionPD]
     }
 
     pub fn supported_versions_u32() -> &'static [u32] {
-        &[Self::V1 as u32, Self::V2 as u32]
+        &[Self::V1 as u32, Self::V2 as u32, Self::VersionPD as u32]
     }
 }
 
@@ -79,6 +81,7 @@ impl alloy_rlp::Decodable for ProtocolVersion {
         match value {
             1 => Ok(Self::V1),
             2 => Ok(Self::V2),
+            9000 => Ok(Self::VersionPD),
             _ => Err(alloy_rlp::Error::Custom("unknown protocol version")),
         }
     }

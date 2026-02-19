@@ -188,6 +188,12 @@ pub enum InvalidDataError {
     TransactionInvalidVersion { version: u8, minimum: u8 },
     #[error("Commitment type not allowed before hardfork activation")]
     TransactionCommitmentTypeNotAllowed,
+    #[error("PD chunk timestamp expired")]
+    PdChunkTimestampExpired,
+    #[error("PD chunk timestamp in the future")]
+    PdChunkTimestampFuture,
+    #[error("PD chunk invalid range specifier")]
+    PdChunkInvalidRangeSpecifier,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -277,6 +283,7 @@ pub enum GossipRoutes {
     BlockIndex,
     Version,
     ProtocolVersion,
+    PdChunk,
 }
 
 impl GossipRoutes {
@@ -299,6 +306,7 @@ impl GossipRoutes {
             Self::BlockIndex => "/block-index",
             Self::Version => "/version",
             Self::ProtocolVersion => "/protocol_version",
+            Self::PdChunk => "/pd_chunks",
         }
     }
 }
