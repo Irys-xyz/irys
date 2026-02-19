@@ -10,7 +10,7 @@ use irys_actors::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
     },
-    block_migration_service::{BlockIndexWriter, BlockMigrationService},
+    block_migration_service::BlockMigrationService,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
     cache_service::ChunkCacheService,
@@ -1352,12 +1352,11 @@ impl IrysNode {
         )?));
 
         // Construct the block migration service
-        let block_index_writer =
-            BlockIndexWriter::new(Some(supply_state.clone()), &config.consensus);
         let block_migration_service = BlockMigrationService::new(
             irys_db.clone(),
             block_index_guard.clone(),
-            block_index_writer,
+            Some(supply_state.clone()),
+            config.consensus.chunk_size,
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
         );

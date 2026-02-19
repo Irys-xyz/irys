@@ -1,11 +1,7 @@
-mod block_index_writer;
-
-pub use block_index_writer::BlockIndexWriter;
-
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use eyre::{ensure, OptionExt as _};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
-use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockTree};
+use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, BlockTree, SupplyState};
 use irys_types::{
     app_state::DatabaseProvider, DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock,
     SystemLedger,
@@ -22,7 +18,8 @@ use tracing::{debug, info};
 pub struct BlockMigrationService {
     db: DatabaseProvider,
     block_index_guard: BlockIndexReadGuard,
-    block_index_writer: BlockIndexWriter,
+    supply_state: Option<Arc<SupplyState>>,
+    chunk_size: u64,
     cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
 }
@@ -31,14 +28,16 @@ impl BlockMigrationService {
     pub fn new(
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
-        block_index_writer: BlockIndexWriter,
+        supply_state: Option<Arc<SupplyState>>,
+        chunk_size: u64,
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
     ) -> Self {
         Self {
             db,
             block_index_guard,
-            block_index_writer,
+            supply_state,
+            chunk_size,
             cache,
             chunk_migration_sender,
         }
@@ -120,7 +119,7 @@ impl BlockMigrationService {
     /// The cache read lock is held only while collecting blocks, then released
     /// before performing DB writes and block index mutations.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %migration_block.block_hash, block.height = migration_block.height))]
-    pub fn migrate_blocks(&mut self, migration_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+    pub fn migrate_blocks(&self, migration_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         debug!("migrating block via BlockMigrationService");
 
         // Collect blocks under the cache read lock, then release it.
@@ -146,7 +145,10 @@ impl BlockMigrationService {
 
         for sealed_block in &prepared {
             self.persist_block(sealed_block)?;
-            self.block_index_writer.update_supply_state(sealed_block)?;
+            if let Some(supply_state) = &self.supply_state {
+                let block = sealed_block.header();
+                supply_state.add_block_reward(block.height, block.reward_amount)?;
+            }
             self.send_chunk_migration(sealed_block)?;
         }
 
@@ -237,7 +239,7 @@ impl BlockMigrationService {
 
     /// Persists block data and block index in a single atomic DB transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
-    fn persist_block(&mut self, sealed_block: &SealedBlock) -> eyre::Result<()> {
+    fn persist_block(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
 
@@ -252,7 +254,7 @@ impl BlockMigrationService {
 
         let migrated_block = (**header).clone();
 
-        let writer = &mut self.block_index_writer;
+        let chunk_size = self.chunk_size;
         self.db.update_eyre(|tx| {
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
@@ -288,7 +290,11 @@ impl BlockMigrationService {
 
             irys_database::insert_block_header(tx, &migrated_block)?;
 
-            writer.write_block_index(tx, sealed_block)?;
+            // Block index: submit txs first, then publish txs (push_block splits at submit_tx_count)
+            let mut block_index_txs = Vec::with_capacity(submit_txs.len() + publish_txs.len());
+            block_index_txs.extend_from_slice(submit_txs);
+            block_index_txs.extend_from_slice(&publish_txs);
+            BlockIndex::push_block(tx, header, &block_index_txs, chunk_size)?;
 
             Ok(())
         })?;
