@@ -1,6 +1,6 @@
 {
   "title": "Network & Gossip",
-  "uid": "irys-network-gossip-detailed",
+  "uid": "irys-network-gossip",
   "tags": [
     "irys",
     "network",
@@ -189,7 +189,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(irys_gossip_chunks_received_total{job=~\"$node\"}[1m]))",
+          "expr": "sum(rate(irys_gossip_chunks_received_total{job=~\"$node\"}[$__rate_interval]))",
           "legendFormat": "chunks",
           "refId": "A"
         }
@@ -371,512 +371,10 @@
     },
     {
       "type": "row",
-      "title": "Gossip Errors",
-      "gridPos": {
-        "x": 0,
-        "y": 12,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "type": "stat",
-      "title": "Inbound Errors",
-      "description": "Total gossip inbound errors (log count)",
-      "gridPos": {
-        "x": 0,
-        "y": 13,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND target: *gossip_data_handler* AND log.level: ERROR",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": ["sum"],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 1},
-              {"color": "red", "value": 10}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Outbound Errors",
-      "description": "Total gossip outbound errors (log count)",
-      "gridPos": {
-        "x": 4,
-        "y": 13,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND target: *gossip_client* AND log.level: ERROR",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": ["sum"],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 1},
-              {"color": "red", "value": 10}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Broadcast Warnings",
-      "description": "Gossip broadcast warnings",
-      "gridPos": {
-        "x": 8,
-        "y": 13,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND target: *gossip_service* AND log.level: WARN",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": ["sum"],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 5},
-              {"color": "orange", "value": 20}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Total P2P Issues",
-      "description": "All gossip and P2P errors + warnings combined",
-      "gridPos": {
-        "x": 12,
-        "y": 13,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND (target: *gossip* OR target: *p2p*) AND (log.level: ERROR OR log.level: WARN)",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": ["sum"],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 10},
-              {"color": "red", "value": 50}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "table",
-      "title": "Recent Gossip Errors & Warnings",
-      "description": "Actual error and warning messages from gossip components",
-      "gridPos": {
-        "x": 0,
-        "y": 17,
-        "w": 24,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND (target: *gossip* OR target: *p2p*) AND (log.level: ERROR OR log.level: WARN)",
-          "metrics": [
-            {
-              "type": "raw_data",
-              "id": "1",
-              "settings": {
-                "size": "50"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "body"},
-            "properties": [{"id": "custom.width", "value": 500}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "target"},
-            "properties": [{"id": "custom.width", "value": 200}]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {"show": false}
-      },
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "_id": true,
-              "_index": true,
-              "_type": true,
-              "TraceId": true,
-              "SpanId": true,
-              "Flags": true,
-              "host.name": true,
-              "service.name": true,
-              "ecs.version": true
-            },
-            "indexByName": {
-              "@timestamp": 0,
-              "log.level": 1,
-              "target": 2,
-              "body": 3
-            },
-            "renameByName": {
-              "@timestamp": "Time",
-              "log.level": "Level",
-              "target": "Component",
-              "body": "Message"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Gossip Errors Over Time",
-      "description": "Gossip error and warning rate over time",
-      "gridPos": {
-        "x": 0,
-        "y": 25,
-        "w": 12,
-        "h": 6
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND (target: *gossip* OR target: *p2p*) AND log.level: ERROR",
-          "alias": "Errors",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "1m",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND (target: *gossip* OR target: *p2p*) AND log.level: WARN",
-          "alias": "Warnings",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "date_histogram",
-              "field": "@timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "1m",
-                "min_doc_count": "0"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {"mode": "palette-classic"},
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "stacking": {"mode": "normal"}
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "Errors"},
-            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "Warnings"},
-            "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
-          }
-        ]
-      }
-    },
-    {
-      "type": "piechart",
-      "title": "Error Distribution by Component",
-      "description": "Breakdown of errors by gossip component",
-      "gridPos": {
-        "x": 12,
-        "y": 25,
-        "w": 12,
-        "h": 6
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "elasticsearch",
-            "uid": "elasticsearch"
-          },
-          "query": "service.name.keyword: ${node:lucene} AND (target: *gossip* OR target: *p2p*) AND (log.level: ERROR OR log.level: WARN)",
-          "metrics": [
-            {
-              "type": "count",
-              "id": "1"
-            }
-          ],
-          "bucketAggs": [
-            {
-              "type": "terms",
-              "field": "target.keyword",
-              "id": "2",
-              "settings": {
-                "size": "10",
-                "order": "desc",
-                "orderBy": "_count",
-                "min_doc_count": "1"
-              }
-            }
-          ],
-          "timeField": "@timestamp",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": ["sum"],
-          "fields": "",
-          "values": false
-        },
-        "pieType": "pie",
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": ["value", "percent"]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"}
-        }
-      }
-    },
-    {
-      "type": "row",
       "title": "Gossip Traffic",
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 12,
         "w": 24,
         "h": 1
       },
@@ -889,7 +387,7 @@
       "description": "Rate of chunks received via gossip protocol",
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 13,
         "w": 12,
         "h": 6
       },
@@ -899,7 +397,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_gossip_chunks_received_total{job=~\"$node\"}[1m])",
+          "expr": "rate(irys_gossip_chunks_received_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
@@ -924,7 +422,7 @@
       "description": "Bytes received via gossip protocol",
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 13,
         "w": 12,
         "h": 6
       },
@@ -934,7 +432,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_gossip_chunks_bytes_received_total{job=~\"$node\"}[1m])",
+          "expr": "rate(irys_gossip_chunks_bytes_received_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
@@ -955,11 +453,11 @@
     },
     {
       "type": "timeseries",
-      "title": "Gossip Inbound Errors (Metrics)",
-      "description": "Gossip inbound processing errors by error type (from metrics)",
+      "title": "Gossip Inbound Errors",
+      "description": "Gossip inbound processing errors by error type",
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 19,
         "w": 12,
         "h": 6
       },
@@ -992,11 +490,11 @@
     },
     {
       "type": "timeseries",
-      "title": "Gossip Outbound Errors (Metrics)",
-      "description": "Gossip outbound send errors by error type (from metrics)",
+      "title": "Gossip Outbound Errors",
+      "description": "Gossip outbound send errors by error type",
       "gridPos": {
         "x": 12,
-        "y": 38,
+        "y": 19,
         "w": 12,
         "h": 6
       },
@@ -1033,7 +531,7 @@
       "description": "Block discovery errors by error type",
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 25,
         "w": 24,
         "h": 6
       },
@@ -1069,7 +567,7 @@
       "title": "Data Sync",
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 31,
         "w": 24,
         "h": 1
       },
@@ -1082,7 +580,7 @@
       "description": "Number of active data sync peers over time",
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 32,
         "w": 8,
         "h": 6
       },
@@ -1117,7 +615,7 @@
       "description": "Rate of sync chunks completed",
       "gridPos": {
         "x": 8,
-        "y": 51,
+        "y": 32,
         "w": 8,
         "h": 6
       },
@@ -1152,7 +650,7 @@
       "description": "Rate of sync chunk failures",
       "gridPos": {
         "x": 16,
-        "y": 51,
+        "y": 32,
         "w": 8,
         "h": 6
       },
@@ -1184,7 +682,7 @@
     {
       "type": "row",
       "title": "Block Discovery & Propagation",
-      "gridPos": { "x": 0, "y": 57, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
       "collapsed": false,
       "panels": []
     },
@@ -1192,24 +690,24 @@
       "type": "timeseries",
       "title": "Block Discovery Duration (p50, p95, p99)",
       "description": "Time from block gossip receive to processing complete",
-      "gridPos": { "x": 0, "y": 58, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 39, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"block_discovered\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1225,24 +723,24 @@
       "type": "timeseries",
       "title": "Block Pull & Process (p50, p95, p99)",
       "description": "Time to pull block from peer and process it",
-      "gridPos": { "x": 12, "y": 58, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 39, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"pull_and_process_block\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1258,24 +756,24 @@
       "type": "timeseries",
       "title": "Block Header Handler (p50, p95, p99)",
       "description": "Block header gossip handler latency",
-      "gridPos": { "x": 0, "y": 66, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 47, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_block_header\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1291,24 +789,24 @@
       "type": "timeseries",
       "title": "Block Migration Duration (p50, p95, p99)",
       "description": "Block migration processing time",
-      "gridPos": { "x": 12, "y": 66, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 47, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"migrate_block\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1324,24 +822,24 @@
       "type": "timeseries",
       "title": "Fork Choice Update Emission (p50, p95, p99)",
       "description": "Fork choice update emission latency",
-      "gridPos": { "x": 0, "y": 74, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 55, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"emit_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1356,7 +854,7 @@
     {
       "type": "row",
       "title": "Gossip Handler Latency",
-      "gridPos": { "x": 0, "y": 82, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 63, "w": 24, "h": 1 },
       "collapsed": false,
       "panels": []
     },
@@ -1364,24 +862,24 @@
       "type": "timeseries",
       "title": "Gossip Chunk Handler (p50, p95, p99)",
       "description": "Gossip chunk handler latency",
-      "gridPos": { "x": 0, "y": 83, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 64, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1397,24 +895,24 @@
       "type": "timeseries",
       "title": "Gossip Transaction Handler (p50, p95, p99)",
       "description": "Gossip transaction handler latency",
-      "gridPos": { "x": 12, "y": 83, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 64, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_transaction\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1430,24 +928,24 @@
       "type": "timeseries",
       "title": "Gossip Commitment Tx Handler (p50, p95, p99)",
       "description": "Gossip commitment transaction handler latency",
-      "gridPos": { "x": 0, "y": 91, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 72, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_commitment_tx\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -1463,24 +961,24 @@
       "type": "timeseries",
       "title": "Execution Payload Handler (p50, p95, p99)",
       "description": "Execution payload gossip handler latency",
-      "gridPos": { "x": 12, "y": 91, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 72, "w": 12, "h": 8 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_execution_payload\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],

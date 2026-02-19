@@ -196,6 +196,12 @@ pub mod v2 {
 
     impl From<UnpackedChunk> for GossipBroadcastMessageV2 {
         fn from(chunk: UnpackedChunk) -> Self {
+            Self::from(Arc::new(chunk))
+        }
+    }
+
+    impl From<Arc<UnpackedChunk>> for GossipBroadcastMessageV2 {
+        fn from(chunk: Arc<UnpackedChunk>) -> Self {
             let key = GossipCacheKey::chunk(&chunk);
             let value = GossipDataV2::Chunk(chunk);
             Self::new(key, value)
@@ -236,7 +242,7 @@ pub mod v2 {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum GossipDataV2 {
-        Chunk(UnpackedChunk),
+        Chunk(Arc<UnpackedChunk>),
         Transaction(DataTransactionHeader),
         CommitmentTransaction(CommitmentTransaction),
         BlockHeader(Arc<IrysBlockHeader>),
@@ -254,7 +260,7 @@ pub mod v2 {
     impl From<super::v1::GossipDataV1> for GossipDataV2 {
         fn from(v1: super::v1::GossipDataV1) -> Self {
             match v1 {
-                super::v1::GossipDataV1::Chunk(chunk) => Self::Chunk(chunk),
+                super::v1::GossipDataV1::Chunk(chunk) => Self::Chunk(Arc::new(chunk)),
                 super::v1::GossipDataV1::Transaction(tx) => Self::Transaction(tx),
                 super::v1::GossipDataV1::CommitmentTransaction(tx) => {
                     Self::CommitmentTransaction(tx)
@@ -271,7 +277,9 @@ pub mod v2 {
     impl GossipDataV2 {
         pub fn to_v1(&self) -> Option<super::v1::GossipDataV1> {
             match self {
-                Self::Chunk(chunk) => Some(super::v1::GossipDataV1::Chunk(chunk.clone())),
+                Self::Chunk(chunk) => {
+                    Some(super::v1::GossipDataV1::Chunk(UnpackedChunk::clone(chunk)))
+                }
                 Self::Transaction(tx) => Some(super::v1::GossipDataV1::Transaction(tx.clone())),
                 Self::CommitmentTransaction(commitment_tx) => Some(
                     super::v1::GossipDataV1::CommitmentTransaction(commitment_tx.clone()),
