@@ -159,7 +159,7 @@ services:
     environment:
       - ENABLE_METRICS=true
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3

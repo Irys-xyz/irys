@@ -866,7 +866,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(20, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[$__rate_interval])))",
+          "expr": "topk(20, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{job=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -920,7 +920,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(15, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[$__rate_interval])))",
+          "expr": "topk(15, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{job=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }

@@ -23,6 +23,7 @@ connectors:
         buckets: [1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s]
     dimensions:
       - name: service.name
+    metrics_expiration: 5m
 
 processors:
   batch:
