@@ -767,7 +767,8 @@ pub fn generate_ingress_proof(
 
     info!(
         "generated ingress proof {} for data root {}",
-        &proof.proof, &data_root
+        &proof.proof_id(),
+        &data_root
     );
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);

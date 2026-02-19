@@ -124,7 +124,7 @@ pub mod v1 {
                 Self::IngressProof(ingress_proof) => {
                     format!(
                         "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        ingress_proof.data_root(),
                         ingress_proof.recover_signer()
                     )
                 }
@@ -313,7 +313,7 @@ pub mod v2 {
                 Self::IngressProof(ingress_proof) => {
                     format!(
                         "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        ingress_proof.data_root(),
                         ingress_proof.recover_signer()
                     )
                 }
@@ -415,7 +415,7 @@ impl GossipCacheKey {
     }
 
     pub fn ingress_proof(ingress_proof: &IngressProof) -> Self {
-        Self::IngressProof(ingress_proof.proof)
+        Self::IngressProof(ingress_proof.proof_id())
     }
 }
 

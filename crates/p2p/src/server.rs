@@ -527,7 +527,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = proof_json.0.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -893,7 +893,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = proof_json.0.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root

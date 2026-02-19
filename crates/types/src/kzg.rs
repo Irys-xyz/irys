@@ -1,10 +1,135 @@
+use crate::{IrysAddress, H256};
 use alloy_eips::eip4844::env_settings::EnvKzgSettings;
+use bytes::BufMut;
 use c_kzg::{Blob, KzgCommitment, KzgSettings};
 use openssl::sha;
+use reth_codecs::Compact;
+use serde::{Deserialize, Serialize};
 
 pub const BLOB_SIZE: usize = 131_072; // 128KB = 4096 * 32 bytes
 pub const CHUNK_SIZE_FOR_KZG: usize = 262_144; // 256KB = 2 * BLOB_SIZE
 pub const COMMITMENT_SIZE: usize = 48; // Compressed G1 point
+pub const DOMAIN_SEPARATOR: &[u8] = b"IRYS_KZG_INGRESS_V1";
+
+/// A 48-byte KZG commitment (compressed BLS12-381 G1 point).
+///
+/// Newtype wrapper around `[u8; 48]` providing the trait implementations
+/// that raw arrays lack (serde for N>32, Default for N>32, Compact).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KzgCommitmentBytes(pub [u8; COMMITMENT_SIZE]);
+
+impl Default for KzgCommitmentBytes {
+    fn default() -> Self {
+        Self([0_u8; COMMITMENT_SIZE])
+    }
+}
+
+impl std::fmt::Debug for KzgCommitmentBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "0x")?;
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for KzgCommitmentBytes {
+    type Target = [u8; COMMITMENT_SIZE];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8; COMMITMENT_SIZE]> for KzgCommitmentBytes {
+    fn as_ref(&self) -> &[u8; COMMITMENT_SIZE] {
+        &self.0
+    }
+}
+
+impl From<[u8; COMMITMENT_SIZE]> for KzgCommitmentBytes {
+    fn from(bytes: [u8; COMMITMENT_SIZE]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<KzgCommitmentBytes> for [u8; COMMITMENT_SIZE] {
+    fn from(val: KzgCommitmentBytes) -> Self {
+        val.0
+    }
+}
+
+impl Serialize for KzgCommitmentBytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            let hex = alloy_primitives::hex::encode(self.0);
+            serializer.serialize_str(&format!("0x{hex}"))
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for KzgCommitmentBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            let s = String::deserialize(deserializer)?;
+            let s = s.strip_prefix("0x").unwrap_or(&s);
+            let bytes = alloy_primitives::hex::decode(s).map_err(serde::de::Error::custom)?;
+            let arr: [u8; COMMITMENT_SIZE] = bytes.try_into().map_err(|v: Vec<u8>| {
+                serde::de::Error::custom(format!(
+                    "expected {COMMITMENT_SIZE} bytes, got {}",
+                    v.len()
+                ))
+            })?;
+            Ok(Self(arr))
+        } else {
+            let bytes = <Vec<u8>>::deserialize(deserializer)?;
+            let arr: [u8; COMMITMENT_SIZE] = bytes.try_into().map_err(|v: Vec<u8>| {
+                serde::de::Error::custom(format!(
+                    "expected {COMMITMENT_SIZE} bytes, got {}",
+                    v.len()
+                ))
+            })?;
+            Ok(Self(arr))
+        }
+    }
+}
+
+impl Compact for KzgCommitmentBytes {
+    fn to_compact<B: BufMut + AsMut<[u8]>>(&self, buf: &mut B) -> usize {
+        self.0.to_compact(buf)
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (arr, rest) = <[u8; COMMITMENT_SIZE]>::from_compact(buf, len);
+        (Self(arr), rest)
+    }
+}
+
+impl arbitrary::Arbitrary<'_> for KzgCommitmentBytes {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes: [u8; COMMITMENT_SIZE] = u.arbitrary()?;
+        Ok(Self(bytes))
+    }
+}
+
+impl alloy_rlp::Encodable for KzgCommitmentBytes {
+    fn encode(&self, out: &mut dyn BufMut) {
+        self.0.encode(out);
+    }
+
+    fn length(&self) -> usize {
+        self.0.length()
+    }
+}
+
+impl alloy_rlp::Decodable for KzgCommitmentBytes {
+    fn decode(buf: &mut &[u8]) -> Result<Self, alloy_rlp::Error> {
+        let arr = <[u8; COMMITMENT_SIZE]>::decode(buf)?;
+        Ok(Self(arr))
+    }
+}
 
 /// Returns a reference to the default (Ethereum mainnet) trusted setup KZG settings.
 /// Lazily initialized on first call, thread-safe.
@@ -123,6 +248,22 @@ pub fn compute_chunk_commitment(
     aggregate_commitments(&c1, &c2)
 }
 
+/// Compute a composite commitment binding a KZG commitment to a signer's address.
+///
+/// `composite = SHA256(DOMAIN_SEPARATOR || kzg_commitment || signer_address)`
+///
+/// This prevents one signer from claiming another's KZG commitment as their own.
+pub fn compute_composite_commitment(
+    kzg_commitment: &[u8; COMMITMENT_SIZE],
+    signer_address: &IrysAddress,
+) -> H256 {
+    let mut hasher = sha::Sha256::new();
+    hasher.update(DOMAIN_SEPARATOR);
+    hasher.update(kzg_commitment);
+    hasher.update(&signer_address.0 .0);
+    H256(hasher.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +363,35 @@ mod tests {
         let oversized = vec![0_u8; CHUNK_SIZE_FOR_KZG + 1];
         let result = compute_chunk_commitment(&oversized, kzg_settings());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn composite_commitment_deterministic() {
+        let kzg = [42_u8; COMMITMENT_SIZE];
+        let addr = IrysAddress::from([1_u8; 20]);
+        let c1 = compute_composite_commitment(&kzg, &addr);
+        let c2 = compute_composite_commitment(&kzg, &addr);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn composite_commitment_different_addresses() {
+        let kzg = [42_u8; COMMITMENT_SIZE];
+        let addr1 = IrysAddress::from([1_u8; 20]);
+        let addr2 = IrysAddress::from([2_u8; 20]);
+        let c1 = compute_composite_commitment(&kzg, &addr1);
+        let c2 = compute_composite_commitment(&kzg, &addr2);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn composite_commitment_different_kzg_commitments() {
+        let kzg1 = [1_u8; COMMITMENT_SIZE];
+        let kzg2 = [2_u8; COMMITMENT_SIZE];
+        let addr = IrysAddress::from([42_u8; 20]);
+        let c1 = compute_composite_commitment(&kzg1, &addr);
+        let c2 = compute_composite_commitment(&kzg2, &addr);
+        assert_ne!(c1, c2);
     }
 
     // BLS12-381 field modulus starts with 0x73; filling a blob with any byte

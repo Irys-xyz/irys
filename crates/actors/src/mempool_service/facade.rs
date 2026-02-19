@@ -227,7 +227,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let data_root = ingress_proof.data_root;
+        let data_root = ingress_proof.data_root();
         self.service
             .send(MempoolServiceMessage::IngestIngressProof(
                 ingress_proof,

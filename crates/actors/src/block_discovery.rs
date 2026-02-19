@@ -572,12 +572,12 @@ impl BlockDiscoveryServiceInner {
             })?;
             // Validate the anchors
             for proof in tx_proofs.iter() {
-                if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                if !valid_ingress_anchor_blocks.contains(&proof.anchor()) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::IngressProof {
                             promotion_target_id: tx_header.id,
                         },
-                        anchor: proof.anchor,
+                        anchor: proof.anchor(),
                     });
                 }
             }

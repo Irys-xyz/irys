@@ -239,11 +239,13 @@ where
         let source_miner_address = proof_request.miner_address;
         debug!(
             "Node {}: Gossip ingress_proof received from peer {}: {:?}",
-            self.gossip_client.mining_address, source_miner_address, proof_request.data.proof
+            self.gossip_client.mining_address,
+            source_miner_address,
+            proof_request.data.proof_id()
         );
 
         let proof = proof_request.data;
-        let proof_hash = proof.proof;
+        let proof_hash = proof.proof_id();
 
         let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof_hash)?;
 

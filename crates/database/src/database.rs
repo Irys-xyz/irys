@@ -448,17 +448,17 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address: signer.address(),
             proof: ingress_proof.clone(),
@@ -473,17 +473,17 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     address: IrysAddress,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
