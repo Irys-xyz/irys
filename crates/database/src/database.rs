@@ -17,8 +17,8 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
     DataRoot, DataTransactionHeader, DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionId, LedgerIndexItem, PeerListItem, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, H256, MEGABYTE,
+    IrysPeerId, IrysTransactionId, LedgerIndexItem, PeerListItem, SealedBlock, TxChunkOffset,
+    UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -653,6 +653,73 @@ pub fn insert_block_index_item<T: DbTxMut>(
         tx.put::<IrysBlockIndexItems>(height, CompactLedgerIndexItem(ledger_item.clone()))?;
     }
     Ok(())
+}
+
+/// Computes and inserts a [`BlockIndexItem`] for a sealed block.
+///
+/// Extracts Submit/Publish transactions from the [`SealedBlock`], computes
+/// cumulative chunk counts (looking up the previous block in the index),
+/// and writes the resulting [`BlockIndexItem`] to the database.
+pub fn insert_block_index_for_sealed_block<T: DbTxMut + DbTx>(
+    tx: &T,
+    sealed_block: &SealedBlock,
+    chunk_size: u64,
+) -> eyre::Result<()> {
+    let block = sealed_block.header();
+    let transactions = sealed_block.transactions();
+
+    fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
+        let bytes_added = txs.iter().fold(0, |acc, tx| {
+            acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+        });
+        bytes_added / chunk_size
+    }
+
+    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+
+    let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
+    let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
+
+    let num_blocks = block_index_num_blocks(tx)?;
+
+    let (max_publish_chunks, max_submit_chunks) = if num_blocks == 0 && block.height == 0 {
+        (0, sub_chunks_added)
+    } else {
+        let prev_height = block.height.saturating_sub(1);
+        let prev_block = block_index_item_by_height(tx, &prev_height)?;
+        if prev_block.block_hash != block.previous_block_hash {
+            eyre::bail!(
+                "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
+                prev_height,
+                block.previous_block_hash,
+                prev_block.block_hash
+            );
+        }
+        (
+            prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
+            prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
+        )
+    };
+
+    let block_index_item = BlockIndexItem {
+        block_hash: block.block_hash,
+        num_ledgers: 2,
+        ledgers: vec![
+            LedgerIndexItem {
+                total_chunks: max_publish_chunks,
+                tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
+                ledger: DataLedger::Publish,
+            },
+            LedgerIndexItem {
+                total_chunks: max_submit_chunks,
+                tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
+                ledger: DataLedger::Submit,
+            },
+        ],
+    };
+
+    insert_block_index_item(tx, block.height, &block_index_item)
 }
 
 /// Returns the latest (highest) block height in the block index, or `None` if empty.

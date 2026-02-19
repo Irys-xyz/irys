@@ -7,11 +7,11 @@
 use eyre::Result;
 use irys_database::{
     block_index_item_by_height, block_index_latest_height, block_index_num_blocks,
-    db::IrysDatabaseExt as _, insert_block_index_item,
+    db::IrysDatabaseExt as _, insert_block_index_for_sealed_block, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, SealedBlock, H256,
+    BlockIndexItem, DataLedger, DatabaseProvider, LedgerChunkOffset, LedgerIndexItem, NodeConfig,
+    SealedBlock, H256,
 };
 use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;
@@ -145,61 +145,7 @@ impl BlockIndex {
         sealed_block: &SealedBlock,
         chunk_size: u64,
     ) -> eyre::Result<()> {
-        let block = sealed_block.header();
-        let transactions = sealed_block.transactions();
-
-        fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
-            let bytes_added = txs.iter().fold(0, |acc, tx| {
-                acc + tx.data_size.div_ceil(chunk_size) * chunk_size
-            });
-            bytes_added / chunk_size
-        }
-
-        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
-        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
-
-        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
-        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
-
-        let num_blocks = block_index_num_blocks(tx)?;
-
-        let (max_publish_chunks, max_submit_chunks) = if num_blocks == 0 && block.height == 0 {
-            (0, sub_chunks_added)
-        } else {
-            let prev_height = block.height.saturating_sub(1);
-            let prev_block = block_index_item_by_height(tx, &prev_height)?;
-            if prev_block.block_hash != block.previous_block_hash {
-                eyre::bail!(
-                    "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
-                    prev_height,
-                    block.previous_block_hash,
-                    prev_block.block_hash
-                );
-            }
-            (
-                prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
-                prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
-            )
-        };
-
-        let block_index_item = BlockIndexItem {
-            block_hash: block.block_hash,
-            num_ledgers: 2,
-            ledgers: vec![
-                LedgerIndexItem {
-                    total_chunks: max_publish_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
-                    ledger: DataLedger::Publish,
-                },
-                LedgerIndexItem {
-                    total_chunks: max_submit_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
-                    ledger: DataLedger::Submit,
-                },
-            ],
-        };
-
-        insert_block_index_item(tx, block.height, &block_index_item)
+        insert_block_index_for_sealed_block(tx, sealed_block, chunk_size)
     }
 
     /// For a given chunk offset in a ledger, what block was responsible for adding

@@ -34,7 +34,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
+use irys_database::{add_genesis_commitments, database};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -59,9 +59,10 @@ use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
-    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
+    BlockBody, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
+    SealedBlock, ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs,
+    H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -570,16 +571,6 @@ impl IrysNode {
             number_of_ingress_proofs_total,
         );
 
-        // Generate genesis commitments from configuration
-        let commitments = get_genesis_commitments(&self.config).await;
-
-        // Calculate initial difficulty based on number of storage modules
-        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
-        let difficulty =
-            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
-                .expect("valid calculated initial difficulty");
-
-        genesis_block.diff = difficulty;
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
             genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
@@ -588,7 +579,15 @@ impl IrysNode {
         genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
         // Add commitment transactions to genesis block and get initial treasury
-        let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
+        let (commitments, initial_treasury) =
+            add_genesis_commitments(&mut genesis_block, &self.config).await;
+
+        // Calculate initial difficulty based on number of storage modules
+        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
+        let difficulty =
+            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
+                .expect("valid calculated initial difficulty");
+        genesis_block.diff = difficulty;
 
         // Set the genesis treasury to the total value of all commitments
         genesis_block.treasury = initial_treasury;
@@ -706,8 +705,14 @@ impl IrysNode {
             database::insert_commitment_tx(&write_tx, commitment_tx)?;
         }
 
-        // Insert the genesis block index entry (no data transactions in genesis)
-        let genesis_sealed = SealedBlock::genesis(genesis_block.clone());
+        // Insert the genesis block index entry.
+        // Use full sealing here so we verify genesis commitments match the header.
+        let genesis_body = BlockBody {
+            block_hash: genesis_block.block_hash,
+            data_transactions: vec![],
+            commitment_transactions: genesis_commitments.to_vec(),
+        };
+        let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
         BlockIndex::push_block(&write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
 
         // Commit the database transaction
