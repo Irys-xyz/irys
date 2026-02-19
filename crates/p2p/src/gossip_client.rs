@@ -361,7 +361,11 @@ impl GossipClient {
     }
 
     pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Info);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, ProtocolVersion::V1),
+            GossipRoutes::Info
+        );
         let response = self.internal_client().get(&url).send().await;
 
         let gossip_result = match response {
@@ -398,7 +402,11 @@ impl GossipClient {
         &self,
         peer: SocketAddr,
     ) -> Result<Vec<PeerAddress>, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer, GossipRoutes::PeerList);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V1),
+            GossipRoutes::PeerList
+        );
         let response = self
             .internal_client()
             .get(&url)
@@ -433,8 +441,11 @@ impl GossipClient {
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
         // V1 uses /version endpoint
-        let path = format!("gossip{}", GossipRoutes::Version);
-        let url = format!("http://{}/{}", peer, path);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V1),
+            GossipRoutes::Version
+        );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
@@ -498,8 +509,11 @@ impl GossipClient {
         version: HandshakeRequestV2,
     ) -> Result<PeerResponse, GossipClientError> {
         // V2 uses /v2/handshake endpoint
-        let path = format!("gossip/v2{}", GossipRoutes::Handshake);
-        let url = format!("http://{}/{}", peer, path);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V2),
+            GossipRoutes::Handshake
+        );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
@@ -553,7 +567,11 @@ impl GossipClient {
         peer: PeerAddress,
         query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::BlockIndex);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, ProtocolVersion::V1),
+            GossipRoutes::BlockIndex
+        );
         let response = self.internal_client().get(&url).query(&query).send().await;
 
         let gossip_result = match response {
@@ -781,7 +799,11 @@ impl GossipClient {
         route: GossipRoutes,
         body: bytes::Bytes,
     ) -> GossipResult<GossipResponse<()>> {
-        let url = format!("http://{}/gossip/v2{}", gossip_address, route);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(gossip_address, ProtocolVersion::V2),
+            route
+        );
 
         debug!("Sending pre-serialized data to {}", url);
 

@@ -21,6 +21,7 @@ use irys_types::{
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
+use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, info_span, instrument, warn, Instrument as _};
@@ -76,6 +77,7 @@ impl Inner {
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
+        let chunk = Arc::new(chunk);
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
@@ -238,7 +240,9 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state.put_chunk(chunk.clone()).await;
+                self.mempool_state
+                    .put_chunk(Arc::unwrap_or_clone(chunk))
+                    .await;
                 return Ok(());
             }
         };
@@ -261,7 +265,9 @@ impl Inner {
                     "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
                     chunk.data_size, data_size, chunk.data_root
                 );
-                self.mempool_state.put_chunk(chunk.clone()).await;
+                self.mempool_state
+                    .put_chunk(Arc::unwrap_or_clone(chunk))
+                    .await;
                 return Ok(());
             }
         }
@@ -401,7 +407,7 @@ impl Inner {
         let storage_start = Instant::now();
         match self
             .chunk_data_writer
-            .queue_write(&chunk)
+            .queue_write(Arc::clone(&chunk))
             .instrument(info_span!("chunk.cache_write"))
             .await
         {

@@ -3272,6 +3272,18 @@ impl MempoolService {
             Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
         }
 
+        // Flush write-behind chunk buffer so all queued chunks are committed to MDBX
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.chunk_data_writer.flush(),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!("Flushed chunk data writer successfully"),
+            Ok(Err(e)) => tracing::error!("Error flushing chunk data writer: {:?}", e),
+            Err(_) => tracing::warn!("Timeout flushing chunk data writer, continuing shutdown"),
+        }
+
         // Persist to disk with timeout
         match tokio::time::timeout(
             Duration::from_secs(10),

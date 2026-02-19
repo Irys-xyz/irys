@@ -254,6 +254,12 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 
 /// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
 ///
+/// # SAFETY REQUIREMENT
+///
+/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
+/// calling this function. Failure to do so will leave orphaned chunk data in the cache
+/// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
+///
 /// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
 /// callers (e.g. the write-behind writer) that have already validated the data root.
 /// Returns `true` if the chunk was a duplicate and was not inserted.

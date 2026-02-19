@@ -9,7 +9,7 @@ use tracing::{debug, error, warn};
 const MAX_BATCH_SIZE: usize = 64;
 
 enum WriterCommand {
-    WriteChunk(UnpackedChunk),
+    WriteChunk(Arc<UnpackedChunk>),
     Flush(oneshot::Sender<Result<(), QueueError>>),
 }
 
@@ -52,14 +52,14 @@ impl ChunkDataWriter {
     /// Queue a chunk for asynchronous write to the cache DB.
     ///
     /// Returns `true` if the chunk hash is already pending (duplicate).
-    pub async fn queue_write(&self, chunk: &UnpackedChunk) -> Result<bool, QueueError> {
+    pub async fn queue_write(&self, chunk: Arc<UnpackedChunk>) -> Result<bool, QueueError> {
         let hash = chunk.chunk_path_hash();
         if !self.pending_hashes.insert(hash) {
             return Ok(true);
         }
         if self
             .tx
-            .send(WriterCommand::WriteChunk(chunk.clone()))
+            .send(WriterCommand::WriteChunk(chunk))
             .await
             .is_err()
         {
@@ -115,7 +115,7 @@ struct BackgroundWriter {
 
 impl BackgroundWriter {
     async fn run(mut self) {
-        let mut batch: Vec<UnpackedChunk> = Vec::with_capacity(MAX_BATCH_SIZE);
+        let mut batch: Vec<Arc<UnpackedChunk>> = Vec::with_capacity(MAX_BATCH_SIZE);
 
         loop {
             // Block until at least one command arrives.
@@ -168,14 +168,14 @@ impl BackgroundWriter {
         }
     }
 
-    fn write_batch(&self, batch: &[UnpackedChunk]) -> Result<(), QueueError> {
+    fn write_batch(&self, batch: &[Arc<UnpackedChunk>]) -> Result<(), QueueError> {
         if batch.is_empty() {
             return Ok(());
         }
 
         // Precompute SHA-256 hashes once — avoids redundant hashing inside the
         // MDBX closure (log lines) and during post-transaction cleanup.
-        let hashes: Vec<ChunkPathHash> = batch.iter().map(UnpackedChunk::chunk_path_hash).collect();
+        let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
         let result = self.db.update(|tx| {
             let mut newly_written = Vec::with_capacity(batch.len());
