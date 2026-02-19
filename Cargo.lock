@@ -5229,6 +5229,7 @@ dependencies = [
  "irys-config",
  "irys-database",
  "irys-domain",
+ "irys-macros-diag-slow",
  "irys-p2p",
  "irys-packing",
  "irys-packing-worker",
@@ -5390,6 +5391,14 @@ dependencies = [
  "openssl",
  "rstest",
  "tracing",
+]
+
+[[package]]
+name = "irys-macros-diag-slow"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]

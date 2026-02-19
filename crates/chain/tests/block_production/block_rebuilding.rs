@@ -121,7 +121,9 @@ async fn heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Mine blocks until solution becomes invalid (solution.vdf_step <= parent.vdf_step)
     // Get initial VDF by mining a block and checking its parent
     let initial_block = node2.mine_block().await?;
-    node2.wait_for_block_at_height(initial_block.height, 10).await?;
+    node2
+        .wait_for_block_at_height(initial_block.height, 10)
+        .await?;
     let mut node2_latest_vdf = initial_block.vdf_limiter_info.global_step_number;
     let mut block_count = 1;
 

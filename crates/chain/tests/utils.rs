@@ -36,6 +36,7 @@ use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
+use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -328,6 +329,7 @@ impl IrysNodeTest<()> {
         }
     }
 
+    #[diag_slow]
     pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
@@ -371,6 +373,7 @@ impl IrysNodeTest<()> {
         self.with_name(log_name).start().await
     }
 
+    #[diag_slow]
     pub async fn start_and_wait_for_packing(
         self,
         log_name: &str,
@@ -616,6 +619,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
+    #[diag_slow]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
@@ -699,6 +703,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         })
     }
 
+    #[diag_slow]
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         self.node_ctx
             .packing_waiter
@@ -752,6 +757,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
+    #[diag_slow]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -801,6 +807,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Wait for a specific block at the given height using event subscription
     /// This eliminates polling and race conditions by listening to BlockStateUpdated events
     #[tracing::instrument(level = "trace", skip_all)]
+    #[diag_slow]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1264,6 +1271,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow]
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
         let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
@@ -1271,6 +1279,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.get_block_by_hash(&hash)
     }
 
+    #[diag_slow]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
@@ -1338,6 +1347,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    #[diag_slow]
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
@@ -1365,6 +1375,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Mine blocks until the next epoch boundary is reached.
     /// Returns the number of blocks mined and the final height.
+    #[diag_slow]
     pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
         let current_height = self.get_canonical_chain_height().await;
@@ -1408,6 +1419,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for specific block to be available via block tree guard
     ///   i.e. in the case of a fork, check a specific block has been gossiped between peers,
     ///        even though it may not become part of the canonical chain.
+    #[diag_slow]
     pub async fn wait_for_block(
         &self,
         hash: &H256,
@@ -1535,6 +1547,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    #[diag_slow]
     pub async fn wait_for_reth_marker(
         &self,
         tag: BlockNumberOrTag,
@@ -1581,6 +1594,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[diag_slow]
     #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
@@ -1621,6 +1635,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow]
     pub async fn wait_for_mempool_commitment_txs(
         &self,
         tx_ids: Vec<H256>,
@@ -2017,6 +2032,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    #[diag_slow]
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
@@ -2086,6 +2102,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// This method is useful in tests where gossip is disabled. It delivers all
     /// transaction headers contained in the block as well as the block header and execution payload
     /// itself directly to the peer's actors/services.
+    #[diag_slow]
     pub async fn send_full_block(
         &self,
         peer: &Self,
@@ -2563,6 +2580,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         client.upload_chunks(self.get_peer_addr(), tx).await
     }
 
+    #[diag_slow]
     pub async fn post_commitment_tx(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -2678,6 +2696,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow]
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result =
@@ -2698,6 +2717,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow]
     pub async fn ingest_commitment_tx(
         &self,
         commitment_tx: CommitmentTransaction,
@@ -2717,6 +2737,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow]
     pub async fn post_pledge_commitment(
         &self,
         anchor: Option<H256>,
@@ -2782,10 +2803,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow]
     pub async fn get_anchor(&self) -> eyre::Result<H256> {
         self.get_api_client().get_anchor(self.get_peer_addr()).await
     }
 
+    #[diag_slow]
     pub async fn post_stake_commitment(
         &self,
         anchor: Option<H256>,

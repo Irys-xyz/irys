@@ -1658,9 +1658,7 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     node_a.mine_block().await?; // mine block a1
     node_a.wait_for_block_at_height(1, seconds_to_wait).await?;
     let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
-    node_b
-        .wait_for_block_at_height(1, seconds_to_wait)
-        .await?;
+    node_b.wait_for_block_at_height(1, seconds_to_wait).await?;
 
     assert_eq!(
         block_height_1.system_ledgers.len(),
