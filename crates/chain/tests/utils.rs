@@ -329,7 +329,7 @@ impl IrysNodeTest<()> {
         }
     }
 
-    #[diag_slow]
+    #[diag_slow(state = "start".to_string())]
     pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
@@ -373,7 +373,7 @@ impl IrysNodeTest<()> {
         self.with_name(log_name).start().await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = "start_and_wait_for_packing".to_string())]
     pub async fn start_and_wait_for_packing(
         self,
         log_name: &str,
@@ -388,6 +388,83 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    async fn diag_wait_state(&self) -> String {
+        let (
+            canonical_tip_height,
+            canonical_tip_hash,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+        ) = {
+            let tree = self.node_ctx.block_tree_guard.read();
+            let (canonical_chain, not_onchain_count) = tree.get_canonical_chain();
+            let canonical_tip = canonical_chain
+                .last()
+                .map(|entry| (entry.height(), entry.block_hash()));
+            let (max_diff_height, max_diff_hash) = tree.get_max_cumulative_difficulty_block();
+
+            (
+                canonical_tip.map(|(height, _)| height),
+                canonical_tip.map(|(_, block_hash)| block_hash),
+                canonical_chain.len(),
+                not_onchain_count,
+                max_diff_height,
+                max_diff_hash,
+            )
+        };
+
+        let known_peers = self.node_ctx.peer_list.all_peers().iter().count();
+        let gossip_broadcast = self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let gossip_reception = self.node_ctx.sync_state.is_gossip_reception_enabled();
+
+        let reth_peer_count = match self
+            .node_ctx
+            .reth_node_adapter
+            .inner
+            .network
+            .get_all_peers()
+            .await
+        {
+            Ok(peers) => peers.len().to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let reth_tip = match self
+            .node_ctx
+            .reth_node_adapter
+            .reth_node
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Latest, false)
+            .await
+        {
+            Ok(Some(block)) => format!("{}@{}", block.header.number, block.header.hash),
+            Ok(None) => "none".to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let canonical_tip = canonical_tip_height
+            .zip(canonical_tip_hash)
+            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
+            .unwrap_or_else(|| "none".to_string());
+
+        format!(
+            "node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} peer_list={} reth_peers={} reth_tip={} gossip_tx={} gossip_rx={}",
+            self.name,
+            canonical_tip,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+            known_peers,
+            reth_peer_count,
+            reth_tip,
+            gossip_broadcast,
+            gossip_reception,
+        )
+    }
+
     /// Returns true if the next block height is in the last quarter of the pricing interval.
     pub fn ema_next_block_in_last_quarter(
         next_block_height: u64,
@@ -521,7 +598,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Create a new peer config with partition assignments
     /// This will start the peer node and wait for the peer to sync the commitment block
     /// It will mine all the blocks necessary to reach the next epoch round.
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn testing_peer_with_assignments(
         &self,
         peer_signer: &IrysSigner,
@@ -533,7 +610,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn testing_peer_with_assignments_and_name(
         &self,
         config: NodeConfig,
@@ -621,7 +698,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
@@ -652,6 +729,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Polls `get_block_by_height_from_index` (which checks BOTH the index
     /// entry AND the DB header) until it succeeds or the timeout expires.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block_in_index(
         &self,
         height: u64,
@@ -705,7 +783,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         })
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         self.node_ctx
             .packing_waiter
@@ -759,7 +837,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -809,7 +887,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Wait for a specific block at the given height using event subscription
     /// This eliminates polling and race conditions by listening to BlockStateUpdated events
     #[tracing::instrument(level = "trace", skip_all)]
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -903,6 +981,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_height_confirmed(
         &self,
         target_height: u64,
@@ -941,6 +1020,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_chunk<T, B>(
         &self,
         app: &T,
@@ -989,6 +1069,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// check number of chunks in the CachedChunks table
     /// return Ok(()) once it matches the expected value
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
@@ -1022,6 +1103,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// mine blocks until the txs are found in the block index, i.e. mdbx
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
         &self,
         mut unconfirmed_txs: Vec<DataTransactionHeader>,
@@ -1078,6 +1160,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for data tx to be in mempool and it's IngressProofs to be in database
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_ingress_proofs(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1088,6 +1171,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for data tx to be in mempool and its IngressProofs to be in database. does this without mining new blocks.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1097,6 +1181,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_multiple_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1227,6 +1312,46 @@ impl IrysNodeTest<IrysNodeCtx> {
             .clone()
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
+    async fn wait_for_reorg_subscribed(
+        &self,
+        mut reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
+        seconds_to_wait: usize,
+        start_tip: H256,
+    ) -> eyre::Result<ReorgEvent> {
+        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
+        match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
+            Ok(Ok(reorg_event)) => {
+                info!(
+                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
+                    reorg_event.old_fork.len(),
+                    reorg_event.new_fork.len(),
+                    reorg_event.fork_parent.height,
+                    reorg_event.new_tip
+                );
+                Ok(reorg_event)
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => Err(eyre::eyre!(
+                "Reorg broadcast receiver lagged and skipped {} events",
+                skipped
+            )),
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                Err(eyre::eyre!("Reorg broadcast channel closed"))
+            }
+            Err(_) => {
+                let current_tip = self.get_max_difficulty_block().block_hash;
+                let state = self.diag_wait_state().await;
+                Err(eyre::eyre!(
+                    "Timeout: No reorg event received within {} seconds (start_tip={}, current_tip={}). State: {}",
+                    seconds_to_wait,
+                    start_tip,
+                    current_tip,
+                    state
+                ))
+            }
+        }
+    }
+
     /// Returns a future that resolves when a reorg is detected.
     ///
     /// Subscribes to the reorg broadcast channel and waits up to `seconds_to_wait` for the ReorgEvent.
@@ -1242,38 +1367,18 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// peer.mine_competing_block().await?;
     /// let reorg = reorg_future.await?;
     /// ```
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all)]
     pub fn wait_for_reorg(
         &self,
         seconds_to_wait: usize,
-    ) -> impl Future<Output = eyre::Result<ReorgEvent>> {
-        // Subscribe to reorg events
-        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
-        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
-
-        // Return the future without awaiting it
-        async move {
-            match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
-                Ok(Ok(reorg_event)) => {
-                    info!(
-                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
-                    reorg_event.old_fork.len(),
-                    reorg_event.new_fork.len(),
-                    reorg_event.fork_parent.height,
-                    reorg_event.new_tip
-                );
-                    Ok(reorg_event)
-                }
-                Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
-                Err(_) => Err(eyre::eyre!(
-                    "Timeout: No reorg event received within {} seconds",
-                    seconds_to_wait
-                )),
-            }
-        }
+    ) -> impl Future<Output = eyre::Result<ReorgEvent>> + '_ {
+        // Subscribe immediately so callers can safely await later without missing events.
+        let reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+        let start_tip = self.get_max_difficulty_block().block_hash;
+        self.wait_for_reorg_subscribed(reorg_rx, seconds_to_wait, start_tip)
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
         let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
@@ -1281,7 +1386,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.get_block_by_hash(&hash)
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
@@ -1349,7 +1454,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
@@ -1377,7 +1482,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Mine blocks until the next epoch boundary is reached.
     /// Returns the number of blocks mined and the final height.
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
         let current_height = self.get_canonical_chain_height().await;
@@ -1421,7 +1526,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for specific block to be available via block tree guard
     ///   i.e. in the case of a fork, check a specific block has been gossiped between peers,
     ///        even though it may not become part of the canonical chain.
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block(
         &self,
         hash: &H256,
@@ -1479,6 +1584,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .ok_or_eyre("Got None")
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_evm_block(
         &self,
         hash: alloy_core::primitives::BlockHash,
@@ -1505,77 +1611,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     async fn evm_tx_wait_diag_state(&self, hash: &alloy_core::primitives::B256) -> String {
-        let (
-            canonical_tip_height,
-            canonical_tip_hash,
-            canonical_chain_len,
-            not_onchain_count,
-            max_diff_height,
-            max_diff_hash,
-        ) = {
-            let tree = self.node_ctx.block_tree_guard.read();
-            let (canonical_chain, not_onchain_count) = tree.get_canonical_chain();
-            let canonical_tip = canonical_chain
-                .last()
-                .map(|entry| (entry.height(), entry.block_hash()));
-            let (max_diff_height, max_diff_hash) = tree.get_max_cumulative_difficulty_block();
-
-            (
-                canonical_tip.map(|(height, _)| height),
-                canonical_tip.map(|(_, block_hash)| block_hash),
-                canonical_chain.len(),
-                not_onchain_count,
-                max_diff_height,
-                max_diff_hash,
-            )
-        };
-
-        let known_peers = self.node_ctx.peer_list.all_peers().iter().count();
-
-        let reth_peer_count = match self
-            .node_ctx
-            .reth_node_adapter
-            .inner
-            .network
-            .get_all_peers()
-            .await
-        {
-            Ok(peers) => peers.len().to_string(),
-            Err(err) => format!("error({err:#})"),
-        };
-
-        let reth_tip = match self
-            .node_ctx
-            .reth_node_adapter
-            .reth_node
-            .inner
-            .eth_api()
-            .block_by_number(BlockNumberOrTag::Latest, false)
-            .await
-        {
-            Ok(Some(block)) => format!("{}@{}", block.header.number, block.header.hash),
-            Ok(None) => "none".to_string(),
-            Err(err) => format!("error({err:#})"),
-        };
-
-        let canonical_tip = canonical_tip_height
-            .zip(canonical_tip_hash)
-            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
-            .unwrap_or_else(|| "none".to_string());
-
-        format!(
-            "tx={} node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} peer_list={} reth_peers={} reth_tip={}",
-            hash,
-            self.name,
-            canonical_tip,
-            canonical_chain_len,
-            not_onchain_count,
-            max_diff_height,
-            max_diff_hash,
-            known_peers,
-            reth_peer_count,
-            reth_tip,
-        )
+        let state = self.diag_wait_state().await;
+        format!("tx={} {}", hash, state)
     }
 
     #[diag_slow(interval = 2, state = self.evm_tx_wait_diag_state(hash).await)]
@@ -1644,7 +1681,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_reth_marker(
         &self,
         tag: BlockNumberOrTag,
@@ -1691,7 +1728,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
@@ -1732,7 +1769,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_mempool_commitment_txs(
         &self,
         tx_ids: Vec<H256>,
@@ -1771,6 +1808,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // waits until mempool
     // all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_mempool_best_txs_shape(
         &self,
         submit_txs: usize,
@@ -1866,7 +1904,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_publish_data_tx(
         &self,
         account: &IrysSigner,
@@ -2130,7 +2168,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
-    #[diag_slow]
+    #[diag_slow(state = "stop".to_string())]
     pub async fn stop(self) -> IrysNodeTest<()> {
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
@@ -2201,7 +2239,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// This method is useful in tests where gossip is disabled. It delivers all
     /// transaction headers contained in the block as well as the block header and execution payload
     /// itself directly to the peer's actors/services.
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn send_full_block(
         &self,
         peer: &Self,
@@ -2647,6 +2685,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // Wait until this node's peer list includes the target peer address
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_sees_peer(
         &self,
         target: &PeerAddress,
@@ -2679,7 +2718,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         client.upload_chunks(self.get_peer_addr(), tx).await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_commitment_tx(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -2795,7 +2834,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result =
@@ -2816,7 +2855,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn ingest_commitment_tx(
         &self,
         commitment_tx: CommitmentTransaction,
@@ -2836,7 +2875,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_pledge_commitment(
         &self,
         anchor: Option<H256>,
@@ -2902,12 +2941,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn get_anchor(&self) -> eyre::Result<H256> {
         self.get_api_client().get_anchor(self.get_peer_addr()).await
     }
 
-    #[diag_slow]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_stake_commitment(
         &self,
         anchor: Option<H256>,
@@ -3355,7 +3394,7 @@ pub fn assert_validation_error(
     }
 }
 
-#[diag_slow]
+#[diag_slow(state = format!("block_hash={}", block_hash))]
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,
     block_hash: &H256,
@@ -3421,7 +3460,7 @@ pub async fn read_block_from_state(
 ///
 /// # Panics
 /// Panics on timeout or if the broadcast channel is closed.
-#[diag_slow]
+#[diag_slow(state = format!("timeout_secs={}", timeout_secs))]
 pub async fn wait_for_block_event(
     rx: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
     timeout_secs: u64,
@@ -3620,6 +3659,7 @@ pub fn get_block_parent(
 /// Polls `get_block_parent` until the block header appears in `IrysBlockHeaders`.
 /// The table is populated asynchronously after block migration, so a direct read
 /// may return `None` even though the block has already been mined.
+#[diag_slow(state = format!("txid={} ledger={:?}", txid, ledger))]
 pub async fn wait_for_block_parent(
     txid: H256,
     ledger: DataLedger,

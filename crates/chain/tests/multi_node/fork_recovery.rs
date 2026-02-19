@@ -415,18 +415,53 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
     peer_node.mine_blocks_without_gossip(2).await?;
     let fork_block_level2 = peer_node.get_block_by_height(fork_height + 1).await?;
     let fork_block_level3 = peer_node.get_block_by_height(fork_height + 2).await?;
+    let canonical_cumulative_diff = canonical_block_level2.cumulative_diff;
+
+    let mut fork_blocks = vec![
+        fork_block_level1.clone(),
+        fork_block_level2.clone(),
+        fork_block_level3.clone(),
+    ];
+    let mut fork_tip = fork_block_level3.clone();
+    let mut extra_private_blocks = 0usize;
+
+    // Height alone is not enough to force a reorg when per-block difficulty varies.
+    // Keep extending the private fork until it is strictly heavier than genesis' canonical tip.
+    while fork_tip.cumulative_diff <= canonical_cumulative_diff {
+        peer_node.mine_blocks_without_gossip(1).await?;
+        let next_height = fork_tip.height + 1;
+        fork_tip = peer_node.get_block_by_height(next_height).await?;
+        fork_blocks.push(fork_tip.clone());
+        extra_private_blocks += 1;
+        eyre::ensure!(
+            extra_private_blocks <= 6,
+            "Private fork failed to exceed canonical cumulative difficulty after {} extra blocks (canonical={}, tip={})",
+            extra_private_blocks,
+            canonical_cumulative_diff,
+            fork_tip.cumulative_diff
+        );
+    }
 
     let _ = peer_node
         .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
-            fork_block_level3.evm_block_hash,
+            fork_tip.evm_block_hash,
             seconds_to_wait as u64,
         )
         .await?;
 
-    let fork_arc_level1 = Arc::new(fork_block_level1.clone());
-    let fork_arc_level2 = Arc::new(fork_block_level2.clone());
-    let fork_arc_level3 = Arc::new(fork_block_level3.clone());
+    debug!(
+        "canonical_diff={} fork_tip_diff={} fork_tip_height={} fork_blocks_to_reveal={}",
+        canonical_cumulative_diff,
+        fork_tip.cumulative_diff,
+        fork_tip.height,
+        fork_blocks.len()
+    );
+
+    let fork_arc_level1 = Arc::new(fork_blocks[0].clone());
+    let fork_reveal_tail: Vec<Arc<_>> = fork_blocks.iter().skip(1).cloned().map(Arc::new).collect();
+
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
 
     // Stage 4: peer reveals the first fork block (still not longer than canonical)
     peer_node.gossip_enable();
@@ -444,21 +479,17 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         )
         .await?;
 
-    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
-
     // Stage 5: peer gossips additional fork blocks to overtake canonical tip
-    peer_node.gossip_block_to_peers(&fork_arc_level2)?;
-    genesis_node
-        .wait_for_block(&fork_block_level2.block_hash, seconds_to_wait)
-        .await?;
-    peer_node.gossip_block_to_peers(&fork_arc_level3)?;
-    genesis_node
-        .wait_for_block(&fork_block_level3.block_hash, seconds_to_wait)
-        .await?;
+    for block in &fork_reveal_tail {
+        peer_node.gossip_block_to_peers(block)?;
+        genesis_node
+            .wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
 
     let reorg_event = reorg_future.await?;
 
-    let extension_height = fork_height + 2;
+    let extension_height = fork_tip.height;
     genesis_node
         .wait_until_height(extension_height, seconds_to_wait)
         .await?;
