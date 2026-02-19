@@ -11,7 +11,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, H256};
 use reth_db::{Database as _, DatabaseError};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, warn};
 
 /// Errors that can occur when ingesting an external ingress proof.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,7 +62,7 @@ impl IngressProofGenerationError {
 
 impl ChunkIngressServiceInner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
-    pub fn handle_ingest_ingress_proof(
+    pub(crate) fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
@@ -118,7 +118,7 @@ impl ChunkIngressServiceInner {
         Ok(())
     }
 
-    pub fn validate_ingress_proof_anchor(
+    pub(crate) fn validate_ingress_proof_anchor(
         &self,
         ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
@@ -130,7 +130,7 @@ impl ChunkIngressServiceInner {
         )
     }
 
-    pub fn validate_ingress_proof_anchor_static(
+    pub(crate) fn validate_ingress_proof_anchor_static(
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         config: &Config,
@@ -177,7 +177,7 @@ impl ChunkIngressServiceInner {
         }
     }
 
-    pub fn remove_ingress_proof(
+    pub(crate) fn remove_ingress_proof(
         irys_db: &DatabaseProvider,
         data_root: DataRoot,
     ) -> Result<(), IngressProofError> {
@@ -193,20 +193,7 @@ impl ChunkIngressServiceInner {
         Ok(())
     }
 
-    /// Validate the ingress proof anchor, and if invalid, remove the ingress proof from the database.
-    /// Returns `Ok(true)` if the proof is expired (anchor invalid), `Ok(false)` if it is still valid.
-    /// This function DOES NOT delete the proof; deletion is performed exclusively by the cache service.
-    #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
-    pub fn is_ingress_proof_expired(&self, ingress_proof: &IngressProof) -> ProofCheckResult {
-        Self::is_ingress_proof_expired_static(
-            &self.block_tree_read_guard,
-            &self.irys_db,
-            &self.config,
-            ingress_proof,
-        )
-    }
-
-    pub fn is_ingress_proof_expired_static(
+    pub(crate) fn is_ingress_proof_expired_static(
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         config: &Config,
