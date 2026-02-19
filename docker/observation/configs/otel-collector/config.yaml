@@ -16,6 +16,14 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s]
+    dimensions:
+      - name: service.name
+
 processors:
   batch:
     timeout: 1s
@@ -63,9 +71,9 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp/tempo, spanmetrics]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, spanmetrics]
       processors: [batch]
       exporters: [prometheusremotewrite]
 
