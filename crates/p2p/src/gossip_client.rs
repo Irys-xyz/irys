@@ -1402,7 +1402,10 @@ impl GossipClient {
                     );
                     match reason {
                         RejectionReason::HandshakeRequired(reason) => {
-                            warn!("Request {:?} requires handshake: {:?}", data_request, reason);
+                            warn!(
+                                "Request {:?} requires handshake: {:?}",
+                                data_request, reason
+                            );
                             peer_list.initiate_handshake(
                                 peer.1.address.api,
                                 peer.1.address.gossip,
@@ -1417,8 +1420,7 @@ impl GossipClient {
                         RejectionReason::GossipDisabled => {
                             peer_list.set_is_online_by_peer_id(&peer.0, false);
                         }
-                        RejectionReason::InvalidCredentials
-                        | RejectionReason::ProtocolMismatch => {
+                        RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
                             warn!(
                                 "Peer {:?} rejected {:?} with {:?}",
                                 peer.0, data_request, reason
@@ -1434,9 +1436,9 @@ impl GossipClient {
             },
             Err(err) => match err {
                 GossipError::PeerNetwork(e) => PeerPullOutcome::Err(e),
-                other => PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(
-                    other.to_string(),
-                )),
+                other => {
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(other.to_string()))
+                }
             },
         }
     }
