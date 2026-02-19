@@ -371,11 +371,13 @@ pub fn spawn_p2p_server_watcher_task(
             let tasks_shutdown_handle = TaskManager::current()
                 .executor()
                 .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
+                    let mut broadcast_already_exited = false;
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
                             debug!("Gossip service shutdown signal received");
                         }
                         broadcast_res = broadcast_task_handle.wait_for_exit() => {
+                            broadcast_already_exited = true;
                             warn!("Gossip broadcast exited because: {:?}", broadcast_res);
                         }
                     }
@@ -396,8 +398,12 @@ pub fn spawn_p2p_server_watcher_task(
                         )),
                     };
 
-                    info!("Stopping gossip broadcast");
-                    handle_result(broadcast_task_handle.stop().await);
+                    if broadcast_already_exited {
+                        info!("Gossip broadcast already exited");
+                    } else {
+                        info!("Stopping gossip broadcast");
+                        handle_result(broadcast_task_handle.stop().await);
+                    }
 
                     if errors.is_empty() {
                         info!("Gossip main task finished without errors");

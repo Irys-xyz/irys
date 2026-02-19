@@ -548,6 +548,8 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
 
     let stopped_genesis = ctx_genesis_node.stop().await;
     info!("GENESIS stopped");
+    // Let background shutdown finish releasing DB/ports before immediate restart on CI.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Restart genesis
     let ctx_genesis_node = stopped_genesis

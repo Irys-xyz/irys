@@ -334,20 +334,53 @@ impl IrysNodeTest<()> {
         let span = self.get_span();
         let _enter = span.enter();
 
-        // Retry with fresh random ports if the previous ports are still held by the OS
-        // (common after stop/start cycles when the socket hasn't fully released).
-        let node = match IrysNode::new(self.cfg.clone()) {
-            Ok(node) => node,
-            Err(e) if e.to_string().contains("Address already in use") => {
-                tracing::warn!("Port still in use after stop, retrying with fresh ports");
-                self.cfg.http.bind_port = 0;
-                self.cfg.http.public_port = 0;
-                self.cfg.gossip.bind_port = 0;
-                self.cfg.gossip.public_port = 0;
-                IrysNode::new(self.cfg).unwrap()
+        const MAX_START_RETRIES: usize = 10;
+        let mut node = None;
+
+        for attempt in 1..=MAX_START_RETRIES {
+            match IrysNode::new(self.cfg.clone()) {
+                Ok(created_node) => {
+                    node = Some(created_node);
+                    break;
+                }
+                Err(err) => {
+                    let err_msg = err.to_string();
+                    let address_in_use = err_msg.contains("Address already in use");
+                    let db_not_ready = err_msg.contains("failed to open the database")
+                        || err_msg.contains("unknown error code: 11");
+                    let should_retry = address_in_use || db_not_ready;
+
+                    if !should_retry || attempt == MAX_START_RETRIES {
+                        panic!(
+                            "Failed to create IrysNode after {} attempts (last error: {})",
+                            attempt, err
+                        );
+                    }
+
+                    if address_in_use {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = MAX_START_RETRIES,
+                            "Port still in use after stop, retrying with fresh ports"
+                        );
+                        self.cfg.http.bind_port = 0;
+                        self.cfg.http.public_port = 0;
+                        self.cfg.gossip.bind_port = 0;
+                        self.cfg.gossip.public_port = 0;
+                    } else {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = MAX_START_RETRIES,
+                            error = %err,
+                            "Node database is not ready after stop, retrying startup"
+                        );
+                    }
+
+                    sleep(Duration::from_millis((attempt as u64) * 200)).await;
+                }
             }
-            Err(e) => panic!("Failed to create IrysNode: {e}"),
-        };
+        }
+        let node = node.expect("node must be set when retry loop exits");
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),
@@ -2186,6 +2219,8 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     #[diag_slow(state = "stop".to_string())]
     pub async fn stop(self) -> IrysNodeTest<()> {
+        let pre_stop_state = self.diag_wait_state().await;
+        info!("Stopping node with state: {}", pre_stop_state);
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
