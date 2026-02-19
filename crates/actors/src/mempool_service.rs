@@ -1,4 +1,4 @@
-pub mod chunk_data_writer;
+pub(crate) mod chunk_data_writer;
 pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;

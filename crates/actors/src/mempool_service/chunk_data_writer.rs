@@ -173,17 +173,19 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        // Track per-chunk write outcomes inside the MDBX transaction.
+        // Precompute SHA-256 hashes once — avoids redundant hashing inside the
+        // MDBX closure (log lines) and during post-transaction cleanup.
+        let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
+
         let result = self.db.update(|tx| {
             let mut newly_written = Vec::with_capacity(batch.len());
-            for chunk in batch {
+            for (chunk, hash) in batch.iter().zip(hashes.iter()) {
                 match cache_chunk_verified(tx, chunk) {
                     Ok(is_duplicate) => {
                         if is_duplicate {
                             warn!(
                                 "Duplicate chunk {} of {} in write-behind batch",
-                                chunk.chunk_path_hash(),
-                                chunk.data_root
+                                hash, chunk.data_root
                             );
                             newly_written.push(false);
                         } else {
@@ -193,9 +195,7 @@ impl BackgroundWriter {
                     Err(e) => {
                         error!(
                             "Failed to cache chunk {} of {}: {:?}",
-                            chunk.chunk_path_hash(),
-                            chunk.data_root,
-                            e
+                            hash, chunk.data_root, e
                         );
                         newly_written.push(false);
                     }
@@ -212,8 +212,10 @@ impl BackgroundWriter {
                     batch.len(),
                     written
                 );
-                for (chunk, was_new) in batch.iter().zip(newly_written.iter()) {
-                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                for ((chunk, hash), was_new) in
+                    batch.iter().zip(hashes.iter()).zip(newly_written.iter())
+                {
+                    self.pending_hashes.remove(hash);
                     if *was_new {
                         *self
                             .pending_chunk_counts
@@ -225,15 +227,15 @@ impl BackgroundWriter {
             }
             Ok(Err(e)) => {
                 error!("ChunkDataWriter batch inner error: {:?}", e);
-                for chunk in batch {
-                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                for hash in &hashes {
+                    self.pending_hashes.remove(hash);
                 }
                 Err(QueueError::WriteFailed)
             }
             Err(e) => {
                 error!("ChunkDataWriter MDBX transaction error: {:?}", e);
-                for chunk in batch {
-                    self.pending_hashes.remove(&chunk.chunk_path_hash());
+                for hash in &hashes {
+                    self.pending_hashes.remove(hash);
                 }
                 Err(QueueError::WriteFailed)
             }
