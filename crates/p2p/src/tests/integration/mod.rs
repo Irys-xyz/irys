@@ -4,9 +4,7 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::version_pd::GossipBroadcastMessageVersionPD;
-use irys_types::{
-    BlockHash, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
-};
+use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;

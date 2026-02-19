@@ -155,10 +155,7 @@ impl PeerNetworkServiceState {
         handshake_request
     }
 
-    fn create_handshake_request_v2(
-        &self,
-        protocol_version: ProtocolVersion,
-    ) -> HandshakeRequestV2 {
+    fn create_handshake_request_v2(&self, protocol_version: ProtocolVersion) -> HandshakeRequestV2 {
         let peer_id = self.config.peer_id();
         let mut handshake_request = HandshakeRequestV2 {
             address: self.peer_address,
@@ -977,8 +974,7 @@ impl PeerNetworkService {
                     .await
             }
             ProtocolVersion::V2 | ProtocolVersion::VersionPD => {
-                let handshake_request =
-                    inner.create_handshake_request_v2(protocol_version).await;
+                let handshake_request = inner.create_handshake_request_v2(protocol_version).await;
                 gossip_client
                     .post_handshake_v2(gossip_address, handshake_request, protocol_version)
                     .await

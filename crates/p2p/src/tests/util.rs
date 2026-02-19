@@ -272,7 +272,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessageVersionPD::from(block))
+                    .send(GossipBroadcastMessageVersionPD::from(header))
                     .expect("to send block");
             });
         }
