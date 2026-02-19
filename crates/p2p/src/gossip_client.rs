@@ -766,10 +766,19 @@ impl GossipClient {
                 GossipRoutes::CommitmentTx,
                 serde_json::to_vec(&self.create_request_v2(tx.clone())),
             ),
-            GossipDataV2::BlockHeader(header) => (
-                GossipRoutes::Block,
-                serde_json::to_vec(&self.create_request_v2(header.clone())),
-            ),
+            GossipDataV2::BlockHeader(header) => {
+                if header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::pre_serialize",
+                        block.hash = ?header.block_hash,
+                        "Pre-serializing a block header without the POA chunk"
+                    );
+                }
+                (
+                    GossipRoutes::Block,
+                    serde_json::to_vec(&self.create_request_v2(header.clone())),
+                )
+            }
             GossipDataV2::BlockBody(body) => (
                 GossipRoutes::BlockBody,
                 serde_json::to_vec(&self.create_request_v2(body.clone())),

@@ -420,7 +420,10 @@ impl Inner {
                     "Write-behind queue error for chunk data_root {:?} tx_offset {}: {:?}",
                     chunk.data_root, chunk.tx_offset, e
                 );
-                return Err(CriticalChunkIngressError::DatabaseError.into());
+                return Err(CriticalChunkIngressError::Other(format!(
+                    "Write-behind channel closed: {e:?}"
+                ))
+                .into());
             }
         }
         record_enqueue_duration(storage_start.elapsed().as_secs_f64() * 1000.0);

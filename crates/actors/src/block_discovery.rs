@@ -69,7 +69,7 @@ pub enum BlockDiscoveryError {
 }
 
 impl BlockDiscoveryError {
-    pub fn metric_label(&self) -> &'static str {
+    pub(crate) fn metric_label(&self) -> &'static str {
         match self {
             Self::BlockValidationError(_) => "validation",
             Self::PreviousBlockNotFound { .. } => "previous_block_not_found",
