@@ -521,6 +521,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Create a new peer config with partition assignments
     /// This will start the peer node and wait for the peer to sync the commitment block
     /// It will mine all the blocks necessary to reach the next epoch round.
+    #[diag_slow]
     pub async fn testing_peer_with_assignments(
         &self,
         peer_signer: &IrysSigner,
@@ -532,6 +533,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow]
     pub async fn testing_peer_with_assignments_and_name(
         &self,
         config: NodeConfig,
@@ -1769,6 +1771,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow]
     pub async fn post_publish_data_tx(
         &self,
         account: &IrysSigner,
@@ -3256,6 +3259,7 @@ pub fn assert_validation_error(
     }
 }
 
+#[diag_slow]
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,
     block_hash: &H256,

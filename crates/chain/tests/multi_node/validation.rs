@@ -318,7 +318,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
 #[test_log::test(tokio::test)]
-async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
+async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }

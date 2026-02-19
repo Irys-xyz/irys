@@ -1005,7 +1005,7 @@ fn assert_no_unstake_in_commitment_snapshot(
 /// 7. No storage modules remain assigned (all pledges cleared)
 /// 8. User is no longer staked (removed from epoch snapshot)
 #[test_log::test(tokio::test)]
-async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
+async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -1099,7 +1099,7 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     // Mine until next epoch - this should process both unpledges and unstake
     let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync to epoch");
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
