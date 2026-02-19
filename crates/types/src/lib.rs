@@ -19,6 +19,7 @@ pub mod gossip;
 pub mod hardfork_config;
 pub mod ingress;
 pub mod irys;
+pub mod kzg;
 pub mod ledger_expiry;
 mod merkle;
 pub mod partition;
