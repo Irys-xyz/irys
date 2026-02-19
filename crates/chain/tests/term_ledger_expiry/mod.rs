@@ -4,13 +4,12 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::Address;
+use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     fee_distribution::TermFeeCharges, irys::IrysSigner, ConsensusConfig, DataLedger,
     DataTransaction, IrysAddress, IrysBlockHeader, NodeConfig, U256,
 };
-use reth::providers::TransactionsProvider as _;
-use reth::rpc::types::TransactionTrait as _;
 use std::ops::{Deref, DerefMut};
 use tracing::info;
 
@@ -578,9 +577,6 @@ impl LedgerExpiryTestContext {
 
     /// Verify final balance matches all expected fees
     async fn verify_final_balance(&self) -> eyre::Result<()> {
-        // Get the reth context to examine shadow transactions
-        let reth_context = self.node.node_ctx.reth_node_adapter.clone();
-
         // Look for expired ledger fee shadow transactions in ALL blocks we mined
         let mut actual_expiry_fees = U256::from(0);
 
@@ -588,12 +584,10 @@ impl LedgerExpiryTestContext {
 
         // Check each block for TermFeeReward shadow transactions
         for block in &self.blocks_mined {
-            // Get all transactions from this block
-            let block_txs = reth_context
-                .inner
-                .provider
-                .transactions_by_block(alloy_eips::HashOrNumber::Hash(block.evm_block_hash))?
-                .unwrap_or_default();
+            // Ensure the EVM block is visible before we inspect its transactions.
+            // CI can lag here and return empty tx lists transiently.
+            let evm_block = self.wait_for_evm_block(block.evm_block_hash, 30).await?;
+            let block_txs = evm_block.body.transactions;
 
             info!(
                 "Block {} has {} transactions",
@@ -603,9 +597,10 @@ impl LedgerExpiryTestContext {
 
             for tx in &block_txs {
                 // Decode the shadow transaction
+                let mut input = tx.input().as_ref();
                 if let Ok(shadow_tx) =
                     irys_reth_node_bridge::irys_reth::shadow_tx::ShadowTransaction::decode(
-                        &mut tx.input().as_ref(),
+                        &mut input,
                     )
                 {
                     if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {

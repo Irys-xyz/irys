@@ -1042,7 +1042,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         B: MessageBody,
     {
         let delay = Duration::from_secs(1);
-        for attempt in 1..seconds {
+        for attempt in 1..=seconds {
             if let Some(_packed_chunk) =
                 get_chunk(&app, ledger, LedgerChunkOffset::from(offset)).await
             {
