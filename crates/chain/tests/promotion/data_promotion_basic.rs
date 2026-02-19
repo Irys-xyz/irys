@@ -1,4 +1,4 @@
-use crate::utils::{post_chunk, verify_published_chunk, wait_for_block_parent};
+use crate::utils::{post_chunk, verify_published_chunk};
 use crate::utils::{AddTxError, IrysNodeTest};
 use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
@@ -165,9 +165,12 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
     assert!(result.is_ok());
 
-    let db = &node.node_ctx.db.clone();
-    let block_tx1 = wait_for_block_parent(txs[0].header.id, DataLedger::Publish, db, 20).await?;
-    let block_tx2 = wait_for_block_parent(txs[2].header.id, DataLedger::Publish, db, 20).await?;
+    let block_tx1 = node
+        .wait_for_block_parent(txs[0].header.id, DataLedger::Publish, 20)
+        .await?;
+    let block_tx2 = node
+        .wait_for_block_parent(txs[2].header.id, DataLedger::Publish, 20)
+        .await?;
 
     let first_tx_index: usize;
     let next_tx_index: usize;

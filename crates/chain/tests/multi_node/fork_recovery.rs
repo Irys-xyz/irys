@@ -738,8 +738,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     assert_eq!(
         a_block2.system_ledgers.len(),
         0,
-        "No txs should have been gossiped back to peer A! {:?}",
-        a_block2.system_ledgers[0].tx_ids
+        "No txs should have been gossiped back to peer A"
     ); // 0 commitments, also means 0 system ledgers
 
     // NODE B -> Node C
@@ -1752,9 +1751,36 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     }
 
     // For convenience keep references to the first and last blocks on each chain
-    let a_block2 = &a_blocks[0];
-    let b_block2 = &b_blocks[0];
-    let b_last = b_blocks.last().expect("b_blocks not empty");
+    let a_block2 = a_blocks[0].clone();
+    let b_block2 = b_blocks[0].clone();
+    let a_last = a_blocks.last().expect("a_blocks not empty");
+    let mut b_last = b_blocks.last().expect("b_blocks not empty").clone();
+
+    // False assumption to avoid: one extra block is not always heavier when
+    // per-block difficulty varies. Extend B until it is strictly heavier.
+    let mut extra_private_blocks = 0usize;
+    while b_last.cumulative_diff <= a_last.cumulative_diff {
+        let (block, _, _) = node_b.mine_block_without_gossip().await?;
+        b_last = block.clone();
+        b_blocks.push(block);
+        extra_private_blocks += 1;
+        eyre::ensure!(
+            extra_private_blocks <= 6,
+            "B fork failed to exceed A cumulative difficulty after {} extra block(s): a_last_diff={} b_last_diff={}",
+            extra_private_blocks,
+            a_last.cumulative_diff,
+            b_last.cumulative_diff
+        );
+    }
+
+    debug!(
+        "fork heaviness before sync: a_last_height={} a_last_diff={} b_last_height={} b_last_diff={} extra_b_blocks={}",
+        a_last.height,
+        a_last.cumulative_diff,
+        b_last.height,
+        b_last.cumulative_diff,
+        extra_private_blocks
+    );
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -1765,8 +1791,7 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     assert_eq!(
         a_block2.system_ledgers.len(),
         0,
-        "No txs should have been gossiped back to peer A! {:?}",
-        a_block2.system_ledgers[0].tx_ids
+        "No txs should have been gossiped back to peer A"
     ); // 0 commitments, also means 0 system ledgers
 
     //

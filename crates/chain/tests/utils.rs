@@ -516,16 +516,18 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
     /// mines a single block on this node and waits again.
     /// Designed for use with calls that expect to be able to send and confirm a tx in a single future.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn future_or_mine_on_timeout<F, T>(
         &self,
-        mut future: F,
+        future: F,
         timeout_duration: Duration,
     ) -> eyre::Result<T>
     where
-        F: Future<Output = T> + Unpin,
+        F: Future<Output = T>,
     {
+        tokio::pin!(future);
         loop {
-            let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
+            let race = select(future.as_mut(), Box::pin(sleep(timeout_duration))).await;
             match race {
                 // provided future finished
                 futures::future::Either::Left((res, _)) => return Ok(res),
@@ -884,8 +886,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    /// Wait for a specific block at the given height using event subscription
-    /// This eliminates polling and race conditions by listening to BlockStateUpdated events
+    /// Wait for a canonical block at `target_height` using a hybrid strategy:
+    /// short-interval canonical polling plus BlockStateUpdated subscription.
     #[tracing::instrument(level = "trace", skip_all)]
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block_at_height(
@@ -903,80 +905,54 @@ impl IrysNodeTest<IrysNodeCtx> {
         let timeout = Duration::from_secs(max_seconds as u64);
         let deadline = Instant::now() + timeout;
 
-        // First check if we already have the block
-        let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-
-        // Look for the exact block at target height
-        if let Some(block) = canonical_chain
-            .0
-            .iter()
-            .find(|b| b.height() == target_height)
-        {
-            // Check if it's part of canonical chain (not discarded)
-            let tree = self.node_ctx.block_tree_guard.read();
-            let (canonical_entries, _) = tree.get_canonical_chain();
-            if canonical_entries
+        // Hybrid wait strategy: poll canonical chain plus event stream.
+        // Relying only on events is brittle because a target-height event can arrive
+        // before the block becomes canonical, and no later event may be emitted.
+        loop {
+            let canonical_chain =
+                get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+            if let Some(block) = canonical_chain
+                .0
                 .iter()
-                .any(|b| b.block_hash() == block.block_hash())
+                .find(|b| b.height() == target_height)
             {
-                info!("Block at height {} already available", target_height);
+                info!("Canonical block at height {} is available", target_height);
                 return Ok(block.block_hash());
             }
-        }
 
-        // Wait for events
-        loop {
             // Check timeout
             if Instant::now() > deadline {
+                let state = self.diag_wait_state().await;
                 return Err(eyre::eyre!(
-                    "Timeout waiting for block at height {} after {} seconds",
+                    "Timeout waiting for block at height {} after {} seconds; state: {}",
                     target_height,
-                    max_seconds
+                    max_seconds,
+                    state
                 ));
             }
 
-            // Wait for next block state update with timeout
-            match tokio::time::timeout_at(deadline.into(), block_state_rx.recv()).await {
+            // Wait briefly for block-state updates so we can re-check canonical
+            // state even if no further events arrive.
+            let now = Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            let wait_slice = remaining.min(Duration::from_secs(1));
+
+            match tokio::time::timeout(wait_slice, block_state_rx.recv()).await {
                 Ok(Ok(event)) => {
-                    // Check if this is the block we're waiting for
-                    if event.height == target_height && !event.discarded {
-                        // Verify it's canonical
-                        let tree = self.node_ctx.block_tree_guard.read();
-                        let (canonical_entries, _) = tree.get_canonical_chain();
-                        if canonical_entries
-                            .iter()
-                            .any(|b| b.block_hash() == event.block_hash)
-                        {
-                            info!("Received block at height {} via event", target_height);
-                            return Ok(event.block_hash);
-                        }
-                    }
-                    // Also check after reorgs if our target block is now canonical
-                    if event.height > target_height {
-                        let canonical_chain =
-                            get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-                        if let Some(block) = canonical_chain
-                            .0
-                            .iter()
-                            .find(|b| b.height() == target_height)
-                        {
-                            info!(
-                                "Block at height {} became canonical after reorg",
-                                target_height
-                            );
-                            return Ok(block.block_hash());
-                        }
+                    if event.height >= target_height && !event.discarded {
+                        info!(
+                            "Observed block_state update at/above target height: event_height={} target_height={} block_hash={}",
+                            event.height,
+                            target_height,
+                            event.block_hash
+                        );
                     }
                 }
                 Ok(Err(_)) => {
                     return Err(eyre::eyre!("Block state channel closed"));
                 }
-                Err(_) => {
-                    return Err(eyre::eyre!(
-                        "Timeout waiting for block at height {}",
-                        target_height
-                    ));
-                }
+                // No event in this short slice, loop and poll canonical state again.
+                Err(_) => {}
             }
         }
     }
@@ -1549,6 +1525,46 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!(
             "Failed to locate block in block tree after {} retries",
             retries
+        ))
+    }
+
+    #[diag_slow(state = format!(
+        "txid={} ledger={:?} {}",
+        txid,
+        ledger,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_block_parent(
+        &self,
+        txid: H256,
+        ledger: DataLedger,
+        max_seconds: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        for attempt in 1..=max_seconds {
+            let canonical_chain =
+                get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+            for entry in canonical_chain.0.iter().rev() {
+                let block_hash = entry.block_hash();
+                if let Ok(block) = self.get_block_by_hash(&block_hash) {
+                    if block.data_ledgers[ledger].tx_ids.0.contains(&txid) {
+                        tracing::info!(
+                            "found block parent for tx {} on {} after {} attempt(s)",
+                            txid,
+                            self.name.clone().unwrap_or_else(|| "genesis".to_string()),
+                            attempt
+                        );
+                        return Ok(block);
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        Err(eyre::eyre!(
+            "block parent for tx {} not found on {} after {} seconds",
+            txid,
+            self.name.clone().unwrap_or_else(|| "genesis".to_string()),
+            max_seconds
         ))
     }
 
