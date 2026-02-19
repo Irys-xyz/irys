@@ -73,7 +73,7 @@ pub fn select_data_size_from_storage_modules(
 
 impl ChunkIngressServiceInner {
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
-    pub async fn handle_chunk_ingress_message(
+    pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {

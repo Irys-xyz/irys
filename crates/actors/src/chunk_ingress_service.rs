@@ -25,7 +25,7 @@ use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, Semaphore};
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info, warn, Instrument, Span};
+use tracing::{error, info, warn, Instrument as _, Span};
 
 use crate::mempool_service::chunk_data_writer;
 use crate::services::ServiceSenders;
@@ -112,7 +112,7 @@ impl ChunkIngressServiceInner {
     }
 
     /// Helper to get the latest block height from the canonical chain.
-    pub fn get_latest_block_height_static(
+    pub(crate) fn get_latest_block_height_static(
         block_tree_read_guard: &BlockTreeReadGuard,
     ) -> Result<u64, String> {
         let canon_chain = block_tree_read_guard.read().get_canonical_chain();
@@ -126,7 +126,7 @@ impl ChunkIngressServiceInner {
     /// Resolves an anchor (block hash) to its height.
     /// If it couldn't find the anchor, returns None.
     /// Set canonical to true to enforce that the anchor must be part of the current canonical chain.
-    pub fn get_anchor_height_static(
+    pub(crate) fn get_anchor_height_static(
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         anchor: H256,
