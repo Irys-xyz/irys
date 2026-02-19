@@ -19,7 +19,6 @@ use crate::utils::{
 };
 use irys_actors::block_tree_service::ValidationResult;
 use irys_actors::block_validation::ValidationError;
-use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
     async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
@@ -55,21 +54,6 @@ pub async fn send_block_to_block_tree(
         })?;
 
     response_rx.await??;
-    Ok(())
-}
-
-fn send_block_to_block_validation(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<SealedBlock>,
-) -> Result<(), PreValidationError> {
-    node_ctx
-        .service_senders
-        .validation_service
-        .send(ValidationServiceMessage::ValidateBlock {
-            block,
-            skip_vdf_validation: false,
-        })
-        .unwrap();
     Ok(())
 }
 
@@ -1143,11 +1127,14 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
     genesis_node.gossip_disable();
 
     let (header, _, txs) = fork_creator_1.mine_block_without_gossip().await?;
-    let block = Arc::new(SealedBlock::new((*header).clone(), BlockBody {
-        block_hash: header.block_hash,
-        data_transactions: txs.all_data_txs().cloned().collect(),
-        commitment_transactions: txs.all_system_txs().cloned().collect(),
-    })?);
+    let block = Arc::new(SealedBlock::new(
+        (*header).clone(),
+        BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: txs.all_data_txs().cloned().collect(),
+            commitment_transactions: txs.all_system_txs().cloned().collect(),
+        },
+    )?);
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
     let root_block_of_fork = header;
 
@@ -1159,11 +1146,14 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
     for _ in 0..10 {
         let (header, eth_block, txs) = fork_creator_2.mine_block_without_gossip().await?;
         tracing::error!(block_heght = header.height,  ?header.cumulative_diff, "block");
-        let block = Arc::new(SealedBlock::new((*header).clone(), BlockBody {
-            block_hash: header.block_hash,
-            data_transactions: txs.all_data_txs().cloned().collect(),
-            commitment_transactions: txs.all_system_txs().cloned().collect(),
-        })?);
+        let block = Arc::new(SealedBlock::new(
+            (*header).clone(),
+            BlockBody {
+                block_hash: header.block_hash,
+                data_transactions: txs.all_data_txs().cloned().collect(),
+                commitment_transactions: txs.all_system_txs().cloned().collect(),
+            },
+        )?);
         send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
         genesis_node
             .node_ctx

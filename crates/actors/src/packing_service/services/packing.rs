@@ -186,6 +186,10 @@ impl InternalPackingService {
             };
 
             let _guard = ActiveWorkerGuard::new(self.active_workers.clone(), self.notify.clone());
+            crate::metrics::record_packing_workers(
+                self.active_workers.load(Ordering::Relaxed) as u64,
+                self.semaphore.available_permits() as u64,
+            );
 
             // TODO(optimization): Check for already-packed ranges.
 

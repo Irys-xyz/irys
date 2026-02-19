@@ -758,8 +758,7 @@ impl ConsensusConfig {
                     min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
                 }),
                 aurora: Some(Aurora {
-                    // Enable aurora from genesis for tests
-                    activation_timestamp: UnixTimestamp::from_secs(0),
+                    activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
@@ -942,7 +941,7 @@ mod tests {
         // - The canonical JSON serialization implementation
         // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
+        let expected_hash = H256::from_base58("JAvW3YLPGQhoDcR4xdGyh6fssC6usQh7gGkh5fC2JPTM");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

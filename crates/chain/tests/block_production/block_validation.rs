@@ -1,19 +1,14 @@
 use crate::utils::{solution_context, IrysNodeTest};
 use eyre::Result;
 use irys_actors::block_validation::{prevalidate_block, PreValidationError};
-use irys_actors::{
-    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
-};
+use irys_actors::{async_trait, BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_reth::IrysBuiltPayload;
 use irys_types::{
-    block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     SealedBlock, SystemLedger, UnixTimestampMs, H256, U256,
 };
-use reth::core::primitives::SealedBlock as RethSealedBlock;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -130,7 +125,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     };
     use irys_types::{block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats};
-    use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
+    use reth::core::primitives::SealedBlock as RethSealedBlock;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,

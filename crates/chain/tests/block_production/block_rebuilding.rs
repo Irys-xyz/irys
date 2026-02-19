@@ -11,7 +11,9 @@
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth::IrysBuiltPayload;
-use irys_types::{block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock, H256};
+use irys_types::{
+    block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock, H256,
+};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;

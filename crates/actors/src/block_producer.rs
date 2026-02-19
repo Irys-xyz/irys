@@ -42,8 +42,7 @@ use irys_types::{
     AdjustmentStats, Base64, BlockBody, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger,
-    TokioServiceHandle,
-    UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
