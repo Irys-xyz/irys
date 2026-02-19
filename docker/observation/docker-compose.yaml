@@ -146,6 +146,25 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Grafana Image Renderer - server-side PNG/PDF export
+  grafana-image-renderer:
+    image: grafana/grafana-image-renderer:5.5.1
+    container_name: obs-grafana-image-renderer
+    restart: unless-stopped
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.107
+    ports:
+      - "${RENDERER_BIND_HOST:-127.0.0.1}:${RENDERER_PORT:-8081}:8081"
+    environment:
+      - ENABLE_METRICS=true
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   # Grafana - Visualization (Tempo, Prometheus, Elasticsearch)
   grafana:
     image: grafana/grafana:latest
@@ -164,14 +183,21 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_DEFAULT_THEME=dark
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,correlations
+      - GF_RENDERING_SERVER_URL=http://grafana-image-renderer:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://grafana:3000/
     volumes:
       - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - tempo
-      - prometheus
-      - elasticsearch
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      grafana-image-renderer:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 10s

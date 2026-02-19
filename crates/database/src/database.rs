@@ -28,7 +28,7 @@ use reth_db::transaction::DbTxMut;
 use reth_db::TableSet;
 use reth_db::{
     cursor::*,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration, SyncMode},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_db_api::Database as _;
@@ -66,7 +66,10 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
             .with_growth_step((50 * MEGABYTE).into())
-            .with_shrink_threshold((100 * MEGABYTE).try_into()?),
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
+            // Cache data is non-authoritative and can be rebuilt, so trade
+            // durability for write throughput by skipping fsync operations.
+            .with_sync_mode(Some(SyncMode::SafeNoSync)),
     );
     open_or_create_db(path, tables, Some(args))
 }
@@ -239,16 +242,34 @@ type IsDuplicate = bool;
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_root;
-    // Check if the data root exists
-    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+    if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            data_root
+            chunk.data_root
         ));
     }
 
+    cache_chunk_verified(tx, chunk)
+}
+
+/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
+///
+/// # SAFETY REQUIREMENT
+///
+/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
+/// calling this function. Failure to do so will leave orphaned chunk data in the cache
+/// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
+///
+/// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
+/// callers (e.g. the write-behind writer) that have already validated the data root.
+/// Returns `true` if the chunk was a duplicate and was not inserted.
+pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: &UnpackedChunk,
+) -> eyre::Result<IsDuplicate> {
+    let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
+
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
@@ -256,6 +277,7 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
         );
         return Ok(true);
     }
+
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
         meta: CachedChunkIndexMetadata {

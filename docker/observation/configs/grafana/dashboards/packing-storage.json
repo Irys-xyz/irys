@@ -1,14 +1,15 @@
 {
-  "title": "Block Production & Progression",
-  "uid": "irys-block-production-detailed",
+  "title": "Packing & Storage",
+  "uid": "irys-packing-storage",
   "tags": [
     "irys",
-    "blocks",
-    "production"
+    "packing",
+    "storage",
+    "mining"
   ],
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 3,
+  "version": 2,
   "refresh": "10s",
   "time": {
     "from": "now-1h",
@@ -24,11 +25,11 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(irys_chain_block_height, job)",
+        "query": "label_values(irys_storage_modules_total, job)",
         "refresh": 2,
         "includeAll": true,
         "allValue": ".*",
-        "multi": false,
+        "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
@@ -42,7 +43,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Block Status",
+      "title": "Storage Overview",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -54,12 +55,12 @@
     },
     {
       "type": "stat",
-      "title": "Block Height",
-      "description": "Current block height",
+      "title": "Storage Modules",
+      "description": "Total storage modules configured",
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 5,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -68,216 +69,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(irys_chain_block_height{job=~\"$node\"})",
-          "legendFormat": "max",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Canonical Tip",
-      "description": "Canonical tip height from block tree",
-      "gridPos": {
-        "x": 5,
-        "y": 1,
-        "w": 5,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max(irys_block_tree_canonical_tip_height{job=~\"$node\"})",
-          "legendFormat": "max",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Reth FCU Head",
-      "description": "Reth FCU head block height",
-      "gridPos": {
-        "x": 10,
-        "y": 1,
-        "w": 5,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max(irys_reth_fcu_head_height{job=~\"$node\"})",
-          "legendFormat": "max",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Blocks Produced",
-      "description": "Total blocks produced",
-      "gridPos": {
-        "x": 15,
-        "y": 1,
-        "w": 5,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "irys_block_producer_blocks_produced_total{job=~\"$node\"}",
-          "legendFormat": "{{job}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Reorgs",
-      "description": "Chain reorg events",
-      "gridPos": {
-        "x": 20,
-        "y": 1,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "irys_block_tree_reorgs_total{job=~\"$node\"}",
-          "legendFormat": "{{job}}",
+          "expr": "sum(irys_storage_modules_total{job=~\"$node\"})",
+          "legendFormat": "modules",
           "refId": "A"
         }
       ],
@@ -304,16 +97,164 @@
             "mode": "absolute",
             "steps": [
               {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active Packing Workers",
+      "description": "Currently active packing workers",
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(irys_packing_active_workers{job=~\"$node\"})",
+          "legendFormat": "workers",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Cached Chunks",
+      "description": "Number of chunks in cache",
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(irys_cache_chunk_count{job=~\"$node\"})",
+          "legendFormat": "chunks",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Mining Solutions",
+      "description": "Total mining solutions found",
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(irys_mining_solutions_found_total{job=~\"$node\"})",
+          "legendFormat": "solutions",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
               }
             ]
           }
@@ -322,7 +263,7 @@
     },
     {
       "type": "row",
-      "title": "Block Heights Over Time",
+      "title": "Packing Activity",
       "gridPos": {
         "x": 0,
         "y": 5,
@@ -334,13 +275,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Block Height Progression",
-      "description": "Chain height, canonical tip, and Reth FCU head over time",
+      "title": "Active Packing Workers Over Time",
+      "description": "Number of active packing workers",
       "gridPos": {
         "x": 0,
         "y": 6,
-        "w": 24,
-        "h": 8
+        "w": 12,
+        "h": 6
       },
       "targets": [
         {
@@ -348,27 +289,255 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "irys_chain_block_height{job=~\"$node\"}",
-          "legendFormat": "{{job}} chain height",
+          "expr": "irys_packing_active_workers{job=~\"$node\"}",
+          "legendFormat": "{{job}}",
           "refId": "A"
-        },
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Packing Semaphore Available",
+      "description": "Available packing permits over time",
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "irys_block_tree_canonical_tip_height{job=~\"$node\"}",
-          "legendFormat": "{{job}} canonical tip",
-          "refId": "B"
-        },
+          "expr": "irys_packing_semaphore_available{job=~\"$node\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cache",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache Chunk Count Over Time",
+      "description": "Number of cached chunks",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "irys_reth_fcu_head_height{job=~\"$node\"}",
-          "legendFormat": "{{job}} reth FCU head",
-          "refId": "C"
+          "expr": "irys_cache_chunk_count{job=~\"$node\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache Chunk Size",
+      "description": "Size of cached chunks in bytes",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "irys_cache_chunk_size_bytes{job=~\"$node\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Mining & Commitments",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Mining Solutions Found",
+      "description": "Rate of mining solutions discovered",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(irys_mining_solutions_found_total{job=~\"$node\"}[5m])",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pledge Txs Posted",
+      "description": "Rate of pledge transactions posted",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(irys_commitment_pledge_tx_posted_total{job=~\"$node\"}[5m])",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Storage Modules",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage Modules Total",
+      "description": "Number of storage modules over time",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "irys_storage_modules_total{job=~\"$node\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -380,136 +549,48 @@
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "auto"
+            "lineWidth": 2
           }
         }
       }
     },
     {
       "type": "row",
-      "title": "Block Production Activity",
-      "gridPos": {
-        "x": 0,
-        "y": 14,
-        "w": 24,
-        "h": 1
-      },
+      "title": "Data Sync Performance",
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
-      "title": "Blocks Produced Rate",
-      "description": "Rate of blocks produced per second",
-      "gridPos": {
-        "x": 0,
-        "y": 15,
-        "w": 12,
-        "h": 6
-      },
+      "title": "Data Sync Tick Duration (p50, p95, p99)",
+      "description": "Data sync service tick cycle duration",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 8 },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "rate(irys_block_producer_blocks_produced_total{job=~\"$node\"}[$__rate_interval])",
-          "legendFormat": "{{job}} blocks/s",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 20,
-            "lineWidth": 2
-          }
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Block Producer Retries & Rebuilds",
-      "description": "Retry attempts and parent-changed rebuilds",
-      "gridPos": {
-        "x": 12,
-        "y": 15,
-        "w": 12,
-        "h": 6
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "rate(irys_block_producer_retry_attempts_total{job=~\"$node\"}[$__rate_interval])",
-          "legendFormat": "{{job}} retries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"tick\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "rate(irys_block_producer_rebuilds_total{job=~\"$node\"}[$__rate_interval])",
-          "legendFormat": "{{job}} rebuilds",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"tick\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 20,
-            "lineWidth": 2
-          }
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Reorg Events",
-      "description": "Chain reorganization events over time",
-      "gridPos": {
-        "x": 0,
-        "y": 21,
-        "w": 24,
-        "h": 6
-      },
-      "targets": [
+        },
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(irys_block_tree_reorgs_total{job=~\"$node\"}[$__rate_interval])",
-          "legendFormat": "{{job}} reorgs",
-          "refId": "A"
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"tick\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "lineWidth": 1
-          }
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
         }
       }
     }

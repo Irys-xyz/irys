@@ -3946,20 +3946,20 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_forkchoice\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -4017,20 +4017,20 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"resolve_new_fcu\"}[$__rate_interval])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -4159,7 +4159,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "Reth - Transaction Pool",
-  "uid": "irys-reth-mempool-detailed",
+  "uid": "bee34f59-c79c-4669-a000-198057b3703d",
   "version": 2,
   "weekStart": ""
 }
