@@ -371,6 +371,54 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     Ok(proof)
 }
 
+/// Generate a V2 ingress proof with KZG commitment for native Irys data.
+///
+/// Unlike V1 which only hashes chunks into a merkle tree, V2 also computes
+/// a KZG commitment over the chunk data and binds it to the signer's address
+/// via a composite commitment.
+pub fn generate_ingress_proof_v2(
+    signer: &IrysSigner,
+    data_root: DataRoot,
+    chunks: &[impl AsRef<[u8]>],
+    chain_id: u64,
+    anchor: H256,
+    kzg_settings: &c_kzg::KzgSettings,
+) -> eyre::Result<IngressProof> {
+    use crate::kzg::{
+        aggregate_all_commitments, compute_chunk_commitment, compute_composite_commitment,
+        KzgCommitmentBytes,
+    };
+
+    // Step 1: Compute per-chunk KZG commitments and aggregate
+    let chunk_commitments: Vec<c_kzg::KzgCommitment> = chunks
+        .iter()
+        .map(|chunk| compute_chunk_commitment(chunk.as_ref(), kzg_settings))
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+    let aggregated = aggregate_all_commitments(&chunk_commitments)?;
+    let kzg_bytes: [u8; 48] = aggregated
+        .as_ref()
+        .try_into()
+        .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))?;
+
+    // Step 2: Compute composite commitment binding KZG to signer
+    let composite = compute_composite_commitment(&kzg_bytes, &signer.address());
+
+    // Step 3: Build and sign the V2 proof
+    let mut proof = IngressProof::V2(IngressProofV2 {
+        signature: Default::default(),
+        data_root,
+        kzg_commitment: KzgCommitmentBytes::from(kzg_bytes),
+        composite_commitment: composite,
+        chain_id,
+        anchor,
+        source_type: DataSourceType::NativeData,
+    });
+
+    signer.sign_ingress_proof(&mut proof)?;
+    Ok(proof)
+}
+
 pub fn verify_ingress_proof<C: AsRef<[u8]>>(
     proof: &IngressProof,
     chunks: impl IntoIterator<Item = C>,

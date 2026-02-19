@@ -698,6 +698,7 @@ pub fn generate_ingress_proof(
     chain_id: ChainId,
     anchor: H256,
     enable_shadow_kzg_logging: bool,
+    use_kzg_ingress_proofs: bool,
 ) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
@@ -757,10 +758,23 @@ pub fn generate_ingress_proof(
             Ok(chunk_bin)
         });
 
-        // generate the ingress proof hash
-        let proof = irys_types::ingress::generate_ingress_proof(
-            &signer, data_root, iter, chain_id, anchor,
-        )?;
+        let proof = if use_kzg_ingress_proofs {
+            // V2: collect chunks for KZG commitment computation
+            let chunks: Vec<Vec<u8>> = iter.collect::<eyre::Result<Vec<_>>>()?;
+            irys_types::ingress::generate_ingress_proof_v2(
+                &signer,
+                data_root,
+                &chunks,
+                chain_id,
+                anchor,
+                irys_types::kzg::default_kzg_settings(),
+            )?
+        } else {
+            // V1: pass lazy iterator for SHA256 merkle proof
+            irys_types::ingress::generate_ingress_proof(
+                &signer, data_root, iter, chain_id, anchor,
+            )?
+        };
 
         Ok((proof, total_data_size, chunk_count))
     })?;
@@ -775,7 +789,7 @@ pub fn generate_ingress_proof(
 
     db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
-    if enable_shadow_kzg_logging {
+    if enable_shadow_kzg_logging && !use_kzg_ingress_proofs {
         if let Err(e) = shadow_log_kzg_commitments(&db, data_root) {
             warn!(
                 data_root = %data_root,

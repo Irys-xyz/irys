@@ -121,6 +121,12 @@ pub struct ConsensusConfig {
     #[serde(default)]
     pub enable_shadow_kzg_logging: bool,
 
+    /// Generate V2 (KZG-based) ingress proofs instead of V1 (SHA256 merkle only).
+    /// When enabled, new ingress proofs include a KZG commitment and composite
+    /// commitment binding the data to the signer's address.
+    #[serde(default)]
+    pub use_kzg_ingress_proofs: bool,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -581,6 +587,7 @@ impl ConsensusConfig {
             // Toggles full ingress proof validation on or off
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
             // Fee required to stake a mining address in Irys tokens
             stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
             // Base fee required for pledging a partition in Irys tokens
@@ -719,6 +726,7 @@ impl ConsensusConfig {
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
             max_future_timestamp_drift_millis: 15_000,
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
@@ -766,6 +774,7 @@ impl ConsensusConfig {
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {

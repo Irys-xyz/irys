@@ -248,6 +248,25 @@ pub fn compute_chunk_commitment(
     aggregate_commitments(&c1, &c2)
 }
 
+/// Aggregate an arbitrary number of KZG commitments into a single commitment
+/// via iterative pairwise aggregation: `C = aggregate(C_prev, C_next)`.
+///
+/// Returns an error if `commitments` is empty.
+/// For a single commitment, returns it unchanged.
+pub fn aggregate_all_commitments(commitments: &[KzgCommitment]) -> eyre::Result<KzgCommitment> {
+    match commitments.len() {
+        0 => Err(eyre::eyre!("cannot aggregate zero commitments")),
+        1 => Ok(commitments[0]),
+        _ => {
+            let mut acc = commitments[0];
+            for c in &commitments[1..] {
+                acc = aggregate_commitments(&acc, c)?;
+            }
+            Ok(acc)
+        }
+    }
+}
+
 /// Compute a composite commitment binding a KZG commitment to a signer's address.
 ///
 /// `composite = SHA256(DOMAIN_SEPARATOR || kzg_commitment || signer_address)`
@@ -392,6 +411,38 @@ mod tests {
         let c1 = compute_composite_commitment(&kzg1, &addr);
         let c2 = compute_composite_commitment(&kzg2, &addr);
         assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn aggregate_all_single_commitment() {
+        let data = [1_u8; BLOB_SIZE];
+        let c = compute_blob_commitment(&data, kzg_settings()).unwrap();
+        let agg = aggregate_all_commitments(&[c]).unwrap();
+        assert_eq!(commitment_bytes(&c), commitment_bytes(&agg));
+    }
+
+    #[test]
+    fn aggregate_all_empty_returns_error() {
+        assert!(aggregate_all_commitments(&[]).is_err());
+    }
+
+    #[test]
+    fn aggregate_all_deterministic() {
+        let c1 = compute_blob_commitment(&[1_u8; BLOB_SIZE], kzg_settings()).unwrap();
+        let c2 = compute_blob_commitment(&[2_u8; BLOB_SIZE], kzg_settings()).unwrap();
+        let c3 = compute_blob_commitment(&[3_u8; BLOB_SIZE], kzg_settings()).unwrap();
+        let agg1 = aggregate_all_commitments(&[c1, c2, c3]).unwrap();
+        let agg2 = aggregate_all_commitments(&[c1, c2, c3]).unwrap();
+        assert_eq!(commitment_bytes(&agg1), commitment_bytes(&agg2));
+    }
+
+    #[test]
+    fn aggregate_all_order_matters() {
+        let c1 = compute_blob_commitment(&[1_u8; BLOB_SIZE], kzg_settings()).unwrap();
+        let c2 = compute_blob_commitment(&[2_u8; BLOB_SIZE], kzg_settings()).unwrap();
+        let agg_12 = aggregate_all_commitments(&[c1, c2]).unwrap();
+        let agg_21 = aggregate_all_commitments(&[c2, c1]).unwrap();
+        assert_ne!(commitment_bytes(&agg_12), commitment_bytes(&agg_21));
     }
 
     // BLS12-381 field modulus starts with 0x73; filling a blob with any byte

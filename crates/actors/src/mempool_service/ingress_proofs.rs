@@ -333,6 +333,7 @@ pub fn generate_and_store_ingress_proof(
         chain_id,
         anchor,
         config.consensus.enable_shadow_kzg_logging,
+        config.consensus.use_kzg_ingress_proofs,
     );
 
     let proof = match proof_res {
