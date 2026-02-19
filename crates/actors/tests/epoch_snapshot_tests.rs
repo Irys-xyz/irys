@@ -13,7 +13,10 @@ use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, Stor
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
-use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
+use irys_types::{
+    partition::PartitionAssignment, BlockTransactions, DataLedger, IrysBlockHeader, SealedBlock,
+    H256,
+};
 use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
@@ -787,11 +790,13 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
+    let genesis_sealed = SealedBlock::new_unchecked(
+        Arc::new(genesis_block.clone()),
+        BlockTransactions::default(),
+    );
     block_index
         .db()
-        .update_eyre(|tx| {
-            BlockIndex::push_block(tx, &genesis_block, &[], config.consensus.chunk_size)
-        })
+        .update_eyre(|tx| BlockIndex::push_block(tx, &genesis_sealed, config.consensus.chunk_size))
         .expect("Failed to index genesis block");
 
     {

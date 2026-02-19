@@ -290,11 +290,7 @@ impl BlockMigrationService {
 
             irys_database::insert_block_header(tx, &migrated_block)?;
 
-            // Block index: submit txs first, then publish txs (push_block splits at submit_tx_count)
-            let mut block_index_txs = Vec::with_capacity(submit_txs.len() + publish_txs.len());
-            block_index_txs.extend_from_slice(submit_txs);
-            block_index_txs.extend_from_slice(&publish_txs);
-            BlockIndex::push_block(tx, header, &block_index_txs, chunk_size)?;
+            BlockIndex::push_block(tx, sealed_block, chunk_size)?;
 
             Ok(())
         })?;

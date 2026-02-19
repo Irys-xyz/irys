@@ -1221,6 +1221,17 @@ impl SealedBlock {
         })
     }
 
+    /// Creates a `SealedBlock` for the genesis block.
+    ///
+    /// Genesis blocks have no data transactions and are trusted (signature
+    /// validation is skipped since the genesis block is hardcoded).
+    pub fn genesis(header: IrysBlockHeader) -> Self {
+        Self {
+            header: Arc::new(header),
+            transactions: Arc::new(BlockTransactions::default()),
+        }
+    }
+
     /// Test-only constructor that skips signature and hash validation.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_unchecked(header: Arc<IrysBlockHeader>, transactions: BlockTransactions) -> Self {

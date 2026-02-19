@@ -10,8 +10,8 @@ use irys_database::{
     db::IrysDatabaseExt as _, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader,
-    LedgerChunkOffset, LedgerIndexItem, NodeConfig, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, LedgerChunkOffset,
+    LedgerIndexItem, NodeConfig, SealedBlock, H256,
 };
 use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;
@@ -139,13 +139,15 @@ impl BlockIndex {
     ///
     /// This allows the block index write to participate in a larger atomic transaction
     /// (e.g. combined with block header and tx persistence).
-    #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
+    #[instrument(skip_all, err, fields(block.hash = %sealed_block.header().block_hash, block.height = %sealed_block.header().height))]
     pub fn push_block(
         tx: &(impl DbTxMut + DbTx),
-        block: &IrysBlockHeader,
-        all_txs: &[DataTransactionHeader],
+        sealed_block: &SealedBlock,
         chunk_size: u64,
     ) -> eyre::Result<()> {
+        let block = sealed_block.header();
+        let transactions = sealed_block.transactions();
+
         fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
             let bytes_added = txs.iter().fold(0, |acc, tx| {
                 acc + tx.data_size.div_ceil(chunk_size) * chunk_size
@@ -153,9 +155,8 @@ impl BlockIndex {
             bytes_added / chunk_size
         }
 
-        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
-        let submit_txs = &all_txs[..submit_tx_count];
-        let publish_txs = &all_txs[submit_tx_count..];
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
         let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
         let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);

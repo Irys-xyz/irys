@@ -3098,9 +3098,11 @@ mod tests {
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
+        let genesis_sealed =
+            SealedBlock::new_unchecked(Arc::clone(&arc_genesis), BlockTransactions::default());
         block_index
             .db()
-            .update_eyre(|tx| BlockIndex::push_block(tx, &arc_genesis, &[], chunk_size))
+            .update_eyre(|tx| BlockIndex::push_block(tx, &genesis_sealed, chunk_size))
             .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
@@ -3347,16 +3349,16 @@ mod tests {
         });
 
         // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
             .block_index
             .db()
             .update_eyre(|tx| {
-                BlockIndex::push_block(
-                    tx,
-                    &irys_block,
-                    &tx_headers,
-                    context.consensus_config.chunk_size,
-                )
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
             .expect("Failed to index second block");
 
@@ -3591,16 +3593,16 @@ mod tests {
         });
 
         // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
             .block_index
             .db()
             .update_eyre(|tx| {
-                BlockIndex::push_block(
-                    tx,
-                    &irys_block,
-                    &tx_headers,
-                    context.consensus_config.chunk_size,
-                )
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
             .expect("Failed to index second block");
 

@@ -10,7 +10,6 @@ use crate::{
     StorageModuleServiceMessage,
 };
 use eyre::OptionExt as _;
-use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
@@ -68,8 +67,6 @@ pub struct BlockTreeServiceInner {
     pub block_index_guard: BlockIndexReadGuard,
     /// Global storage config
     pub config: Config,
-    /// Storage submodules configuration
-    pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
     /// Block migration orchestration and DB persistence
@@ -105,7 +102,6 @@ impl BlockTreeService {
         rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
-        storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
         service_senders: &ServiceSenders,
         chain_sync_state: ChainSyncState,
@@ -120,7 +116,6 @@ impl BlockTreeService {
         let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
         let config = config.clone();
-        let storage_submodules_config = storage_submodules_config.clone();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -135,7 +130,6 @@ impl BlockTreeService {
                         block_index_guard,
                         config,
                         service_senders,
-                        storage_submodules_config,
                         chain_sync_state,
                     },
                 };

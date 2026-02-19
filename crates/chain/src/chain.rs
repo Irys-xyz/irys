@@ -60,8 +60,8 @@ use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
+    ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -700,12 +700,8 @@ impl IrysNode {
         }
 
         // Insert the genesis block index entry (no data transactions in genesis)
-        BlockIndex::push_block(
-            &write_tx,
-            genesis_block,
-            &[],
-            self.config.consensus.chunk_size,
-        )?;
+        let genesis_sealed = SealedBlock::genesis(genesis_block.clone());
+        BlockIndex::push_block(&write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
 
         // Commit the database transaction
         write_tx.inner.commit()?;
@@ -1366,7 +1362,6 @@ impl IrysNode {
             receivers.block_tree,
             irys_db.clone(),
             block_index_guard.clone(),
-            &storage_submodules_config,
             &config,
             &service_senders,
             sync_state.clone(),
