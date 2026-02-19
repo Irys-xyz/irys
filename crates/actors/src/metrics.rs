@@ -67,8 +67,8 @@ pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {
     CACHE_CHUNK_SIZE_BYTES.record(chunk_size_bytes, &[]);
 }
 
-pub(crate) fn record_block_discovery_error(error_type: &str) {
-    BLOCK_DISCOVERY_ERRORS.add(1, &[KeyValue::new("error_type", error_type.to_owned())]);
+pub(crate) fn record_block_discovery_error(error_type: &'static str) {
+    BLOCK_DISCOVERY_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
 }
 
 pub(crate) fn record_data_sync_chunk_completed() {

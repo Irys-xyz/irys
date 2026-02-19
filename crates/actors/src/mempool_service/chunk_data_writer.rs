@@ -175,7 +175,7 @@ impl BackgroundWriter {
 
         // Precompute SHA-256 hashes once — avoids redundant hashing inside the
         // MDBX closure (log lines) and during post-transaction cleanup.
-        let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
+        let hashes: Vec<ChunkPathHash> = batch.iter().map(UnpackedChunk::chunk_path_hash).collect();
 
         let result = self.db.update(|tx| {
             let mut newly_written = Vec::with_capacity(batch.len());

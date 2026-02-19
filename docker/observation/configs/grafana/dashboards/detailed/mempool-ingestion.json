@@ -241,7 +241,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[1h]))",
+          "expr": "sum(increase(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[$__range]))",
           "legendFormat": "unfunded",
           "refId": "A"
         }

@@ -68,6 +68,24 @@ pub enum BlockDiscoveryError {
     },
 }
 
+impl BlockDiscoveryError {
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Self::BlockValidationError(_) => "validation",
+            Self::PreviousBlockNotFound { .. } => "previous_block_not_found",
+            Self::InternalError(_) => "internal",
+            Self::DuplicateTransaction(_) => "duplicate_transaction",
+            Self::MissingTransactions(_) => "missing_transactions",
+            Self::InvalidEpochBlock(_) => "invalid_epoch_block",
+            Self::InvalidCommitmentTransaction(_) => "invalid_commitment_transaction",
+            Self::InvalidDataLedgersLength(_, _) => "invalid_data_ledgers_length",
+            Self::InvalidAnchor { .. } => "invalid_anchor",
+            Self::InvalidSignature(_) => "invalid_signature",
+            Self::TransactionIdMismatch { .. } => "transaction_id_mismatch",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
@@ -243,7 +261,7 @@ impl BlockDiscoveryService {
                 let block_height = block.header().height;
                 let result = self.inner.clone().block_discovered(block, skip_vdf).await;
                 if let Err(ref e) = result {
-                    metrics::record_block_discovery_error(&format!("{e}"));
+                    metrics::record_block_discovery_error(e.metric_label());
                 }
                 if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
