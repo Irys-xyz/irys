@@ -50,6 +50,8 @@ pub async fn send_block_to_block_tree(
             block,
             skip_vdf_validation,
             response: response_tx,
+            span: tracing::Span::current(),
+            request_id: Some(irys_types::RequestId::new()),
         })?;
 
     response_rx.await??;
@@ -66,6 +68,8 @@ fn send_block_to_block_validation(
         .send(ValidationServiceMessage::ValidateBlock {
             block,
             skip_vdf_validation: false,
+            span: tracing::Span::current(),
+            request_id: Some(irys_types::RequestId::new()),
         })
         .unwrap();
     Ok(())
@@ -694,7 +698,9 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .block_discovery
             .clone(),
     );
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), false, Some(irys_types::RequestId::new()))
+        .await;
     assert!(
         matches!(
             result,
@@ -758,7 +764,11 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .clone(),
     );
     let result = block_discovery
-        .handle_block(block_after_epoch.clone(), false)
+        .handle_block(
+            block_after_epoch.clone(),
+            false,
+            Some(irys_types::RequestId::new()),
+        )
         .await;
     assert!(
         matches!(
@@ -989,7 +999,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     );
 
     // This should fail during prevalidation due to duplicate signers
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), false, Some(irys_types::RequestId::new()))
+        .await;
 
     // Assert that the block was rejected due to duplicate ingress proof signers
     assert!(

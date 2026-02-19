@@ -121,6 +121,7 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
         &self,
         block: Arc<SealedBlock>,
         skip_vdf: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> Result<(), BlockDiscoveryError>;
 }
 
@@ -141,6 +142,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
         &self,
         block: Arc<SealedBlock>,
         skip_vdf: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -148,6 +150,8 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
                 block,
                 skip_vdf,
                 response: Some(tx),
+                span: tracing::Span::current(),
+                request_id,
             })
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
@@ -256,10 +260,14 @@ impl BlockDiscoveryService {
                 block,
                 skip_vdf,
                 response,
+                span: parent_span,
+                request_id,
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
-                let result = self.inner.clone().block_discovered(block, skip_vdf).await;
+                let result = self.inner.clone().block_discovered(block, skip_vdf, request_id)
+                    .instrument(tracing::info_span!(parent: &parent_span, "block_discovery.process", block.hash = %block_hash, block.height = block_height, request.id = ?request_id))
+                    .await;
                 if let Err(ref e) = result {
                     metrics::record_block_discovery_error(e.metric_label());
                 }
@@ -285,6 +293,8 @@ pub enum BlockDiscoveryMessage {
         block: Arc<SealedBlock>,
         skip_vdf: bool,
         response: Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
+        span: tracing::Span,
+        request_id: Option<irys_types::RequestId>,
     },
 }
 
@@ -294,6 +304,7 @@ impl BlockDiscoveryServiceInner {
         &self,
         block: Arc<SealedBlock>,
         skip_vdf: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
         let new_block_header = block.header();
@@ -764,6 +775,8 @@ impl BlockDiscoveryServiceInner {
                         block,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
+                        span: tracing::Span::current(),
+                        request_id,
                     })
                     .map_err(|channel_error| {
                         BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(

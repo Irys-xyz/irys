@@ -57,6 +57,8 @@ pub enum ValidationServiceMessage {
     ValidateBlock {
         block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
+        span: tracing::Span,
+        request_id: Option<irys_types::RequestId>,
     },
 }
 
@@ -209,12 +211,16 @@ impl ValidationService {
                         Some(ValidationServiceMessage::ValidateBlock {
                             block,
                             skip_vdf_validation,
+                            span: parent_span,
+                            request_id,
                         }) => {
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
                                 Arc::clone(&self.inner),
                                 self.inner.block_tree_guard.clone(),
                                 skip_vdf_validation,
+                                parent_span,
+                                request_id,
                             );
 
                             coordinator.submit_task(task);
@@ -239,7 +245,7 @@ impl ValidationService {
 
                 // Process VDF completions
                 _ = self.vdf_notify.notified() => {
-                    if let Some((hash, result)) = coordinator.process_vdf().await {
+                    if let Some((hash, result, request_id)) = coordinator.process_vdf().await {
                         match result {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
@@ -255,6 +261,8 @@ impl ValidationService {
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
+                                        span: tracing::Span::current(),
+                                        request_id,
                                     }
                                 ) {
                                     error!(
@@ -281,6 +289,8 @@ impl ValidationService {
                                 crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                     block_hash: validation.block_hash,
                                     validation_result: validation.validation_result,
+                                    span: tracing::Span::current(),
+                                    request_id: validation.request_id,
                                 }
                             ) {
                                 error!(
@@ -291,18 +301,18 @@ impl ValidationService {
                             }
                         }
                         Some(Err(e)) => {
-                            let block_hash = coordinator.concurrent_task_blocks.remove(&e.id());
+                            let removed = coordinator.concurrent_task_blocks.remove(&e.id());
                             let message = if e.is_cancelled() {
                                 "Concurrent validation task was cancelled"
                             } else {
                                 "Concurrent validation task panicked"
                             };
                             error!(
-                                block.hash = ?block_hash,
+                                block.hash = ?removed.as_ref().map(|(h, _)| h),
                                 custom.error = %e,
                                 message
                             );
-                            if let Some(hash) = block_hash {
+                            if let Some((hash, request_id)) = removed {
                                 if let Err(send_err) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
@@ -312,6 +322,8 @@ impl ValidationService {
                                                 details: e.to_string(),
                                             },
                                         ),
+                                        span: tracing::Span::current(),
+                                        request_id,
                                     }
                                 ) {
                                     error!(

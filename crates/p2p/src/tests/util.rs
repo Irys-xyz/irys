@@ -242,6 +242,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         &self,
         block: Arc<SealedBlock>,
         _skip_vdf: bool,
+        _request_id: Option<irys_types::RequestId>,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         let header = Arc::clone(block.header());
         self.block_status_provider

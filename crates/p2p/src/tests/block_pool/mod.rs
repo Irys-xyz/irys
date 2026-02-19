@@ -197,7 +197,7 @@ async fn should_process_block() {
     );
 
     service
-        .process_block(sealed_block, false)
+        .process_block(sealed_block, false, None)
         .await
         .expect("can't process block");
 
@@ -338,7 +338,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
                     block.clone(),
                     create_test_block_body(block.block_hash),
                 );
-                pool.process_block(sealed_block, false)
+                pool.process_block(sealed_block, false, None)
                     .await
                     .expect("to process block");
             });
@@ -362,7 +362,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         create_test_sealed_block((*block3).clone(), create_test_block_body(block3.block_hash));
 
     block_pool
-        .process_block(block3_sealed, false)
+        .process_block(block3_sealed, false, None)
         .await
         .expect("can't process block");
 
@@ -545,7 +545,7 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         create_test_sealed_block((*block3).clone(), create_test_block_body(block3.block_hash));
 
     block_pool
-        .process_block(block3_sealed, false)
+        .process_block(block3_sealed, false, None)
         .await
         .expect("can't process block");
 
@@ -568,7 +568,7 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         create_test_sealed_block((*block4).clone(), create_test_block_body(block4.block_hash));
 
     block_pool
-        .process_block(block4_sealed, false)
+        .process_block(block4_sealed, false, None)
         .await
         .expect("can't process block");
 
@@ -666,7 +666,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         create_test_block_body(header_building_on_very_old_block.block_hash),
     );
 
-    let res = block_pool.process_block(sealed_block, false).await;
+    let res = block_pool.process_block(sealed_block, false, None).await;
 
     assert!(res.is_err());
     assert!(matches!(
@@ -818,7 +818,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                     block.clone(),
                     create_test_block_body(block.block_hash),
                 );
-                let res = pool.process_block(sealed_block, false).await;
+                let res = pool.process_block(sealed_block, false, None).await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -845,7 +845,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         bogus_block.clone(),
         create_test_block_body(bogus_block.block_hash),
     );
-    let res = block_pool.process_block(sealed_block, false).await;
+    let res = block_pool.process_block(sealed_block, false, None).await;
 
     sync_service_handle.shutdown_signal.fire();
 
@@ -908,7 +908,7 @@ async fn should_not_fast_track_block_already_in_index() {
     );
 
     let err = service
-        .process_block(sealed_block, true)
+        .process_block(sealed_block, true, None)
         .await
         .expect_err("to have an error");
 

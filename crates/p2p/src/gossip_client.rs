@@ -16,6 +16,7 @@ use irys_types::{
     PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
+use opentelemetry::propagation::Injector;
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
@@ -23,7 +24,7 @@ use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument, warn, Instrument as _};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
@@ -35,6 +36,25 @@ fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
         ProtocolVersion::V1 => format!("http://{}/gossip", addr),
         ProtocolVersion::V2 => format!("http://{}/gossip/v2", addr),
     }
+}
+
+struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&value) {
+                self.0.insert(name, val);
+            }
+        }
+    }
+}
+
+fn inject_trace_context(headers: &mut reqwest::header::HeaderMap) {
+    let cx = tracing_opentelemetry::OpenTelemetrySpanExt::context(&tracing::Span::current());
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(headers));
+    });
 }
 
 /// Response time threshold for fast responses (deserving extra reward)
@@ -366,7 +386,14 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::Info
         );
-        let response = self.internal_client().get(&url).send().await;
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await;
 
         let gossip_result = match response {
             Ok(resp) => {
@@ -407,9 +434,12 @@ impl GossipClient {
             gossip_base_url(&peer, ProtocolVersion::V1),
             GossipRoutes::PeerList
         );
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
         let response = self
             .internal_client()
             .get(&url)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
@@ -447,9 +477,12 @@ impl GossipClient {
             GossipRoutes::Version
         );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
         let response = self
             .internal_client()
             .post(&url)
+            .headers(headers)
             .json(&version)
             .send()
             .await
@@ -515,9 +548,12 @@ impl GossipClient {
             GossipRoutes::Handshake
         );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
         let response = self
             .internal_client()
             .post(&url)
+            .headers(headers)
             .json(&version)
             .send()
             .await
@@ -572,7 +608,15 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::BlockIndex
         );
-        let response = self.internal_client().get(&url).query(&query).send().await;
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .query(&query)
+            .send()
+            .await;
 
         let gossip_result = match response {
             Ok(resp) => {
@@ -613,9 +657,12 @@ impl GossipClient {
             peer.gossip,
             GossipRoutes::ProtocolVersion
         );
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
         let response = self
             .internal_client()
             .get(&url)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| {
@@ -677,7 +724,15 @@ impl GossipClient {
         );
         let peer_addr_str = peer.gossip.to_string();
 
-        let response = match self.internal_client().get(&url).send().await {
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
+        let response = match self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(error) => {
                 tracing::debug!(
@@ -816,10 +871,17 @@ impl GossipClient {
 
         debug!("Sending pre-serialized data to {}", url);
 
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+        inject_trace_context(&mut headers);
+
         let response = self
             .client
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .headers(headers)
             .body(body)
             .send()
             .await
@@ -874,28 +936,32 @@ impl GossipClient {
         let peer_list = peer_list.clone();
         let peer_id = *peer.0;
         let peer = peer.1.clone();
+        let span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            if let Err(e) = client.check_circuit_breaker(&peer_id) {
-                record_gossip_outbound_error(gossip_error_type(&e));
-                return;
-            }
-            let result = client
-                .send_preserialized(&peer.address.gossip, route, body)
-                .await;
-            Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
-            match result {
-                Ok(_) => {
-                    if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
-                        error!("Error recording seen data in cache: {:?}", err);
+        tokio::spawn(
+            async move {
+                if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                    record_gossip_outbound_error(gossip_error_type(&e));
+                    return;
+                }
+                let result = client
+                    .send_preserialized(&peer.address.gossip, route, body)
+                    .await;
+                Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
+                match result {
+                    Ok(_) => {
+                        if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
+                            error!("Error recording seen data in cache: {:?}", err);
+                        }
+                    }
+                    Err(e) => {
+                        record_gossip_outbound_error(gossip_error_type(&e));
+                        error!("Error sending pre-serialized data to peer: {:?}", e);
                     }
                 }
-                Err(e) => {
-                    record_gossip_outbound_error(gossip_error_type(&e));
-                    error!("Error sending pre-serialized data to peer: {:?}", e);
-                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Send data to a peer
@@ -1090,14 +1156,27 @@ impl GossipClient {
 
         debug!("Sending data to {} using {:?}", url, protocol_version);
 
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject_trace_context(&mut headers);
+
         let response = match protocol_version {
             ProtocolVersion::V1 => {
                 let req = self.create_request_v1(data.clone());
-                self.client.post(&url).json(&req).send().await
+                self.client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&req)
+                    .send()
+                    .await
             }
             ProtocolVersion::V2 => {
                 let req = self.create_request_v2(data.clone());
-                self.client.post(&url).json(&req).send().await
+                self.client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&req)
+                    .send()
+                    .await
             }
         };
 
@@ -1291,6 +1370,7 @@ impl GossipClient {
         irys_types::GossipRequestV2 {
             peer_id: self.peer_id,
             miner_address: self.mining_address,
+            request_id: Some(irys_types::RequestId::new()),
             data,
         }
     }
@@ -1919,9 +1999,12 @@ impl GossipClient {
                     GossipRoutes::StakeAndPledgeWhitelist
                 );
 
+                let mut headers = reqwest::header::HeaderMap::new();
+                inject_trace_context(&mut headers);
                 let response = self
                     .client
                     .get(&url)
+                    .headers(headers)
                     .send()
                     .await
                     .map_err(|response_error| {

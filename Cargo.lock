@@ -5436,6 +5436,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

@@ -87,24 +87,29 @@ fn init_tracing() -> eyre::Result<()> {
         .with_default_directive(LevelFilter::INFO.into())
         .from_env()?;
 
-    let output_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(true)
-        .with_file(true)
-        .with_writer(std::io::stdout);
+    let use_json = std::env::var("IRYS_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
 
-    // use json logging for release builds
     let subscriber = subscriber.with(filter).with(ErrorLayer::default());
-    // TODO: re-enable with config options
 
-    // let subscriber = if cfg!(debug_assertions) {
-    //     subscriber.with(output_layer.boxed())
-    // } else {
-    //     subscriber.with(output_layer.json().with_current_span(true).boxed())
-    // };
-    let subscriber = subscriber.with(output_layer.boxed());
-
-    subscriber.init();
+    if use_json {
+        let output_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(std::io::stdout);
+        subscriber.with(output_layer.boxed()).init();
+    } else {
+        let output_layer = tracing_subscriber::fmt::layer()
+            .with_line_number(true)
+            .with_ansi(true)
+            .with_file(true)
+            .with_writer(std::io::stdout);
+        subscriber.with(output_layer.boxed()).init();
+    }
 
     Ok(())
 }

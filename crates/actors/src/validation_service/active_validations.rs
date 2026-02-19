@@ -83,6 +83,7 @@ impl PartialOrd for BlockPriorityMeta {
 pub(super) struct ConcurrentValidationResult {
     pub block_hash: BlockHash,
     pub validation_result: ValidationResult,
+    pub request_id: Option<irys_types::RequestId>,
 }
 
 /// VDF task with preemption support
@@ -273,8 +274,9 @@ pub(super) struct ValidationCoordinator {
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
-    /// Maps task IDs to block hashes for panic diagnostics
-    pub concurrent_task_blocks: HashMap<tokio::task::Id, BlockHash>,
+    /// Maps task IDs to block hashes and request IDs for panic diagnostics
+    pub concurrent_task_blocks:
+        HashMap<tokio::task::Id, (BlockHash, Option<irys_types::RequestId>)>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -340,13 +342,21 @@ impl ValidationCoordinator {
 
     /// Process VDF completion
     #[instrument(skip_all)]
-    pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
+    pub(super) async fn process_vdf(
+        &mut self,
+    ) -> Option<(
+        BlockHash,
+        VdfValidationResult,
+        Option<irys_types::RequestId>,
+    )> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
+            let request_id = task.request_id;
             match &result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.sealed_block.header().block_hash;
 
+                    let task_request_id = task.request_id;
                     let abort_handle = self.concurrent_tasks.spawn(
                         async move {
                             // Execute the validation and return the result
@@ -355,6 +365,7 @@ impl ValidationCoordinator {
                             ConcurrentValidationResult {
                                 block_hash,
                                 validation_result,
+                                request_id: task_request_id,
                             }
                         }
                         .instrument(tracing::error_span!(
@@ -364,7 +375,7 @@ impl ValidationCoordinator {
                         .in_current_span(),
                     );
                     self.concurrent_task_blocks
-                        .insert(abort_handle.id(), block_hash);
+                        .insert(abort_handle.id(), (block_hash, task_request_id));
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority
@@ -379,7 +390,7 @@ impl ValidationCoordinator {
 
             // Start next VDF task
             self.vdf_scheduler.start_next();
-            return Some((hash, result));
+            return Some((hash, result, request_id));
         }
 
         // Try to start a VDF task if none running

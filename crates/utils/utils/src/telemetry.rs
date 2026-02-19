@@ -8,8 +8,8 @@ use opentelemetry::{trace::TracerProvider as _, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{
-    logs::SdkLoggerProvider, metrics::SdkMeterProvider, resource::Resource,
-    trace::SdkTracerProvider,
+    logs::SdkLoggerProvider, metrics::SdkMeterProvider, propagation::TraceContextPropagator,
+    resource::Resource, trace::SdkTracerProvider,
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
@@ -169,17 +169,31 @@ fn setup_tracing_subscriber(
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
 
-    let output_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(true)
-        .with_file(true)
-        .with_writer(std::io::stdout)
-        .with_span_events(FmtSpan::NONE);
+    let use_json = std::env::var("IRYS_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
 
-    let subscriber = subscriber
-        .with(filter)
-        .with(ErrorLayer::default())
-        .with(output_layer.boxed());
+    let subscriber = subscriber.with(filter).with(ErrorLayer::default());
+
+    let subscriber = if use_json {
+        let output_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(std::io::stdout)
+            .with_span_events(FmtSpan::NONE);
+        subscriber.with(output_layer.boxed())
+    } else {
+        let output_layer = tracing_subscriber::fmt::layer()
+            .with_line_number(true)
+            .with_ansi(true)
+            .with_file(true)
+            .with_writer(std::io::stdout)
+            .with_span_events(FmtSpan::NONE);
+        subscriber.with(output_layer.boxed())
+    };
 
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -267,6 +281,7 @@ pub fn init_telemetry() -> Result<()> {
     let _ = METER_PROVIDER.set(meter_provider.clone());
 
     opentelemetry::global::set_meter_provider(meter_provider);
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
     // NOTE: We do NOT install a metrics recorder here because Reth's internal
     // EngineNodeLauncher calls install_prometheus_recorder() and will panic

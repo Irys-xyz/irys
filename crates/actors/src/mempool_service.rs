@@ -228,11 +228,13 @@ pub enum MempoolServiceMessage {
     IngestCommitmentTxFromApi(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
+        tracing::Span,
     ),
     /// Ingress CommitmentTransaction into the mempool (from Gossip)
     IngestCommitmentTxFromGossip(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
+        tracing::Span,
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
@@ -240,11 +242,13 @@ pub enum MempoolServiceMessage {
     IngestDataTxFromApi(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
+        tracing::Span,
     ),
     /// validate and process an incoming DataTransactionHeader (from Gossip)
     IngestDataTxFromGossip(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
+        tracing::Span,
     ),
     /// Return filtered list of candidate txns for the provided Irys block hash
     GetBestMempoolTxs(BlockHash, oneshot::Sender<eyre::Result<MempoolTxs>>),
@@ -284,11 +288,11 @@ impl MempoolServiceMessage {
             Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::CommitmentTxExists(_, _) => "CommitmentTxExists",
-            Self::IngestCommitmentTxFromApi(_, _) => "IngestCommitmentTxFromApi",
-            Self::IngestCommitmentTxFromGossip(_, _) => "IngestCommitmentTxFromGossip",
+            Self::IngestCommitmentTxFromApi(_, _, _) => "IngestCommitmentTxFromApi",
+            Self::IngestCommitmentTxFromGossip(_, _, _) => "IngestCommitmentTxFromGossip",
             Self::DataTxExists(_, _) => "DataTxExists",
-            Self::IngestDataTxFromApi(_, _) => "IngestDataTxFromApi",
-            Self::IngestDataTxFromGossip(_, _) => "IngestDataTxFromGossip",
+            Self::IngestDataTxFromApi(_, _, _) => "IngestDataTxFromApi",
+            Self::IngestDataTxFromGossip(_, _, _) => "IngestDataTxFromGossip",
             Self::GetBestMempoolTxs(_, _) => "GetBestMempoolTxs",
             Self::GetCommitmentTxs { .. } => "GetCommitmentTxs",
             Self::GetDataTxs(_, _) => "GetDataTxs",
@@ -326,17 +330,27 @@ impl Inner {
                     );
                 }
             }
-            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
+            MempoolServiceMessage::IngestCommitmentTxFromApi(
+                commitment_tx,
+                response,
+                parent_span,
+            ) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_commitment_tx", source = "api"))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                commitment_tx,
+                response,
+                parent_span,
+            ) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_commitment_tx", source = "gossip"))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -400,14 +414,20 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+            MempoolServiceMessage::IngestDataTxFromApi(tx, response, parent_span) => {
+                let response_value = self
+                    .handle_data_tx_ingress_message_api(tx)
+                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_data_tx", source = "api"))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+            MempoolServiceMessage::IngestDataTxFromGossip(tx, response, parent_span) => {
+                let response_value = self
+                    .handle_data_tx_ingress_message_gossip(tx)
+                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_data_tx", source = "gossip"))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };

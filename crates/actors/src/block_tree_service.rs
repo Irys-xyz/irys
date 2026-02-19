@@ -42,10 +42,14 @@ pub enum BlockTreeServiceMessage {
         block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
+        span: tracing::Span,
+        request_id: Option<irys_types::RequestId>,
     },
     BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
+        span: tracing::Span,
+        request_id: Option<irys_types::RequestId>,
     },
 }
 
@@ -224,10 +228,13 @@ impl BlockTreeServiceInner {
                 block,
                 skip_vdf_validation: skip_vdf,
                 response,
+                span: parent_span,
+                request_id,
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
-                let result = self.on_block_prevalidated(block, skip_vdf);
+                let _guard = tracing::info_span!(parent: &parent_span, "block_tree.pre_validate", block.hash = %block_hash, block.height = block_height, request.id = ?request_id).entered();
+                let result = self.on_block_prevalidated(block, skip_vdf, request_id);
                 if let Err(send_err) = response.send(result) {
                     tracing::warn!(
                         block.hash = ?block_hash,
@@ -240,8 +247,11 @@ impl BlockTreeServiceInner {
             BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash,
                 validation_result,
+                span: parent_span,
+                request_id,
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
+                    .instrument(tracing::info_span!(parent: &parent_span, "block_tree.validation_finished", block.hash = %block_hash, request.id = ?request_id))
                     .await?;
             }
         }
@@ -306,6 +316,7 @@ impl BlockTreeServiceInner {
         &mut self,
         block: Arc<SealedBlock>,
         skip_vdf: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> eyre::Result<(), PreValidationError> {
         let block_header = block.header();
         let block_hash = &block_header.block_hash;
@@ -404,6 +415,8 @@ impl BlockTreeServiceInner {
             .send(ValidationServiceMessage::ValidateBlock {
                 block: block.clone(),
                 skip_vdf_validation: skip_vdf,
+                span: tracing::Span::current(),
+                request_id,
             })
             .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
 
