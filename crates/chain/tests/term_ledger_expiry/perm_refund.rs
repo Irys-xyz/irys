@@ -120,7 +120,9 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     // Extract PermFeeRefund transactions from the expiry block
     info!("Checking for perm fee refunds at expiry");
     let final_block = node.get_block_by_height(target_expiry_height).await?;
-    let final_evm_block = node.wait_for_evm_block(final_block.evm_block_hash, 20).await?;
+    let final_evm_block = node
+        .wait_for_evm_block(final_block.evm_block_hash, 20)
+        .await?;
     let refunds: Vec<_> = final_evm_block
         .body
         .transactions

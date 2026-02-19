@@ -423,7 +423,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         fork_block_level3.clone(),
     ];
     let mut fork_tip = fork_block_level3.clone();
-    let mut extra_private_blocks = 0usize;
+    let mut extra_private_blocks = 0_usize;
 
     // Height alone is not enough to force a reorg when per-block difficulty varies.
     // Keep extending the private fork until it is strictly heavier than genesis' canonical tip.
@@ -1758,7 +1758,7 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
 
     // False assumption to avoid: one extra block is not always heavier when
     // per-block difficulty varies. Extend B until it is strictly heavier.
-    let mut extra_private_blocks = 0usize;
+    let mut extra_private_blocks = 0_usize;
     while b_last.cumulative_diff <= a_last.cumulative_diff {
         let (block, _, _) = node_b.mine_block_without_gossip().await?;
         b_last = block.clone();
