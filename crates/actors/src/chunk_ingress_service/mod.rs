@@ -26,6 +26,7 @@ use reth::tasks::TaskExecutor;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, Semaphore};
 use tracing::{error, info, warn};
 
+use crate::mempool_service::chunk_data_writer;
 use crate::services::ServiceSenders;
 
 /// Messages handled by the ChunkIngressService
@@ -57,6 +58,7 @@ pub struct ChunkIngressServiceInner {
     pub storage_modules_guard: StorageModulesReadGuard,
     pub recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
     pub pending_chunks: tokio::sync::RwLock<PriorityPendingChunks>,
+    pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
 pub struct ChunkIngressService {
@@ -200,6 +202,7 @@ impl ChunkIngressService {
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_preheader_chunks_per_item = mempool_config.max_preheader_chunks_per_item;
         let max_concurrent_chunk_ingress_tasks = mempool_config.max_concurrent_chunk_ingress_tasks;
+        let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let service_senders = service_senders.clone();
 
         let handle = runtime_handle.spawn(async move {
@@ -210,6 +213,10 @@ impl ChunkIngressService {
                 max_pending_chunk_items,
                 max_preheader_chunks_per_item,
             ));
+            let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
+                irys_db.clone(),
+                chunk_writer_buffer_size,
+            );
 
             let service = Self {
                 shutdown: shutdown_rx,
@@ -226,6 +233,7 @@ impl ChunkIngressService {
                     storage_modules_guard,
                     recent_valid_chunks,
                     pending_chunks,
+                    chunk_data_writer,
                 }),
             };
             service
@@ -314,6 +322,10 @@ impl ChunkIngressService {
                     }
                 }
             }
+        }
+
+        if let Err(e) = inner.chunk_data_writer.flush().await {
+            warn!("Failed to flush chunk writer on shutdown: {:?}", e);
         }
 
         info!("ChunkIngressService shut down");

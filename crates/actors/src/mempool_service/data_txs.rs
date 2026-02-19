@@ -103,27 +103,32 @@ impl Inner {
         metrics::record_data_tx_ingested();
         Ok(())
     }
-    /// check the mempool and mdbx for data transaction
-    /// TODO: align the logic with handle_get_commitment_tx_message (specifically HashMap output)
+    /// Check the mempool and mdbx for data transactions.
+    /// Uses batch mempool lookup (single READ lock) then falls back to DB for missing txs.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = txs.len()))]
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
+        // Batch mempool lookup: single READ lock for all txids
+        let mempool_results = self
+            .mempool_state
+            .batch_valid_submit_ledger_tx_cloned(&txs)
+            .await;
+
         let mut found_txs = Vec::with_capacity(txs.len());
 
-        for tx in txs {
-            // if data tx exists in mempool
-            if let Some(tx_header) = self.mempool_state.valid_submit_ledger_tx_cloned(&tx).await {
-                trace!("Got tx {} from mempool", &tx);
+        for (tx_id, mempool_result) in txs.iter().zip(mempool_results) {
+            if let Some(tx_header) = mempool_result {
+                trace!("Got tx {} from mempool", tx_id);
                 found_txs.push(Some(tx_header));
                 continue;
             }
 
-            // if data tx exists in mdbx
+            // Fall back to DB for txs not in mempool
             let db_result = self
                 .irys_db
-                .view(|read_tx| tx_header_by_txid(read_tx, &tx))
+                .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
                 .map_err(|e| {
                     warn!("Failed to open DB read transaction: {}", e);
                     e
@@ -131,26 +136,20 @@ impl Inner {
                 .ok()
                 .and_then(|result| match result {
                     Ok(Some(tx_header)) => {
-                        trace!("Got tx {} from DB", &tx);
+                        trace!("Got tx {} from DB", tx_id);
                         Some(tx_header)
                     }
                     Ok(None) => {
-                        debug!("Tx {} not found in DB", &tx);
+                        debug!("Tx {} not found in DB", tx_id);
                         None
                     }
                     Err(e) => {
-                        warn!("DB error reading tx {}: {}", &tx, e);
+                        warn!("DB error reading tx {}: {}", tx_id, e);
                         None
                     }
                 });
 
-            if let Some(tx_header) = db_result {
-                found_txs.push(Some(tx_header));
-                continue;
-            }
-
-            // not found anywhere
-            found_txs.push(None);
+            found_txs.push(db_result);
         }
 
         found_txs

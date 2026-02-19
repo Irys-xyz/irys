@@ -1,57 +1,44 @@
-use opentelemetry::metrics::Counter;
-use opentelemetry::{global, KeyValue};
-use std::sync::OnceLock;
+use opentelemetry::KeyValue;
 
-fn meter() -> opentelemetry::metrics::Meter {
-    global::meter("irys-chunk-ingress")
+irys_utils::define_metrics! {
+    meter: "irys-mempool";
+
+    counter CHUNKS_INGESTED("irys.mempool.chunks.ingested_total", "Chunks successfully ingested into mempool");
+    counter BYTES_INGESTED("irys.mempool.chunks.bytes_ingested_total", "Total bytes ingested into mempool");
+    counter DUPLICATES("irys.mempool.chunks.duplicates_total", "Duplicate chunks skipped");
+    histogram VALIDATION_MS("irys.mempool.chunks.validation_duration_ms", "Chunk proof validation latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    histogram ENQUEUE_MS("irys.mempool.chunks.enqueue_duration_ms", "Chunk write-behind enqueue latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    counter FLUSH_FAILURES("irys.mempool.chunks.flush_failures_total", "Chunk writer flush failures");
+    counter ERRORS("irys.mempool.chunks.errors_total", "Chunk processing errors by type");
 }
 
-static CHUNKS_INGESTED: OnceLock<Counter<u64>> = OnceLock::new();
-static BYTES_INGESTED: OnceLock<Counter<u64>> = OnceLock::new();
-static DUPLICATES: OnceLock<Counter<u64>> = OnceLock::new();
-static ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
-
-pub(crate) fn record_chunk_ingested(bytes: u64) {
-    let chunks = CHUNKS_INGESTED.get_or_init(|| {
-        meter()
-            .u64_counter("irys.chunk_ingress.ingested_total")
-            .with_description("Chunks successfully ingested")
-            .build()
-    });
-    let bytes_counter = BYTES_INGESTED.get_or_init(|| {
-        meter()
-            .u64_counter("irys.chunk_ingress.bytes_ingested_total")
-            .with_description("Total bytes ingested")
-            .build()
-    });
-    chunks.add(1, &[]);
-    bytes_counter.add(bytes, &[]);
+pub(super) fn record_chunk_ingested(bytes: u64) {
+    CHUNKS_INGESTED.add(1, &[]);
+    BYTES_INGESTED.add(bytes, &[]);
 }
 
-pub(crate) fn record_chunk_duplicate() {
-    DUPLICATES
-        .get_or_init(|| {
-            meter()
-                .u64_counter("irys.chunk_ingress.duplicates_total")
-                .with_description("Duplicate chunks skipped")
-                .build()
-        })
-        .add(1, &[]);
+pub(super) fn record_chunk_duplicate() {
+    DUPLICATES.add(1, &[]);
 }
 
-pub(crate) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
-    ERRORS
-        .get_or_init(|| {
-            meter()
-                .u64_counter("irys.chunk_ingress.errors_total")
-                .with_description("Chunk processing errors by type")
-                .build()
-        })
-        .add(
-            1,
-            &[
-                KeyValue::new("error_type", error_type),
-                KeyValue::new("advisory", is_advisory),
-            ],
-        );
+pub(super) fn record_validation_duration(ms: f64) {
+    VALIDATION_MS.record(ms, &[]);
+}
+
+pub(super) fn record_enqueue_duration(ms: f64) {
+    ENQUEUE_MS.record(ms, &[]);
+}
+
+pub(super) fn record_flush_failure() {
+    FLUSH_FAILURES.add(1, &[]);
+}
+
+pub(super) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
+    ERRORS.add(
+        1,
+        &[
+            KeyValue::new("error_type", error_type),
+            KeyValue::new("advisory", if is_advisory { "true" } else { "false" }),
+        ],
+    );
 }

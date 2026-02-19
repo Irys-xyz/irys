@@ -46,6 +46,7 @@ where
 {
     data_handler: Arc<GossipDataHandler<M, B>>,
     peer_list: PeerList,
+    chunk_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl<M, B> Clone for GossipServer<M, B>
@@ -57,6 +58,7 @@ where
         Self {
             data_handler: self.data_handler.clone(),
             peer_list: self.peer_list.clone(),
+            chunk_semaphore: self.chunk_semaphore.clone(),
         }
     }
 }
@@ -66,13 +68,21 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    pub const fn new(
+    pub fn new(
         gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
+        max_concurrent_chunks: usize,
     ) -> Self {
+        let effective_limit = if max_concurrent_chunks == 0 {
+            warn!("max_concurrent_gossip_chunks is 0, treating as unlimited");
+            tokio::sync::Semaphore::MAX_PERMITS
+        } else {
+            max_concurrent_chunks
+        };
         Self {
             data_handler: gossip_server_data_handler,
             peer_list,
+            chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(effective_limit)),
         }
     }
 
@@ -109,7 +119,18 @@ where
             data: v1_request.data,
         };
 
-        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
+        let permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
+        };
+
+        let result = server.data_handler.handle_chunk(v2_request).await;
+        drop(permit);
+
+        if let Err(error) = result {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
@@ -599,7 +620,18 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
+        let permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
+        };
+
+        let result = server.data_handler.handle_chunk(v2_request).await;
+        drop(permit);
+
+        if let Err(error) = result {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
