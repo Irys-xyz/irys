@@ -73,6 +73,11 @@ impl PriorityPendingChunks {
         self.entries.get(data_root)
     }
 
+    /// Returns all data roots currently in the pending cache.
+    pub fn data_roots(&self) -> Vec<DataRoot> {
+        self.entries.keys().copied().collect()
+    }
+
     /// Evict the entry with the fewest chunks.
     fn evict_lowest_priority(&mut self) {
         if self.entries.is_empty() {

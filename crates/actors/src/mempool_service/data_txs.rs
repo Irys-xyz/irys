@@ -93,8 +93,8 @@ impl Inner {
             .chunk_ingress
             .send(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
         {
-            tracing::error!(
-                "Failed to send ProcessPendingChunks message for data_root {:?}: {:?}",
+            tracing::warn!(
+                "Failed to send ProcessPendingChunks for data_root {:?}: {:?} (sweep timer will retry)",
                 tx.data_root,
                 e
             );

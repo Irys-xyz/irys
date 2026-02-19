@@ -382,7 +382,10 @@ impl GossipServiceTestFixture {
                         let _ = reply.send(Ok(()));
                     }
                     ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
-                        debug!("Received fire-and-forget chunk: data_root {:?}", chunk.data_root);
+                        debug!(
+                            "Received fire-and-forget chunk: data_root {:?}",
+                            chunk.data_root
+                        );
                         chunk_store
                             .write()
                             .expect("to unlock chunk store")
@@ -393,7 +396,13 @@ impl GossipServiceTestFixture {
                         let _ = reply.send(Ok(()));
                     }
                     ChunkIngressMessage::ProcessPendingChunks(data_root) => {
-                        debug!("Received ProcessPendingChunks for {:?} (test stub)", data_root);
+                        debug!(
+                            "Received ProcessPendingChunks for {:?} (test stub)",
+                            data_root
+                        );
+                    }
+                    ChunkIngressMessage::GetPendingChunksCount(reply) => {
+                        let _ = reply.send(0);
                     }
                 }
             }

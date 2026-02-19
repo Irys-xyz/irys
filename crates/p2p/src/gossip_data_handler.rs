@@ -12,8 +12,7 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade,
-    chunk_ingress_service::facade::{ChunkIngressFacade as _, ChunkIngressFacadeImpl},
+    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
     ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
 };
 use irys_domain::chain_sync_state::ChainSyncState;

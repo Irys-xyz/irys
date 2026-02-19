@@ -2,7 +2,6 @@ pub mod commitment_txs;
 pub mod data_txs;
 pub mod facade;
 pub mod lifecycle;
-pub(crate) mod metrics;
 pub mod pledge_provider;
 pub mod types;
 
@@ -413,10 +412,23 @@ impl Inner {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
-        Ok(self
+        let mut status = self
             .mempool_state
             .get_status(&self.config.node_config)
-            .await)
+            .await;
+
+        // Query the real pending chunks count from ChunkIngressService
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .service_senders
+            .chunk_ingress
+            .send(crate::chunk_ingress_service::ChunkIngressMessage::GetPendingChunksCount(tx))
+            .is_ok()
+        {
+            status.pending_chunks_count = rx.await.unwrap_or(0);
+        }
+
+        Ok(status)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]

@@ -184,6 +184,7 @@ impl From<&NodeConfig> for MempoolConfig {
             anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
+            max_concurrent_chunk_ingress_tasks: value.mempool.max_concurrent_chunk_ingress_tasks,
         }
     }
 }
@@ -290,6 +291,9 @@ pub struct MempoolConfig {
 
     /// Maximum number of concurrent handlers for mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent handlers for chunk ingress messages
+    pub max_concurrent_chunk_ingress_tasks: usize,
 }
 
 impl MempoolConfig {
@@ -314,6 +318,7 @@ impl MempoolConfig {
             max_valid_commitment_addresses: 100,
             max_commitments_per_address: 10,
             max_concurrent_mempool_tasks: 10,
+            max_concurrent_chunk_ingress_tasks: 10,
         }
     }
 }

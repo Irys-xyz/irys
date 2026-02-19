@@ -692,6 +692,9 @@ pub struct MempoolNodeConfig {
 
     /// Maximum number of concurrent handlers for the mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent handlers for chunk ingress messages
+    pub max_concurrent_chunk_ingress_tasks: usize,
 }
 
 impl Default for MempoolNodeConfig {
@@ -710,6 +713,7 @@ impl Default for MempoolNodeConfig {
             max_valid_commitment_addresses: 1_000,
             max_commitments_per_address: 5,
             max_concurrent_mempool_tasks: 30,
+            max_concurrent_chunk_ingress_tasks: 30,
         }
     }
 }
@@ -881,6 +885,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_chunk_ingress_tasks: 30,
             },
 
             vdf: VdfNodeConfig {
@@ -1026,6 +1031,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_chunk_ingress_tasks: 30,
             },
 
             vdf: VdfNodeConfig {

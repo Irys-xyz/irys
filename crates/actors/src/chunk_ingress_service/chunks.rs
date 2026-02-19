@@ -1,6 +1,6 @@
 use super::ingress_proofs::generate_and_store_ingress_proof;
+use super::metrics::{record_chunk_duplicate, record_chunk_ingested};
 use super::ChunkIngressServiceInner;
-use crate::mempool_service::metrics::{record_chunk_duplicate, record_chunk_ingested};
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,

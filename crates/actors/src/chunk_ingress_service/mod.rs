@@ -1,6 +1,7 @@
 pub mod chunks;
 pub mod facade;
 pub mod ingress_proofs;
+pub(crate) mod metrics;
 pub mod pending_chunks;
 
 pub use chunks::{AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError};
@@ -10,6 +11,7 @@ pub use pending_chunks::PriorityPendingChunks;
 use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, StorageModulesReadGuard};
@@ -21,7 +23,7 @@ use irys_types::{
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot, Semaphore};
 use tracing::{error, info, warn};
 
 use crate::services::ServiceSenders;
@@ -41,6 +43,8 @@ pub enum ChunkIngressMessage {
     /// Process pending chunks for a data root after its TX header was ingested.
     /// Sent by the mempool when a data TX is successfully validated.
     ProcessPendingChunks(DataRoot),
+    /// Query the current pending chunks count. Used for status reporting.
+    GetPendingChunksCount(oneshot::Sender<usize>),
 }
 
 pub struct ChunkIngressServiceInner {
@@ -48,6 +52,7 @@ pub struct ChunkIngressServiceInner {
     pub config: Config,
     pub exec: TaskExecutor,
     pub irys_db: DatabaseProvider,
+    pub message_handler_semaphore: Arc<Semaphore>,
     pub service_senders: ServiceSenders,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
@@ -66,19 +71,13 @@ impl ChunkIngressServiceInner {
             ChunkIngressMessage::IngestChunk(chunk, response) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
                 if let Err(ref e) = result {
-                    crate::mempool_service::metrics::record_chunk_error(
-                        e.error_type(),
-                        e.is_advisory(),
-                    );
+                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
                 }
                 let _ = response.send(result);
             }
             ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
                 if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
-                    crate::mempool_service::metrics::record_chunk_error(
-                        e.error_type(),
-                        e.is_advisory(),
-                    );
+                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
                 }
             }
             ChunkIngressMessage::IngestIngressProof(proof, response) => {
@@ -87,6 +86,10 @@ impl ChunkIngressServiceInner {
             }
             ChunkIngressMessage::ProcessPendingChunks(data_root) => {
                 self.process_pending_chunks_for_root(data_root).await;
+            }
+            ChunkIngressMessage::GetPendingChunksCount(response) => {
+                let count = self.pending_chunks.read().await.len();
+                let _ = response.send(count);
             }
         }
     }
@@ -135,12 +138,36 @@ impl ChunkIngressServiceInner {
         }
     }
 
+    /// Periodic sweep: for each pending data root, check if a tx header now exists in DB.
+    /// If so, pop and re-process the chunks. This is a correctness backstop for missed
+    /// or failed ProcessPendingChunks triggers.
+    async fn sweep_pending_chunks(&self) {
+        let data_roots = self.pending_chunks.read().await.data_roots();
+        if data_roots.is_empty() {
+            return;
+        }
+        tracing::debug!(count = data_roots.len(), "Sweeping pending chunks");
+        for data_root in data_roots {
+            // Check if a cached data root entry exists (meaning the TX was ingested)
+            let has_header = self
+                .irys_db
+                .view_eyre(|tx| irys_database::cached_data_root_by_data_root(tx, data_root))
+                .ok()
+                .flatten()
+                .is_some();
+            if has_header {
+                self.process_pending_chunks_for_root(data_root).await;
+            }
+        }
+    }
+
     async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
         let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
             for chunk in chunks {
                 if let Err(err) = self.handle_chunk_ingress_message(chunk).await {
+                    metrics::record_chunk_error(err.error_type(), err.is_advisory());
                     error!(
                         "Failed to handle pending chunk ingress for data_root {:?}: {:?}",
                         data_root, err
@@ -172,6 +199,7 @@ impl ChunkIngressService {
         let max_valid_chunks = mempool_config.max_valid_chunks;
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_preheader_chunks_per_item = mempool_config.max_preheader_chunks_per_item;
+        let max_concurrent_chunk_ingress_tasks = mempool_config.max_concurrent_chunk_ingress_tasks;
         let service_senders = service_senders.clone();
 
         let handle = runtime_handle.spawn(async move {
@@ -191,6 +219,9 @@ impl ChunkIngressService {
                     config,
                     exec: TaskExecutor::current(),
                     irys_db,
+                    message_handler_semaphore: Arc::new(Semaphore::new(
+                        max_concurrent_chunk_ingress_tasks,
+                    )),
                     service_senders,
                     storage_modules_guard,
                     recent_valid_chunks,
@@ -219,6 +250,9 @@ impl ChunkIngressService {
             inner,
         } = self;
 
+        let mut sweep_interval = tokio::time::interval(Duration::from_secs(30));
+        sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let mut shutdown_future = pin!(shutdown);
         loop {
             tokio::select! {
@@ -226,9 +260,53 @@ impl ChunkIngressService {
                     info!("ChunkIngressService received shutdown signal");
                     break;
                 }
+                _ = sweep_interval.tick() => {
+                    let inner = Arc::clone(&inner);
+                    tokio::spawn(async move {
+                        inner.sweep_pending_chunks().await;
+                    });
+                }
                 msg = msg_rx.recv() => {
                     match msg {
-                        Some(msg) => inner.handle_message(msg).await,
+                        Some(msg) => {
+                            let semaphore = inner.message_handler_semaphore.clone();
+                            let inner = Arc::clone(&inner);
+                            match semaphore.try_acquire_owned() {
+                                Ok(permit) => {
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        inner.handle_message(msg).await;
+                                    });
+                                }
+                                Err(tokio::sync::TryAcquireError::Closed) => {
+                                    error!("Chunk ingress message handler semaphore closed");
+                                    break;
+                                }
+                                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    warn!("Chunk ingress semaphore at capacity, waiting for permit");
+                                    let semaphore = inner.message_handler_semaphore.clone();
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(60),
+                                        semaphore.acquire_owned(),
+                                    ).await {
+                                        Ok(Ok(permit)) => {
+                                            tokio::spawn(async move {
+                                                let _permit = permit;
+                                                inner.handle_message(msg).await;
+                                            });
+                                        }
+                                        Ok(Err(_)) => {
+                                            error!("Chunk ingress semaphore closed while waiting");
+                                            break;
+                                        }
+                                        Err(_) => {
+                                            error!("Timed out waiting for chunk ingress handler permit, processing inline");
+                                            inner.handle_message(msg).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         None => {
                             warn!("ChunkIngressService receiver channel closed");
                             break;
