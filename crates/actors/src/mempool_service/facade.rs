@@ -183,6 +183,29 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process TxExistenceQuery")
     }
 
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let data_root = ingress_proof.data_root();
+        self.service
+            .send_traced(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                IngressProofError::Other(format!(
+                    "Error sending IngestIngressProof message for data_root {:?}",
+                    data_root
+                ))
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process IngestIngressProof message")
+    }
+
     async fn get_block_header(
         &self,
         block_hash: H256,

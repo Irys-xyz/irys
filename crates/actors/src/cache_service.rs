@@ -581,11 +581,11 @@ impl InnerCacheTask {
                 }
             } else {
                 debug!(
-                    ingress_proof.data_root = ?proof.data_root,
+                    ingress_proof.data_root = ?proof.data_root(),
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
                 if let Err(e) =
-                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root())
                 {
                     warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
                 }
@@ -598,26 +598,26 @@ impl InnerCacheTask {
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
-                    proof.data_root,
+                    proof.data_root(),
                     None,
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
                     if error.is_benign() {
-                        debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
+                        debug!(ingress_proof.data_root = ?proof.data_root(), "Skipped ingress proof regeneration: {error}");
                     } else {
-                        warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {error}");
+                        warn!(ingress_proof.data_root = ?proof.data_root(), "Failed to regenerate ingress proof: {error}");
                     }
                 }
             } else {
                 debug!(
-                    ingress_proof.data_root = ?proof.data_root,
+                    ingress_proof.data_root = ?proof.data_root(),
                     "Regeneration disabled, removing ingress proof for data root"
                 );
                 if let Err(e) =
-                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root())
                 {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root(), "Failed to remove ingress proof: {e}");
                 }
             }
         }
@@ -1126,8 +1126,10 @@ mod tests {
 
         // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
         db.update(|wtx| {
-            let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            let ingress_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root: tx_header.data_root,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(
                 wtx,
                 &ingress_proof,
@@ -1631,8 +1633,10 @@ mod tests {
         let local_addr = signer.address();
 
         db.update(|wtx| {
-            let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            let ingress_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root: tx_header.data_root,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(
                 wtx,
                 &ingress_proof,

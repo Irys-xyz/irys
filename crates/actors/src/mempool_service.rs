@@ -493,7 +493,7 @@ impl Inner {
         min_anchor_height: u64,
         ingress_proof: &IngressProof,
     ) -> eyre::Result<bool> {
-        let anchor = ingress_proof.anchor;
+        let anchor = ingress_proof.anchor();
         let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
             TxIngressError::DatabaseError(format!(
                 "Error getting anchor height for {}: {}",
@@ -522,7 +522,8 @@ impl Inner {
             // TODO: recover the signer's address here? (or compute an ID)
             warn!(
                 "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
-                &ingress_proof.data_root, &ingress_proof.signature
+                ingress_proof.data_root(),
+                ingress_proof.signature()
             );
             Ok(false)
         }
@@ -1376,17 +1377,13 @@ impl Inner {
                 // Separate assigned and unassigned proofs
                 let assigned_proof_set: HashSet<_> = assigned_proofs
                     .iter()
-                    .map(|p| &p.proof.0) // Use signature as unique identifier
+                    .map(|p| p.proof_id().0) // Use proof ID as unique identifier
                     .collect();
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
-                    .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
-                    .filter(|c| {
-                        // Filter out proofs from unstaked signers
-                        epoch_snapshot.is_staked(c.address)
-                    })
-                    .map(|c| c.proof.clone())
+                    .filter(|p| !assigned_proof_set.contains(&p.proof_id().0))
+                    .cloned()
                     .collect();
 
                 // Build the final proof list

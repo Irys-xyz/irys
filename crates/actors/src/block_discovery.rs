@@ -603,13 +603,13 @@ impl BlockDiscoveryServiceInner {
             })?;
             // Validate the anchors
             for proof in tx_proofs.iter() {
-                if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                if !valid_ingress_anchor_blocks.contains(&proof.anchor()) {
                     info!(
                         "valid ingress anchor blocks: {:?},  bt_finished_height {} min_ingress_proof_anchor_height {} anchor {}, ID {}",
                         &valid_ingress_anchor_blocks,
                         &bt_finished_height,
                         &min_ingress_proof_anchor_height,
-                        &proof.anchor,
+                        &proof.anchor(),
                         &proof.id()
                     );
                     return Err(BlockDiscoveryError::InvalidAnchor {
@@ -617,7 +617,7 @@ impl BlockDiscoveryServiceInner {
                             promotion_target_id: tx_header.id,
                             id: proof.id(),
                         },
-                        anchor: proof.anchor,
+                        anchor: proof.anchor(),
                     });
                 }
             }
