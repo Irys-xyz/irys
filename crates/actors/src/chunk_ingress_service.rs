@@ -24,7 +24,8 @@ use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, Semaphore};
-use tracing::{error, info, warn};
+use tokio::time::MissedTickBehavior;
+use tracing::{error, info, warn, Instrument, Span};
 
 use crate::mempool_service::chunk_data_writer;
 use crate::services::ServiceSenders;
@@ -46,6 +47,19 @@ pub enum ChunkIngressMessage {
     ProcessPendingChunks(DataRoot),
     /// Query the current pending chunks count. Used for status reporting.
     GetPendingChunksCount(oneshot::Sender<usize>),
+}
+
+impl ChunkIngressMessage {
+    /// Returns the variant name as a static string for tracing/logging purposes
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::IngestChunk(_, _) => "IngestChunk",
+            Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
+            Self::IngestIngressProof(_, _) => "IngestIngressProof",
+            Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
+            Self::GetPendingChunksCount(_) => "GetPendingChunksCount",
+        }
+    }
 }
 
 pub struct ChunkIngressServiceInner {
@@ -80,6 +94,7 @@ impl ChunkIngressServiceInner {
             ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
                 if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
+                    error!("handle_chunk_ingress_message error: {:?}", e);
                 }
             }
             ChunkIngressMessage::IngestIngressProof(proof, response) => {
@@ -137,29 +152,6 @@ impl ChunkIngressServiceInner {
             Ok(Some(hdr.height))
         } else {
             Ok(None)
-        }
-    }
-
-    /// Periodic sweep: for each pending data root, check if a tx header now exists in DB.
-    /// If so, pop and re-process the chunks. This is a correctness backstop for missed
-    /// or failed ProcessPendingChunks triggers.
-    async fn sweep_pending_chunks(&self) {
-        let data_roots = self.pending_chunks.read().await.data_roots();
-        if data_roots.is_empty() {
-            return;
-        }
-        tracing::debug!(count = data_roots.len(), "Sweeping pending chunks");
-        for data_root in data_roots {
-            // Check if a cached data root entry exists (meaning the TX was ingested)
-            let has_header = self
-                .irys_db
-                .view_eyre(|tx| irys_database::cached_data_root_by_data_root(tx, data_root))
-                .ok()
-                .flatten()
-                .is_some();
-            if has_header {
-                self.process_pending_chunks_for_root(data_root).await;
-            }
         }
     }
 
@@ -237,7 +229,7 @@ impl ChunkIngressService {
                 }),
             };
             service
-                .start()
+                .start(tokio::runtime::Handle::current())
                 .await
                 .expect("ChunkIngressService encountered an irrecoverable error")
         });
@@ -249,67 +241,69 @@ impl ChunkIngressService {
         }
     }
 
-    async fn start(self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         info!("starting ChunkIngressService");
 
-        let Self {
-            shutdown,
-            mut msg_rx,
-            inner,
-        } = self;
-
-        let mut sweep_interval = tokio::time::interval(Duration::from_secs(30));
-        sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut shutdown_future = pin!(shutdown);
+        let mut shutdown_future = pin!(self.shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown_future => {
                     info!("ChunkIngressService received shutdown signal");
                     break;
                 }
-                _ = sweep_interval.tick() => {
-                    let inner = Arc::clone(&inner);
-                    tokio::spawn(async move {
-                        inner.sweep_pending_chunks().await;
-                    });
-                }
-                msg = msg_rx.recv() => {
+                msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            let semaphore = inner.message_handler_semaphore.clone();
-                            let inner = Arc::clone(&inner);
+                            let msg_type = msg.variant_name();
+                            let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg_type);
+
+                            let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
-                                    tokio::spawn(async move {
+                                    let inner = Arc::clone(&self.inner);
+                                    runtime_handle.spawn(async move {
                                         let _permit = permit;
-                                        inner.handle_message(msg).await;
-                                    });
+                                        let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                        wait_with_progress(
+                                            inner.handle_message(msg),
+                                            20,
+                                            &task_info,
+                                        ).await;
+                                    }.instrument(span));
                                 }
-                                Err(tokio::sync::TryAcquireError::Closed) => {
-                                    error!("Chunk ingress message handler semaphore closed");
-                                    break;
-                                }
-                                Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    warn!("Chunk ingress semaphore at capacity, waiting for permit");
-                                    let semaphore = inner.message_handler_semaphore.clone();
-                                    match tokio::time::timeout(
-                                        Duration::from_secs(60),
-                                        semaphore.acquire_owned(),
-                                    ).await {
-                                        Ok(Ok(permit)) => {
-                                            tokio::spawn(async move {
-                                                let _permit = permit;
-                                                inner.handle_message(msg).await;
-                                            });
-                                        }
-                                        Ok(Err(_)) => {
-                                            error!("Chunk ingress semaphore closed while waiting");
+                                Err(e) => {
+                                    match e {
+                                        tokio::sync::TryAcquireError::Closed => {
+                                            error!("Chunk ingress message handler semaphore closed");
                                             break;
                                         }
+                                        tokio::sync::TryAcquireError::NoPermits => {
+                                            warn!("Chunk ingress message handler semaphore at capacity, waiting for permit");
+                                        }
+                                    }
+                                    let inner = Arc::clone(&self.inner);
+                                    let semaphore = inner.message_handler_semaphore.clone();
+                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                        Ok(permit_result) => {
+                                            match permit_result {
+                                                Ok(permit) => {
+                                                    runtime_handle.spawn(async move {
+                                                        let _permit = permit;
+                                                        let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                                        wait_with_progress(
+                                                            inner.handle_message(msg),
+                                                            20,
+                                                            &task_info,
+                                                        ).await;
+                                                    }.instrument(span));
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
+                                                }
+                                            }
+                                        }
                                         Err(_) => {
-                                            error!("Timed out waiting for chunk ingress handler permit, processing inline");
-                                            inner.handle_message(msg).await;
+                                            error!("Timed out waiting for chunk ingress message handler permit");
                                         }
                                     }
                                 }
@@ -324,11 +318,56 @@ impl ChunkIngressService {
             }
         }
 
-        if let Err(e) = inner.chunk_data_writer.flush().await {
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+
+        // Process remaining messages with timeout
+        let process_remaining = async {
+            while let Ok(msg) = self.msg_rx.try_recv() {
+                let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg.variant_name());
+                self.inner.handle_message(msg).instrument(span).await;
+            }
+        };
+
+        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
+            Ok(()) => tracing::debug!("Processed remaining chunk ingress messages successfully"),
+            Err(_) => tracing::warn!(
+                "Timeout processing remaining chunk ingress messages, continuing shutdown"
+            ),
+        }
+
+        if let Err(e) = self.inner.chunk_data_writer.flush().await {
             warn!("Failed to flush chunk writer on shutdown: {:?}", e);
         }
 
         info!("ChunkIngressService shut down");
         Ok(())
+    }
+}
+
+/// Waits for `fut` to finish while printing every `n_secs`.
+async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let span = Span::current();
+    let fut = fut.instrument(Span::current());
+    tokio::pin!(fut);
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(n_secs));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    // Don't do an immediate tick
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let _ = span.enter();
+                warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
+            }
+            res = &mut fut => {
+                break res;
+            }
+        }
     }
 }
