@@ -182,14 +182,15 @@ impl IngressProofGenerationError {
 }
 
 impl ChunkIngressServiceInner {
-    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root()))]
     pub(crate) fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
         // Validate the proofs signature and basic details
+        let data_root_val = ingress_proof.data_root();
         let address = ingress_proof
-            .pre_validate(&ingress_proof.data_root)
+            .pre_validate(&data_root_val)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
         // Reject proofs from addresses not staked or pending stake (spam protection)
@@ -209,7 +210,7 @@ impl ChunkIngressServiceInner {
             Ok(()) => {}
             Err(IngressProofError::UnknownAnchor(anchor)) => {
                 debug!(
-                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    ingress_proof.data_root = ?ingress_proof.data_root(),
                     ingress_proof.anchor = ?anchor,
                     "parking ingress proof until its anchor block is known"
                 );
@@ -238,7 +239,7 @@ impl ChunkIngressServiceInner {
 
         if let Err(e) = res {
             tracing::error!(
-                ingress_proof.data_root = ?ingress_proof.data_root,
+                ingress_proof.data_root = ?ingress_proof.data_root(),
                 "Failed to store ingress proof data root: {:?}",
                 e
             );
@@ -246,7 +247,7 @@ impl ChunkIngressServiceInner {
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
-        let data_root = ingress_proof.data_root;
+        let data_root = ingress_proof.data_root();
         let gossip_broadcast_message = GossipBroadcastMessageV2::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send_traced(gossip_broadcast_message) {
@@ -302,21 +303,20 @@ impl ChunkIngressServiceInner {
             })?;
 
         // TODO: add an ingress proof invalid LRU, like we have for txs
+        let anchor = ingress_proof.anchor();
         let anchor_height = match crate::anchor_validation::get_anchor_height(
             block_tree_read_guard,
             irys_db,
-            ingress_proof.anchor,
+            anchor,
             false, /* does not need to be canonical */
         )
         .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
         {
             Some(height) => height,
             None => {
-                return Err(IngressProofError::UnknownAnchor(ingress_proof.anchor));
+                return Err(IngressProofError::UnknownAnchor(anchor));
             }
         };
-
-        // check consensus config
 
         let min_anchor_height = latest_height
             .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64);
@@ -326,9 +326,9 @@ impl ChunkIngressServiceInner {
         if too_old {
             warn!(
                 "Ingress proof anchor {} has height {}, which is too old (min: {})",
-                ingress_proof.anchor, anchor_height, min_anchor_height
+                anchor, anchor_height, min_anchor_height
             );
-            Err(IngressProofError::InvalidAnchor(ingress_proof.anchor))
+            Err(IngressProofError::InvalidAnchor(anchor))
         } else {
             Ok(())
         }
@@ -349,7 +349,7 @@ impl ChunkIngressServiceInner {
             // Fully valid
             Ok(()) => {
                 debug!(
-                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    data_root = ?ingress_proof.data_root(),
                     "Ingress proof anchor is valid"
                 );
                 ProofCheckResult {
@@ -362,8 +362,8 @@ impl ChunkIngressServiceInner {
                     IngressProofError::InvalidAnchor(_block_hash)
                     | IngressProofError::UnknownAnchor(_block_hash) => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
-                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
+                            ingress_proof.anchor = ?ingress_proof.anchor(),
                             "Ingress proof anchor has an invalid anchor",
                         );
                         // Prune, regenerate if not at capacity
@@ -374,8 +374,8 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::InvalidSignature => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
-                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
+                            ingress_proof.anchor = ?ingress_proof.anchor(),
                             "Ingress proof anchor has an invalid signature and is going to be pruned",
                         );
                         // Fully regenerate
@@ -386,8 +386,8 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::UnstakedAddress => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
-                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
+                            ingress_proof.anchor = ?ingress_proof.anchor(),
                             "Ingress proof has been created by an unstaked address and is going to be pruned",
                         );
                         // Should not happen; prune, our own address should not be unstaked unexpectedly
@@ -399,7 +399,7 @@ impl ChunkIngressServiceInner {
                     IngressProofError::DatabaseError(message) => {
                         // Don't do anything, we don't know the proof status
                         error!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
                             "Database error during ingress proof expiration validation: {}", message
                         );
                         ProofCheckResult {
@@ -409,7 +409,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::Overloaded => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
                             "Ingress proof service overloaded during expiration validation"
                         );
                         ProofCheckResult {
@@ -419,7 +419,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::Other(reason_message) => {
                         error!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_root = ?ingress_proof.data_root(),
                             "Unexpected error during ingress proof expiration validation: {}", reason_message
                         );
                         ProofCheckResult {
@@ -558,13 +558,13 @@ pub fn reanchor_and_store_ingress_proof(
 
     load_complete_ingress_leaves(
         db,
-        proof.data_root,
+        proof.data_root(),
         signer.address(),
         config.consensus.chunk_size,
     )?;
 
     let _generation_lease = generation_state
-        .try_acquire(proof.data_root)
+        .try_acquire(proof.data_root())
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
 
     let latest_anchor = block_tree_guard
@@ -573,8 +573,7 @@ pub fn reanchor_and_store_ingress_proof(
         .block_hash();
 
     let mut proof = proof.clone();
-    // Re-anchor and re-sign
-    proof.anchor = latest_anchor;
+    proof.set_anchor(latest_anchor);
     signer
         .sign_ingress_proof(&mut proof)
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
@@ -603,12 +602,12 @@ pub fn gossip_ingress_proof(
         Ok(()) => {
             let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send_traced(msg) {
-                tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
+                tracing::error!(proof.data_root = ?ingress_proof.data_root(), "Failed to gossip regenerated ingress proof: {e}");
             }
         }
         Err(e) => {
             // Skip gossip; proof stored for potential later use/regeneration.
-            warn!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+            warn!(proof.data_root = ?ingress_proof.data_root(), "Generated ingress proof anchor invalid (not gossiped): {e}");
         }
     }
 }

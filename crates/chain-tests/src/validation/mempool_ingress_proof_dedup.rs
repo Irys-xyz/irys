@@ -191,7 +191,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             (&proof_1b, signer_b.address()),
         ] {
             tx.put::<IngressProofs>(
-                proof.data_root,
+                proof.data_root(),
                 CompactCachedIngressProof(CachedIngressProof {
                     address,
                     proof: proof.clone(),

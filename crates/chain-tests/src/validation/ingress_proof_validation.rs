@@ -111,12 +111,15 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
     };
 
     // 7. Create evil ingress proof signed by UNSTAKED signer
+    let IngressProof::V1(valid_v1) = &valid_proof else {
+        eyre::bail!("expected a v1 ingress proof");
+    };
     let mut evil_proof = IngressProof::V1(IngressProofV1 {
         signature: Default::default(),
-        data_root: valid_proof.data_root,
-        proof: valid_proof.proof,
-        chain_id: valid_proof.chain_id,
-        anchor: valid_proof.anchor,
+        data_root: valid_v1.data_root,
+        proof: valid_v1.proof,
+        chain_id: valid_v1.chain_id,
+        anchor: valid_v1.anchor,
     });
     unstaked_signer.sign_ingress_proof(&mut evil_proof)?;
 
