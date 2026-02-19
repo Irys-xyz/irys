@@ -139,7 +139,8 @@ impl BlockIndex {
     ///
     /// This allows the block index write to participate in a larger atomic transaction
     /// (e.g. combined with block header and tx persistence).
-    pub fn push_block_with_tx(
+    #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
+    pub fn push_block(
         tx: &(impl DbTxMut + DbTx),
         block: &IrysBlockHeader,
         all_txs: &[DataTransactionHeader],
@@ -198,17 +199,6 @@ impl BlockIndex {
         };
 
         insert_block_index_item(tx, block.height, &block_index_item)
-    }
-
-    #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
-    pub fn push_block(
-        &self,
-        block: &IrysBlockHeader,
-        all_txs: &[DataTransactionHeader],
-        chunk_size: u64,
-    ) -> eyre::Result<()> {
-        self.db
-            .update_eyre(|tx| Self::push_block_with_tx(tx, block, all_txs, chunk_size))
     }
 
     /// For a given chunk offset in a ledger, what block was responsible for adding

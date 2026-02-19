@@ -3099,7 +3099,8 @@ mod tests {
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
         block_index
-            .push_block(&arc_genesis, &[], chunk_size)
+            .db()
+            .update_eyre(|tx| BlockIndex::push_block(tx, &arc_genesis, &[], chunk_size))
             .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
@@ -3348,11 +3349,15 @@ mod tests {
         // Migrate block into the block index
         context
             .block_index
-            .push_block(
-                &irys_block,
-                &tx_headers,
-                context.consensus_config.chunk_size,
-            )
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(
+                    tx,
+                    &irys_block,
+                    &tx_headers,
+                    context.consensus_config.chunk_size,
+                )
+            })
             .expect("Failed to index second block");
 
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
@@ -3588,11 +3593,15 @@ mod tests {
         // Migrate block into the block index
         context
             .block_index
-            .push_block(
-                &irys_block,
-                &tx_headers,
-                context.consensus_config.chunk_size,
-            )
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(
+                    tx,
+                    &irys_block,
+                    &tx_headers,
+                    context.consensus_config.chunk_size,
+                )
+            })
             .expect("Failed to index second block");
 
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());

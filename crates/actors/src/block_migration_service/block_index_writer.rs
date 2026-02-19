@@ -60,7 +60,7 @@ impl BlockIndexWriter {
         all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Publish));
         all_txs.extend_from_slice(transactions.get_ledger_txs(DataLedger::Submit));
 
-        BlockIndex::push_block_with_tx(tx, block, &all_txs, self.chunk_size)?;
+        BlockIndex::push_block(tx, block, &all_txs, self.chunk_size)?;
 
         self.last_received_block = Some((block.height, block.block_hash));
 

@@ -675,7 +675,6 @@ impl IrysNode {
         genesis_block: &IrysBlockHeader,
         genesis_commitments: &[CommitmentTransaction],
         irys_db: &DatabaseProvider,
-        block_index: &BlockIndex,
     ) -> eyre::Result<()> {
         info!("Initializing database with genesis block and commitments");
 
@@ -700,14 +699,16 @@ impl IrysNode {
             database::insert_commitment_tx(&write_tx, commitment_tx)?;
         }
 
-        // Commit the database transaction
-        write_tx.inner.commit()?;
-
-        block_index.push_block(
+        // Insert the genesis block index entry (no data transactions in genesis)
+        BlockIndex::push_block(
+            &write_tx,
             genesis_block,
-            &Vec::new(), // Assuming no data transactions in genesis block
+            &[],
             self.config.consensus.chunk_size,
         )?;
+
+        // Commit the database transaction
+        write_tx.inner.commit()?;
 
         info!("Genesis block and commitments successfully persisted");
         Ok(())
@@ -759,7 +760,6 @@ impl IrysNode {
                 &genesis_block,
                 &genesis_commitments,
                 &irys_db,
-                &block_index,
             )?;
         }
 

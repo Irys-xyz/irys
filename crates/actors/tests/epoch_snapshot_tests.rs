@@ -7,6 +7,7 @@ use irys_actors::{
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
+    db::IrysDatabaseExt as _,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -787,7 +788,10 @@ async fn epoch_blocks_reinitialization_test() {
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
     block_index
-        .push_block(&genesis_block, &[], config.consensus.chunk_size)
+        .db()
+        .update_eyre(|tx| {
+            BlockIndex::push_block(tx, &genesis_block, &[], config.consensus.chunk_size)
+        })
         .expect("Failed to index genesis block");
 
     {
