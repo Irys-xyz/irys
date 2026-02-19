@@ -869,6 +869,10 @@ fn all_wire_types_have_fixture_coverage() {
             "IngressProofV1Inner",
             "tested via IngressProof version-tagged enum",
         ),
+        (
+            "IngressProofV2Inner",
+            "tested via IngressProof version-tagged enum",
+        ),
     ];
     let excluded_names: std::collections::HashSet<&str> =
         EXCLUDED.iter().map(|(name, _)| *name).collect();

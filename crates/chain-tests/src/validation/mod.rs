@@ -1161,8 +1161,8 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     )?;
 
     // Verify both proofs have the same data_root and can recover the same signer
-    assert_eq!(proof1.data_root, data_root);
-    assert_eq!(proof2.data_root, data_root);
+    assert_eq!(proof1.data_root(), data_root);
+    assert_eq!(proof2.data_root(), data_root);
     assert_eq!(proof1.recover_signer()?, test_signer.address());
     assert_eq!(proof2.recover_signer()?, test_signer.address());
 

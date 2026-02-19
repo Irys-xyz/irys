@@ -989,7 +989,8 @@ pub fn generate_ingress_proof(
 
     info!(
         "generated ingress proof {} for data root {}",
-        &proof.proof, &data_root
+        &proof.proof_id(),
+        &data_root
     );
     db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
@@ -1009,7 +1010,11 @@ pub fn generate_ingress_proof(
 /// Compute KZG commitments in shadow mode: re-reads chunks from DB, computes
 /// per-chunk KZG commitments, and logs results. Errors are informational only.
 fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<()> {
+    use eyre::eyre;
+    use irys_database::tables::{CachedChunks, CachedChunksIndex};
     use irys_types::kzg::{compute_chunk_commitment, default_kzg_settings};
+    use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::transaction::DbTx as _;
     use std::time::Instant;
 
     let settings = default_kzg_settings();

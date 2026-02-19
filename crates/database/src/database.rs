@@ -1623,27 +1623,27 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
     // Delete all existing proofs for this signer before inserting, as DupSort
     // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root())?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
-        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+        tx.delete::<IngressProofs>(ingress_proof.data_root(), Some(existing))?;
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -1658,25 +1658,25 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     address: IrysAddress,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
     // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root())?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
-        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+        tx.delete::<IngressProofs>(ingress_proof.data_root(), Some(existing))?;
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -2481,9 +2481,11 @@ mod tests {
 
         // Build minimal distinct proofs for addr_a and addr_b.
         let make_proof = |address: IrysAddress, proof_hash: H256| {
-            let mut p = irys_types::IngressProof::default();
-            p.data_root = data_root;
-            p.proof = proof_hash;
+            let p = irys_types::IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root,
+                proof: proof_hash,
+                ..Default::default()
+            });
             CompactCachedIngressProof(CachedIngressProof { address, proof: p })
         };
 
@@ -2567,9 +2569,11 @@ mod tests {
         let addr_a = IrysAddress::random();
 
         let make_proof = |proof_hash: H256| {
-            let mut p = irys_types::IngressProof::default();
-            p.data_root = data_root;
-            p.proof = proof_hash;
+            let p = irys_types::IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root,
+                proof: proof_hash,
+                ..Default::default()
+            });
             CompactCachedIngressProof(CachedIngressProof {
                 address: addr_a,
                 proof: p,

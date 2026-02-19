@@ -61,6 +61,7 @@ reth-chainspec = { workspace = true, optional = true }
 alloy-eips.workspace = true
 blst.workspace = true
 c-kzg.workspace = true
+openssl.workspace = true
 alloy-genesis.workspace = true
 reth-db = { workspace = true, optional = true }
 reth-db-api = { workspace = true, optional = true }

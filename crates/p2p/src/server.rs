@@ -620,7 +620,7 @@ where
         let v1_request: GossipRequest<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = v1_request.data.data_root;
+            let data_root = v1_request.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -1027,7 +1027,7 @@ where
         let v2_request: GossipRequestV2<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = v2_request.data.data_root;
+            let data_root = v2_request.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root

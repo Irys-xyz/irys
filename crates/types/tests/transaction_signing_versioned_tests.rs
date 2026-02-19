@@ -120,7 +120,7 @@ fn ingress_proof_signing_uses_discriminant() {
     let sig_hash = proof.signature_hash();
     assert!(
         proof
-            .signature
+            .signature()
             .validate_signature(sig_hash, signer.address())
     );
 }

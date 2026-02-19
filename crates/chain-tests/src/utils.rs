@@ -1640,7 +1640,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 if n >= num_proofs {
                     if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
                         for ingress_proof in tx_proofs.iter() {
-                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            assert_eq!(ingress_proof.proof.data_root(), tx_header.data_root);
                             tracing::info!(
                                 "proof {} signer: {}",
                                 ingress_proof.proof.id(),

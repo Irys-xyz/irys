@@ -5681,6 +5681,7 @@ dependencies = [
  "k256",
  "modular-bitfield",
  "nodit",
+ "openssl",
  "pretty_assertions",
  "proptest",
  "rand 0.8.5",
