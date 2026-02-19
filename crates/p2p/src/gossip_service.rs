@@ -26,7 +26,9 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig};
+use irys_types::{
+    Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
+};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -34,7 +36,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -209,7 +211,11 @@ impl P2PService {
             started_at,
             consensus_config_hash,
         });
-        let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
+        let server = GossipServer::new(
+            Arc::clone(&gossip_data_handler),
+            peer_list.clone(),
+            config.node_config.p2p_gossip.max_concurrent_gossip_chunks,
+        );
 
         let server = server.run(listener)?;
         let server_handle = server.handle();
@@ -245,6 +251,7 @@ impl P2PService {
         ))
     }
 
+    #[instrument(name = "broadcast_data", skip_all)]
     async fn broadcast_data(
         &self,
         broadcast_message: GossipBroadcastMessageV2,
@@ -259,6 +266,9 @@ impl P2PService {
         let message_type_and_id = broadcast_message.data_type_and_id();
         let GossipBroadcastMessageV2 { key, data } = broadcast_message;
         let broadcast_data = Arc::new(data);
+
+        // Pre-serialize once for all V2 peers (O(1) clone per peer instead of N serializations)
+        let preserialized = self.client.pre_serialize_for_broadcast(&broadcast_data);
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
@@ -298,6 +308,20 @@ impl P2PService {
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
+                if peer_entry.protocol_version == ProtocolVersion::V2 {
+                    if let Some((route, ref body)) = preserialized {
+                        self.client.send_preserialized_detached(
+                            (&peer_miner_address, &peer_entry),
+                            route,
+                            body.clone(),
+                            peer_list,
+                            Arc::clone(&self.cache),
+                            key,
+                        );
+                        continue;
+                    }
+                }
+                // V1 peers or preserialization failure: fall back to existing path
                 self.client.send_data_and_update_the_score_detached(
                     (&peer_miner_address, &peer_entry),
                     Arc::clone(&broadcast_data),

@@ -30,6 +30,7 @@ reth.workspace = true
 moka.workspace = true
 futures.workspace = true
 serde_json.workspace = true
+bytes.workspace = true
 dashmap = "6.1.0"
 semver.workspace = true
 

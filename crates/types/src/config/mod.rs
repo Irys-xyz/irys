@@ -184,6 +184,7 @@ impl From<&NodeConfig> for MempoolConfig {
             anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
+            chunk_writer_buffer_size: value.mempool.chunk_writer_buffer_size,
         }
     }
 }
@@ -290,6 +291,9 @@ pub struct MempoolConfig {
 
     /// Maximum number of concurrent handlers for mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Backpressure channel capacity for the async chunk write-behind buffer
+    pub chunk_writer_buffer_size: usize,
 }
 
 impl MempoolConfig {
@@ -314,6 +318,7 @@ impl MempoolConfig {
             max_valid_commitment_addresses: 100,
             max_commitments_per_address: 10,
             max_concurrent_mempool_tasks: 10,
+            chunk_writer_buffer_size: 4096,
         }
     }
 }

@@ -23,7 +23,7 @@ use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
@@ -368,7 +368,11 @@ impl GossipClient {
     }
 
     pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Info);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, ProtocolVersion::V1),
+            GossipRoutes::Info
+        );
         let response = self.internal_client().get(&url).send().await;
 
         let gossip_result = match response {
@@ -405,7 +409,11 @@ impl GossipClient {
         &self,
         peer: SocketAddr,
     ) -> Result<Vec<PeerAddress>, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer, GossipRoutes::PeerList);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V1),
+            GossipRoutes::PeerList
+        );
         let response = self
             .internal_client()
             .get(&url)
@@ -440,8 +448,11 @@ impl GossipClient {
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
         // V1 uses /version endpoint
-        let path = format!("gossip{}", GossipRoutes::Version);
-        let url = format!("http://{}/{}", peer, path);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V1),
+            GossipRoutes::Version
+        );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
@@ -505,8 +516,11 @@ impl GossipClient {
         version: HandshakeRequestV2,
     ) -> Result<PeerResponse, GossipClientError> {
         // V2 uses /v2/handshake endpoint
-        let path = format!("gossip/v2{}", GossipRoutes::Handshake);
-        let url = format!("http://{}/{}", peer, path);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer, ProtocolVersion::V2),
+            GossipRoutes::Handshake
+        );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
@@ -560,7 +574,11 @@ impl GossipClient {
         peer: PeerAddress,
         query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::BlockIndex);
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, ProtocolVersion::V1),
+            GossipRoutes::BlockIndex
+        );
         let response = self.internal_client().get(&url).query(&query).send().await;
 
         let gossip_result = match response {
@@ -736,6 +754,157 @@ impl GossipClient {
         }
     }
 
+    /// Pre-serialize a `GossipDataV2` once into `(GossipRoutes, bytes::Bytes)` for V2 peers.
+    /// Returns `None` on serialization failure.
+    pub fn pre_serialize_for_broadcast(
+        &self,
+        data: &GossipDataV2,
+    ) -> Option<(GossipRoutes, bytes::Bytes)> {
+        let (route, json_result) = match data {
+            GossipDataV2::Chunk(chunk) => (
+                GossipRoutes::Chunk,
+                serde_json::to_vec(&self.create_request_v2(chunk.clone())),
+            ),
+            GossipDataV2::Transaction(header) => (
+                GossipRoutes::Transaction,
+                serde_json::to_vec(&self.create_request_v2(header.clone())),
+            ),
+            GossipDataV2::CommitmentTransaction(tx) => (
+                GossipRoutes::CommitmentTx,
+                serde_json::to_vec(&self.create_request_v2(tx.clone())),
+            ),
+            GossipDataV2::BlockHeader(header) => {
+                if header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::pre_serialize",
+                        block.hash = ?header.block_hash,
+                        "Pre-serializing a block header without the POA chunk"
+                    );
+                }
+                (
+                    GossipRoutes::Block,
+                    serde_json::to_vec(&self.create_request_v2(header.clone())),
+                )
+            }
+            GossipDataV2::BlockBody(body) => (
+                GossipRoutes::BlockBody,
+                serde_json::to_vec(&self.create_request_v2(body.clone())),
+            ),
+            GossipDataV2::ExecutionPayload(payload) => (
+                GossipRoutes::ExecutionPayload,
+                serde_json::to_vec(&self.create_request_v2(payload.clone())),
+            ),
+            GossipDataV2::IngressProof(proof) => (
+                GossipRoutes::IngressProof,
+                serde_json::to_vec(&self.create_request_v2(proof.clone())),
+            ),
+        };
+        match json_result {
+            Ok(b) => Some((route, bytes::Bytes::from(b))),
+            Err(e) => {
+                warn!(?route, "Failed to pre-serialize gossip data: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Send pre-serialized JSON body to a V2 peer. Skips serialization — posts raw bytes.
+    async fn send_preserialized(
+        &self,
+        gossip_address: &SocketAddr,
+        route: GossipRoutes,
+        body: bytes::Bytes,
+    ) -> GossipResult<GossipResponse<()>> {
+        let url = format!(
+            "{}{}",
+            gossip_base_url(gossip_address, ProtocolVersion::V2),
+            route
+        );
+
+        debug!("Sending pre-serialized data to {}", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|response_error| {
+                GossipError::Network(format!(
+                    "Failed to send data to {}: {}",
+                    url, response_error
+                ))
+            })?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let text = response.text().await.map_err(|e| {
+                    GossipError::Network(format!("Failed to read response from {}: {}", url, e))
+                })?;
+
+                if text.trim().is_empty() {
+                    return Err(GossipError::Network(format!("Empty response from {}", url)));
+                }
+
+                let parsed = serde_json::from_str(&text).map_err(|e| {
+                    GossipError::Network(format!(
+                        "{}: Failed to parse JSON: {} - Response: {}",
+                        url, e, text
+                    ))
+                })?;
+                Ok(parsed)
+            }
+            _ => {
+                let error_text = response.text().await.unwrap_or_default();
+                Err(GossipError::Network(format!(
+                    "API request {} failed with status: {} - {}",
+                    url, status, error_text
+                )))
+            }
+        }
+    }
+
+    /// Spawns a detached task that sends pre-serialized data, updates peer score, and records cache seen.
+    pub fn send_preserialized_detached(
+        &self,
+        peer: (&IrysPeerId, &PeerListItem),
+        route: GossipRoutes,
+        body: bytes::Bytes,
+        peer_list: &PeerList,
+        cache: Arc<GossipCache>,
+        gossip_cache_key: GossipCacheKey,
+    ) {
+        let client = self.clone();
+        let peer_list = peer_list.clone();
+        let peer_id = *peer.0;
+        let peer = peer.1.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                record_gossip_outbound_error(gossip_error_type(&e));
+                return;
+            }
+            let result = client
+                .send_preserialized(&peer.address.gossip, route, body)
+                .await;
+            Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
+            match result {
+                Ok(_) => {
+                    if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
+                        error!("Error recording seen data in cache: {:?}", err);
+                    }
+                }
+                Err(e) => {
+                    record_gossip_outbound_error(gossip_error_type(&e));
+                    error!("Error sending pre-serialized data to peer: {:?}", e);
+                }
+            }
+        });
+    }
+
     /// Send data to a peer
     ///
     /// # Errors
@@ -907,6 +1076,7 @@ impl GossipClient {
         }
     }
 
+    #[instrument(name = "send_data_internal", skip_all, fields(%route, ?protocol_version))]
     async fn send_data_internal<T, R>(
         &self,
         gossip_address: &SocketAddr,
