@@ -644,11 +644,11 @@ impl<T> From<GossipRequestV2<T>> for GossipRequestV1<T> {
 
 /// Conversion from VersionPD to V2
 impl<T> From<GossipRequestVersionPD<T>> for GossipRequestV2<T> {
-    fn from(v3: GossipRequestVersionPD<T>) -> Self {
+    fn from(pd: GossipRequestVersionPD<T>) -> Self {
         Self {
-            peer_id: v3.peer_id,
-            miner_address: v3.miner_address,
-            data: v3.data,
+            peer_id: pd.peer_id,
+            miner_address: pd.miner_address,
+            data: pd.data,
         }
     }
 }

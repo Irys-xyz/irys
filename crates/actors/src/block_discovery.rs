@@ -767,7 +767,7 @@ impl BlockDiscoveryServiceInner {
                 // Send the block to the gossip bus
                 tracing::trace!("sending block to bus: block height {:?}", &block_height);
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessageVersionPD::from(new_block_header))
+                    gossip_sender.send(GossipBroadcastMessageVersionPD::from(header_for_broadcast))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",

@@ -22,7 +22,7 @@ use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
     GossipRequest, GossipRequestV2, GossipRequestVersionPD, HandshakeRequest, HandshakeRequestV2,
-    HandshakeResponse, IngressProof, IrysAddress, IrysBlockHeader,
+    HandshakeResponseV1, HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader,
     IrysPeerId, PdChunkMessage, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
