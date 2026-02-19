@@ -1504,6 +1504,81 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    async fn evm_tx_wait_diag_state(&self, hash: &alloy_core::primitives::B256) -> String {
+        let (
+            canonical_tip_height,
+            canonical_tip_hash,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+        ) = {
+            let tree = self.node_ctx.block_tree_guard.read();
+            let (canonical_chain, not_onchain_count) = tree.get_canonical_chain();
+            let canonical_tip = canonical_chain
+                .last()
+                .map(|entry| (entry.height(), entry.block_hash()));
+            let (max_diff_height, max_diff_hash) = tree.get_max_cumulative_difficulty_block();
+
+            (
+                canonical_tip.map(|(height, _)| height),
+                canonical_tip.map(|(_, block_hash)| block_hash),
+                canonical_chain.len(),
+                not_onchain_count,
+                max_diff_height,
+                max_diff_hash,
+            )
+        };
+
+        let known_peers = self.node_ctx.peer_list.all_peers().iter().count();
+
+        let reth_peer_count = match self
+            .node_ctx
+            .reth_node_adapter
+            .inner
+            .network
+            .get_all_peers()
+            .await
+        {
+            Ok(peers) => peers.len().to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let reth_tip = match self
+            .node_ctx
+            .reth_node_adapter
+            .reth_node
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Latest, false)
+            .await
+        {
+            Ok(Some(block)) => format!("{}@{}", block.header.number, block.header.hash),
+            Ok(None) => "none".to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let canonical_tip = canonical_tip_height
+            .zip(canonical_tip_hash)
+            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
+            .unwrap_or_else(|| "none".to_string());
+
+        format!(
+            "tx={} node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} peer_list={} reth_peers={} reth_tip={}",
+            hash,
+            self.name,
+            canonical_tip,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+            known_peers,
+            reth_peer_count,
+            reth_tip,
+        )
+    }
+
+    #[diag_slow(interval = 2, state = self.evm_tx_wait_diag_state(hash).await)]
     pub async fn wait_for_evm_tx(
         &self,
         hash: &alloy_core::primitives::B256,
@@ -1520,9 +1595,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .rpc_client()
             .ok_or_eyre("Unable to get RPC client")?;
+        let mut last_rpc_error: Option<String> = None;
 
         for retry in 0..max_retries {
-            if let Some(tx) = reth::rpc::api::EthApiClient::<
+            match reth::rpc::api::EthApiClient::<
                 TransactionRequest,
                 Transaction,
                 Block,
@@ -1530,22 +1606,41 @@ impl IrysNodeTest<IrysNodeCtx> {
                 Header,
                 Bytes,
             >::transaction_by_hash(&rpc, *hash)
-            .await?
+            .await
             {
-                info!(
-                    "tx {} found in {:?} reth after {} retries",
-                    &hash, &self.name, &retry
-                );
-                return Ok(tx);
+                Ok(Some(tx)) => {
+                    info!(
+                        "tx {} found in {:?} reth after {} retries",
+                        &hash, &self.name, &retry
+                    );
+                    return Ok(tx);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let err_msg = format!("{err:#}");
+                    if retry % retries_per_second == 0 {
+                        tracing::warn!(
+                            "failed to query tx {} in {:?} reth at retry {}: {}",
+                            hash,
+                            self.name,
+                            retry,
+                            err_msg
+                        );
+                    }
+                    last_rpc_error = Some(err_msg);
+                }
             }
             sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
         }
 
+        let final_state = self.evm_tx_wait_diag_state(hash).await;
         Err(eyre::eyre!(
-            "Failed to locate tx {} in {:?} reth after {} retries",
+            "Failed to locate tx {} in {:?} reth after {} retries. Last RPC error: {}. Final state: {}",
             &hash,
             &self.name,
-            max_retries
+            max_retries,
+            last_rpc_error.unwrap_or_else(|| "none".to_string()),
+            final_state
         ))
     }
 

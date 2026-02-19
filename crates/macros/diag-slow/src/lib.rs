@@ -1,6 +1,52 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, LitInt};
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input, Expr, Ident, ItemFn, LitInt, Token,
+};
+
+struct DiagSlowArgs {
+    interval_secs: u64,
+    state_expr: Option<Expr>,
+}
+
+impl Parse for DiagSlowArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut interval_secs = 5;
+        let mut state_expr = None;
+
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+
+            match key.to_string().as_str() {
+                "interval" => {
+                    let lit = input.parse::<LitInt>()?;
+                    interval_secs = lit.base10_parse::<u64>()?;
+                }
+                "state" => {
+                    state_expr = Some(input.parse::<Expr>()?);
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        key,
+                        "diag_slow supports only `interval = <u64>` and `state = <expr>`",
+                    ));
+                }
+            }
+
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<Token![,]>()?;
+        }
+
+        Ok(Self {
+            interval_secs,
+            state_expr,
+        })
+    }
+}
 
 /// Attribute macro that wraps an `async fn` body with periodic "still running"
 /// warnings, so CI logs reveal which helper is hung when a test times out.
@@ -9,6 +55,7 @@ use syn::{parse_macro_input, ItemFn, LitInt};
 /// ```ignore
 /// #[diag_slow]          // warns every 5s (default)
 /// #[diag_slow(3)]       // warns every 3s
+/// #[diag_slow(interval = 2, state = self.debug_snapshot())]
 /// pub async fn my_helper(&self) -> T { .. }
 /// ```
 ///
@@ -18,13 +65,24 @@ use syn::{parse_macro_input, ItemFn, LitInt};
 pub fn diag_slow(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
 
-    // Parse optional interval: #[diag_slow] or #[diag_slow(3)]
-    let interval_secs: u64 = if attr.is_empty() {
-        5
+    // Parse supported forms:
+    // - #[diag_slow]
+    // - #[diag_slow(3)]
+    // - #[diag_slow(interval = 3, state = <expr>)]
+    // - #[diag_slow(state = <expr>)]
+    let (interval_secs, state_expr): (u64, Option<Expr>) = if attr.is_empty() {
+        (5, None)
+    } else if let Ok(lit) = syn::parse::<LitInt>(attr.clone()) {
+        (
+            lit.base10_parse::<u64>()
+                .expect("diag_slow expects a u64 literal"),
+            None,
+        )
     } else {
-        let lit = parse_macro_input!(attr as LitInt);
-        lit.base10_parse::<u64>()
-            .expect("diag_slow expects a u64 literal")
+        let args = syn::parse::<DiagSlowArgs>(attr).expect(
+            "diag_slow expects #[diag_slow], #[diag_slow(<u64>)], or #[diag_slow(interval = <u64>, state = <expr>)]",
+        );
+        (args.interval_secs, args.state_expr)
     };
 
     let fn_name = input_fn.sig.ident.to_string();
@@ -32,12 +90,41 @@ pub fn diag_slow(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input_fn.sig;
     let attrs = &input_fn.attrs;
     let body = &input_fn.block;
+    let fut_decl = if state_expr.is_some() {
+        quote! {
+            // Keep captured variables available for optional state diagnostics.
+            let __diag_fut = async #body;
+        }
+    } else {
+        quote! {
+            let __diag_fut = async move #body;
+        }
+    };
+    let diag_tick = if let Some(expr) = state_expr {
+        quote! {
+            let __diag_state = { #expr };
+            ::tracing::warn!(
+                "[DIAG_SLOW] {} still running after {:?}; state={:?}",
+                #fn_name,
+                __diag_start.elapsed(),
+                __diag_state,
+            );
+        }
+    } else {
+        quote! {
+            ::tracing::warn!(
+                "[DIAG_SLOW] {} still running after {:?}",
+                #fn_name,
+                __diag_start.elapsed(),
+            );
+        }
+    };
 
     let expanded = quote! {
         #(#attrs)*
         #vis #sig {
             let __diag_start = ::std::time::Instant::now();
-            let __diag_fut = async move #body;
+            #fut_decl
             ::tokio::pin!(__diag_fut);
             let mut __diag_interval = ::tokio::time::interval(
                 ::std::time::Duration::from_secs(#interval_secs),
@@ -49,11 +136,7 @@ pub fn diag_slow(attr: TokenStream, item: TokenStream) -> TokenStream {
                         break __diag_result;
                     }
                     _ = __diag_interval.tick() => {
-                        ::tracing::warn!(
-                            "[DIAG_SLOW] {} still running after {:?}",
-                            #fn_name,
-                            __diag_start.elapsed(),
-                        );
+                        #diag_tick
                     }
                 }
             }
