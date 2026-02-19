@@ -119,7 +119,7 @@ where
             data: v1_request.data,
         };
 
-        let _permit = match server.chunk_semaphore.try_acquire() {
+        let permit = match server.chunk_semaphore.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
                 return HttpResponse::Ok()
@@ -127,7 +127,10 @@ where
             }
         };
 
-        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
+        let result = server.data_handler.handle_chunk(v2_request).await;
+        drop(permit);
+
+        if let Err(error) = result {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
@@ -617,7 +620,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        let _permit = match server.chunk_semaphore.try_acquire() {
+        let permit = match server.chunk_semaphore.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
                 return HttpResponse::Ok()
@@ -625,7 +628,10 @@ where
             }
         };
 
-        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
+        let result = server.data_handler.handle_chunk(v2_request).await;
+        drop(permit);
+
+        if let Err(error) = result {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
