@@ -28,6 +28,7 @@ pub use block_producer::*;
 pub use data_sync_service::*;
 pub use mempool_guard::*;
 pub use mempool_service::*;
+pub use metrics::record_reth_fcu_head_height;
 pub use mining_bus::MiningBus;
 pub use partition_mining_service::*;
 pub use reth_ethereum_primitives;

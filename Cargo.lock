@@ -5106,6 +5106,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
  "irys-vdf",
  "itertools 0.13.0",
  "lru 0.14.0",
@@ -5169,6 +5170,7 @@ dependencies = [
  "irys-reward-curve",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
  "opentelemetry",
  "proptest",
  "reth",
@@ -5415,6 +5417,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "async-trait",
+ "bytes",
  "dashmap 6.1.0",
  "eyre",
  "futures",

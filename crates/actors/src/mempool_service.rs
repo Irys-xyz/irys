@@ -1,3 +1,4 @@
+pub(crate) mod chunk_data_writer;
 pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;
@@ -196,6 +197,8 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    /// Async write-behind buffer for chunk MDBX writes
+    pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -2663,6 +2666,20 @@ impl AtomicMempoolState {
         hash_map
     }
 
+    // --- Batch methods for reduced lock contention ---
+
+    /// Batch lookup data transactions from mempool in a single READ lock.
+    pub async fn batch_valid_submit_ledger_tx_cloned(
+        &self,
+        tx_ids: &[H256],
+    ) -> Vec<Option<DataTransactionHeader>> {
+        let state = self.read().await;
+        tx_ids
+            .iter()
+            .map(|tx_id| state.valid_submit_ledger_tx.get(tx_id).cloned())
+            .collect()
+    }
+
     /// Do not call this function from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
     async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
@@ -3080,6 +3097,7 @@ impl MempoolService {
         let config = config.clone();
         let mempool_config = &config.mempool;
         let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
@@ -3096,6 +3114,11 @@ impl MempoolService {
 
                 let mut stake_and_pledge_whitelist = HashSet::new();
                 stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
+
+                let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
+                    irys_db.clone(),
+                    chunk_writer_buffer_size,
+                );
 
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
@@ -3114,6 +3137,7 @@ impl MempoolService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        chunk_data_writer,
                     }),
                 };
                 mempool_service
@@ -3246,6 +3270,18 @@ impl MempoolService {
             Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
             Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
             Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
+        }
+
+        // Flush write-behind chunk buffer so all queued chunks are committed to MDBX
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.chunk_data_writer.flush(),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!("Flushed chunk data writer successfully"),
+            Ok(Err(e)) => tracing::error!("Error flushing chunk data writer: {:?}", e),
+            Err(_) => tracing::warn!("Timeout flushing chunk data writer, continuing shutdown"),
         }
 
         // Persist to disk with timeout
