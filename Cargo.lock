@@ -5753,6 +5753,7 @@ dependencies = [
  "reth-db",
  "sha2",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber 0.3.22",
 ]
