@@ -200,7 +200,7 @@ impl GossipClient {
                 &peer.1.address.gossip,
                 GossipRoutes::GetData,
                 &requested_data,
-                ProtocolVersion::V2,
+                peer.1.protocol_version,
             )
             .await
         };
@@ -320,7 +320,7 @@ impl GossipClient {
                     &peer.1.address.gossip,
                     GossipRoutes::PullData,
                     &requested_data,
-                    ProtocolVersion::V2,
+                    peer.1.protocol_version,
                 )
                 .await
             };

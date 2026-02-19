@@ -1050,6 +1050,79 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
+    async fn handle_data_request_version_pd(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequestVersionPD<GossipDataRequestV2>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<GossipDataRequestV2> = data_request.0.into();
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
+
+        let peer = match Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            source_peer_id,
+            source_miner_address,
+        ) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
+        };
+
+        match server
+            .data_handler
+            .handle_get_data(&peer, v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
+            .in_current_span()
+            .await
+        {
+            Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited data request from peer");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
+            }
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+            }
+        }
+    }
+
+    async fn handle_pull_data_version_pd(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequestVersionPD<GossipDataRequestV2>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v2_request: GossipRequestV2<GossipDataRequestV2> = data_request.0.into();
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
+
+        match Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            source_peer_id,
+            source_miner_address,
+        ) {
+            Ok(_) => {}
+            Err(error_response) => return error_response,
+        };
+
+        match server
+            .data_handler
+            .handle_get_data_sync(v2_request)
+            .in_current_span()
+            .await
+        {
+            Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+            }
+        }
+    }
+
     // ============================================================================
     // End VersionPD Handlers
     // ============================================================================
@@ -1631,11 +1704,11 @@ where
                     )
                     .route(
                         GossipRoutes::GetData.as_str(),
-                        web::post().to(Self::handle_data_request),
+                        web::post().to(Self::handle_data_request_version_pd),
                     )
                     .route(
                         GossipRoutes::PullData.as_str(),
-                        web::post().to(Self::handle_pull_data),
+                        web::post().to(Self::handle_pull_data_version_pd),
                     )
                     .route(
                         GossipRoutes::Handshake.as_str(),

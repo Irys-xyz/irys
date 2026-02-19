@@ -161,12 +161,12 @@ where
         const MAX_AGE_SECS: u64 = 5 * 60; // 5 minutes
         const MAX_FUTURE_SECS: u64 = 30; // 30 seconds
 
-        if pd_chunk_message.timestamp + MAX_AGE_SECS < now {
+        if pd_chunk_message.timestamp.saturating_add(MAX_AGE_SECS) < now {
             return Err(GossipError::InvalidData(
                 InvalidDataError::PdChunkTimestampExpired,
             ));
         }
-        if pd_chunk_message.timestamp > now + MAX_FUTURE_SECS {
+        if pd_chunk_message.timestamp > now.saturating_add(MAX_FUTURE_SECS) {
             return Err(GossipError::InvalidData(
                 InvalidDataError::PdChunkTimestampFuture,
             ));
