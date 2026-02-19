@@ -58,11 +58,10 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
-    BlockBody, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
-    SealedBlock, ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs,
-    H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CloneableJoinHandle,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
+    ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
