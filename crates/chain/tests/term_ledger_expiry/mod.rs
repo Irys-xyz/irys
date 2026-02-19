@@ -91,7 +91,7 @@ async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
 //         Slot 1 remains active
 //
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
+async fn slow_heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
     info!("Testing ledger expiry with multiple transactions per block");
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,
@@ -457,7 +457,8 @@ impl LedgerExpiryTestContext {
             self.blocks_mined.push(block);
         }
 
-        self.wait_until_height(expiry_block_height, 30).await?;
+        self.wait_for_block_at_height(expiry_block_height, 30)
+            .await?;
 
         let expiry_block = &self.blocks_mined.last().unwrap();
         info!("Reached expiry block at height {}", expiry_block_height);

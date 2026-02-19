@@ -2037,9 +2037,25 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     #[diag_slow]
     pub async fn stop(self) -> IrysNodeTest<()> {
-        self.node_ctx
-            .stop(irys_types::ShutdownReason::TestComplete)
-            .await;
+        let node_name = self.name.clone().unwrap_or_default();
+        // Wrap stop() in a timeout to prevent zombie test processes.
+        // The production binary has spawn_shutdown_watchdog for this, but
+        // test binaries share a process so we just warn and move on.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.node_ctx
+                .stop(irys_types::ShutdownReason::TestComplete),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::error!(
+                    node_name,
+                    "Node stop() did not complete within 30s — abandoning graceful shutdown"
+                );
+            }
+        }
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),

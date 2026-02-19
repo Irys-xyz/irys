@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 #[tokio::test]
-async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
+async fn slow_heavy3_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(
     //     "RUST_LOG",
@@ -81,7 +81,9 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     debug!("block1: {} block2: {}", block1.height, block2.height);
 
     // wait for block mining to reach tree height
-    genesis_node.wait_until_height(2, seconds_to_wait).await?;
+    genesis_node
+        .wait_for_block_at_height(2, seconds_to_wait)
+        .await?;
 
     // wait for migration to reach index height
     genesis_node
@@ -150,8 +152,12 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     result2?;
 
     // wait for block mining to reach tree height
-    peer1_node.wait_until_height(3, seconds_to_wait).await?;
-    peer2_node.wait_until_height(3, seconds_to_wait).await?;
+    peer1_node
+        .wait_for_block_at_height(3, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_for_block_at_height(3, seconds_to_wait)
+        .await?;
     // wait for migration to reach index height
     peer1_node
         .wait_until_block_index_height(2, seconds_to_wait)
@@ -202,7 +208,9 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     assert_eq!(peer2_block_after.block_hash, peer2_block.block_hash);
 
     // wait for genesis block tree height 3
-    genesis_node.wait_until_height(3, seconds_to_wait).await?;
+    genesis_node
+        .wait_for_block_at_height(3, seconds_to_wait)
+        .await?;
     let genesis_block = genesis_node.get_block_by_height(3).await?;
     //wait for genesis block index height 2
     // FIXME: genesis_node.wait_until_height_on_chain(2) sometimes fails
