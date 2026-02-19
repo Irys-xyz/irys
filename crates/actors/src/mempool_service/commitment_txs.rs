@@ -7,7 +7,7 @@ use irys_types::{
     VersionDiscriminant as _, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
-use irys_types::gossip::v3::GossipBroadcastMessageV3;
+use irys_types::gossip::version_pd::GossipBroadcastMessageVersionPD;
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
@@ -336,7 +336,7 @@ impl Inner {
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
         self.service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV3::from(tx.clone()))
+            .send(GossipBroadcastMessageVersionPD::from(tx.clone()))
             .expect("Failed to send gossip data");
     }
 

@@ -9,7 +9,7 @@ use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-/// Message for gossiping unpacked PD (Programmable Data) chunks between V3 peers.
+/// Message for gossiping unpacked PD (Programmable Data) chunks between VersionPD peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PdChunkMessage {
     pub chunk: UnpackedChunk,
@@ -393,7 +393,7 @@ pub mod v2 {
     }
 }
 
-pub mod v3 {
+pub mod version_pd {
     use super::PdChunkMessage;
     use crate::{
         BlockBody, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, IngressProof,
@@ -405,13 +405,13 @@ pub mod v3 {
     use std::sync::Arc;
 
     #[derive(Clone, Debug)]
-    pub struct GossipBroadcastMessageV3 {
+    pub struct GossipBroadcastMessageVersionPD {
         pub key: GossipCacheKey,
-        pub data: GossipDataV3,
+        pub data: GossipDataVersionPD,
     }
 
-    impl GossipBroadcastMessageV3 {
-        pub fn new(key: GossipCacheKey, data: GossipDataV3) -> Self {
+    impl GossipBroadcastMessageVersionPD {
+        pub fn new(key: GossipCacheKey, data: GossipDataVersionPD) -> Self {
             Self { key, data }
         }
 
@@ -420,58 +420,61 @@ pub mod v3 {
         }
     }
 
-    impl From<SealedBlock<Block>> for GossipBroadcastMessageV3 {
+    impl From<SealedBlock<Block>> for GossipBroadcastMessageVersionPD {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             let key = GossipCacheKey::sealed_evm_block(&sealed_block);
-            let value = GossipDataV3::from(sealed_block);
+            let value = GossipDataVersionPD::from(sealed_block);
             Self::new(key, value)
         }
     }
 
-    impl From<UnpackedChunk> for GossipBroadcastMessageV3 {
+    impl From<UnpackedChunk> for GossipBroadcastMessageVersionPD {
         fn from(chunk: UnpackedChunk) -> Self {
             let key = GossipCacheKey::chunk(&chunk);
-            Self::new(key, GossipDataV3::Chunk(chunk))
+            Self::new(key, GossipDataVersionPD::Chunk(chunk))
         }
     }
 
-    impl From<DataTransactionHeader> for GossipBroadcastMessageV3 {
+    impl From<DataTransactionHeader> for GossipBroadcastMessageVersionPD {
         fn from(transaction: DataTransactionHeader) -> Self {
             let key = GossipCacheKey::transaction(&transaction);
-            Self::new(key, GossipDataV3::Transaction(transaction))
+            Self::new(key, GossipDataVersionPD::Transaction(transaction))
         }
     }
 
-    impl From<CommitmentTransaction> for GossipBroadcastMessageV3 {
+    impl From<CommitmentTransaction> for GossipBroadcastMessageVersionPD {
         fn from(commitment_tx: CommitmentTransaction) -> Self {
             let key = GossipCacheKey::commitment_transaction(&commitment_tx);
-            Self::new(key, GossipDataV3::CommitmentTransaction(commitment_tx))
+            Self::new(
+                key,
+                GossipDataVersionPD::CommitmentTransaction(commitment_tx),
+            )
         }
     }
 
-    impl From<IngressProof> for GossipBroadcastMessageV3 {
+    impl From<IngressProof> for GossipBroadcastMessageVersionPD {
         fn from(ingress_proof: IngressProof) -> Self {
             let key = GossipCacheKey::ingress_proof(&ingress_proof);
-            Self::new(key, GossipDataV3::IngressProof(ingress_proof))
+            Self::new(key, GossipDataVersionPD::IngressProof(ingress_proof))
         }
     }
 
-    impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessageV3 {
+    impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessageVersionPD {
         fn from(block: Arc<IrysBlockHeader>) -> Self {
             let key = GossipCacheKey::irys_block(&block);
-            Self::new(key, GossipDataV3::BlockHeader(block))
+            Self::new(key, GossipDataVersionPD::BlockHeader(block))
         }
     }
 
-    impl From<PdChunkMessage> for GossipBroadcastMessageV3 {
+    impl From<PdChunkMessage> for GossipBroadcastMessageVersionPD {
         fn from(msg: PdChunkMessage) -> Self {
             let key = GossipCacheKey::chunk(&msg.chunk);
-            Self::new(key, GossipDataV3::PdChunk(msg))
+            Self::new(key, GossipDataVersionPD::PdChunk(msg))
         }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum GossipDataV3 {
+    pub enum GossipDataVersionPD {
         Chunk(UnpackedChunk),
         Transaction(DataTransactionHeader),
         CommitmentTransaction(CommitmentTransaction),
@@ -482,13 +485,13 @@ pub mod v3 {
         PdChunk(PdChunkMessage),
     }
 
-    impl From<SealedBlock<Block>> for GossipDataV3 {
+    impl From<SealedBlock<Block>> for GossipDataVersionPD {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             Self::ExecutionPayload(sealed_block.into_block())
         }
     }
 
-    impl GossipDataV3 {
+    impl GossipDataVersionPD {
         pub fn to_v2(&self) -> Option<super::v2::GossipDataV2> {
             match self {
                 Self::Chunk(chunk) => Some(super::v2::GossipDataV2::Chunk(chunk.clone())),
@@ -618,9 +621,9 @@ pub struct GossipRequestV2<T> {
     pub data: T,
 }
 
-/// V3 GossipRequest
+/// VersionPD GossipRequest
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GossipRequestV3<T> {
+pub struct GossipRequestVersionPD<T> {
     pub peer_id: IrysPeerId,
     pub miner_address: IrysAddress,
     pub data: T,
@@ -639,9 +642,9 @@ impl<T> From<GossipRequestV2<T>> for GossipRequestV1<T> {
     }
 }
 
-/// Conversion from V3 to V2
-impl<T> From<GossipRequestV3<T>> for GossipRequestV2<T> {
-    fn from(v3: GossipRequestV3<T>) -> Self {
+/// Conversion from VersionPD to V2
+impl<T> From<GossipRequestVersionPD<T>> for GossipRequestV2<T> {
+    fn from(v3: GossipRequestVersionPD<T>) -> Self {
         Self {
             peer_id: v3.peer_id,
             miner_address: v3.miner_address,

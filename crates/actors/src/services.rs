@@ -16,7 +16,7 @@ use crate::{
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
-use irys_types::v3::GossipBroadcastMessageV3;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ pub struct ServiceReceivers {
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV3>,
+    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageVersionPD>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
@@ -129,7 +129,7 @@ pub struct ServiceSendersInner {
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV3>,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageVersionPD>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub block_index: UnboundedSender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
@@ -160,7 +160,7 @@ impl ServiceSendersInner {
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
-            unbounded_channel::<GossipBroadcastMessageV3>();
+            unbounded_channel::<GossipBroadcastMessageVersionPD>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
         let (block_index_sender, block_index_receiver) =

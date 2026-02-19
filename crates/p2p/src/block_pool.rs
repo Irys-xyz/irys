@@ -16,7 +16,7 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
-use irys_types::v3::GossipBroadcastMessageV3;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
     IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
@@ -1055,7 +1055,7 @@ where
                     let gossip_payload = execution_payload_provider
                         .get_sealed_block_from_cache(&evm_block_hash)
                         .await
-                        .map(GossipBroadcastMessageV3::from);
+                        .map(GossipBroadcastMessageVersionPD::from);
 
                     if let Some(payload) = gossip_payload {
                         if let Err(err) = gossip_broadcast_sender.send(payload) {

@@ -20,7 +20,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::v3::GossipDataV3;
+use irys_types::version_pd::GossipDataVersionPD;
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PdChunkMessage, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
@@ -978,7 +978,7 @@ where
                                 "Block pool returned a block without a POA chunk"
                             );
                         }
-                        let data = Arc::new(GossipDataV3::BlockHeader(block));
+                        let data = Arc::new(GossipDataVersionPD::BlockHeader(block));
                         self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
@@ -999,7 +999,7 @@ where
                 .await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV3::BlockBody(Arc::clone(&block_body)));
+                    let data = Arc::new(GossipDataVersionPD::BlockBody(Arc::clone(&block_body)));
                     self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                     Ok(true)
                 } else {
@@ -1018,7 +1018,7 @@ where
 
                 match maybe_evm_block {
                     Some(evm_block) => {
-                        let data = Arc::new(GossipDataV3::ExecutionPayload(evm_block));
+                        let data = Arc::new(GossipDataVersionPD::ExecutionPayload(evm_block));
                         self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
@@ -1039,7 +1039,7 @@ where
                 match get_commitment_tx_in_parallel(&vec, mempool_guard, db).await {
                     Ok(mut result) => {
                         if let Some(tx) = result.pop() {
-                            let data = Arc::new(GossipDataV3::CommitmentTransaction(tx));
+                            let data = Arc::new(GossipDataVersionPD::CommitmentTransaction(tx));
                             self.send_gossip_data(
                                 (&request.peer_id, peer_info),
                                 data,
@@ -1060,7 +1060,7 @@ where
                 match get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await {
                     Ok(mut result) => {
                         if let Some(tx) = result.pop() {
-                            let data = Arc::new(GossipDataV3::Transaction(tx));
+                            let data = Arc::new(GossipDataVersionPD::Transaction(tx));
                             self.send_gossip_data(
                                 (&request.peer_id, peer_info),
                                 data,
@@ -1192,7 +1192,7 @@ where
     fn send_gossip_data(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: Arc<GossipDataV3>,
+        data: Arc<GossipDataVersionPD>,
         check_result: &RequestCheckResult,
     ) {
         if check_result.should_update_score() {

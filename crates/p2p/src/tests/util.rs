@@ -27,7 +27,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::v3::GossipBroadcastMessageV3;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, BlockTransactions, CommitmentTransaction,
@@ -52,7 +52,7 @@ use tracing::{debug, info, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV3>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageVersionPD>,
     pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub mempool_state: AtomicMempoolState,
@@ -61,7 +61,7 @@ pub(crate) struct MempoolStub {
 impl MempoolStub {
     #[must_use]
     pub(crate) fn new(
-        internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV3>,
+        internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageVersionPD>,
         mempool_state: AtomicMempoolState,
     ) -> Self {
         Self {
@@ -100,7 +100,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipBroadcastMessageV3::from(tx_header))
+                .send(GossipBroadcastMessageVersionPD::from(tx_header))
                 .expect("to send transaction");
         });
 
@@ -148,7 +148,7 @@ impl MempoolFacade for MempoolStub {
             let message_bus = self.internal_message_bus.clone();
             tokio::runtime::Handle::current().spawn(async move {
                 message_bus
-                    .send(GossipBroadcastMessageV3::from(chunk))
+                    .send(GossipBroadcastMessageVersionPD::from(chunk))
                     .expect("to send chunk");
             });
         }
@@ -241,7 +241,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessageV3>>,
+    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessageVersionPD>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
@@ -272,7 +272,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessageV3::from(block))
+                    .send(GossipBroadcastMessageVersionPD::from(block))
                     .expect("to send block");
             });
         }
@@ -303,7 +303,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub service_senders: ServiceSenders,
-    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessageV3>>,
+    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessageVersionPD>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
     // needs to be held so the directory is removed correctly
@@ -452,7 +452,7 @@ impl GossipServiceTestFixture {
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
-        mpsc::UnboundedSender<GossipBroadcastMessageV3>,
+        mpsc::UnboundedSender<GossipBroadcastMessageVersionPD>,
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
@@ -955,10 +955,10 @@ async fn handle_info(
 }
 
 async fn handle_protocol_version() -> HttpResponse {
-    // Return V1, V2, and V3 support
+    // Return V1, V2, and VersionPD support
     HttpResponse::Ok()
         .content_type("application/json")
-        .json(vec![1_u32, 2_u32, 3_u32])
+        .json(vec![1_u32, 2_u32, 9000_u32])
 }
 
 async fn handle_health() -> HttpResponse {
