@@ -971,8 +971,10 @@ impl AdvisoryChunkIngressError {
     }
 }
 
-/// Generates an ingress proof for a specific `data_root` from its ordered,
-/// persisted compact leaves. Cached chunk bodies are not read on this path.
+/// Generates an ingress proof for a specific `data_root`.
+///
+/// V1 proofs are signed from the ordered compact leaves. V2 proofs also read
+/// cached chunk bodies to compute the KZG commitment.
 #[must_use = "the generated ingress proof should be used or stored"]
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
@@ -982,10 +984,23 @@ pub fn generate_ingress_proof(
     chain_id: ChainId,
     anchor: H256,
     enable_shadow_kzg_logging: bool,
+    use_kzg_ingress_proofs: bool,
 ) -> eyre::Result<IngressProof> {
-    let proof = irys_types::ingress::generate_ingress_proof_from_leaves(
-        &signer, data_root, leaves, chain_id, anchor,
-    )?;
+    let proof = if use_kzg_ingress_proofs {
+        let chunks = load_cached_chunk_bytes(&db, data_root)?;
+        irys_types::ingress::generate_ingress_proof_v2(
+            &signer,
+            data_root,
+            &chunks,
+            chain_id,
+            anchor,
+            irys_types::kzg::default_kzg_settings(),
+        )?
+    } else {
+        irys_types::ingress::generate_ingress_proof_from_leaves(
+            &signer, data_root, leaves, chain_id, anchor,
+        )?
+    };
 
     info!(
         "generated ingress proof {} for data root {}",
@@ -994,7 +1009,7 @@ pub fn generate_ingress_proof(
     );
     db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
-    if enable_shadow_kzg_logging {
+    if enable_shadow_kzg_logging && !use_kzg_ingress_proofs {
         if let Err(e) = shadow_log_kzg_commitments(&db, data_root) {
             warn!(
                 data_root = %data_root,
@@ -1005,6 +1020,34 @@ pub fn generate_ingress_proof(
     }
 
     Ok(proof)
+}
+
+fn load_cached_chunk_bytes(
+    db: &DatabaseProvider,
+    data_root: DataRoot,
+) -> eyre::Result<Vec<Vec<u8>>> {
+    use eyre::eyre;
+    use irys_database::tables::{CachedChunks, CachedChunksIndex};
+    use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::transaction::DbTx as _;
+
+    db.view_eyre(|tx| {
+        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+        let mut chunks = Vec::new();
+        for entry in dup_walker {
+            let (_root_hash, index_entry) = entry?;
+            let chunk_path_hash = index_entry.meta.chunk_path_hash;
+            let chunk = tx.get::<CachedChunks>(chunk_path_hash)?.ok_or_else(|| {
+                eyre!("missing cached chunk {chunk_path_hash} for data root {data_root}")
+            })?;
+            let chunk_bin = chunk.chunk.ok_or_else(|| {
+                eyre!("missing chunk body {chunk_path_hash} for data root {data_root}")
+            })?;
+            chunks.push(chunk_bin.0);
+        }
+        Ok(chunks)
+    })
 }
 
 /// Compute KZG commitments in shadow mode: re-reads chunks from DB, computes
