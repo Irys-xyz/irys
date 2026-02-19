@@ -8,15 +8,11 @@
 //! Test scenarios covered:
 //! 1. VDF too old - solution's VDF step is not greater than parent's VDF step
 //! 2. Valid solution reuse - parent changes but solution remains valid
-//!
-//! NOTE: All tests use the `serial_` prefix to ensure they run sequentially.
-//! This is required because the VDF thread needs consistent CPU time without
-//! OS scheduling congestion from concurrent test execution.
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth::IrysBuiltPayload;
 use irys_types::{
-    block_production::SolutionContext, BlockTransactions, IrysBlockHeader, NodeConfig, H256,
+    block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock, H256,
 };
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -48,7 +44,7 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)>> {
+    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>> {
         // Track the solution hash and VDF step
         *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
         *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
@@ -78,7 +74,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -191,7 +187,7 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// but the solution still meets all requirements (VDF step and difficulty),
 /// the block producer rebuilds on the new parent using the same solution.
 #[test_log::test(tokio::test)]
-async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup
@@ -273,17 +269,19 @@ async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<
 
     // Get the result
     let result = handle.await??;
-    let (block, _eth_payload, _) = result.expect("Block should be produced successfully");
+    let (block, _eth_payload) = result.expect("Block should be produced successfully");
 
     // Verify the block was built on node2's block (parent changed)
     assert_eq!(
-        block.previous_block_hash, node2_block.block_hash,
+        block.header().previous_block_hash,
+        node2_block.block_hash,
         "Block should be built on the new parent"
     );
 
     // Verify same solution hash was used
     assert_eq!(
-        block.solution_hash, original_solution_hash,
+        block.header().solution_hash,
+        original_solution_hash,
         "Same solution hash should be reused after parent change"
     );
 
@@ -298,18 +296,18 @@ async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<
     info!("SUCCESS: Solution was reused when parent changed but remained valid");
     info!("Original solution hash: {}", original_solution_hash);
     info!("Block built on new parent: {}", node2_block.block_hash);
-    info!("Final block height: {}", block.height);
+    info!("Final block height: {}", block.header().height);
 
     // Verify both nodes have validated the newly produced block
     info!(
         "Waiting for both nodes to validate the new block at height {}",
-        block.height
+        block.header().height
     );
-    node1.wait_until_height(block.height, 10).await?;
-    node2.wait_until_height(block.height, 10).await?;
+    node1.wait_until_height(block.header().height, 10).await?;
+    node2.wait_until_height(block.header().height, 10).await?;
     info!(
         "Both nodes have successfully validated the block at height {}",
-        block.height
+        block.header().height
     );
 
     // Cleanup

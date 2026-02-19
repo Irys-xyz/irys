@@ -417,6 +417,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
             min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
         }),
         aurora: None,
+        borealis: None,
     };
 
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)

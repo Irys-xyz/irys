@@ -3,17 +3,32 @@ use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
+use opentelemetry::metrics::Gauge;
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
+use std::sync::OnceLock;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
 use tracing::{debug, error, info, Instrument as _};
+
+static RETH_FCU_HEAD_HEIGHT: OnceLock<Gauge<u64>> = OnceLock::new();
+
+fn record_reth_fcu_head_height(height: u64) {
+    RETH_FCU_HEAD_HEIGHT
+        .get_or_init(|| {
+            opentelemetry::global::meter("irys-chain")
+                .u64_gauge("irys.reth.fcu_head_height")
+                .with_description("Reth fork choice update head block height")
+                .build()
+        })
+        .record(height, &[]);
+}
 
 #[derive(Debug)]
 pub struct RethService {
@@ -270,8 +285,9 @@ impl RethService {
             "Reth state after fork choice update"
         );
 
+        let latest_after = latest_after.unwrap();
         eyre::ensure!(
-            head_hash == latest_after.unwrap().header.hash,
+            head_hash == latest_after.header.hash,
             "head hashes don't match post FCU"
         );
         eyre::ensure!(
@@ -282,6 +298,8 @@ impl RethService {
             finalized_hash == finalized_after.unwrap().header.hash,
             "finalized hashes don't match post FCU"
         );
+
+        record_reth_fcu_head_height(latest_after.header.number);
 
         Ok(fcu)
     }

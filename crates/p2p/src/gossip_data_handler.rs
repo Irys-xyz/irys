@@ -1,6 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
+    metrics::{record_gossip_chunk_received, record_gossip_inbound_error},
     rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
@@ -11,18 +12,18 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
-    CriticalChunkIngressError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, ChunkIngressError, CriticalChunkIngressError,
+    MempoolFacade,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -52,6 +53,8 @@ where
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
     pub started_at: Instant,
+    /// Precomputed hash of the consensus config to avoid recomputing on every handshake
+    pub consensus_config_hash: H256,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -73,6 +76,7 @@ where
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
             started_at: self.started_at,
+            consensus_config_hash: self.consensus_config_hash,
         }
     }
 }
@@ -82,14 +86,18 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    #[tracing::instrument(level = "trace", skip_all, err)]
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub(crate) async fn handle_chunk(
         &self,
         chunk_request: GossipRequestV2<UnpackedChunk>,
     ) -> GossipResult<()> {
         let source_peer_id = chunk_request.peer_id;
         let chunk = chunk_request.data;
+        let chunk_size = chunk.bytes.0.len() as u64;
         let chunk_path_hash = chunk.chunk_path_hash();
+
+        record_gossip_chunk_received(chunk_size);
+
         match self.mempool.handle_chunk_ingress(chunk).await {
             Ok(()) => {
                 // Success. Mempool will send the tx data to the internal mempool,
@@ -98,71 +106,39 @@ where
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
-                match error {
-                    ChunkIngressError::Critical(err) => {
-                        match err {
-                            // ===== External invalid data errors
-                            CriticalChunkIngressError::InvalidProof => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
-                            ),
-                            CriticalChunkIngressError::InvalidDataHash => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash),
-                            ),
-                            CriticalChunkIngressError::InvalidChunkSize => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
-                            ),
-                            CriticalChunkIngressError::InvalidDataSize => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
-                            ),
-                            CriticalChunkIngressError::InvalidOffset(msg) => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg)),
-                            ),
-                            // ===== Internal errors
-                            CriticalChunkIngressError::DatabaseError => {
-                                Err(GossipError::Internal(InternalGossipError::Database(
-                                    "Chunk ingress database error".to_string(),
-                                )))
-                            }
-                            CriticalChunkIngressError::ServiceUninitialized => Err(
-                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
-                            ),
-                            CriticalChunkIngressError::Other(other) => {
-                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
-                            }
-                        }
-                    }
+                record_gossip_inbound_error(error.error_type(), error.is_advisory());
 
-                    ChunkIngressError::Advisory(err) => {
-                        match err {
-                            // ===== Interval data 'errors' (peers should not be punished)
-                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg) => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg),
-                                )))
-                            }
-                            AdvisoryChunkIngressError::Other(other) => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::Other(other),
-                                )))
-                            }
+                Err(match error {
+                    ChunkIngressError::Critical(err) => match err {
+                        CriticalChunkIngressError::InvalidProof => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof)
                         }
+                        CriticalChunkIngressError::InvalidDataHash => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash)
+                        }
+                        CriticalChunkIngressError::InvalidChunkSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
+                        }
+                        CriticalChunkIngressError::InvalidDataSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize)
+                        }
+                        CriticalChunkIngressError::InvalidOffset(msg) => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
+                        }
+                        CriticalChunkIngressError::DatabaseError => GossipError::Internal(
+                            InternalGossipError::Database("Chunk ingress database error".into()),
+                        ),
+                        CriticalChunkIngressError::ServiceUninitialized => {
+                            GossipError::Internal(InternalGossipError::ServiceUninitialized)
+                        }
+                        CriticalChunkIngressError::Other(other) => {
+                            GossipError::Internal(InternalGossipError::Unknown(other))
+                        }
+                    },
+                    ChunkIngressError::Advisory(err) => {
+                        GossipError::Advisory(AdvisoryGossipError::ChunkIngress(err))
                     }
-                }
+                })
             }
         }
     }
@@ -353,29 +329,41 @@ where
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
         debug!("Pulling block {} from the network", block_hash);
-        let (source_address, irys_block) = self
+        let (source_peer_id, irys_block) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
-        let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
+        let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             // This shouldn't happen, but we still should have a safeguard just in case
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_address
+            let error_msg = format!(
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
             "Pulled block {} from peer {}, sending for processing",
-            block_hash, source_address
+            block_hash, source_peer_id
         );
         // Get miner_address from the peer item
         let miner_address = peer_info.mining_address;
         self.handle_block_header(
             GossipRequestV2 {
-                peer_id: source_address,
+                peer_id: source_peer_id,
                 miner_address,
                 data: (*irys_block).clone(),
             },
@@ -392,17 +380,29 @@ where
         block_hash: BlockHash,
         peer: &(irys_types::IrysPeerId, PeerListItem),
     ) -> GossipResult<()> {
-        let (source_peer_id, irys_block) = self
+        let (source_peer_id, irys_block) = match self
             .gossip_client
             .pull_block_header_from_peer(block_hash, peer, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_peer failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
-                source_peer_id
+            let error_msg = format!(
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         // Get miner_address from the peer item
@@ -529,12 +529,15 @@ where
             .pull_block_body(&block_header, use_trusted_peers_only)
             .await?;
 
+        let sealed_block = SealedBlock::new(block_header, block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(
-                Arc::new(block_header),
-                block_body,
-                skip_validation_for_fast_track,
-            )
+            .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
             .await?;
         Ok(())
     }
@@ -681,8 +684,15 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
+        let sealed_block = SealedBlock::new((*block_header).clone(), block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(block_header, Arc::new(block_body), skip_block_validation)
+            .process_block(Arc::new(sealed_block), skip_block_validation)
             .await?;
         Ok(())
     }
@@ -697,17 +707,29 @@ where
             block_hash
         );
 
-        let (source_peer_id, irys_block_header) = self
+        let (source_peer_id, irys_block_header) = match self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
+                return Err(e.into());
+            }
+        };
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_peer_id
+            let error_msg = format!(
+                "Peer with peer_id {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block header from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
@@ -769,7 +791,12 @@ where
                 }
             }
         }
-        Err(last_err.expect("Error must be set after 3 attempts"))
+        let err = last_err.expect("Error must be set after 3 attempts");
+        self.sync_state.record_data_pull_error(format!(
+            "pull_payload_from_network failed for {}: {:?}",
+            evm_block_hash, err
+        ));
+        Err(err)
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -871,11 +898,7 @@ where
                             );
                         }
                         let data = Arc::new(GossipDataV2::BlockHeader(block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -886,12 +909,17 @@ where
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
                 );
-                let block_body =
-                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
+                let block_body = get_block_body(
+                    &block_hash,
+                    &self.block_pool,
+                    &self.mempool,
+                    &self.block_tree,
+                )
+                .await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV2::BlockBody(block_body));
-                    self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
+                    let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
+                    self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -910,11 +938,7 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipDataV2::ExecutionPayload(evm_block));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
                         Ok(true)
                     }
                     None => Ok(false),
@@ -936,7 +960,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -957,7 +981,7 @@ where
                         if let Some(tx) = result.pop() {
                             let data = Arc::new(GossipDataV2::Transaction(tx));
                             self.send_gossip_data(
-                                (&request.miner_address, peer_info),
+                                (&request.peer_id, peer_info),
                                 data,
                                 &check_result,
                             );
@@ -998,9 +1022,14 @@ where
                 Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
             GossipDataRequestV2::BlockBody(block_hash) => {
-                let maybe_block_body =
-                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
-                Ok(maybe_block_body.map(GossipDataV2::BlockBody))
+                let maybe_block_body = get_block_body(
+                    &block_hash,
+                    &self.block_pool,
+                    &self.mempool,
+                    &self.block_tree,
+                )
+                .await?;
+                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::clone(&body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1081,7 +1110,7 @@ where
 
     fn send_gossip_data(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
         check_result: &RequestCheckResult,
     ) {
@@ -1146,7 +1175,7 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<Arc<BlockBody>> {
+    ) -> GossipResult<BlockBody> {
         let block_hash = header.block_hash;
 
         debug!(
@@ -1175,7 +1204,7 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, source_peer_id
                             );
-                            return Ok(irys_block_body);
+                            return Ok((*irys_block_body).clone());
                         }
                         Ok(false) => {
                             warn!(
@@ -1259,39 +1288,47 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     block_hash: &BlockHash,
     block_pool: &BlockPool<B, M>,
     mempool: &M,
+    block_tree: &BlockTreeReadGuard,
 ) -> GossipResult<Option<Arc<BlockBody>>> {
-    let maybe_block_body =
-        if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
-            Some(block_body)
-        } else {
-            let maybe_block_header = block_pool.get_block_header(block_hash).await?;
-            if let Some(block_header) = &maybe_block_header {
-                let block_body = build_block_body_for_processed_block_header(
-                    block_header,
-                    &mempool.get_internal_read_guard().await,
-                    &block_pool.db,
-                )
-                .await
-                .map_err(|err| {
-                    error!(
-                        "Error building block body for block {:?}: {:?}",
-                        block_hash, err
-                    );
-                    GossipError::Internal(InternalGossipError::Unknown(format!(
-                        "Error building block body for block {}: {}",
-                        block_hash, err
-                    )))
-                })?;
-                debug!("Successfully built block body for block {:?}", block_hash);
-                Some(Arc::new(block_body))
-            } else {
-                warn!(
-                    "Didn't find the block header to build the block body for the block {:?}",
-                    block_hash
-                );
-                None
-            }
-        };
+    // Check the pool caches (in-flight + recently-processed)
+    if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
+        return Ok(Some(block_body));
+    }
 
-    Ok(maybe_block_body)
+    // Check the block tree (code block to drop the guard)
+    {
+        let from_tree = block_tree.read().get_sealed_block(block_hash);
+        if let Some(sealed) = from_tree {
+            return Ok(Some(Arc::new(sealed.to_block_body())));
+        }
+    }
+
+    // Expensive path: reconstruct from mempool/DB
+    let maybe_block_header = block_pool.get_block_header(block_hash).await?;
+    if let Some(block_header) = &maybe_block_header {
+        let block_body = build_block_body_for_processed_block_header(
+            block_header,
+            &mempool.get_internal_read_guard().await,
+            &block_pool.db,
+        )
+        .await
+        .map_err(|err| {
+            error!(
+                "Error building block body for block {:?}: {:?}",
+                block_hash, err
+            );
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Error building block body for block {}: {}",
+                block_hash, err
+            )))
+        })?;
+        debug!("Successfully built block body for block {:?}", block_hash);
+        Ok(Some(Arc::new(block_body)))
+    } else {
+        warn!(
+            "Didn't find the block header to build the block body for the block {:?}",
+            block_hash
+        );
+        Ok(None)
+    }
 }

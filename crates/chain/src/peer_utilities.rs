@@ -1,3 +1,4 @@
+use crate::metrics;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
@@ -92,6 +93,7 @@ pub async fn fetch_txn(
                 Err(e) => {
                     let msg = format!("Error reading body from {}: {}", &url, e);
                     warn!(msg);
+                    metrics::record_peer_fetch_error("txn_body_parse");
                     None
                 }
             },
@@ -102,11 +104,13 @@ pub async fn fetch_txn(
                     e.status().unwrap_or_default()
                 );
                 warn!(msg);
+                metrics::record_peer_fetch_error("txn_http_error");
                 None
             }
         },
         Err(e) => {
             warn!("Request to {} failed: {}", &url, e);
+            metrics::record_peer_fetch_error("txn_request_failed");
             None
         }
     }
@@ -126,6 +130,7 @@ pub async fn fetch_block(
                 Ok(combined) => Some(combined.irys),
                 Err(e) => {
                     warn!("Error parsing block response {}: {}", &url, e);
+                    metrics::record_peer_fetch_error("block_body_parse");
                     None
                 }
             },
@@ -135,11 +140,13 @@ pub async fn fetch_block(
                     &url,
                     e.status().unwrap_or_default()
                 );
+                metrics::record_peer_fetch_error("block_http_error");
                 None
             }
         },
         Err(e) => {
             warn!("Request to {} failed: {}", &url, e);
+            metrics::record_peer_fetch_error("block_request_failed");
             None
         }
     }

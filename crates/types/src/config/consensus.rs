@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig, Sprite};
+use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig, Sprite};
 use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
     storage_pricing::{
@@ -226,7 +226,7 @@ impl ConsensusOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
     #[serde(
@@ -269,7 +269,7 @@ impl IrysRethConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenesisConfig {
     /// The timestamp in milliseconds used for the genesis block
@@ -309,7 +309,7 @@ pub struct GenesisConfig {
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
@@ -329,7 +329,7 @@ pub struct EpochConfig {
 /// # EMA (Exponential Moving Average) Configuration
 ///
 /// Controls how token prices are smoothed over time to reduce volatility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaConfig {
     /// Number of blocks between EMA price recalculations
@@ -340,7 +340,7 @@ pub struct EmaConfig {
 /// # VDF (Verifiable Delay Function) Configuration
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VdfConsensusConfig {
     /// VDF reset frequency in global steps
@@ -366,7 +366,7 @@ pub struct VdfConsensusConfig {
 /// # Difficulty Adjustment Configuration
 ///
 /// Controls how mining difficulty changes over time to maintain target block times.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DifficultyAdjustmentConfig {
     /// Target time between blocks in seconds
@@ -385,7 +385,7 @@ pub struct DifficultyAdjustmentConfig {
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MempoolConsensusConfig {
     /// Maximum number of data transactions that can be included in a single block
@@ -406,7 +406,48 @@ pub struct MempoolConsensusConfig {
     pub commitment_fee: u64,
 }
 
+/// Recursively sort all object keys in a JSON value for deterministic serialization.
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, sort_json_keys(v)))
+                .collect();
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            )
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_keys).collect())
+        }
+        other => other,
+    }
+}
+
 impl ConsensusConfig {
+    /// Produce a deterministic Keccak256 hash of this consensus config.
+    ///
+    /// Uses canonical JSON serialization with alphabetically sorted keys.
+    /// This ensures platform-independent and deterministic hashing across the network.
+    pub fn keccak256_hash(&self) -> H256 {
+        // Serialize to canonical JSON value (camelCase keys, u64/i64 as strings)
+        let json_value = crate::canonical::to_canonical(self)
+            .expect("ConsensusConfig should serialize to canonical JSON");
+
+        // Sort all keys recursively for deterministic ordering
+        let sorted_value = sort_json_keys(json_value);
+
+        // Serialize to compact JSON string (no extra whitespace)
+        let json_string = serde_json::to_string(&sorted_value)
+            .expect("Sorted JSON value should serialize to string");
+
+        // Hash the canonical JSON string
+        H256(alloy_primitives::keccak256(json_string.as_bytes()).0)
+    }
+
     // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
     // TODO: get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
     // discrepancies when using GPU mining
@@ -600,6 +641,7 @@ impl ConsensusConfig {
                 next_name_tbd: None,
                 sprite: None,
                 aurora: None,
+                borealis: None,
             },
         }
     }
@@ -716,11 +758,14 @@ impl ConsensusConfig {
                     min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
                 }),
                 aurora: Some(Aurora {
-                    // Enable aurora from genesis for tests
-                    activation_timestamp: UnixTimestamp::from_secs(0),
+                    activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
+                // Borealis hardfork - enabled from genesis for testing
+                borealis: Some(Borealis {
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                }),
             },
         }
     }
@@ -825,7 +870,82 @@ impl ConsensusConfig {
                 }),
                 next_name_tbd: None,
                 sprite: None,
+                // Borealis hardfork - disabled for testnet (controlled activation)
+                borealis: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consensus_hash_deterministic() {
+        let config = ConsensusConfig::testing();
+        let hash1 = config.keccak256_hash();
+        let hash2 = config.keccak256_hash();
+        assert_eq!(hash1, hash2, "same config should hash to the same value");
+        assert_ne!(hash1, H256::zero(), "hash should not be zero");
+    }
+
+    #[test]
+    fn test_consensus_hash_differs_on_change() {
+        let config_a = ConsensusConfig::testing();
+        let mut config_b = ConsensusConfig::testing();
+        config_b.chunk_size += 1;
+        assert_ne!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "configs differing by one field should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_consensus_hash_independent_instances() {
+        let config_a = ConsensusConfig::testing();
+        let config_b = ConsensusConfig::testing();
+        assert_eq!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "independently constructed configs should produce identical hashes"
+        );
+    }
+
+    #[test]
+    fn test_genesis_and_peer_consensus_hash_match() {
+        let mut genesis_config = ConsensusConfig::testing();
+        assert!(genesis_config.expected_genesis_hash.is_none());
+
+        let fake_hash = H256::from_base58("5VoHFxVrC4WM7VHDwUJrFWZ2yVJXkY3JHEsR2U9bQxXH");
+
+        let mut peer_config = ConsensusConfig::testing();
+        peer_config.expected_genesis_hash = Some(fake_hash);
+
+        // Simulate what Genesis node does at runtime
+        genesis_config.expected_genesis_hash = Some(fake_hash);
+
+        assert_eq!(
+            genesis_config.keccak256_hash(),
+            peer_config.keccak256_hash(),
+            "Genesis and Peer nodes with same expected_genesis_hash must have matching consensus hashes"
+        );
+    }
+
+    #[test]
+    fn test_consensus_hash_regression() {
+        // This test verifies that the hash of the testing config remains stable.
+        // If this test fails, it indicates a breaking change in either:
+        // - The ConsensusConfig structure or field order
+        // - The canonical JSON serialization implementation
+        // - The serde serialization of dependency types
+        let config = ConsensusConfig::testing();
+        let expected_hash = H256::from_base58("JAvW3YLPGQhoDcR4xdGyh6fssC6usQh7gGkh5fC2JPTM");
+        assert_eq!(
+            config.keccak256_hash(),
+            expected_hash,
+            "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
+        );
     }
 }

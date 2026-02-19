@@ -1,5 +1,7 @@
+use crate::mempool_service::metrics::record_chunk_error;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
+use crate::metrics;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
@@ -28,6 +30,13 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if this tx targets an unsupported term ledger
+        match DataLedger::try_from(tx.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => return Err(TxIngressError::InvalidLedger(tx.ledger_id)),
+        }
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
             // Compute composite fingerprint: keccak(signature + prehash + id)
@@ -80,6 +89,7 @@ impl Inner {
         self.cache_data_root_with_expiry(tx, expiry_height);
         self.process_pending_chunks_for_root(tx.data_root).await?;
         self.broadcast_tx_gossip(tx);
+        metrics::record_data_tx_ingested();
         Ok(())
     }
     /// check the mempool and mdbx for data transaction
@@ -173,8 +183,8 @@ impl Inner {
             DataLedger::Publish => {
                 // Gossip path: skip API-only checks here
             }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
@@ -221,8 +231,8 @@ impl Inner {
                 // Publish ledger - permanent storage
                 self.validate_fee_structure_api_only(&tx)?;
             }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
@@ -267,6 +277,7 @@ impl Inner {
                 tx.signer = %tx.signer,
                 "Insufficient balance for data tx"
             );
+            metrics::record_data_tx_unfunded();
             return Err(TxIngressError::Unfunded(tx.id));
         }
 
@@ -298,13 +309,10 @@ impl Inner {
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
             let ema = tree
-                .get_ema_snapshot(&last_block_entry.block_hash)
+                .get_ema_snapshot(&last_block_entry.block_hash())
                 .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
-            let last_block = tree
-                .get_block(&last_block_entry.block_hash)
-                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
             // Convert block timestamp from millis to seconds
-            let timestamp_secs = last_block.timestamp_secs();
+            let timestamp_secs = last_block_entry.header().timestamp_secs();
             (ema, timestamp_secs)
         };
 
@@ -445,6 +453,7 @@ impl Inner {
                 let msg_result = self.handle_chunk_ingress_message(chunk).await;
 
                 if let Err(err) = msg_result {
+                    record_chunk_error(err.error_type(), err.is_advisory());
                     tracing::error!(
                         "Failed to handle chunk ingress for data_root {:?}: {:?}",
                         data_root,
@@ -494,10 +503,7 @@ impl Inner {
             let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
-            let last_block = tree
-                .get_block(&last_block_entry.block_hash)
-                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
-            last_block.timestamp_secs()
+            last_block_entry.header().timestamp_secs()
         };
         let number_of_ingress_proofs_total = self
             .config
@@ -579,12 +585,12 @@ impl Inner {
         // This is just here to catch any oddities in the debug log. The optimistic
         // and canonical should always have the same results from my reading of the code.
         // if the tests are stable and this hasn't come up it can be removed.
-        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash {
+        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash() {
             debug!("Optimistic and Canonical have different heads");
         }
 
-        let block_hash = canonical_head_entry.block_hash;
-        let block_height = canonical_head_entry.height;
+        let block_hash = canonical_head_entry.block_hash();
+        let block_height = canonical_head_entry.height();
 
         // retrieve block from mempool or database
         // be aware that genesis starts its life immediately in the database

@@ -2,6 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::metrics::record_gossip_outbound_error;
 use crate::types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
@@ -10,10 +11,11 @@ use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
-    HandshakeRequestV2, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysPeerId,
-    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
-    ProtocolVersion, DATA_REQUEST_RETRIES, H256,
+    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
+    IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
+    PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
 };
+use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
@@ -25,6 +27,15 @@ use tracing::{debug, error, warn};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
+
+/// Builds the base gossip URL for a given peer address and protocol version,
+/// e.g. `http://<addr>/gossip` for V1 or `http://<addr>/gossip/v2` for V2.
+fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
+    match version {
+        ProtocolVersion::V1 => format!("http://{}/gossip", addr),
+        ProtocolVersion::V2 => format!("http://{}/gossip/v2", addr),
+    }
+}
 
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
@@ -43,6 +54,8 @@ pub enum GossipClientError {
     HealthCheck(String, reqwest::StatusCode),
     #[error("Failed to get json response payload from {0} with reason {1}")]
     GetJsonResponsePayload(String, String),
+    #[error("Circuit breaker open for peer {0}")]
+    CircuitBreakerOpen(IrysPeerId),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +63,24 @@ pub struct GossipClient {
     pub mining_address: IrysAddress,
     pub peer_id: IrysPeerId,
     client: Client,
+    circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+}
+
+fn gossip_error_type(err: &GossipError) -> &'static str {
+    match err {
+        GossipError::Network(_) => "network",
+        GossipError::InvalidPeer(_) => "invalid_peer",
+        GossipError::Cache(_) => "cache",
+        GossipError::Internal(_) => "internal",
+        GossipError::InvalidData(_) => "invalid_data",
+        GossipError::BlockPool(_) => "block_pool",
+        GossipError::TransactionIsAlreadyHandled => "already_handled",
+        GossipError::CommitmentValidation(_) => "commitment_validation",
+        GossipError::PeerNetwork(_) => "peer_network",
+        GossipError::RateLimited => "rate_limited",
+        GossipError::Advisory(_) => "advisory",
+        GossipError::CircuitBreakerOpen(_) => "circuit_breaker_open",
+    }
 }
 
 impl GossipClient {
@@ -57,6 +88,23 @@ impl GossipClient {
 
     #[must_use]
     pub fn new(timeout: Duration, mining_address: IrysAddress, peer_id: IrysPeerId) -> Self {
+        Self::with_circuit_breaker_config(
+            timeout,
+            mining_address,
+            peer_id,
+            CircuitBreakerConfig::p2p_defaults(),
+        )
+    }
+
+    #[must_use]
+    pub fn with_circuit_breaker_config(
+        timeout: Duration,
+        mining_address: IrysAddress,
+        peer_id: IrysPeerId,
+        circuit_config: CircuitBreakerConfig,
+    ) -> Self {
+        let circuit_breaker = CircuitBreakerManager::new(circuit_config);
+
         Self {
             mining_address,
             peer_id,
@@ -64,11 +112,32 @@ impl GossipClient {
                 .timeout(timeout)
                 .build()
                 .expect("Failed to create reqwest client"),
+            circuit_breaker,
         }
     }
 
     pub fn internal_client(&self) -> &Client {
         &self.client
+    }
+
+    /// Get circuit breaker metrics for monitoring
+    pub fn circuit_breaker_metrics(
+        &self,
+    ) -> irys_utils::circuit_breaker::CircuitBreakerMetrics<IrysPeerId> {
+        self.circuit_breaker.metrics()
+    }
+
+    /// Cleanup stale circuit breakers that haven't been accessed recently
+    pub fn cleanup_stale_circuit_breakers(&self) {
+        self.circuit_breaker.cleanup_stale();
+    }
+
+    fn check_circuit_breaker(&self, peer: &IrysPeerId) -> GossipResult<()> {
+        if self.circuit_breaker.is_available(peer) {
+            return Ok(());
+        }
+        tracing::debug!(?peer, "circuit breaker open, skipping request");
+        Err(GossipError::CircuitBreakerOpen(*peer))
     }
 
     /// Send data to a peer and update their score based on the result
@@ -78,15 +147,17 @@ impl GossipClient {
     /// If the peer is offline or the request fails, an error is returned.
     async fn send_data_and_update_score_internal(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: &GossipDataV2,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
-        let peer_miner_address = peer.0;
+        let peer_id = peer.0;
         let peer = peer.1;
 
+        self.check_circuit_breaker(peer_id)?;
+
         let res = self.send_data(peer, data).await;
-        Self::handle_score(peer_list, &res, peer_miner_address);
+        Self::handle_score(peer_list, &res, peer_id, &self.circuit_breaker);
         res.map(|_| ())
     }
 
@@ -98,6 +169,8 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
+        self.check_circuit_breaker(&peer.0)?;
+
         let start_time = std::time::Instant::now();
 
         let res = if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
@@ -131,7 +204,13 @@ impl GossipClient {
         };
 
         let response_time = start_time.elapsed();
-        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(
+            peer_list,
+            &res,
+            &peer.0,
+            response_time,
+            &self.circuit_breaker,
+        );
         res
     }
 
@@ -207,6 +286,12 @@ impl GossipClient {
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
             if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+                // BlockBody does not exist in V1 - reject early for safety
+                if matches!(requested_data, GossipDataRequestV2::BlockBody(_)) {
+                    return Ok(GossipResponse::Rejected(
+                        RejectionReason::UnsupportedFeature,
+                    ));
+                }
                 if let Some(req_v1) = requested_data.to_v1() {
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
                         self.send_data_internal(
@@ -239,7 +324,13 @@ impl GossipClient {
             };
 
         let response_time = start_time.elapsed();
-        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(
+            peer_list,
+            &res,
+            &peer.0,
+            response_time,
+            &self.circuit_breaker,
+        );
 
         res
     }
@@ -253,6 +344,8 @@ impl GossipClient {
         fallback_header: Option<&IrysBlockHeader>,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
+        self.check_circuit_breaker(&peer.0)?;
+
         if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
             if let GossipDataRequestV2::BlockBody(_block_hash) = requested_data {
                 let header = fallback_header.expect(
@@ -358,14 +451,23 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponse> =
+        let response: GossipResponse<HandshakeResponseV1> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
         match response {
-            GossipResponse::Accepted(version_response) => {
-                Ok(PeerResponse::Accepted(version_response))
+            GossipResponse::Accepted(v1_response) => {
+                // Convert V1 response to V2 format for internal compatibility
+                let v2_response = HandshakeResponseV2 {
+                    version: v1_response.version,
+                    protocol_version: v1_response.protocol_version,
+                    peers: v1_response.peers,
+                    timestamp: v1_response.timestamp,
+                    message: v1_response.message,
+                    consensus_config_hash: H256::zero(), // V1 doesn't have consensus hash
+                };
+                Ok(PeerResponse::Accepted(v2_response))
             }
             GossipResponse::Rejected(reason) => match reason {
                 RejectionReason::InvalidCredentials => Ok(PeerResponse::Rejected(
@@ -414,7 +516,7 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponse> =
+        let response: GossipResponse<HandshakeResponseV2> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
@@ -540,31 +642,70 @@ impl GossipClient {
 
     pub async fn check_health(
         &self,
+        peer_id: &IrysPeerId,
         peer: PeerAddress,
+        protocol_version: ProtocolVersion,
         peer_list: &PeerList,
     ) -> Result<bool, GossipClientError> {
-        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Health);
-        let peer_addr = peer.gossip.to_string();
-
-        let response = self
-            .internal_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| GossipClientError::GetRequest(peer_addr.clone(), error.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
+        if !self.circuit_breaker.is_available(peer_id) {
+            tracing::debug!(?peer_id, "circuit breaker open, skipping health check");
+            return Err(GossipClientError::CircuitBreakerOpen(*peer_id));
         }
 
-        let response: GossipResponse<bool> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })?;
+        let url = format!(
+            "{}{}",
+            gossip_base_url(&peer.gossip, protocol_version),
+            GossipRoutes::Health
+        );
+        let peer_addr_str = peer.gossip.to_string();
+
+        let response = match self.internal_client().get(&url).send().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                tracing::debug!(
+                    peer = ?peer_id,
+                    error = %error,
+                    "health check request failed, recording circuit breaker failure"
+                );
+                self.circuit_breaker.record_failure(peer_id);
+                return Err(GossipClientError::GetRequest(
+                    peer_addr_str,
+                    error.to_string(),
+                ));
+            }
+        };
+
+        if !response.status().is_success() {
+            self.circuit_breaker.record_failure(peer_id);
+            return Err(GossipClientError::HealthCheck(
+                peer_addr_str,
+                response.status(),
+            ));
+        }
+
+        let response: GossipResponse<bool> = match response.json().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                self.circuit_breaker.record_failure(peer_id);
+                return Err(GossipClientError::GetJsonResponsePayload(
+                    peer_addr_str,
+                    error.to_string(),
+                ));
+            }
+        };
 
         match response {
-            GossipResponse::Accepted(val) => Ok(val),
+            GossipResponse::Accepted(val) => {
+                if val {
+                    self.circuit_breaker.record_success(peer_id);
+                } else {
+                    self.circuit_breaker.record_failure(peer_id);
+                }
+                Ok(val)
+            }
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
+                self.circuit_breaker.record_failure(peer_id);
                 match reason {
                     RejectionReason::HandshakeRequired(reason) => {
                         warn!("Health check requires handshake: {:?}", reason);
@@ -771,10 +912,11 @@ impl GossipClient {
         for<'de> R: Deserialize<'de>,
     {
         // Construct URL based on protocol version
-        let url = match protocol_version {
-            ProtocolVersion::V1 => format!("http://{}/gossip{}", gossip_address, route),
-            ProtocolVersion::V2 => format!("http://{}/gossip/v2{}", gossip_address, route),
-        };
+        let url = format!(
+            "{}{}",
+            gossip_base_url(gossip_address, protocol_version),
+            route
+        );
 
         debug!("Sending data to {} using {:?}", url, protocol_version);
 
@@ -829,27 +971,28 @@ impl GossipClient {
     fn handle_score<T>(
         peer_list: &PeerList,
         result: &GossipResult<GossipResponse<T>>,
-        peer_miner_address: &IrysAddress,
+        peer_id: &IrysPeerId,
+        circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
         match &result {
             Ok(_) => {
-                // Successful send, increase score for data request
-                peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
-                peer_list.set_is_online(peer_miner_address, true);
+                peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::DataRequest);
+                peer_list.set_is_online_by_peer_id(peer_id, true);
+                circuit_breaker.record_success(peer_id);
             }
             Err(err) => {
                 if let GossipError::Network(_message) = err {
                     debug!(
                         "Setting peer {:?} status to 'offline' due to a network error",
-                        peer_miner_address
+                        peer_id
                     );
-                    peer_list.set_is_online(peer_miner_address, false);
+                    peer_list.set_is_online_by_peer_id(peer_id, false);
                 }
-                // Failed to send, decrease score
-                peer_list.decrease_peer_score(
-                    peer_miner_address,
+                peer_list.decrease_peer_score_by_peer_id(
+                    peer_id,
                     ScoreDecreaseReason::NetworkError(format!("{:?}", err)),
                 );
+                circuit_breaker.record_failure(peer_id);
             }
         }
     }
@@ -860,27 +1003,24 @@ impl GossipClient {
         result: &GossipResult<T>,
         peer_id: &IrysPeerId,
         response_time: Duration,
+        circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
         match result {
             Ok(_) => {
-                // Successful response - reward based on speed
                 if response_time <= FAST_RESPONSE_THRESHOLD {
-                    // Fast response deserves extra reward
                     peer_list.increase_peer_score_by_peer_id(
                         peer_id,
                         ScoreIncreaseReason::TimelyResponse,
                     );
                 } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
-                    // Normal response gets standard reward
                     peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::Online);
                 } else {
-                    // Slow but successful response gets minimal penalty
                     peer_list
                         .decrease_peer_score_by_peer_id(peer_id, ScoreDecreaseReason::SlowResponse);
                 }
+                circuit_breaker.record_success(peer_id);
             }
             Err(err) => {
-                // Failed to respond - severe penalty
                 peer_list.decrease_peer_score_by_peer_id(
                     peer_id,
                     ScoreDecreaseReason::NetworkError(format!(
@@ -888,6 +1028,7 @@ impl GossipClient {
                         err
                     )),
                 );
+                circuit_breaker.record_failure(peer_id);
             }
         }
     }
@@ -907,15 +1048,11 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
-            let peer_miner_address = peer.mining_address;
             if let Err(e) = client
-                .send_data_and_update_score_internal(
-                    (&peer_miner_address, &peer),
-                    &data,
-                    &peer_list,
-                )
+                .send_data_and_update_score_internal((&peer_id, &peer), &data, &peer_list)
                 .await
             {
+                record_gossip_outbound_error(gossip_error_type(&e));
                 error!("Error sending data to peer: {:?}", e);
             } else if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
                 error!("Error recording seen data in cache: {:?}", err);
@@ -926,7 +1063,7 @@ impl GossipClient {
     /// Sends data to a peer without updating their score
     pub fn send_data_without_score_update(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
     ) {
         let client = self.clone();
@@ -934,6 +1071,7 @@ impl GossipClient {
 
         tokio::spawn(async move {
             if let Err(e) = client.send_data(&peer, &data).await {
+                record_gossip_outbound_error(gossip_error_type(&e));
                 error!("Error sending data to peer: {}", e);
             }
         });
@@ -942,26 +1080,26 @@ impl GossipClient {
     /// Sends data to a peer and updates their score specifically for data requests
     pub fn send_data_and_update_score_for_request(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
         peer_list: &PeerList,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();
-        let peer_miner_address = *peer.0;
+        let peer_id = *peer.0;
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
             let result = client.send_data(&peer, &data).await;
             match &result {
                 Ok(_) => {
-                    // Use DataRequest reason for score increase
                     peer_list
-                        .increase_peer_score(&peer_miner_address, ScoreIncreaseReason::DataRequest);
+                        .increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::DataRequest);
                 }
                 Err(err) => {
-                    peer_list.decrease_peer_score(
-                        &peer_miner_address,
+                    record_gossip_outbound_error(gossip_error_type(err));
+                    peer_list.decrease_peer_score_by_peer_id(
+                        &peer_id,
                         ScoreDecreaseReason::Offline(format!(
                             "send_data_and_update_score_for_request resulted in an error: {:?}",
                             err
@@ -1279,15 +1417,15 @@ impl GossipClient {
                 let pl = peer_list;
                 let fh = fallback_header;
                 futs.push(async move {
-                    let addr = peer.0;
+                    let peer_id = peer.0;
                     let res = gc.pull_data_and_update_the_score(&peer, dr, fh, pl).await;
-                    (addr, peer, res)
+                    (peer_id, peer, res)
                 });
             }
 
             let mut next_retryable = Vec::new();
 
-            while let Some((address, peer, result)) = futs.next().await {
+            while let Some((peer_id, peer, result)) = futs.next().await {
                 had_any_attempts = true;
                 match result {
                     Ok(GossipResponse::Accepted(maybe_data)) => {
@@ -1296,20 +1434,20 @@ impl GossipClient {
                                 Ok(data) => {
                                     debug!(
                                         "Successfully pulled {:?} from peer {}",
-                                        data_request, address
+                                        data_request, peer_id
                                     );
                                     // Drop remaining futures to cancel outstanding requests
-                                    return Ok((address, data));
+                                    return Ok((peer_id, data));
                                 }
                                 Err(err) => {
-                                    warn!("Failed to map data from peer {}: {}", address, err);
+                                    warn!("Failed to map data from peer {}: {}", peer_id, err);
                                     // Not retriable: don't include this peer for future rounds
                                     all_failures_were_handshake = false;
                                 }
                             },
                             None => {
                                 // Peer doesn't have this data; keep for future rounds to allow re-gossip
-                                debug!("Peer {} doesn't have {:?}", address, data_request);
+                                debug!("Peer {} doesn't have {:?}", peer_id, data_request);
                                 next_retryable.push(peer);
                                 all_failures_were_handshake = false;
                             }
@@ -1317,8 +1455,8 @@ impl GossipClient {
                     }
                     Ok(GossipResponse::Rejected(reason)) => {
                         warn!(
-                            "Peer {} reject the request: {:?}: {:?}",
-                            address, data_request, reason
+                            "Peer {} rejected the request: {:?}: {:?}",
+                            peer_id, data_request, reason
                         );
                         match reason {
                             RejectionReason::HandshakeRequired(reason) => {
@@ -1334,7 +1472,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} requires a handshake",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                             }
@@ -1343,7 +1481,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} has gossip disabled",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1352,7 +1490,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} reported invalid data",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1361,7 +1499,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rate limited the request",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1370,7 +1508,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} unable to verify our origin",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1380,7 +1518,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rejected with {:?}",
-                                        data_request, address, reason
+                                        data_request, peer_id, reason
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1389,7 +1527,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} doesn't support protocol version {:?}",
-                                        data_request, address, unsupported_version
+                                        data_request, peer_id, unsupported_version
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1398,7 +1536,7 @@ impl GossipClient {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} doesn't support the requested feature",
-                                        data_request, address
+                                        data_request, peer_id
                                     )),
                                 ));
                                 all_failures_were_handshake = false;
@@ -1411,7 +1549,7 @@ impl GossipClient {
                         warn!(
                             "Failed to fetch {:?} from peer {:?} (attempt {}/{}): {}",
                             data_request,
-                            address,
+                            peer_id,
                             attempt,
                             DATA_REQUEST_RETRIES,
                             last_error.as_ref().unwrap()
@@ -1449,20 +1587,20 @@ impl GossipClient {
                 let pl = peer_list;
                 let fh = fallback_header;
                 retry_futs.push(async move {
-                    let addr = peer.0;
+                    let peer_id = peer.0;
                     let res = gc.pull_data_and_update_the_score(peer, dr, fh, pl).await;
-                    (addr, res)
+                    (peer_id, res)
                 });
             }
 
-            while let Some((address, result)) = retry_futs.next().await {
+            while let Some((peer_id, result)) = retry_futs.next().await {
                 if let Ok(GossipResponse::Accepted(Some(data))) = result {
                     if let Ok(data) = map_data(data) {
                         debug!(
                             "Successfully retrieved {:?} from peer {} after handshake wait",
-                            data_request, address
+                            data_request, peer_id
                         );
-                        return Ok((address, data));
+                        return Ok((peer_id, data));
                     }
                 }
             }
@@ -1478,10 +1616,19 @@ impl GossipClient {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
         for peer in peers {
-            match self.check_health(peer.1.address, peer_list).await {
+            match self
+                .check_health(&peer.0, peer.1.address, peer.1.protocol_version, peer_list)
+                .await
+            {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
+                }
+                Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
+                    debug!(
+                        ?peer_id,
+                        "Circuit breaker open, skipping online status update"
+                    );
                 }
                 Err(err) => {
                     warn!(
@@ -1520,8 +1667,8 @@ impl GossipClient {
                     peer.0, attempt
                 );
                 let url = format!(
-                    "http://{}/gossip{}",
-                    peer.1.address.gossip,
+                    "{}{}",
+                    gossip_base_url(&peer.1.address.gossip, peer.1.protocol_version),
                     GossipRoutes::StakeAndPledgeWhitelist
                 );
 
@@ -1574,8 +1721,7 @@ impl GossipClient {
                 };
 
                 // Update score for the peer based on the result
-                let miner_address = peer.1.mining_address;
-                Self::handle_score(peer_list, &res, &miner_address);
+                Self::handle_score(peer_list, &res, &peer.0, &self.circuit_breaker);
 
                 match res {
                     Ok(response) => match response {
@@ -1706,20 +1852,22 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(
+                client: GossipClient::with_circuit_breaker_config(
                     Duration::from_secs(1),
                     IrysAddress::from([1_u8; 20]),
                     IrysPeerId::from([1_u8; 20]),
+                    CircuitBreakerConfig::testing(),
                 ),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(
+                client: GossipClient::with_circuit_breaker_config(
                     timeout,
                     IrysAddress::from([1_u8; 20]),
                     IrysPeerId::from([1_u8; 20]),
+                    CircuitBreakerConfig::testing(),
                 ),
             }
         }
@@ -1848,7 +1996,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", unreachable_port);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V1, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1871,7 +2023,11 @@ mod tests {
             let peer = create_peer_address("192.0.2.1", 8080);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V1, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1893,7 +2049,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V1, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1919,6 +2079,103 @@ mod tests {
         }
     }
 
+    mod health_check_v2_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_v2_connection_refused() {
+            let fixture = TestFixture::new();
+            let unreachable_port = get_free_port();
+            let peer = create_peer_address("127.0.0.1", unreachable_port);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::GetRequest(addr, reason) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert!(
+                        reason.to_lowercase().contains("connection refused"),
+                        "Expected connection refused error, got: {}",
+                        reason
+                    );
+                }
+                err => panic!("Expected GetRequest error, got: {:?}", err),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_v2_health_check_accepted() {
+            let body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "V2 health check should succeed: {:?}",
+                result
+            );
+            assert!(result.unwrap(), "V2 health check should return true");
+        }
+
+        #[tokio::test]
+        async fn test_v2_404_not_found() {
+            let server = MockHttpServer::new_with_response(404, "", "text/plain");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::HealthCheck(addr, status) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert_eq!(status, StatusCode::NOT_FOUND);
+                }
+                err => panic!("Expected HealthCheck error, got: {:?}", err),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_v2_invalid_json_response() {
+            let server =
+                MockHttpServer::new_with_response(200, "invalid json {", "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V2, &mock_list)
+                .await;
+
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                GossipClientError::GetJsonResponsePayload(_, _)
+            ));
+        }
+    }
+
     // Response parsing tests
     mod response_parsing_tests {
         use super::*;
@@ -1931,7 +2188,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V1, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1961,7 +2222,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer, ProtocolVersion::V1, &mock_list)
+                .await;
 
             assert!(result.is_err());
             assert!(matches!(
@@ -2018,7 +2283,8 @@ mod tests {
 
             for (response_time, should_increase) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                let fixture = TestFixture::new();
+                let (peer_id, _, peer) = create_test_peer(1);
                 peer_list.add_or_update_peer(peer, true);
 
                 let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2028,6 +2294,7 @@ mod tests {
                     &Ok(()),
                     &peer_id,
                     response_time,
+                    &fixture.client.circuit_breaker,
                 );
 
                 let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2054,7 +2321,8 @@ mod tests {
 
             for (response_time, expected_decrease) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                let fixture = TestFixture::new();
+                let (peer_id, _, peer) = create_test_peer(1);
                 peer_list.add_or_update_peer(peer, true);
 
                 let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2064,6 +2332,7 @@ mod tests {
                     &Ok(()),
                     &peer_id,
                     response_time,
+                    &fixture.client.circuit_breaker,
                 );
 
                 let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2080,7 +2349,8 @@ mod tests {
         #[test]
         fn test_handle_data_retrieval_score_failed_response() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            let fixture = TestFixture::new();
+            let (peer_id, _, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(peer, true);
 
             let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2091,6 +2361,7 @@ mod tests {
                 &Err(GossipError::Network("timeout".to_string())),
                 &peer_id,
                 response_time,
+                &fixture.client.circuit_breaker,
             );
 
             let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
@@ -2104,7 +2375,8 @@ mod tests {
         #[test]
         fn test_multiple_score_updates_in_sequence() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            let fixture = TestFixture::new();
+            let (peer_id, _, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(peer, true);
 
             let operations = vec![
@@ -2126,6 +2398,7 @@ mod tests {
                             &Ok(()),
                             &peer_id,
                             response_time,
+                            &fixture.client.circuit_breaker,
                         );
                     }
                     Err(e) => {
@@ -2134,6 +2407,7 @@ mod tests {
                             &Err(e),
                             &peer_id,
                             response_time,
+                            &fixture.client.circuit_breaker,
                         );
                     }
                 }
@@ -2189,6 +2463,47 @@ mod tests {
         }
     }
 
+    mod circuit_breaker_tests {
+        use super::*;
+        use irys_types::IrysAddress;
+
+        #[tokio::test]
+        async fn test_health_check_respects_circuit_breaker() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let peer_id = IrysPeerId::from(IrysAddress::from([40_u8; 20]));
+            let peer_address = create_peer_address("127.0.0.1", 8080);
+
+            // Open the circuit by recording failures (100 to match testing config threshold)
+            for _ in 0..100 {
+                fixture.client.circuit_breaker.record_failure(&peer_id);
+            }
+
+            // Verify circuit is open
+            assert!(
+                !fixture.client.circuit_breaker.is_available(&peer_id),
+                "Circuit breaker should be open after failures"
+            );
+
+            // Health check should return error without making a request
+            let result = fixture
+                .client
+                .check_health(&peer_id, peer_address, ProtocolVersion::V1, &peer_list)
+                .await;
+
+            assert!(
+                result.is_err(),
+                "Health check should return error when circuit is open"
+            );
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, GossipClientError::CircuitBreakerOpen(_)),
+                "Error should indicate circuit breaker is open, got: {:?}",
+                err
+            );
+        }
+    }
+
     mod concurrent_scoring_tests {
         use super::*;
         use irys_types::IrysAddress;
@@ -2200,6 +2515,7 @@ mod tests {
         #[tokio::test]
         async fn test_concurrent_score_updates() {
             let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
+            let fixture = Arc::new(TestFixture::new());
             let mining_addr = IrysAddress::from([1_u8; 20]);
             let peer_id = IrysPeerId::from(mining_addr);
             let peer = PeerListItem {
@@ -2222,6 +2538,7 @@ mod tests {
 
             for i in 0..20 {
                 let peer_list_clone = peer_list.clone();
+                let fixture_clone = fixture.clone();
                 let peer_id_copy = peer_id;
 
                 join_set.spawn(async move {
@@ -2239,6 +2556,7 @@ mod tests {
                             &Err(GossipError::Network("test".to_string())),
                             &peer_id_copy,
                             response_time,
+                            &fixture_clone.client.circuit_breaker,
                         );
                     } else {
                         GossipClient::handle_data_retrieval_score(
@@ -2246,6 +2564,7 @@ mod tests {
                             &Ok(()),
                             &peer_id_copy,
                             response_time,
+                            &fixture_clone.client.circuit_breaker,
                         );
                     }
                 });

@@ -12,9 +12,8 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, CommitmentTypeV1};
+use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
-use std::collections::HashMap;
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
@@ -46,6 +45,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -112,7 +112,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -121,51 +121,26 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         let _ = gossip_commitment_to_node(node, &invalid_unpledge).await;
     }
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unpledge.clone()],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let genesis_outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    let genesis_outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         genesis_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
         "genesis node should discard block with unpledge referencing unowned partition",
     );
 
-    send_block_to_block_tree(
-        &victim_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unpledge.clone()],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let victim_outcome = read_block_from_state(&victim_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&victim_node.node_ctx, Arc::clone(&block), false).await?;
+    let victim_outcome =
+        read_block_from_state(&victim_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         victim_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
         "victim peer should also discard the malicious block",
     );
 
-    send_block_to_block_tree(
-        &evil_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unpledge],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let evil_outcome = read_block_from_state(&evil_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&evil_node.node_ctx, Arc::clone(&block), false).await?;
+    let evil_outcome = read_block_from_state(&evil_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         evil_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
@@ -209,6 +184,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -247,7 +223,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await;
 
         let count = target_counts[idx];
-        tx.set_commitment_type(CommitmentTypeV1::Unpledge {
+        tx.set_commitment_type(CommitmentTypeV2::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: assignment.partition_hash,
         });
@@ -273,23 +249,14 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: unpledge_txs,
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| {
@@ -339,6 +306,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -385,23 +353,14 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unpledge],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     // The block is rejected because the commitment transaction has an invalid unpledge value.
     assert_validation_error(
         outcome,
@@ -445,6 +404,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -508,28 +468,20 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
     assert_eq!(
-        block.height % num_blocks_in_epoch as u64,
+        block.header().height % num_blocks_in_epoch as u64,
         0,
         "Malicious block must be at epoch boundary"
     );
 
-    let err = send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: commitments,
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await
-    .expect_err("epoch block with extra unpledge should be rejected");
+    let err = send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false)
+        .await
+        .expect_err("epoch block with extra unpledge should be rejected");
 
     let err = err
         .downcast::<irys_actors::block_validation::PreValidationError>()

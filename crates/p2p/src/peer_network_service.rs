@@ -163,6 +163,7 @@ impl PeerNetworkServiceState {
             peer_id,
             protocol_version: ProtocolVersion::V2,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.config
@@ -366,39 +367,39 @@ impl PeerNetworkService {
         };
         let sender_inner = self.inner.clone();
 
-        for (mining_addr, peer) in inactive_peers {
+        for (peer_id, peer) in inactive_peers {
             let client = gossip_client.clone();
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
             tokio::spawn(async move {
-                match client.check_health(peer.address, &peer_list).await {
+                match client
+                    .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
+                    .await
+                {
                     Ok(true) => {
-                        debug!("Peer {:?} is online", mining_addr);
-                        inner_clone.increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
+                        debug!("Peer {:?} is online", peer_id);
+                        inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                     }
                     Ok(false) => {
-                        debug!("Peer {:?} is offline", mining_addr);
+                        debug!("Peer {:?} is offline", peer_id);
                         inner_clone.decrease_peer_score(
-                            &mining_addr,
+                            &peer_id,
                             ScoreDecreaseReason::Offline("Health check returned false".to_string()),
                         );
                     }
                     Err(GossipClientError::HealthCheck(url, status)) => {
                         let message = format!(
                             "Peer {:?} ({}) health check failed with status {}",
-                            mining_addr, url, status
+                            peer_id, url, status
                         );
                         debug!("{message}");
                         inner_clone.decrease_peer_score(
-                            &mining_addr,
+                            &peer_id,
                             ScoreDecreaseReason::NetworkError(message),
                         );
                     }
                     Err(err) => {
-                        error!(
-                            "Failed to check health of peer {:?}: {:?}",
-                            mining_addr, err
-                        );
+                        error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
                     }
                 }
             });
@@ -704,40 +705,40 @@ impl PeerNetworkService {
                 let dr = data_request.clone();
                 let pl = peer_list.clone();
                 futs.push(async move {
-                    let addr = peer.0;
+                    let peer_id = peer.0;
                     let res = gc
                         .make_get_data_request_and_update_the_score(&peer, dr, &pl)
                         .await;
-                    (addr, peer, res)
+                    (peer_id, peer, res)
                 });
             }
 
             let mut next_retryable = Vec::new();
 
-            while let Some((address, peer, result)) = futs.next().await {
+            while let Some((peer_id, peer, result)) = futs.next().await {
                 match result {
                     Ok(GossipResponse::Accepted(has)) => {
                         if has {
                             info!(
                                 "Successfully requested {:?} from peer {}",
-                                data_request, address
+                                data_request, peer_id
                             );
                             return Ok(());
                         } else {
-                            debug!("Peer {} doesn't have {:?}", address, data_request);
+                            debug!("Peer {} doesn't have {:?}", peer_id, data_request);
                             next_retryable.push(peer);
                         }
                     }
                     Ok(GossipResponse::Rejected(reason)) => {
                         warn!(
                             "Peer {} rejected data request {:?}: {:?}",
-                            address, data_request, reason
+                            peer_id, data_request, reason
                         );
                         match reason {
                             RejectionReason::HandshakeRequired(reason) => {
                                 warn!(
                                     "Peer {} requires a handshake before requesting data: {:?}",
-                                    address, reason
+                                    peer_id, reason
                                 );
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(
@@ -757,7 +758,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} has gossip disabled",
-                                        address
+                                        peer_id
                                     )),
                                 ));
                             }
@@ -765,7 +766,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} reported invalid data for request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -773,7 +774,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rate limited the request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -781,7 +782,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} unable to verify our origin of request {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -790,7 +791,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rejected data request {:?} with {:?}",
-                                        peer.0, data_request, reason
+                                        peer_id, data_request, reason
                                     )),
                                 ));
                             }
@@ -798,7 +799,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} has unsupported protocol version {}",
-                                        peer.0, unsupported_version
+                                        peer_id, unsupported_version
                                     )),
                                 ));
                             }
@@ -806,7 +807,7 @@ impl PeerNetworkService {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} does not support requested feature for {:?}",
-                                        peer.0, data_request
+                                        peer_id, data_request
                                     )),
                                 ));
                             }
@@ -817,7 +818,7 @@ impl PeerNetworkService {
                         warn!(
                             "Failed to fetch {:?} from peer {:?} (attempt {}/{}): {:?}",
                             data_request,
-                            address,
+                            peer_id,
                             attempt,
                             retries,
                             last_error.as_ref().unwrap()
@@ -1017,6 +1018,17 @@ impl PeerNetworkService {
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
+                // Only log mismatch if the version is not V1 - V1 peers have zero hash
+                if protocol_version != ProtocolVersion::V1 {
+                    let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
+                    if accepted_peers.consensus_config_hash != our_hash {
+                        error!(
+                            "Consensus config mismatch with peer at {}! ours={} theirs={}",
+                            gossip_address, our_hash, accepted_peers.consensus_config_hash,
+                        );
+                    }
+                }
+
                 if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
                     let peer_addresses: Vec<SocketAddr> =
                         accepted_peers.peers.iter().map(|p| p.api).collect();

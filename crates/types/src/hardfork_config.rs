@@ -5,7 +5,7 @@ use crate::{serialization::unix_timestamp_string_serde, UnixTimestamp, VersionDi
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IrysHardforkConfig {
     /// Frontier parameters (always active from genesis)
     pub frontier: FrontierParams,
@@ -21,12 +21,18 @@ pub struct IrysHardforkConfig {
     /// Aurora hardfork - enables canonical RLP encoding on Commitment tx. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aurora: Option<Aurora>,
+
+    /// Borealis hardfork - enables UpdateRewardAddress commitment transactions.
+    /// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch block's
+    /// timestamp >= activation_timestamp. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borealis: Option<Borealis>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
 ///
 /// These are the parameters active from block 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
     /// Number of ingress proofs required for promotion
     pub number_of_ingress_proofs_total: u64,
@@ -38,7 +44,7 @@ pub struct FrontierParams {
 /// A hardfork activation with its parameters.
 ///
 /// When this fork activates, the contained parameters take effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NextNameTBD {
     /// Times (seconds since epoch) at which this hardfork activates
     #[serde(with = "unix_timestamp_string_serde")]
@@ -54,7 +60,7 @@ pub struct NextNameTBD {
 /// Sprite hardfork - enables Programmable Data (PD) features.
 ///
 /// When this fork activates, PD transactions become valid and the PD precompile is enabled.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Sprite {
     /// Timestamp at which this hardfork activates
     pub activation_timestamp: UnixTimestamp,
@@ -82,13 +88,26 @@ pub struct Sprite {
 ///
 /// When this fork activates, commitment transactions must use the minimum version
 /// specified for proper canonical encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Aurora {
     /// Timestamp (seconds since epoch) at which this hardfork activates
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Minimum version required for commitment transactions
     pub minimum_commitment_tx_version: u8,
+}
+
+/// Borealis hardfork - enables UpdateRewardAddress commitment transactions.
+///
+/// Activation is epoch-aligned: the feature is enabled for all blocks in an epoch
+/// if that epoch's epoch block has a timestamp >= activation_timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Borealis {
+    /// Timestamp (seconds since epoch) at which this hardfork activates.
+    /// The actual activation happens at the first epoch boundary where the
+    /// epoch block's timestamp meets or exceeds this value.
+    #[serde(with = "unix_timestamp_string_serde")]
+    pub activation_timestamp: UnixTimestamp,
 }
 
 impl IrysHardforkConfig {
@@ -232,6 +251,7 @@ mod tests {
             next_name_tbd: None,
             sprite: None,
             aurora: None,
+            borealis: None,
         };
 
         assert_eq!(
@@ -263,6 +283,7 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 minimum_commitment_tx_version: 2,
             }),
+            borealis: None,
         };
 
         // Before activation timestamp
@@ -292,6 +313,7 @@ mod tests {
             }),
             sprite: None,
             aurora: None,
+            borealis: None,
         };
 
         // Before activation timestamp
@@ -341,6 +363,7 @@ mod tests {
             }),
             sprite: None,
             aurora: None,
+            borealis: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -383,6 +406,7 @@ mod tests {
                 min_pd_transaction_cost: Amount::new(U256::from(10_000_000_000_000_000_u64)), // 0.01 USD
             }),
             aurora: None,
+            borealis: None,
         };
 
         // Before activation
@@ -452,6 +476,7 @@ mod tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -477,6 +502,7 @@ mod tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -495,6 +521,7 @@ mod tests {
                 next_name_tbd: None,
                 sprite: None,
                 aurora: None,
+                borealis: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -526,6 +553,7 @@ mod tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -557,6 +585,7 @@ mod tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             }
         }
 
@@ -569,6 +598,7 @@ mod tests {
                 next_name_tbd: None,
                 sprite: None,
                 aurora: None,
+                borealis: None,
             }
         }
 

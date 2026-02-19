@@ -12,6 +12,8 @@ use thiserror::Error;
 pub enum GossipError {
     #[error("Network error: {0}")]
     Network(String),
+    #[error("Circuit breaker open for peer {0}")]
+    CircuitBreakerOpen(irys_types::IrysPeerId),
     #[error("Invalid peer: {0}")]
     InvalidPeer(String),
     #[error("Cache error: {0}")]
@@ -113,6 +115,10 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::InvalidVersion { version, minimum } => {
                 Self::InvalidData(InvalidDataError::TransactionInvalidVersion { version, minimum })
             }
+            TxIngressError::UpdateRewardAddressNotAllowed => {
+                // UpdateRewardAddress not allowed before Borealis hardfork
+                Self::InvalidData(InvalidDataError::TransactionCommitmentTypeNotAllowed)
+            }
         }
     }
 }
@@ -180,6 +186,8 @@ pub enum InvalidDataError {
     BlockBodyTransactionsMismatch,
     #[error("Invalid transaction version {version}, minimum required is {minimum}")]
     TransactionInvalidVersion { version: u8, minimum: u8 },
+    #[error("Commitment type not allowed before hardfork activation")]
+    TransactionCommitmentTypeNotAllowed,
 }
 
 #[derive(Debug, Error, Clone)]

@@ -90,6 +90,12 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         epoch_block.data_ledgers[DataLedger::Submit]
     );
 
+    // Wait for the data block to be confirmed and migrated to the block index,
+    // so that poa_is_valid can look up block bounds for chunk offsets.
+    genesis_node
+        .wait_until_height_confirmed(new_block.height, 20)
+        .await?;
+
     // Get the epoch snapshot of the latest block
     let block_tree = genesis_node.node_ctx.block_tree_guard.clone();
     let epoch_snapshot = block_tree
@@ -155,7 +161,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 tx_path: None,
                 data_path: None,
                 chunk: Some(Base64(entropy_chunk)),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset,
                 partition_hash,
             };
@@ -176,7 +182,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                     sorted_txs[tx_index].proofs[chunk_index].proof.clone(),
                 )),
                 chunk: Some(Base64(poa_chunk.clone())),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset,
                 partition_hash,
             };

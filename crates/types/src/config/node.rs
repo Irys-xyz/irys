@@ -579,6 +579,10 @@ pub struct SyncConfig {
     pub retry_block_request_timeout_secs: u64,
     /// Whether to enable periodic sync checks
     pub enable_periodic_sync_check: bool,
+    /// Timeout per attempt when waiting for a queue slot
+    pub wait_queue_slot_timeout_secs: u64,
+    /// Maximum consecutive timeout attempts when waiting for a queue slot with no active validations
+    pub wait_queue_slot_max_attempts: usize,
 }
 
 impl Default for SyncConfig {
@@ -589,6 +593,8 @@ impl Default for SyncConfig {
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
             enable_periodic_sync_check: true,
+            wait_queue_slot_timeout_secs: 30,
+            wait_queue_slot_max_attempts: 3,
         }
     }
 }
@@ -1070,6 +1076,11 @@ impl NodeConfig {
     /// get the `vdf_steps` directory path
     pub fn vdf_steps_dir(&self) -> PathBuf {
         self.base_directory.join("vdf_steps")
+    }
+
+    /// get the peer info directory path
+    pub fn peer_info_dir(&self) -> PathBuf {
+        self.base_directory.join("peer_info")
     }
 
     /// Get the PeerAddress for this node configuration
