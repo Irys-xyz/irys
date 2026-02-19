@@ -534,6 +534,7 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
         chain_id,
         anchor,
         config.consensus.enable_shadow_kzg_logging,
+        config.consensus.use_kzg_ingress_proofs,
     )
     .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
