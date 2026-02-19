@@ -34,8 +34,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    new_stake_tx, read_block_from_state, solution_context, AddTxError, BlockValidationOutcome,
-    IrysNodeTest,
+    new_stake_tx, read_block_from_state, solution_context, wait_for_block_event, AddTxError,
+    BlockValidationOutcome, IrysNodeTest,
 };
 
 // EVM test constants
@@ -1065,7 +1065,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
 // This test produces a block with invalid tx ordering.
 #[test_log::test(tokio::test)]
-async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -1177,16 +1177,11 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         evil_block.header().height,
         "we have created a fork because we don't want to build on the evil block"
     );
-    loop {
-        // wait for the block to be validated
-        let res = sub.recv().await.unwrap();
-        if res.block_hash == new_block.header().block_hash
-            // if we get anything other than Unknown, proceed processing
-            && res.state != ChainState::NotOnchain(BlockState::Unknown)
-        {
-            break;
-        }
-    }
+    let new_block_hash = new_block.header().block_hash;
+    wait_for_block_event(&mut sub, 30, |ev| {
+        ev.block_hash == new_block_hash && ev.state != ChainState::NotOnchain(BlockState::Unknown)
+    })
+    .await;
 
     let latest_block_hash = node
         .node_ctx

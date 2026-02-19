@@ -3317,6 +3317,31 @@ pub async fn read_block_from_state(
     ))
 }
 
+/// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.
+///
+/// Consumes events from the broadcast receiver until one matches or the deadline
+/// is reached.  Reuses the *same* receiver across calls so callers that iterate
+/// over multiple blocks can share one subscription.
+///
+/// # Panics
+/// Panics on timeout or if the broadcast channel is closed.
+#[diag_slow]
+pub async fn wait_for_block_event(
+    rx: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+    timeout_secs: u64,
+    predicate: impl Fn(&BlockStateUpdated) -> bool,
+) -> BlockStateUpdated {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(event)) if predicate(&event) => return event,
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("broadcast channel error while waiting for block event: {e}"),
+            Err(_) => panic!("timed out after {timeout_secs}s waiting for block event"),
+        }
+    }
+}
+
 /// Helper function for testing chunk uploads. Posts a single chunk of transaction data
 /// to the /v1/chunk endpoint and verifies successful response.
 pub async fn post_chunk<T, B>(

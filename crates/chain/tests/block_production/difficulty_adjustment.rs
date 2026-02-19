@@ -2,7 +2,10 @@ use irys_actors::block_tree_service::ValidationResult;
 use irys_types::{BlockBody, NodeConfig, SealedBlock};
 use rust_decimal_macros::dec;
 
-use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
+use crate::{
+    utils::{wait_for_block_event, IrysNodeTest},
+    validation::send_block_to_block_tree,
+};
 
 /// Ensures that the node adjusts its mining difficulty after the configured
 /// number of blocks and that the `last_diff_timestamp` metadata is updated to
@@ -134,7 +137,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
-    'outer: for ((block, eth_block, _), new_tip) in order.iter() {
+    for ((block, eth_block, _), new_tip) in order.iter() {
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
         genesis_node
             .node_ctx
@@ -142,13 +145,11 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
             .execution_payload_provider
             .add_payload_to_cache(eth_block.block().clone())
             .await;
-        while let Ok(event) = block_state_rx.recv().await {
-            if event.block_hash == block.block_hash
-                && matches!(event.validation_result, ValidationResult::Valid)
-            {
-                continue 'outer;
-            }
-        }
+        wait_for_block_event(&mut block_state_rx, 120, |ev| {
+            ev.block_hash == block.block_hash
+                && matches!(ev.validation_result, ValidationResult::Valid)
+        })
+        .await;
 
         if *new_tip {
             assert_eq!(
