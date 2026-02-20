@@ -356,16 +356,14 @@ impl ValidationCoordinator {
                 VdfValidationResult::Valid => {
                     let block_hash = task.sealed_block.header().block_hash;
 
-                    let task_request_id = task.request_id;
                     let abort_handle = self.concurrent_tasks.spawn(
                         async move {
-                            // Execute the validation and return the result
                             let validation_result = task.execute_concurrent().await;
 
                             ConcurrentValidationResult {
                                 block_hash,
                                 validation_result,
-                                request_id: task_request_id,
+                                request_id,
                             }
                         }
                         .instrument(tracing::error_span!(
@@ -375,7 +373,7 @@ impl ValidationCoordinator {
                         .in_current_span(),
                     );
                     self.concurrent_task_blocks
-                        .insert(abort_handle.id(), (block_hash, task_request_id));
+                        .insert(abort_handle.id(), (block_hash, request_id));
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority

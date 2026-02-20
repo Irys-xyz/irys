@@ -76,9 +76,4 @@ macro_rules! define_metrics {
                     .build()
             });
     };
-
-    // -- Type string helpers --
-    (@type_str counter) => { "counter" };
-    (@type_str gauge) => { "gauge" };
-    (@type_str histogram) => { "histogram" };
 }

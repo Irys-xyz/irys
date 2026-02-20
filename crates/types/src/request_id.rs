@@ -42,6 +42,7 @@ impl RequestId {
 }
 
 impl Default for RequestId {
+    /// Generates a new unique `RequestId` (equivalent to `RequestId::new()`).
     fn default() -> Self {
         Self::new()
     }
