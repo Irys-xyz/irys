@@ -1,4 +1,3 @@
-pub(crate) mod chunk_data_writer;
 pub mod commitment_txs;
 pub mod data_txs;
 pub mod facade;

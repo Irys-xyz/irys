@@ -21,7 +21,7 @@ enum WriterCommand {
 /// in-flight duplicates, and a [`DashMap`] maintains per-data-root chunk counts
 /// for ingress proof threshold checks without hitting the database.
 #[derive(Debug)]
-pub struct ChunkDataWriter {
+pub(crate) struct ChunkDataWriter {
     tx: mpsc::Sender<WriterCommand>,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
     pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
@@ -29,7 +29,7 @@ pub struct ChunkDataWriter {
 
 impl ChunkDataWriter {
     /// Spawn the background writer task and return the writer handle.
-    pub fn spawn(db: DatabaseProvider, buffer_size: usize) -> Self {
+    pub(crate) fn spawn(db: DatabaseProvider, buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         let pending_hashes = Arc::new(DashSet::new());
         let pending_chunk_counts = Arc::new(DashMap::new());
@@ -52,7 +52,7 @@ impl ChunkDataWriter {
     /// Queue a chunk for asynchronous write to the cache DB.
     ///
     /// Returns `true` if the chunk hash is already pending (duplicate).
-    pub async fn queue_write(&self, chunk: Arc<UnpackedChunk>) -> Result<bool, QueueError> {
+    pub(crate) async fn queue_write(&self, chunk: Arc<UnpackedChunk>) -> Result<bool, QueueError> {
         let hash = chunk.chunk_path_hash();
         if !self.pending_hashes.insert(hash) {
             return Ok(true);
@@ -70,12 +70,12 @@ impl ChunkDataWriter {
     }
 
     /// Returns `true` if the chunk hash is currently pending a write.
-    pub fn is_pending(&self, hash: &ChunkPathHash) -> bool {
+    pub(crate) fn is_pending(&self, hash: &ChunkPathHash) -> bool {
         self.pending_hashes.contains(hash)
     }
 
     /// Returns the number of chunks pending or already written for a data root.
-    pub fn pending_chunk_count(&self, data_root: &DataRoot) -> u64 {
+    pub(crate) fn pending_chunk_count(&self, data_root: &DataRoot) -> u64 {
         self.pending_chunk_counts
             .get(data_root)
             .map(|v| *v)
@@ -88,7 +88,7 @@ impl ChunkDataWriter {
     /// background writer to acknowledge it. Because the channel is FIFO,
     /// all chunks queued before the flush are guaranteed to be committed
     /// to MDBX by the time this returns.
-    pub async fn flush(&self) -> Result<(), QueueError> {
+    pub(crate) async fn flush(&self) -> Result<(), QueueError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.tx
             .send(WriterCommand::Flush(done_tx))
@@ -99,7 +99,7 @@ impl ChunkDataWriter {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum QueueError {
+pub(crate) enum QueueError {
     #[error("writer channel closed")]
     ChannelClosed,
     #[error("batch write failed")]

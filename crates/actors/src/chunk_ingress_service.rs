@@ -1,3 +1,4 @@
+pub(crate) mod chunk_data_writer;
 pub mod chunks;
 pub mod facade;
 pub mod ingress_proofs;
@@ -27,7 +28,6 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn, Instrument as _, Span};
 
-use crate::mempool_service::chunk_data_writer;
 use crate::services::ServiceSenders;
 
 /// Messages handled by the ChunkIngressService
