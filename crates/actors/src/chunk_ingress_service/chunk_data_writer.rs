@@ -1,6 +1,6 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashSet;
 use irys_database::cache_chunk_verified;
-use irys_types::{ChunkPathHash, DataRoot, DatabaseProvider, UnpackedChunk};
+use irys_types::{ChunkPathHash, DatabaseProvider, UnpackedChunk};
 use reth_db::Database as _;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -17,14 +17,12 @@ enum WriterCommand {
 ///
 /// Chunks are queued via [`queue_write`] and written in batches on a background
 /// task, reducing per-chunk MDBX transaction overhead on the hot ingress path.
-/// A [`DashSet`] tracks pending chunk hashes so callers can check for
-/// in-flight duplicates, and a [`DashMap`] maintains per-data-root chunk counts
-/// for ingress proof threshold checks without hitting the database.
+/// A [`DashSet`] tracks pending chunk hashes so the writer can detect
+/// in-flight duplicates without hitting the database.
 #[derive(Debug)]
 pub(crate) struct ChunkDataWriter {
     tx: mpsc::Sender<WriterCommand>,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
-    pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
 }
 
 impl ChunkDataWriter {
@@ -32,21 +30,15 @@ impl ChunkDataWriter {
     pub(crate) fn spawn(db: DatabaseProvider, buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         let pending_hashes = Arc::new(DashSet::new());
-        let pending_chunk_counts = Arc::new(DashMap::new());
 
         let writer = BackgroundWriter {
             rx,
             db,
             pending_hashes: Arc::clone(&pending_hashes),
-            pending_chunk_counts: Arc::clone(&pending_chunk_counts),
         };
         tokio::spawn(writer.run());
 
-        Self {
-            tx,
-            pending_hashes,
-            pending_chunk_counts,
-        }
+        Self { tx, pending_hashes }
     }
 
     /// Queue a chunk for asynchronous write to the cache DB.
@@ -67,19 +59,6 @@ impl ChunkDataWriter {
             return Err(QueueError::ChannelClosed);
         }
         Ok(false)
-    }
-
-    /// Returns `true` if the chunk hash is currently pending a write.
-    pub(crate) fn is_pending(&self, hash: &ChunkPathHash) -> bool {
-        self.pending_hashes.contains(hash)
-    }
-
-    /// Returns the number of chunks pending or already written for a data root.
-    pub(crate) fn pending_chunk_count(&self, data_root: &DataRoot) -> u64 {
-        self.pending_chunk_counts
-            .get(data_root)
-            .map(|v| *v)
-            .unwrap_or(0)
     }
 
     /// Drain all pending writes before returning.
@@ -110,7 +89,6 @@ struct BackgroundWriter {
     rx: mpsc::Receiver<WriterCommand>,
     db: DatabaseProvider,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
-    pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
 }
 
 impl BackgroundWriter {
@@ -178,7 +156,7 @@ impl BackgroundWriter {
         let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
         let result = self.db.update(|tx| {
-            let mut newly_written = Vec::with_capacity(batch.len());
+            let mut written = 0_usize;
             for (chunk, hash) in batch.iter().zip(hashes.iter()) {
                 match cache_chunk_verified(tx, chunk) {
                     Ok(is_duplicate) => {
@@ -187,9 +165,8 @@ impl BackgroundWriter {
                                 "Duplicate chunk {} of {} in write-behind batch",
                                 hash, chunk.data_root
                             );
-                            newly_written.push(false);
                         } else {
-                            newly_written.push(true);
+                            written += 1;
                         }
                     }
                     Err(e) => {
@@ -197,46 +174,32 @@ impl BackgroundWriter {
                             "Failed to cache chunk {} of {}: {:?}",
                             hash, chunk.data_root, e
                         );
-                        newly_written.push(false);
                     }
                 }
             }
-            Ok::<Vec<bool>, eyre::Report>(newly_written)
+            Ok::<usize, eyre::Report>(written)
         });
 
+        // Always clear pending hashes regardless of outcome.
+        for hash in &hashes {
+            self.pending_hashes.remove(hash);
+        }
+
         match result {
-            Ok(Ok(newly_written)) => {
-                let written: usize = newly_written.iter().filter(|&&w| w).count();
+            Ok(Ok(written)) => {
                 debug!(
                     "ChunkDataWriter committed batch of {} ({} written)",
                     batch.len(),
                     written
                 );
-                for ((chunk, hash), was_new) in
-                    batch.iter().zip(hashes.iter()).zip(newly_written.iter())
-                {
-                    self.pending_hashes.remove(hash);
-                    if *was_new {
-                        *self
-                            .pending_chunk_counts
-                            .entry(chunk.data_root)
-                            .or_insert(0) += 1;
-                    }
-                }
                 Ok(())
             }
             Ok(Err(e)) => {
                 error!("ChunkDataWriter batch inner error: {:?}", e);
-                for hash in &hashes {
-                    self.pending_hashes.remove(hash);
-                }
                 Err(QueueError::WriteFailed)
             }
             Err(e) => {
                 error!("ChunkDataWriter MDBX transaction error: {:?}", e);
-                for hash in &hashes {
-                    self.pending_hashes.remove(hash);
-                }
                 Err(QueueError::WriteFailed)
             }
         }
