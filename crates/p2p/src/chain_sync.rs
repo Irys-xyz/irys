@@ -791,12 +791,6 @@ async fn initialize_sync_mode(
     is_a_genesis_node: bool,
     start_sync_from_height: usize,
 ) -> ChainSyncResult<bool> {
-    if params.is_trusted_mode {
-        sync_state.set_trusted_sync(true);
-    } else {
-        sync_state.set_trusted_sync(false);
-    }
-
     debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", params.sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
 
     if is_a_genesis_node {
@@ -891,8 +885,7 @@ async fn fetch_initial_block_index(
         }
     };
 
-    let mut block_queue = VecDeque::new();
-    block_queue.extend(block_index);
+    let block_queue = VecDeque::from(block_index);
 
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
@@ -1075,15 +1068,16 @@ async fn replenish_block_batch(
         let estimated_height =
             estimate_canonical_height(peer_list, gossip_client, start_sync_from_height as u64)
                 .await;
-        if estimated_height > (sync_state.sync_target_height() + params.migration_depth - 1) as u64
+        let safe_threshold = (sync_state.sync_target_height().saturating_add(params.migration_depth)).saturating_sub(1) as u64;
+        if estimated_height > safe_threshold
         {
             error!(
-                "block index request for entries >{} returned no extra results, but the estimated network height is {}",
-                sync_target, estimated_height
+                "block index request for entries >{} returned no extra results, but the estimated network height is {} (threshold: {})",
+                sync_target, estimated_height, safe_threshold
             );
             return Err(ChainSyncError::Internal(format!(
-                "Block index request for entries >{} returned no extra results, but the estimated network height is {}",
-                sync_target, estimated_height
+                "Block index request for entries >{} returned no extra results, but the estimated network height is {} (threshold: {})",
+                sync_target, estimated_height, safe_threshold
             )));
         }
         debug!(

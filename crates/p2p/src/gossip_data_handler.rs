@@ -45,22 +45,19 @@ fn format_failure_summary(
     if failed_attempts.is_empty() {
         return format!("Failed to pull {}", operation);
     }
-    let mut summary = format!(
-        "Failed to pull {} after {} attempts: ",
+    let entries: Vec<String> = failed_attempts
+        .iter()
+        .map(|(source, err)| match source {
+            Some(peer_id) => format!("[Peer {}: {}]", peer_id, err),
+            None => format!("[Unknown peer: {}]", err),
+        })
+        .collect();
+    format!(
+        "Failed to pull {} after {} attempts: {}",
         operation,
-        failed_attempts.len()
-    );
-    for (idx, (source, err)) in failed_attempts.iter().enumerate() {
-        if let Some(peer_id) = source {
-            summary.push_str(&format!("[Peer {}: {}]", peer_id, err));
-        } else {
-            summary.push_str(&format!("[Unknown peer: {}]", err));
-        }
-        if idx < failed_attempts.len() - 1 {
-            summary.push_str(", ");
-        }
-    }
-    summary
+        failed_attempts.len(),
+        entries.join(", ")
+    )
 }
 
 /// Handles data received by the `GossipServer`
@@ -940,7 +937,7 @@ where
                 }
 
                 // Try data txs
-                match get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await {
+                match get_data_tx_in_parallel(vec, mempool_guard, db).await {
                     Ok(mut result) => {
                         if let Some(tx) = result.pop() {
                             return Ok(Some(GossipDataV2::Transaction(tx)));
