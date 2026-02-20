@@ -3,8 +3,10 @@ use std::fmt;
 
 /// Time-ordered unique request identifier (UUID v7 layout).
 ///
-/// Uses 48-bit millisecond timestamp + 80 bits of randomness with
-/// UUID version 7 and variant bits set, giving sortable, globally-unique IDs.
+/// Uses 48-bit millisecond timestamp + 74 bits of randomness (plus 4-bit
+/// version and 2-bit variant fields), giving sortable, globally-unique IDs.
+/// Ordering is millisecond-precision; IDs generated within the same
+/// millisecond are not guaranteed to be monotonically ordered.
 ///
 /// Serializes as a hyphenated UUID string (e.g. `"018f3a1c-7c4d-7892-a1b2-..."`)
 /// for consistent representation across logs, traces, and wire formats.
@@ -150,5 +152,14 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let expected = format!("\"{}\"", id);
         assert_eq!(json, expected);
+    }
+
+    #[test]
+    fn deserialize_rejects_non_canonical_formats() {
+        let bare = "\"018f3a1c7c4d7892a1b2c3d4e5f60708\"";
+        assert!(serde_json::from_str::<RequestId>(bare).is_err());
+
+        let wrong_hyphens = "\"018f3a1c7c-4d789-2a1b2-c3d4e5f60708\"";
+        assert!(serde_json::from_str::<RequestId>(wrong_hyphens).is_err());
     }
 }
