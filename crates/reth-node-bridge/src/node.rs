@@ -176,8 +176,7 @@ pub async fn run_node(
 
     reth_config.txpool.queued_max_count = subpool_max_tx_count;
     reth_config.txpool.queued_max_size = subpool_max_size_mb;
-    // important: keep blobs disabled in our mempool
-    reth_config.txpool.disable_blobs_support = true;
+    reth_config.txpool.disable_blobs_support = !node_config.consensus_config().enable_blobs;
 
     if let Some(cache_size) = node_config.reth.cross_block_cache_size_megabytes {
         reth_config.engine.cross_block_cache_size = cache_size;
@@ -221,7 +220,9 @@ pub async fn run_node(
         .with_launch_context(task_executor.clone());
 
     let handle = builder
-        .node(IrysEthereumNode)
+        .node(IrysEthereumNode {
+            enable_blobs: node_config.consensus_config().enable_blobs,
+        })
         .launch_with_debug_capabilities()
         .into_future()
         .in_current_span()
