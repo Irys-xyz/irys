@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 /// Time-ordered unique request identifier (UUID v7 layout).
 ///
@@ -90,6 +90,14 @@ impl fmt::Display for RequestId {
     }
 }
 
+impl FromStr for RequestId {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_uuid_str(s)
+    }
+}
+
 impl Serialize for RequestId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
@@ -99,7 +107,7 @@ impl Serialize for RequestId {
 impl<'de> Deserialize<'de> for RequestId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Self::from_uuid_str(&s).map_err(serde::de::Error::custom)
+        s.parse::<Self>().map_err(serde::de::Error::custom)
     }
 }
 
