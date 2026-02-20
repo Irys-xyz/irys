@@ -1222,13 +1222,15 @@ impl IrysNode {
                         Err(_) => error!("Timed out sending shutdown signal to actor thread"),
                     }
 
+                    // Actor internal shutdown budget: API 5s + gossip 5s + VDF 10s = 20s.
+                    // Allow 25s to accommodate scheduling jitter under CI load.
                     debug!("Waiting for the main actor thread to finish");
-                    match tokio::time::timeout(Duration::from_secs(15), actor_done_rx).await {
+                    match tokio::time::timeout(Duration::from_secs(25), actor_done_rx).await {
                         Ok(Ok(())) => debug!("Actor main thread finished"),
                         Ok(Err(_)) => {
                             error!("Actor thread likely panicked (completion channel dropped)")
                         }
-                        Err(_) => error!("Actor main thread did not finish within 15s"),
+                        Err(_) => error!("Actor main thread did not finish within 25s"),
                     }
 
                     service_set.graceful_shutdown().await;

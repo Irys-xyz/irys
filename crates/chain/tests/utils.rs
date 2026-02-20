@@ -82,7 +82,7 @@ use std::{
 };
 use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, error, error_span, info, instrument};
+use tracing::{debug, error, error_span, info, instrument, warn};
 
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
@@ -1080,7 +1080,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                         );
                     }
                 }
-                Ok(Err(_)) => {
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                    warn!("block_state receiver lagged; skipped {skipped} events, re-polling");
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                     return Err(eyre::eyre!("Block state channel closed"));
                 }
                 // No event in this short slice, loop and poll canonical state again.
@@ -3621,7 +3624,13 @@ pub async fn wait_for_block_event(
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(event)) if predicate(&event) => return event,
             Ok(Ok(_)) => continue,
-            Ok(Err(e)) => panic!("broadcast channel error while waiting for block event: {e}"),
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                tracing::warn!("block_event receiver lagged; skipped {skipped} events, continuing");
+                continue;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                panic!("broadcast channel closed while waiting for block event");
+            }
             Err(_) => panic!("timed out after {timeout_secs}s waiting for block event"),
         }
     }

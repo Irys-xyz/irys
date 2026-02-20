@@ -201,8 +201,13 @@ impl BlockTreeService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            if let Err(e) = self.inner.handle_message(msg).await {
-                debug!("Error handling message during shutdown drain (expected if services are stopping): {}", e);
+            match msg {
+                // Skip: talks to downstream services (reth FCU, migration) that
+                // may already be stopped during shutdown.
+                BlockTreeServiceMessage::BlockValidationFinished { .. } => {
+                    debug!("Skipping BlockValidationFinished during shutdown drain");
+                }
+                msg => self.inner.handle_message(msg).await?,
             }
         }
 
@@ -272,7 +277,7 @@ impl BlockTreeServiceInner {
                 },
                 response: tx,
             })
-            .expect("Unable to send confirmation FCU message to reth");
+            .map_err(|e| eyre::eyre!("Reth service channel closed, cannot send FCU: {e}"))?;
 
         rx.await
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
