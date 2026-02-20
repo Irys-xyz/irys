@@ -57,6 +57,12 @@ fn inject_trace_context(headers: &mut reqwest::header::HeaderMap) {
     });
 }
 
+fn traced_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    inject_trace_context(&mut headers);
+    headers
+}
+
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -386,8 +392,7 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::Info
         );
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
@@ -434,8 +439,7 @@ impl GossipClient {
             gossip_base_url(&peer, ProtocolVersion::V1),
             GossipRoutes::PeerList
         );
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
@@ -477,8 +481,7 @@ impl GossipClient {
             GossipRoutes::Version
         );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
@@ -548,8 +551,7 @@ impl GossipClient {
             GossipRoutes::Handshake
         );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
@@ -608,8 +610,7 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::BlockIndex
         );
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
@@ -657,8 +658,7 @@ impl GossipClient {
             peer.gossip,
             GossipRoutes::ProtocolVersion
         );
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
@@ -724,8 +724,7 @@ impl GossipClient {
         );
         let peer_addr_str = peer.gossip.to_string();
 
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
         let response = match self
             .internal_client()
             .get(&url)
@@ -871,12 +870,11 @@ impl GossipClient {
 
         debug!("Sending pre-serialized data to {}", url);
 
-        let mut headers = reqwest::header::HeaderMap::new();
+        let mut headers = traced_headers();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
+            reqwest::header::HeaderValue::from_static("application/json"),
         );
-        inject_trace_context(&mut headers);
 
         let response = self
             .client
@@ -1156,8 +1154,7 @@ impl GossipClient {
 
         debug!("Sending data to {} using {:?}", url, protocol_version);
 
-        let mut headers = reqwest::header::HeaderMap::new();
-        inject_trace_context(&mut headers);
+        let headers = traced_headers();
 
         let response = match protocol_version {
             ProtocolVersion::V1 => {
@@ -1999,8 +1996,7 @@ impl GossipClient {
                     GossipRoutes::StakeAndPledgeWhitelist
                 );
 
-                let mut headers = reqwest::header::HeaderMap::new();
-                inject_trace_context(&mut headers);
+                let headers = traced_headers();
                 let response = self
                     .client
                     .get(&url)

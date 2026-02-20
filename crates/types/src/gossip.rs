@@ -447,6 +447,17 @@ pub struct GossipRequestV2<T> {
     pub data: T,
 }
 
+impl<T> GossipRequestV1<T> {
+    pub fn into_v2(self, peer_id: IrysPeerId) -> GossipRequestV2<T> {
+        GossipRequestV2 {
+            peer_id,
+            miner_address: self.miner_address,
+            request_id: Some(super::request_id::RequestId::new()),
+            data: self.data,
+        }
+    }
+}
+
 /// Legacy type alias for backward compatibility - maps to V1
 pub type GossipRequest<T> = GossipRequestV1<T>;
 

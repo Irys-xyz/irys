@@ -75,8 +75,8 @@ pub(crate) fn record_partitions_unassigned(count: u64) {
     PARTITIONS_UNASSIGNED.record(count, &[]);
 }
 
-pub(crate) fn record_node_shutdown(reason: &str) {
-    NODE_SHUTDOWN.add(1, &[KeyValue::new("reason", reason.to_owned())]);
+pub(crate) fn record_node_shutdown(reason: &'static str) {
+    NODE_SHUTDOWN.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_pledge_tx_posted() {

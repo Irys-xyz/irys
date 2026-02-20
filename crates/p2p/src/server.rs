@@ -111,14 +111,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         let permit = match server.chunk_semaphore.try_acquire() {
             Ok(permit) => permit,
@@ -282,14 +275,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = v2_request.data.block_hash;
@@ -366,14 +352,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = v2_request.data.block_hash;
@@ -433,14 +412,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server
             .data_handler
@@ -482,14 +454,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -527,14 +492,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -572,14 +530,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -1411,10 +1362,8 @@ where
             Err(error_response) => return error_response,
         };
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
-            peer_id,
+            peer_id: peer.peer_id,
             miner_address: source_miner_address,
             request_id: Some(irys_types::RequestId::new()),
             data: v2_data_request,
@@ -1488,14 +1437,7 @@ where
             Err(error_response) => return error_response,
         };
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         match server
             .data_handler
@@ -1530,14 +1472,7 @@ where
             Err(error_response) => return error_response,
         };
 
-        // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id;
-        let v2_request = GossipRequestV2 {
-            peer_id,
-            miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
-            data: v1_request.data,
-        };
+        let v2_request = v1_request.into_v2(peer.peer_id);
 
         match server
             .data_handler

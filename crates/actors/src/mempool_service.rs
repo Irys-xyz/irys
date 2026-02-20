@@ -197,7 +197,6 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
-    /// Async write-behind buffer for chunk MDBX writes
     pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
@@ -2685,8 +2684,6 @@ impl AtomicMempoolState {
 
         hash_map
     }
-
-    // --- Batch methods for reduced lock contention ---
 
     /// Batch lookup data transactions from mempool in a single READ lock.
     pub async fn batch_valid_submit_ledger_tx_cloned(

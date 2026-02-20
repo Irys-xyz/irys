@@ -1,5 +1,4 @@
 mod metric_macros;
-pub use metric_macros::MetricDescriptor;
 
 pub mod circuit_breaker;
 pub mod listener;
