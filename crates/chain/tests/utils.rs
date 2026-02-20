@@ -447,6 +447,42 @@ impl IrysNodeTest<IrysNodeCtx> {
             )
         };
 
+        let (
+            block_index_height,
+            block_index_hash,
+            block_index_submit_total_chunks,
+            block_index_publish_total_chunks,
+        ) = {
+            let block_index = self.node_ctx.block_index_guard.read();
+            let latest = block_index.get_latest_item();
+
+            let (submit_total_chunks, publish_total_chunks) = latest
+                .as_ref()
+                .map(|item| {
+                    let submit_total = item
+                        .ledgers
+                        .iter()
+                        .find(|ledger| ledger.ledger == DataLedger::Submit)
+                        .map(|ledger| ledger.total_chunks)
+                        .unwrap_or(0);
+                    let publish_total = item
+                        .ledgers
+                        .iter()
+                        .find(|ledger| ledger.ledger == DataLedger::Publish)
+                        .map(|ledger| ledger.total_chunks)
+                        .unwrap_or(0);
+                    (submit_total, publish_total)
+                })
+                .unwrap_or((0, 0));
+
+            (
+                latest.as_ref().map(|_| block_index.latest_height()),
+                latest.as_ref().map(|item| item.block_hash),
+                submit_total_chunks,
+                publish_total_chunks,
+            )
+        };
+
         let known_peers = self.node_ctx.peer_list.all_peers().iter().count();
         let gossip_broadcast = self.node_ctx.sync_state.is_gossip_broadcast_enabled();
         let gossip_reception = self.node_ctx.sync_state.is_gossip_reception_enabled();
@@ -482,14 +518,22 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
             .unwrap_or_else(|| "none".to_string());
 
+        let block_index_tip = block_index_height
+            .zip(block_index_hash)
+            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
+            .unwrap_or_else(|| "none".to_string());
+
         format!(
-            "node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} peer_list={} reth_peers={} reth_tip={} gossip_tx={} gossip_rx={}",
+            "node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} index_tip={} index_submit_chunks={} index_publish_chunks={} peer_list={} reth_peers={} reth_tip={} gossip_tx={} gossip_rx={}",
             self.name,
             canonical_tip,
             canonical_chain_len,
             not_onchain_count,
             max_diff_height,
             max_diff_hash,
+            block_index_tip,
+            block_index_submit_total_chunks,
+            block_index_publish_total_chunks,
             known_peers,
             reth_peer_count,
             reth_tip,
@@ -760,6 +804,61 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
             Ok(())
         }
+    }
+
+    /// Polls block-index block-bounds lookup until the requested chunk offset
+    /// is resolvable for the given ledger, or times out.
+    #[diag_slow(state = format!(
+        "ledger={:?} chunk_offset={} {}",
+        ledger,
+        u64::from(chunk_offset),
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_until_block_bounds_available(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        let chunk_offset_u64: u64 = chunk_offset.into();
+        let mut last_error = "none".to_string();
+
+        for attempt in 1..=max_seconds {
+            let lookup = self
+                .node_ctx
+                .block_index_guard
+                .read()
+                .get_block_bounds(ledger, LedgerChunkOffset::from(chunk_offset_u64));
+
+            match lookup {
+                Ok(bounds) => {
+                    info!(
+                        "block bounds available for {:?} offset {} after {} attempt(s): [{}, {}) at height {}",
+                        ledger,
+                        chunk_offset_u64,
+                        attempt,
+                        bounds.start_chunk_offset,
+                        bounds.end_chunk_offset,
+                        bounds.height
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    last_error = format!("{err:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        let state = self.diag_wait_state().await;
+        Err(eyre::eyre!(
+            "Failed waiting for block bounds for ledger {:?} offset {} after {} seconds; last_error={}; state: {}",
+            ledger,
+            chunk_offset_u64,
+            max_seconds,
+            last_error,
+            state
+        ))
     }
 
     /// Polls `get_block_by_height_from_index` (which checks BOTH the index
