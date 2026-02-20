@@ -127,6 +127,17 @@ pub struct ConsensusConfig {
     #[serde(default)]
     pub use_kzg_ingress_proofs: bool,
 
+    /// Accept V2 (KZG-based) ingress proofs from peers. When false, V2 proofs
+    /// received via gossip or in blocks are rejected. Must be true when
+    /// `use_kzg_ingress_proofs` is true.
+    #[serde(default)]
+    pub accept_kzg_ingress_proofs: bool,
+
+    /// Require V2 (KZG-based) ingress proofs exclusively. When true, V1 proofs
+    /// are rejected. Implies `accept_kzg_ingress_proofs = true`.
+    #[serde(default)]
+    pub require_kzg_ingress_proofs: bool,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -588,6 +599,8 @@ impl ConsensusConfig {
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
             use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
             // Fee required to stake a mining address in Irys tokens
             stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
             // Base fee required for pledging a partition in Irys tokens
@@ -727,6 +740,8 @@ impl ConsensusConfig {
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
             use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
             max_future_timestamp_drift_millis: 15_000,
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
@@ -775,6 +790,8 @@ impl ConsensusConfig {
             enable_full_ingress_proof_validation: false,
             enable_shadow_kzg_logging: false,
             use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {

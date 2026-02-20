@@ -2891,6 +2891,9 @@ pub enum IngressProofError {
     /// The ingress proof is anchored to an unknown/expired anchor
     #[error("Invalid anchor: {0}")]
     InvalidAnchor(BlockHash),
+    /// The proof version is not accepted by current config
+    #[error("Rejected ingress proof version: {0}")]
+    RejectedVersion(String),
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),

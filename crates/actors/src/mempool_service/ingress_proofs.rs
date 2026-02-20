@@ -19,6 +19,21 @@ impl Inner {
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
+        // Check proof version is accepted by current config
+        match &ingress_proof {
+            IngressProof::V2(_) if !self.config.consensus.accept_kzg_ingress_proofs => {
+                return Err(IngressProofError::RejectedVersion(
+                    "V2 proofs not accepted (accept_kzg_ingress_proofs = false)".into(),
+                ));
+            }
+            IngressProof::V1(_) if self.config.consensus.require_kzg_ingress_proofs => {
+                return Err(IngressProofError::RejectedVersion(
+                    "V1 proofs rejected (require_kzg_ingress_proofs = true)".into(),
+                ));
+            }
+            _ => {}
+        }
+
         // Validate the proofs signature and basic details
         let data_root_val = ingress_proof.data_root();
         let address = ingress_proof
@@ -227,6 +242,16 @@ impl Inner {
                     );
                     ProofCheckResult {
                         expired_or_invalid: false,
+                        regeneration_action: RegenAction::DoNotRegenerate,
+                    }
+                }
+                IngressProofError::RejectedVersion(reason) => {
+                    warn!(
+                        data_root = ?ingress_proof.data_root(),
+                        "Ingress proof version rejected: {}", reason
+                    );
+                    ProofCheckResult {
+                        expired_or_invalid: true,
                         regeneration_action: RegenAction::DoNotRegenerate,
                     }
                 }
