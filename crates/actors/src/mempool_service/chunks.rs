@@ -396,14 +396,11 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        // Record validation duration
         record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
 
         drop(_proof_span);
 
-        // Queue the chunk for async batched write to CachedChunks via the
-        // write-behind writer, avoiding a synchronous MDBX transaction on the
-        // hot ingress path.
+        // Write-behind: defers MDBX write for throughput
         let storage_start = Instant::now();
         match self
             .chunk_data_writer
@@ -483,10 +480,7 @@ impl Inner {
             );
         }
 
-        // ==== INGRESS PROOFS ====
-        // Flush the write-behind writer so that the chunk we just queued (and
-        // any others in the buffer) are committed to MDBX before we count
-        // chunks for ingress proof generation.
+        // Flush to ensure chunks are committed before ingress proof check.
         if let Err(e) = self.chunk_data_writer.flush().await {
             error!(
                 "Failed to flush chunk data writer before ingress proof check: {:?}",

@@ -72,9 +72,9 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/tempo, spanmetrics]
+      exporters: [otlp/tempo]
     metrics:
-      receivers: [otlp, spanmetrics]
+      receivers: [otlp]
       processors: [batch]
       exporters: [prometheusremotewrite]
 

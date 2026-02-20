@@ -84,6 +84,7 @@ pub enum SyncChainServiceMessage {
     /// Request parent block from the network
     RequestBlockFromTheNetwork {
         block_hash: BlockHash,
+        request_id: Option<irys_types::RequestId>,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
     /// Forcefully pulls payload from the network and adds it to payload cache -
@@ -91,6 +92,7 @@ pub enum SyncChainServiceMessage {
     PullPayloadFromTheNetwork {
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
+        request_id: Option<irys_types::RequestId>,
         response: oneshot::Sender<GossipResult<()>>,
     },
     AttemptReprocessingBlock(BlockHash),
@@ -296,6 +298,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 );
                 let block_pool = self.block_pool.clone();
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
+                let request_id = orphaned_block.request_id;
                 let orphaned_block_arc = Arc::clone(&orphaned_block.block);
                 futures.push(async move {
                     debug!(
@@ -304,7 +307,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     );
 
                     block_pool
-                        .process_block(orphaned_block_arc, is_fast_tracking)
+                        .process_block(orphaned_block_arc, is_fast_tracking, request_id)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -360,6 +363,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
     async fn request_parent_block(
         &self,
         parent_block_hash: BlockHash,
+        request_id: Option<irys_types::RequestId>,
     ) -> Result<(), ChainSyncError> {
         let parent_is_already_in_the_pool =
             self.block_pool.contains_block(&parent_block_hash).await;
@@ -370,7 +374,8 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 "Orphan service: Parent block {:?} not found in the cache, requesting it from the network",
                 parent_block_hash
             );
-            self.request_block_from_the_network(parent_block_hash).await
+            self.request_block_from_the_network(parent_block_hash, request_id)
+                .await
         } else {
             debug!(
                 "Parent block {:?} is already in the cache, skipping get data request",
@@ -384,11 +389,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
     async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
+        request_id: Option<irys_types::RequestId>,
     ) -> Result<(), ChainSyncError> {
         self.block_pool.mark_block_as_requested(block_hash).await;
         if let Err(err) = self
             .gossip_data_handler
-            .pull_and_process_block(block_hash, self.sync_state.is_trusted_sync())
+            .pull_and_process_block(block_hash, self.sync_state.is_trusted_sync(), request_id)
             .await
         {
             error!(
@@ -540,6 +546,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
             }
             SyncChainServiceMessage::RequestBlockFromTheNetwork {
                 block_hash: parent_block_hash,
+                request_id,
                 response,
             } => {
                 debug!(
@@ -548,7 +555,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 );
                 let inner = self.inner.clone();
                 tokio::spawn(async move {
-                    let result = inner.request_parent_block(parent_block_hash).await;
+                    let result = inner
+                        .request_parent_block(parent_block_hash, request_id)
+                        .await;
                     if let Some(sender) = response {
                         if let Err(e) = sender.send(result) {
                             tracing::error!("Failed to send response: {:?}", e);
@@ -560,6 +569,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 evm_block_hash,
                 response,
                 use_trusted_peers_only,
+                request_id,
             } => {
                 debug!(
                     "SyncChainService: Received a request to force pull an execution payload for evm block hash {:?}",
@@ -572,6 +582,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                         .pull_and_add_execution_payload_to_cache(
                             evm_block_hash,
                             use_trusted_peers_only,
+                            request_id,
                         )
                         .await;
                     if let Err(e) = response.send(result) {
@@ -594,6 +605,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                             .process_block(
                                 Arc::clone(&cached_block.block),
                                 cached_block.is_fast_tracking,
+                                cached_block.request_id,
                             )
                             .await
                         {
@@ -840,6 +852,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                                 gossip_data_handler.pull_and_process_block(
                                     retry_block.block_hash,
                                     sync_state.is_syncing_from_a_trusted_peer(),
+                                    None,
                                 ),
                             )
                             .await
@@ -899,6 +912,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                     .pull_and_process_block(
                         block_hash,
                         sync_state_clone.is_syncing_from_a_trusted_peer(),
+                        None,
                     )
                     .await
                 {

@@ -203,6 +203,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .service(routes())
             .wrap(Cors::permissive())
             .wrap(TracingLogger::default())
+            .wrap(metrics::RequestMetrics)
     })
     .listen(listener)
     .unwrap()

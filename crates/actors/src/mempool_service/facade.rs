@@ -95,7 +95,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let tx_id = tx_header.id;
         self.service
             .send(MempoolServiceMessage::IngestDataTxFromApi(
-                tx_header, oneshot_tx,
+                tx_header,
+                oneshot_tx,
+                tracing::Span::current(),
             ))
             .map_err(|_| {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
@@ -112,7 +114,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let tx_id = tx_header.id;
         self.service
             .send(MempoolServiceMessage::IngestDataTxFromGossip(
-                tx_header, oneshot_tx,
+                tx_header,
+                oneshot_tx,
+                tracing::Span::current(),
             ))
             .map_err(|_| {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
@@ -131,6 +135,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
                 commitment_tx,
                 oneshot_tx,
+                tracing::Span::current(),
             ))
             .map_err(|_| {
                 TxIngressError::Other(format!(
@@ -154,6 +159,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                 commitment_tx,
                 oneshot_tx,
+                tracing::Span::current(),
             ))
             .map_err(|_| {
                 TxIngressError::Other(format!(

@@ -139,7 +139,9 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
             .block_discovery
             .clone(),
     );
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), false, Some(irys_types::RequestId::new()))
+        .await;
 
     // 11. Assert validation fails with UnstakedIngressProofSigner
     assert!(

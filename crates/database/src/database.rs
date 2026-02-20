@@ -67,8 +67,10 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
             .with_growth_step((50 * MEGABYTE).into())
             .with_shrink_threshold((100 * MEGABYTE).try_into()?)
-            // Cache data is non-authoritative and can be rebuilt, so trade
-            // durability for write throughput by skipping fsync operations.
+            // Cache data is non-authoritative and can be rebuilt from chain state,
+            // so trade durability for write throughput by skipping fsync operations.
+            // On crash/corruption: delete the cache DB directory; it will be rebuilt
+            // on next startup from authoritative chain data.
             .with_sync_mode(Some(SyncMode::SafeNoSync)),
     );
     open_or_create_db(path, tables, Some(args))

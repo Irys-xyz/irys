@@ -515,6 +515,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .send(MempoolServiceMessage::IngestDataTxFromGossip(
             old_data_tx.header.clone(),
             tx,
+            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
@@ -529,6 +530,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
             commitment_tx_old.clone(),
             tx,
+            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
@@ -581,7 +583,11 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(
+            Arc::clone(&block),
+            false,
+            Some(irys_types::RequestId::new()),
+        )
         .await;
 
     assert!(matches!(
@@ -612,7 +618,11 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(
+            Arc::clone(&block),
+            false,
+            Some(irys_types::RequestId::new()),
+        )
         .await;
 
     assert!(matches!(
@@ -646,7 +656,11 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(
+            Arc::clone(&block),
+            false,
+            Some(irys_types::RequestId::new()),
+        )
         .await;
 
     assert!(matches!(
@@ -754,7 +768,11 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(
+            Arc::clone(&block),
+            false,
+            Some(irys_types::RequestId::new()),
+        )
         .await;
 
     debug!("validation result: {:?}", preval_res);

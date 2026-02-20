@@ -334,6 +334,7 @@ where
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> GossipResult<()> {
         debug!("Pulling block {} from the network", block_hash);
         let (source_peer_id, irys_block) = match self
@@ -372,6 +373,7 @@ where
             GossipRequestV2 {
                 peer_id: source_peer_id,
                 miner_address,
+                request_id: Some(request_id.unwrap_or_default()),
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -418,6 +420,7 @@ where
             GossipRequestV2 {
                 peer_id: source_peer_id,
                 miner_address,
+                request_id: Some(irys_types::RequestId::new()),
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -437,6 +440,7 @@ where
         }
         let source_peer_id = block_header_request.peer_id;
         let source_miner_address = block_header_request.miner_address;
+        let request_id = block_header_request.request_id;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
         debug!(
@@ -544,7 +548,11 @@ where
         })?;
 
         self.block_pool
-            .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
+            .process_block(
+                Arc::new(sealed_block),
+                skip_validation_for_fast_track,
+                request_id,
+            )
             .await?;
         Ok(())
     }
@@ -556,6 +564,7 @@ where
     ) -> GossipResult<()> {
         let source_peer_id = block_body_request.peer_id;
         let source_miner_address = block_body_request.miner_address;
+        let request_id = block_body_request.request_id;
         let block_body = block_body_request.data;
         let block_hash = block_body.block_hash;
 
@@ -699,7 +708,7 @@ where
         })?;
 
         self.block_pool
-            .process_block(Arc::new(sealed_block), skip_block_validation)
+            .process_block(Arc::new(sealed_block), skip_block_validation, request_id)
             .await?;
         Ok(())
     }
@@ -752,6 +761,7 @@ where
         &self,
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
+        request_id: Option<irys_types::RequestId>,
     ) -> GossipResult<()> {
         let mut last_err = None;
         for attempt in 1..=3 {
@@ -779,6 +789,7 @@ where
                         .handle_execution_payload(GossipRequestV2 {
                             peer_id: source_peer_id,
                             miner_address,
+                            request_id: Some(request_id.unwrap_or_default()),
                             data: execution_payload,
                         })
                         .await

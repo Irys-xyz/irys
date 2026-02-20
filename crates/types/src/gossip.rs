@@ -440,7 +440,22 @@ pub struct GossipRequestV2<T> {
     pub peer_id: IrysPeerId,
     /// Miner address still included for staking checks and verification
     pub miner_address: IrysAddress,
+    /// Optional request ID for cross-node request lifecycle tracing.
+    /// Old peers that don't send this field will deserialize as `None`.
+    #[serde(default)]
+    pub request_id: Option<super::request_id::RequestId>,
     pub data: T,
+}
+
+impl<T> GossipRequestV1<T> {
+    pub fn into_v2(self, peer_id: IrysPeerId) -> GossipRequestV2<T> {
+        GossipRequestV2 {
+            peer_id,
+            miner_address: self.miner_address,
+            request_id: Some(super::request_id::RequestId::new()),
+            data: self.data,
+        }
+    }
 }
 
 /// Legacy type alias for backward compatibility - maps to V1

@@ -38,7 +38,7 @@ pub(super) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
         1,
         &[
             KeyValue::new("error_type", error_type),
-            KeyValue::new("advisory", if is_advisory { "true" } else { "false" }),
+            KeyValue::new("advisory", is_advisory),
         ],
     );
 }

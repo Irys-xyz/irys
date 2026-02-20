@@ -1218,7 +1218,7 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(block.clone(), false)
+            .handle_block(block.clone(), false, Some(irys_types::RequestId::new()))
             .await
         {
             Ok(()) => Ok(()),

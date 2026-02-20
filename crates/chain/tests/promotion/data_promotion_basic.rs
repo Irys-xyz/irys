@@ -342,6 +342,7 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .send(MempoolServiceMessage::IngestDataTxFromGossip(
             data_tx.header.clone(),
             tx,
+            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests

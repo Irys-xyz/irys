@@ -40,7 +40,8 @@ async fn process_commitment_transaction(
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx);
+    let tx_ingress_msg =
+        MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx, tracing::Span::current());
 
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!(
