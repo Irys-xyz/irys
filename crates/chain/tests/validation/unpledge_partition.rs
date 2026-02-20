@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
-    IrysNodeTest,
+    assert_validation_error, gossip_commitment_to_node, solution_context, IrysNodeTest,
 };
-use crate::validation::send_block_to_block_tree;
+use crate::validation::{send_block_and_read_state, send_block_to_block_tree};
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
@@ -121,26 +120,24 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         let _ = gossip_commitment_to_node(node, &invalid_unpledge).await;
     }
 
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     let genesis_outcome =
-        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         genesis_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
         "genesis node should discard block with unpledge referencing unowned partition",
     );
 
-    send_block_to_block_tree(&victim_node.node_ctx, Arc::clone(&block), false).await?;
     let victim_outcome =
-        read_block_from_state(&victim_node.node_ctx, &block.header().block_hash).await;
+        send_block_and_read_state(&victim_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         victim_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
         "victim peer should also discard the malicious block",
     );
 
-    send_block_to_block_tree(&evil_node.node_ctx, Arc::clone(&block), false).await?;
-    let evil_outcome = read_block_from_state(&evil_node.node_ctx, &block.header().block_hash).await;
+    let evil_outcome =
+        send_block_and_read_state(&evil_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         evil_outcome,
         |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
@@ -254,9 +251,8 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         outcome,
         |e| {
@@ -358,9 +354,8 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     // The block is rejected because the commitment transaction has an invalid unpledge value.
     assert_validation_error(
         outcome,

@@ -1,5 +1,4 @@
 use crate::utils::*;
-use alloy_eips::HashOrNumber;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use assert_matches::assert_matches;
 use eyre::eyre;
@@ -12,7 +11,6 @@ use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     IrysAddress, NodeConfig, H256, U256,
 };
-use reth::providers::TransactionsProvider as _;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -984,17 +982,21 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
     );
 
     // Verify TermFeeReward shadow transaction at expiry epoch block
-    let reth_ctx = node.node_ctx.reth_node_adapter.clone();
     let expiry_block = node.get_block_by_height(expiry_height).await?;
-    let block_txs = reth_ctx
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(expiry_block.evm_block_hash))?
-        .unwrap_or_default();
+    let expiry_evm_block = node
+        .wait_for_evm_block(expiry_block.evm_block_hash, 20)
+        .await?;
+    let block_txs = expiry_evm_block.body.transactions;
+    let block_tx_count = block_txs.len();
+    info!(
+        "Expiry block {} has {} EVM txs",
+        expiry_height, block_tx_count
+    );
 
     let mut found_term_fee_reward = false;
-    for tx in &block_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+    for tx in block_txs {
+        let mut input = tx.input().as_ref();
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut input) {
             if let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
                 info!(
                     "Found TermFeeReward at height {}: target={}, amount={}",
@@ -1013,8 +1015,8 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     assert!(
         found_term_fee_reward,
-        "Expected TermFeeReward at expiry epoch block height {}",
-        expiry_height
+        "Expected TermFeeReward at expiry epoch block height {} (evm_txs={})",
+        expiry_height, block_tx_count
     );
 
     info!("TermFeeReward found and correctly sent to custom reward_address");

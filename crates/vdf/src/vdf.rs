@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub fn run_vdf_for_genesis_block(
@@ -64,6 +65,7 @@ pub fn run_vdf<B: BlockProvider>(
     atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
     chain_sync_state: ChainSyncState,
+    shutdown_token: CancellationToken,
 ) {
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
@@ -80,8 +82,20 @@ pub fn run_vdf<B: BlockProvider>(
     let vdf_reset_frequency = config.reset_frequency as u64;
 
     loop {
-        if let Ok(reason) = shutdown_listener.try_recv() {
-            tracing::info!("VDF loop shutdown signal received: {}", reason);
+        match shutdown_listener.try_recv() {
+            Ok(reason) => {
+                tracing::info!("VDF loop shutdown signal received: {}", reason);
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                tracing::warn!("VDF shutdown channel disconnected, exiting");
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        }
+
+        if shutdown_token.is_cancelled() {
+            tracing::info!("VDF loop: cancellation token triggered");
             break;
         }
 
@@ -244,6 +258,7 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt as _};
 
@@ -343,8 +358,10 @@ mod tests {
 
         let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
+        let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
+            let shutdown_token = shutdown_token.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -359,6 +376,7 @@ mod tests {
                     atomic_global_step_number,
                     MockBlockProvider(mock_header),
                     chain_sync_state,
+                    shutdown_token,
                 )
             }
         });
@@ -462,8 +480,10 @@ mod tests {
 
         let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
+        let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
+            let shutdown_token = shutdown_token.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -478,6 +498,7 @@ mod tests {
                     atomic_global_step_number,
                     MockBlockProvider::new(),
                     chain_sync_state,
+                    shutdown_token,
                 )
             }
         });

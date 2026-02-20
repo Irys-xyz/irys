@@ -149,19 +149,45 @@ async fn find_tx_in_blocks(
     tx_id: &IrysTransactionId,
     max_height: u64,
 ) -> Option<u64> {
-    for height in 1..=max_height {
-        if let Ok(block) = node.get_block_by_height(height).await {
-            if block.commitment_tx_ids().contains(tx_id) {
-                return Some(height);
+    const MAX_RETRIES: u32 = 10;
+    const RETRY_DELAY_MS: u64 = 1000;
+
+    for attempt in 1..=MAX_RETRIES {
+        let mut all_blocks_checked = true;
+
+        for height in 1..=max_height {
+            if let Ok(block) = node.get_block_by_height(height).await {
+                if block.commitment_tx_ids().contains(tx_id) {
+                    return Some(height);
+                }
+            } else {
+                tracing::debug!(
+                    "Block at height {} not yet available (attempt {}/{})",
+                    height,
+                    attempt,
+                    MAX_RETRIES
+                );
+                all_blocks_checked = false;
+                break;
             }
-        } else {
-            tracing::debug!(
-                "Block at height {} not yet available, stopping search",
-                height
-            );
+        }
+
+        if all_blocks_checked {
+            // Successfully checked all blocks, tx not found
             break;
         }
+
+        if attempt < MAX_RETRIES {
+            tracing::debug!(
+                "Retrying block search after {} ms (attempt {}/{})",
+                RETRY_DELAY_MS,
+                attempt,
+                MAX_RETRIES
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
     }
+
     tracing::debug!(
         "Transaction {} not found in blocks 1..={}",
         tx_id,
@@ -759,7 +785,7 @@ mod borealis_hardfork {
 
     /// Test that UpdateRewardAddress is accepted and mined after Borealis activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
+    async fn heavy3_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
     {
         let mut config = borealis_config_past();
         let signer = create_funded_signer(&mut config);
@@ -991,7 +1017,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height, pre_activation_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index(pre_aurora_migrated_height, true, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Pre-Aurora blocks migrated to height {}",
@@ -1100,7 +1126,7 @@ mod peer_sync_recovery {
             post_aurora_migrated_height, final_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index(post_aurora_migrated_height, true, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Post-Aurora blocks migrated to height {}",
@@ -1174,7 +1200,7 @@ mod peer_sync_recovery {
 
         // Step 7: Wait for Peer Block Migration and Validate
         peer_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_in_index(post_aurora_migrated_height, true, SECONDS_TO_WAIT * 2)
             .await?;
         info!(
             "Peer block index migrated to height {}",

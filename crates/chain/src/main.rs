@@ -56,22 +56,22 @@ async fn main() -> eyre::Result<()> {
     info!("starting the node, mode: {:?}", &config.node_mode);
     let handle = IrysNode::new(config)?.start().await?;
     handle.start_mining()?;
-    let reth_thread_handle = handle.reth_thread_handle.clone();
-    // wait for the node to be shut down
-    let shutdown_reason = tokio::task::spawn_blocking(move || match reth_thread_handle {
-        Some(handle) => match handle.join() {
+
+    // Await reth thread completion asynchronously
+    let reth_done_rx = handle.reth_done_rx.lock().unwrap().take();
+    let shutdown_reason = match reth_done_rx {
+        Some(rx) => match rx.await {
             Ok(reason) => reason,
-            Err(e) => {
-                error!("Reth thread panicked: {:?}", e);
+            Err(_) => {
+                error!("Reth thread panicked");
                 ShutdownReason::FatalError("Reth thread panicked".to_string())
             }
         },
         None => {
-            error!("Reth thread handle was None");
-            ShutdownReason::FatalError("Reth thread handle was None".to_string())
+            error!("Reth completion receiver was None");
+            ShutdownReason::FatalError("Reth completion receiver was None".to_string())
         }
-    })
-    .await?;
+    };
 
     // Spawn watchdog thread to force exit if graceful shutdown hangs
     spawn_shutdown_watchdog(shutdown_reason.clone());

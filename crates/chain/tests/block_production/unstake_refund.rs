@@ -347,7 +347,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Mine a block - unstake should NOT be included due to HasActivePledges
     let first_block_after_unstake = genesis_node.mine_block().await?;
     genesis_node
-        .wait_until_height(first_block_after_unstake.height, seconds_to_wait)
+        .wait_for_block_at_height(first_block_after_unstake.height, seconds_to_wait)
         .await
         .expect("peer should sync first block after unstake attempt");
     let first_block = genesis_node
@@ -400,7 +400,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Advance to epoch boundary
     let (_mined, first_epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(first_epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(first_epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync first epoch after unstake attempt");
     let first_epoch_block = genesis_node.get_block_by_height(first_epoch_height).await?;
@@ -455,7 +455,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Mine another block to verify unstake continues to be rejected
     let second_block_after_unstake = genesis_node.mine_block().await?;
     peer_node
-        .wait_until_height(second_block_after_unstake.height, seconds_to_wait)
+        .wait_for_block_at_height(second_block_after_unstake.height, seconds_to_wait)
         .await
         .expect("peer to sync second block");
     let second_block = genesis_node
@@ -480,7 +480,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Advance to another epoch - unstake should still not be processed
     let (_mined, second_epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(second_epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(second_epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync second epoch");
     let second_epoch_block = genesis_node
@@ -1005,7 +1005,7 @@ fn assert_no_unstake_in_commitment_snapshot(
 /// 7. No storage modules remain assigned (all pledges cleared)
 /// 8. User is no longer staked (removed from epoch snapshot)
 #[test_log::test(tokio::test)]
-async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
+async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -1099,7 +1099,7 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     // Mine until next epoch - this should process both unpledges and unstake
     let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync to epoch");
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
