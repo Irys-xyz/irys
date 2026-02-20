@@ -132,6 +132,7 @@ pub struct IrysNodeCtx {
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
+    pub chunk_ingress_state: irys_actors::ChunkIngressState,
     backfill_cancel: CancellationToken,
     backfill_complete: Arc<tokio::sync::Notify>,
 }
@@ -938,6 +939,7 @@ impl IrysNode {
             let config = ctx.config.clone();
             let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();
+            let chunk_ingress_state = ctx.chunk_ingress_state.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -962,7 +964,8 @@ impl IrysNode {
                         .map(|(_, i)| i)
                         .collect::<Vec<_>>();
 
-                    let mempool_status = mempool.get_status(&config.node_config).await;
+                    let mut mempool_status = mempool.get_status(&config.node_config).await;
+                    mempool_status.pending_chunks_count = chunk_ingress_state.pending_chunks_count().await;
 
                     info!(
                     target = "node-state",
@@ -1432,7 +1435,7 @@ impl IrysNode {
             ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
 
         // Spawn chunk ingress service
-        let chunk_ingress_handle =
+        let (chunk_ingress_handle, chunk_ingress_state) =
             irys_actors::chunk_ingress_service::ChunkIngressService::spawn_service(
                 irys_db.clone(),
                 storage_modules_guard.clone(),
@@ -1452,6 +1455,7 @@ impl IrysNode {
             &config,
             &service_senders,
             runtime_handle.clone(),
+            chunk_ingress_state.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
@@ -1713,6 +1717,7 @@ impl IrysNode {
             is_vdf_mining_enabled,
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
+            chunk_ingress_state,
             backfill_cancel,
             backfill_complete,
         };

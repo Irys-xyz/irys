@@ -23,7 +23,7 @@ use irys_types::{
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot, Semaphore};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn, Instrument as _, Span};
 
@@ -45,8 +45,6 @@ pub enum ChunkIngressMessage {
     /// Process pending chunks for a data root after its TX header was ingested.
     /// Sent by the mempool when a data TX is successfully validated.
     ProcessPendingChunks(DataRoot),
-    /// Query the current pending chunks count. Used for status reporting.
-    GetPendingChunksCount(oneshot::Sender<usize>),
 }
 
 impl ChunkIngressMessage {
@@ -57,8 +55,20 @@ impl ChunkIngressMessage {
             Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
-            Self::GetPendingChunksCount(_) => "GetPendingChunksCount",
         }
+    }
+}
+
+/// Shared read handle for chunk ingress state.
+/// Allows querying pending chunks count without going through the message loop.
+#[derive(Debug, Clone)]
+pub struct ChunkIngressState {
+    pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+}
+
+impl ChunkIngressState {
+    pub async fn pending_chunks_count(&self) -> usize {
+        self.pending_chunks.read().await.len()
     }
 }
 
@@ -71,7 +81,7 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) service_senders: ServiceSenders,
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
-    pub(crate) pending_chunks: tokio::sync::RwLock<PriorityPendingChunks>,
+    pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
@@ -103,10 +113,6 @@ impl ChunkIngressServiceInner {
             }
             ChunkIngressMessage::ProcessPendingChunks(data_root) => {
                 self.process_pending_chunks_for_root(data_root).await;
-            }
-            ChunkIngressMessage::GetPendingChunksCount(response) => {
-                let count = self.pending_chunks.read().await.len();
-                let _ = response.send(count);
             }
         }
     }
@@ -182,7 +188,7 @@ impl ChunkIngressService {
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
-    ) -> TokioServiceHandle {
+    ) -> (TokioServiceHandle, ChunkIngressState) {
         info!("Spawning chunk ingress service");
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -197,13 +203,17 @@ impl ChunkIngressService {
         let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let service_senders = service_senders.clone();
 
+        let pending_chunks = Arc::new(RwLock::new(PriorityPendingChunks::new(
+            max_pending_chunk_items,
+            max_preheader_chunks_per_item,
+        )));
+        let chunk_ingress_state = ChunkIngressState {
+            pending_chunks: pending_chunks.clone(),
+        };
+
         let handle = runtime_handle.spawn(async move {
             let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
                 NonZeroUsize::new(max_valid_chunks).unwrap(),
-            ));
-            let pending_chunks = tokio::sync::RwLock::new(PriorityPendingChunks::new(
-                max_pending_chunk_items,
-                max_preheader_chunks_per_item,
             ));
             let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                 irys_db.clone(),
@@ -234,11 +244,13 @@ impl ChunkIngressService {
                 .expect("ChunkIngressService encountered an irrecoverable error")
         });
 
-        TokioServiceHandle {
+        let handle = TokioServiceHandle {
             name: "chunk_ingress_service".to_string(),
             handle,
             shutdown_signal: shutdown_tx,
-        }
+        };
+
+        (handle, chunk_ingress_state)
     }
 
     async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {

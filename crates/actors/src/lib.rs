@@ -28,7 +28,7 @@ pub mod validation_service;
 pub use block_producer::*;
 pub use chunk_ingress_service::{
     AdvisoryChunkIngressError, ChunkIngressError, ChunkIngressMessage, ChunkIngressService,
-    CriticalChunkIngressError, IngressProofError, IngressProofGenerationError,
+    ChunkIngressState, CriticalChunkIngressError, IngressProofError, IngressProofGenerationError,
     PriorityPendingChunks,
 };
 pub use data_sync_service::*;

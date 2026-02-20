@@ -13,7 +13,7 @@ pub use types::*;
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
-use crate::chunk_ingress_service::{ChunkIngressMessage, ChunkIngressServiceInner};
+use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -189,6 +189,8 @@ pub struct Inner {
     message_handler_semaphore: Arc<Semaphore>,
     /// Async write-behind buffer for chunk MDBX writes
     pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+    /// Shared state handle for reading chunk ingress pending count
+    pub chunk_ingress_state: ChunkIngressState,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -420,28 +422,7 @@ impl Inner {
             .mempool_state
             .get_status(&self.config.node_config)
             .await;
-
-        // Query the real pending chunks count from ChunkIngressService
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Err(e) = self
-            .service_senders
-            .chunk_ingress
-            .send(ChunkIngressMessage::GetPendingChunksCount(tx))
-        {
-            warn!(
-                "Failed to send GetPendingChunksCount to chunk ingress channel: {:?}",
-                e
-            );
-        } else {
-            match rx.await {
-                Ok(count) => status.pending_chunks_count = count,
-                Err(e) => warn!(
-                    "Failed to receive pending chunks count from chunk ingress service: {:?}",
-                    e
-                ),
-            }
-        }
-
+        status.pending_chunks_count = self.chunk_ingress_state.pending_chunks_count().await;
         Ok(status)
     }
 
@@ -2971,6 +2952,7 @@ impl MempoolService {
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
+        chunk_ingress_state: ChunkIngressState,
     ) -> eyre::Result<TokioServiceHandle> {
         info!("Spawning mempool service");
 
@@ -3023,6 +3005,7 @@ impl MempoolService {
                             max_concurrent_mempool_tasks,
                         )),
                         chunk_data_writer,
+                        chunk_ingress_state,
                     }),
                 };
                 mempool_service

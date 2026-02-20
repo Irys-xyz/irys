@@ -401,9 +401,6 @@ impl GossipServiceTestFixture {
                             data_root
                         );
                     }
-                    ChunkIngressMessage::GetPendingChunksCount(reply) => {
-                        let _ = reply.send(0);
-                    }
                 }
             }
             debug!("ChunkIngress receiver channel closed");
@@ -1026,9 +1023,6 @@ pub(crate) fn data_handler_stub(
                     let _ = reply.send(Ok(()));
                 }
                 ChunkIngressMessage::ProcessPendingChunks(_data_root) => {}
-                ChunkIngressMessage::GetPendingChunksCount(reply) => {
-                    let _ = reply.send(0);
-                }
             }
         }
     });
@@ -1116,9 +1110,6 @@ pub(crate) fn data_handler_with_stubbed_pool(
                     let _ = reply.send(Ok(()));
                 }
                 ChunkIngressMessage::ProcessPendingChunks(_data_root) => {}
-                ChunkIngressMessage::GetPendingChunksCount(reply) => {
-                    let _ = reply.send(0);
-                }
             }
         }
     });

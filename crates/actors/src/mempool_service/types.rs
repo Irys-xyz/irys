@@ -7,7 +7,9 @@ pub struct MempoolStatus {
     pub data_tx_count: usize,
     /// Total number of commitment transactions
     pub commitment_tx_count: usize,
-    /// Total number of pending chunks
+    /// Total number of pending data root entries in the chunk ingress service.
+    /// Initialized to 0 by `AtomicMempoolState::get_status`;
+    /// enriched by callers via `ChunkIngressState::pending_chunks_count()`.
     pub pending_chunks_count: usize,
     /// Total number of pending pledges
     pub pending_pledges_count: usize,
