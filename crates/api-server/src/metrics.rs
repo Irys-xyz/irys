@@ -1,7 +1,10 @@
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
-use futures::future::{ok, Ready};
 use opentelemetry::KeyValue;
-use std::{future::Future, pin::Pin, time::Instant};
+use std::{
+    future::{ready, Future, Ready},
+    pin::Pin,
+    time::Instant,
+};
 
 irys_utils::define_metrics! {
     meter: "irys-api-server";
@@ -48,7 +51,7 @@ where
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ok(RequestMetricsMiddleware { service })
+        ready(Ok(RequestMetricsMiddleware { service }))
     }
 }
 

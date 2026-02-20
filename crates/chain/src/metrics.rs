@@ -86,7 +86,3 @@ pub(crate) fn record_pledge_tx_posted() {
 pub(crate) fn record_peer_fetch_error(error_type: &'static str) {
     PEER_FETCH_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
 }
-
-pub(crate) fn record_reth_fcu_head_height(height: u64) {
-    RETH_FCU_HEAD_HEIGHT.record(height, &[]);
-}
