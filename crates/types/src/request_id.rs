@@ -5,7 +5,10 @@ use std::fmt;
 ///
 /// Uses 48-bit millisecond timestamp + 80 bits of randomness with
 /// UUID version 7 and variant bits set, giving sortable, globally-unique IDs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Serializes as a hyphenated UUID string (e.g. `"018f3a1c-7c4d-7892-a1b2-..."`)
+/// for consistent representation across logs, traces, and wire formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId([u8; 16]);
 
 impl RequestId {
@@ -15,10 +18,13 @@ impl RequestId {
 
         let mut bytes = [0_u8; 16];
 
-        let ts_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let ts_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Bytes 0-5: 48-bit timestamp (big-endian)
         bytes[0] = (ts_ms >> 40) as u8;
@@ -38,6 +44,19 @@ impl RequestId {
         bytes[8] = (bytes[8] & 0x3F) | 0x80;
 
         Self(bytes)
+    }
+
+    fn from_uuid_str(s: &str) -> Result<Self, &'static str> {
+        let hex: String = s.chars().filter(|c| *c != '-').collect();
+        if hex.len() != 32 {
+            return Err("invalid UUID string length");
+        }
+        let mut bytes = [0u8; 16];
+        for i in 0..16 {
+            bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                .map_err(|_| "invalid hex in UUID string")?;
+        }
+        Ok(Self(bytes))
     }
 }
 
@@ -60,6 +79,19 @@ impl fmt::Display for RequestId {
             b[8], b[9],
             b[10], b[11], b[12], b[13], b[14], b[15],
         )
+    }
+}
+
+impl Serialize for RequestId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::from_uuid_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -92,15 +124,25 @@ mod tests {
         let id1 = RequestId::new();
         std::thread::sleep(std::time::Duration::from_millis(2));
         let id2 = RequestId::new();
-        // Compare first 6 bytes (timestamp)
-        assert!(id1.0[..6] <= id2.0[..6]);
+        assert!(id1 < id2);
     }
 
     #[test]
     fn serde_roundtrip() {
         let id = RequestId::new();
         let json = serde_json::to_string(&id).unwrap();
+        // Verify it serializes as a quoted UUID string, not a byte array
+        assert!(json.starts_with('"'));
+        assert!(json.contains('-'));
         let deserialized: RequestId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
+    }
+
+    #[test]
+    fn serde_format_matches_display() {
+        let id = RequestId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        let expected = format!("\"{}\"", id);
+        assert_eq!(json, expected);
     }
 }

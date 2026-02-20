@@ -30,7 +30,6 @@ where
     } else {
         tracing_subscriber::fmt::layer()
             .with_line_number(true)
-            .with_ansi(true)
             .with_file(true)
             .with_writer(std::io::stdout)
             .with_span_events(FmtSpan::NONE)

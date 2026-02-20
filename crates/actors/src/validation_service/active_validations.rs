@@ -13,7 +13,7 @@
 //! then by height (lower first) and VDF steps (fewer first).
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
+use irys_types::{BlockHash, IrysBlockHeader, RequestId, SealedBlock};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ impl PartialOrd for BlockPriorityMeta {
 pub(super) struct ConcurrentValidationResult {
     pub block_hash: BlockHash,
     pub validation_result: ValidationResult,
-    pub request_id: Option<irys_types::RequestId>,
+    pub request_id: Option<RequestId>,
 }
 
 /// VDF task with preemption support
@@ -275,8 +275,7 @@ pub(super) struct ValidationCoordinator {
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
     /// Maps task IDs to block hashes and request IDs for panic diagnostics
-    pub concurrent_task_blocks:
-        HashMap<tokio::task::Id, (BlockHash, Option<irys_types::RequestId>)>,
+    pub concurrent_task_blocks: HashMap<tokio::task::Id, (BlockHash, Option<RequestId>)>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -344,11 +343,7 @@ impl ValidationCoordinator {
     #[instrument(skip_all)]
     pub(super) async fn process_vdf(
         &mut self,
-    ) -> Option<(
-        BlockHash,
-        VdfValidationResult,
-        Option<irys_types::RequestId>,
-    )> {
+    ) -> Option<(BlockHash, VdfValidationResult, Option<RequestId>)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
             let request_id = task.request_id;
