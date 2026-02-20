@@ -138,6 +138,11 @@ pub struct ConsensusConfig {
     #[serde(default)]
     pub require_kzg_ingress_proofs: bool,
 
+    /// Enable EIP-4844 blob transaction support. When false, blob transactions
+    /// are rejected at the txpool, EVM execution, and block validation layers.
+    #[serde(default)]
+    pub enable_blobs: bool,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -601,6 +606,7 @@ impl ConsensusConfig {
             use_kzg_ingress_proofs: false,
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
+            enable_blobs: false,
             // Fee required to stake a mining address in Irys tokens
             stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
             // Base fee required for pledging a partition in Irys tokens
@@ -742,6 +748,7 @@ impl ConsensusConfig {
             use_kzg_ingress_proofs: false,
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
+            enable_blobs: false,
             max_future_timestamp_drift_millis: 15_000,
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
@@ -792,6 +799,7 @@ impl ConsensusConfig {
             use_kzg_ingress_proofs: false,
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
+            enable_blobs: false,
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {

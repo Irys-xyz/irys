@@ -194,7 +194,7 @@ where
 /// This factory produces [`IrysBlockExecutor`] instances that can handle both
 /// regular Ethereum transactions and Irys-specific shadow transactions. It wraps
 /// the standard Ethereum block executor factory with Irys-specific configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IrysBlockExecutorFactory {
     inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
 }
@@ -334,13 +334,14 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-#[non_exhaustive]
-pub struct IrysEvmFactory {}
+#[derive(Debug, Clone, Copy)]
+pub struct IrysEvmFactory {
+    enable_blobs: bool,
+}
 
 impl IrysEvmFactory {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(enable_blobs: bool) -> Self {
+        Self { enable_blobs }
     }
 }
 
@@ -366,6 +367,7 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
+            self.enable_blobs,
         )
     }
 
@@ -386,6 +388,7 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
+            self.enable_blobs,
         )
     }
 }
@@ -432,6 +435,7 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
         EthFrame,
     >,
     inspect: bool,
+    enable_blobs: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
 }
 
@@ -449,10 +453,12 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             EthFrame,
         >,
         inspect: bool,
+        enable_blobs: bool,
     ) -> Self {
         Self {
             inner: evm,
             inspect,
+            enable_blobs,
             state: Default::default(),
         }
     }
@@ -521,11 +527,10 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
-        // Reject blob-carrying transactions (EIP-4844) at execution time.
-        // We keep Cancun active but explicitly disable blobs/sidecars.
-        if !tx.blob_hashes.is_empty()
-            || tx.max_fee_per_blob_gas != 0
-            || tx.tx_type == EIP4844_TX_TYPE_ID
+        if !self.enable_blobs
+            && (!tx.blob_hashes.is_empty()
+                || tx.max_fee_per_blob_gas != 0
+                || tx.tx_type == EIP4844_TX_TYPE_ID)
         {
             tracing::debug!(
                 tx.blob_hashes_len = tx.blob_hashes.len(),
@@ -1336,7 +1341,7 @@ mod tests {
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let factory = IrysEvmFactory::new();
+        let factory = IrysEvmFactory::new(false);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1373,7 +1378,7 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let factory = IrysEvmFactory::new();
+        let factory = IrysEvmFactory::new(false);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();

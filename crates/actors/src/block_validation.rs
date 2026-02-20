@@ -1291,37 +1291,35 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
-    // Reject any blob gas usage in the payload
-    if payload_v3.blob_gas_used != 0 {
-        tracing::debug!(
-            block.hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            payload.blob_gas_used = payload_v3.blob_gas_used,
-            "Rejecting block: blob_gas_used must be zero",
-        );
-        eyre::bail!("block has non-zero blob_gas_used which is disabled");
-    }
-    if payload_v3.excess_blob_gas != 0 {
-        tracing::debug!(
-            block.block_hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            payload.excess_blob_gas = payload_v3.excess_blob_gas,
-            "Rejecting block: excess_blob_gas must be zero",
-        );
-        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
-    }
-
-    // Reject any block that carries blob sidecars (EIP-4844).
-    // We keep Cancun active but disable blobs/sidecars entirely.
-    if let Some(versioned_hashes) = sidecar.versioned_hashes() {
-        if !versioned_hashes.is_empty() {
+    if !config.consensus.enable_blobs {
+        if payload_v3.blob_gas_used != 0 {
+            tracing::debug!(
+                block.hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                payload.blob_gas_used = payload_v3.blob_gas_used,
+                "Rejecting block: blob_gas_used must be zero",
+            );
+            eyre::bail!("block has non-zero blob_gas_used which is disabled");
+        }
+        if payload_v3.excess_blob_gas != 0 {
             tracing::debug!(
                 block.block_hash = %block.block_hash,
                 block.evm_block_hash = %block.evm_block_hash,
-                block.versioned_hashes_len = versioned_hashes.len(),
-                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+                payload.excess_blob_gas = payload_v3.excess_blob_gas,
+                "Rejecting block: excess_blob_gas must be zero",
             );
-            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+            eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+        }
+        if let Some(versioned_hashes) = sidecar.versioned_hashes() {
+            if !versioned_hashes.is_empty() {
+                tracing::debug!(
+                    block.block_hash = %block.block_hash,
+                    block.evm_block_hash = %block.evm_block_hash,
+                    block.versioned_hashes_len = versioned_hashes.len(),
+                    "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+                );
+                eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+            }
         }
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
@@ -1360,15 +1358,16 @@ pub async fn shadow_transactions_are_valid(
         eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
     }
 
-    // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
-    for tx in evm_block.body.transactions.iter() {
-        if tx.is_eip4844() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                "Rejecting block: contains EIP-4844 transaction which is disabled",
-            );
-            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+    if !config.consensus.enable_blobs {
+        for tx in evm_block.body.transactions.iter() {
+            if tx.is_eip4844() {
+                tracing::debug!(
+                    block.block_hash = %block.block_hash,
+                    block.evm_block_hash = %block.evm_block_hash,
+                    "Rejecting block: contains EIP-4844 transaction which is disabled",
+                );
+                eyre::bail!("block contains EIP-4844 transaction which is disabled");
+            }
         }
     }
 

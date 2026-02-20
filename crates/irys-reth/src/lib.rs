@@ -97,8 +97,10 @@ pub fn compose_shadow_tx(
 }
 
 /// Type configuration for an Irys-Ethereum node.
-#[derive(Debug, Clone, Default)]
-pub struct IrysEthereumNode;
+#[derive(Debug, Clone)]
+pub struct IrysEthereumNode {
+    pub enable_blobs: bool,
+}
 
 impl NodeTypes for IrysEthereumNode {
     type Primitives = EthPrimitives;
@@ -130,8 +132,12 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(IrysPoolBuilder::default())
-            .executor(IrysExecutorBuilder)
+            .pool(IrysPoolBuilder {
+                enable_blobs: self.enable_blobs,
+            })
+            .executor(IrysExecutorBuilder {
+                enable_blobs: self.enable_blobs,
+            })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -204,9 +210,10 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 }
 
 /// A custom pool builder for Irys shadow transaction validation and pool configuration.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct IrysPoolBuilder;
+#[derive(Debug, Clone)]
+pub struct IrysPoolBuilder {
+    pub enable_blobs: bool,
+}
 
 /// Implement the [`PoolBuilder`] trait for the Irys pool builder
 ///
@@ -269,6 +276,7 @@ where
         let validator = TransactionValidationTaskExecutor {
             validator: Arc::new(IrysShadowTxValidator {
                 eth_tx_validator: validator.validator,
+                enable_blobs: self.enable_blobs,
             }),
             to_validation_task: validator.to_validation_task,
         };
@@ -302,6 +310,7 @@ where
 #[derive(Debug)]
 pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: Arc<EthTransactionValidator<Client, T>>,
+    enable_blobs: bool,
 }
 
 impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
@@ -334,8 +343,7 @@ where
             Ok(None) => {}
         }
 
-        // once we support blobs, we can start accepting eip4844 txs
-        if tx.is_eip4844() {
+        if !self.enable_blobs && tx.is_eip4844() {
             return Err(TransactionValidationOutcome::Invalid(
                 tx,
                 reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
@@ -391,8 +399,10 @@ where
 }
 
 /// A regular ethereum evm and executor builder.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IrysExecutorBuilder;
+#[derive(Debug, Clone, Copy)]
+pub struct IrysExecutorBuilder {
+    pub enable_blobs: bool,
+}
 
 impl<Types, Node> ExecutorBuilder<Node> for IrysExecutorBuilder
 where
@@ -406,7 +416,7 @@ where
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new();
+        let evm_factory = IrysEvmFactory::new(self.enable_blobs);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -3392,7 +3402,9 @@ pub mod test_utils {
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(exec.clone())
-                .node(IrysEthereumNode)
+                .node(IrysEthereumNode {
+                    enable_blobs: false,
+                })
                 .launch()
                 .await?;
 
