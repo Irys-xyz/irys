@@ -727,21 +727,19 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     )
     .await?;
 
-    if block_queue.is_empty() {
-        return Ok(());
+    if !block_queue.is_empty() {
+        run_sync_loop(
+            &sync_state,
+            &params,
+            config,
+            peer_list,
+            gossip_client,
+            &gossip_data_handler,
+            block_queue,
+            start_sync_from_height,
+        )
+        .await?;
     }
-
-    run_sync_loop(
-        &sync_state,
-        &params,
-        config,
-        peer_list,
-        gossip_client,
-        &gossip_data_handler,
-        block_queue,
-        start_sync_from_height,
-    )
-    .await?;
 
     finalize_sync(
         &sync_state,
