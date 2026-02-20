@@ -2,7 +2,6 @@ use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
-    block_index_service::BlockIndexServiceMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
@@ -97,7 +96,6 @@ pub struct ServiceReceivers {
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
-    pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
@@ -120,7 +118,6 @@ pub struct ServiceSendersInner {
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
-    pub block_index: UnboundedSender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
@@ -148,8 +145,6 @@ impl ServiceSendersInner {
             unbounded_channel::<GossipBroadcastMessageV2>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
-        let (block_index_sender, block_index_receiver) =
-            unbounded_channel::<BlockIndexServiceMessage>();
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -176,7 +171,6 @@ impl ServiceSendersInner {
             data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
-            block_index: block_index_sender,
             validation_service: validation_sender,
             block_producer: block_producer_sender,
             reth_service: reth_service_sender,
@@ -198,7 +192,6 @@ impl ServiceSendersInner {
             data_sync: ds_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
-            block_index: block_index_receiver,
             validation_service: validation_receiver,
             block_producer: block_producer_receiver,
             reth_service: reth_service_receiver,
