@@ -74,6 +74,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+    #[error("Rejected ingress proof version: {0}")]
+    IngressProofVersionRejected(String),
     #[error(
         "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
     )]
@@ -712,6 +714,21 @@ pub async fn prevalidate_block(
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.iter() {
+            // Check proof version is accepted
+            match proof {
+                IngressProof::V2(_) if !config.consensus.accept_kzg_ingress_proofs => {
+                    return Err(PreValidationError::IngressProofVersionRejected(
+                        "V2 proofs not accepted".into(),
+                    ));
+                }
+                IngressProof::V1(_) if config.consensus.require_kzg_ingress_proofs => {
+                    return Err(PreValidationError::IngressProofVersionRejected(
+                        "V1 proofs rejected (V2 required)".into(),
+                    ));
+                }
+                _ => {}
+            }
+
             proof
                 .pre_validate(&tx_header.data_root)
                 .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
