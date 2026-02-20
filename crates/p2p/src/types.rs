@@ -66,6 +66,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::UnknownAnchor(_) => Self::Internal(InternalGossipError::Unknown(
                 "Unknown ingress proof anchor".into(),
             )),
+            IngressProofError::RejectedVersion(reason) => {
+                Self::InvalidData(InvalidDataError::IngressProofVersionRejected(reason))
+            }
         }
     }
 }
@@ -265,6 +268,8 @@ pub enum InvalidDataError {
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]
     IngressProofAnchor(irys_types::BlockHash),
+    #[error("Rejected ingress proof version: {0}")]
+    IngressProofVersionRejected(String),
     #[error("Block body transactions do not match the header")]
     BlockBodyTransactionsMismatch,
     #[error("Invalid transaction version {version}, minimum required is {minimum}")]

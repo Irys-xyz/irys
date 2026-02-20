@@ -145,6 +145,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+    #[error("Rejected ingress proof version: {0}")]
+    IngressProofVersionRejected(String),
     #[error(
         "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
     )]
@@ -603,6 +605,7 @@ impl PreValidationError {
             | Self::IngressProofCountMismatch { .. }
             | Self::IngressProofMismatch { .. }
             | Self::IngressProofSignatureInvalid(_)
+            | Self::IngressProofVersionRejected(_)
             | Self::IngressProofsMissing
             | Self::InsufficientPermFee { .. }
             | Self::InsufficientTermFee { .. }
@@ -699,6 +702,7 @@ impl PreValidationError {
             Self::EmaSnapshotError(_) => "ema_snapshot_error",
             Self::IngressProofsMissing => "ingress_proofs_missing",
             Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
+            Self::IngressProofVersionRejected(_) => "ingress_proof_version_rejected",
             Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
             Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
             Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
@@ -2077,6 +2081,19 @@ pub async fn prevalidate_block(
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.0 {
+            match &proof {
+                IngressProof::V2(_) if !config.consensus.accept_kzg_ingress_proofs => {
+                    return Err(PreValidationError::IngressProofVersionRejected(
+                        "V2 proofs not accepted".into(),
+                    ));
+                }
+                IngressProof::V1(_) if config.consensus.require_kzg_ingress_proofs => {
+                    return Err(PreValidationError::IngressProofVersionRejected(
+                        "V1 proofs rejected (V2 required)".into(),
+                    ));
+                }
+                _ => {}
+            }
             ingress_pairs.push((proof, tx_header.data_root));
         }
     }
