@@ -418,12 +418,10 @@ impl Inner {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
-        let mut status = self
+        Ok(self
             .mempool_state
-            .get_status(&self.config.node_config)
-            .await;
-        status.pending_chunks_count = self.chunk_ingress_state.pending_chunks_count().await;
-        Ok(status)
+            .get_status(&self.config.node_config, &self.chunk_ingress_state)
+            .await)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
@@ -1916,7 +1914,14 @@ impl AtomicMempoolState {
         write.recent_invalid_payload_fingerprints.clear();
     }
 
-    pub async fn get_status(&self, config: &NodeConfig) -> MempoolStatus {
+    pub async fn get_status(
+        &self,
+        config: &NodeConfig,
+        chunk_ingress: &ChunkIngressState,
+    ) -> MempoolStatus {
+        // Read chunk ingress count first to avoid holding the mempool lock across the await.
+        let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
+
         let state = self.read().await;
 
         // Calculate total data size
@@ -1969,7 +1974,7 @@ impl AtomicMempoolState {
         MempoolStatus {
             data_tx_count: state.valid_submit_ledger_tx.len(),
             commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
-            pending_chunks_count: 0,
+            pending_chunks_count,
             pending_pledges_count: state.pending_pledges.len(),
             recent_valid_tx_count: state.recent_valid_tx.len(),
             recent_invalid_tx_count: state.recent_invalid_tx.len(),

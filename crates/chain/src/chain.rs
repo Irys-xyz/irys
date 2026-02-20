@@ -964,8 +964,7 @@ impl IrysNode {
                         .map(|(_, i)| i)
                         .collect::<Vec<_>>();
 
-                    let mut mempool_status = mempool.get_status(&config.node_config).await;
-                    mempool_status.pending_chunks_count = chunk_ingress_state.pending_chunks_count().await;
+                    let mempool_status = mempool.get_status(&config.node_config, &chunk_ingress_state).await;
 
                     info!(
                     target = "node-state",
