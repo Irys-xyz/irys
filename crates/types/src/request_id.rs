@@ -47,10 +47,16 @@ impl RequestId {
     }
 
     fn from_uuid_str(s: &str) -> Result<Self, &'static str> {
-        let hex: String = s.chars().filter(|c| *c != '-').collect();
-        if hex.len() != 32 {
+        if s.len() != 36 {
             return Err("invalid UUID string length");
         }
+        let b = s.as_bytes();
+        for &pos in &[8usize, 13, 18, 23] {
+            if b[pos] != b'-' {
+                return Err("invalid UUID format: hyphen expected");
+            }
+        }
+        let hex: String = s.chars().filter(|c| *c != '-').collect();
         let mut bytes = [0u8; 16];
         for i in 0..16 {
             bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
