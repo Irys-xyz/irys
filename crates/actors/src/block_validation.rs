@@ -3013,13 +3013,11 @@ fn get_submit_ledger_slot_addresses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_index_service::{BlockIndexService, BlockIndexServiceMessage};
 
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
-    use irys_domain::{BlockIndex, EpochSnapshot};
+    use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Base64, BlockHash,
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
@@ -3031,9 +3029,6 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: BlockIndex,
-        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
-        #[expect(dead_code)]
-        pub block_index_handle: TokioServiceHandle,
         pub miner_address: IrysAddress,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
@@ -3088,16 +3083,6 @@ mod tests {
         let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db);
 
-        // Spawn Tokio BlockIndex service
-        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
-        let block_index_handle = BlockIndexService::spawn_service(
-            block_index_rx,
-            block_index.clone(),
-            None, // No supply state needed for tests
-            &consensus_config,
-            tokio::runtime::Handle::current(),
-        );
-
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
                 .expect("Expected to load storage submodules config");
@@ -3106,23 +3091,18 @@ mod tests {
         let epoch_snapshot = EpochSnapshot::new(
             &storage_submodules_config,
             genesis_block,
-            commitments.clone(),
+            commitments,
             &config,
         );
         info!("Genesis Epoch tasks complete.");
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: arc_genesis.clone(),
-                all_txs: Arc::new(vec![]),
-                response: tx,
-            })
-            .expect("send migrate block");
-        rx.await
-            .expect("Failed to receive migration result")
+        let genesis_sealed =
+            SealedBlock::new_unchecked(Arc::clone(&arc_genesis), BlockTransactions::default());
+        block_index
+            .db()
+            .update_eyre(|tx| BlockIndex::push_block(tx, &genesis_sealed, chunk_size))
             .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
@@ -3135,8 +3115,6 @@ mod tests {
             data_dir,
             TestContext {
                 block_index,
-                block_index_tx,
-                block_index_handle,
                 miner_address,
                 epoch_snapshot,
                 partition_hash,
@@ -3149,7 +3127,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_test_3_complete_txs() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -3176,26 +3154,26 @@ mod tests {
             txs.push(tx);
         }
 
+        let chunk_size = context.consensus_config.chunk_size as usize;
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
                 poa_test(
-                    &context,
+                    &mut context,
                     &txs,
                     &mut poa_chunk,
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
-                )
-                .await;
+                    chunk_size,
+                );
             }
         }
     }
 
     #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
@@ -3217,15 +3195,14 @@ mod tests {
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
             poa_test(
-                &context,
+                &mut context,
                 &txs,
                 &mut poa_chunk,
                 poa_tx_num,
                 poa_chunk_num,
                 2,
                 chunk_size,
-            )
-            .await;
+            );
         }
     }
 
@@ -3286,8 +3263,8 @@ mod tests {
         );
     }
 
-    async fn poa_test(
-        context: &TestContext,
+    fn poa_test(
+        context: &mut TestContext,
         txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
@@ -3361,7 +3338,7 @@ mod tests {
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
-                    tx_ids: H256List(data_tx_ids.clone()),
+                    tx_ids: H256List(data_tx_ids),
                     total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
@@ -3371,29 +3348,21 @@ mod tests {
             ..IrysBlockHeaderV1::default()
         });
 
-        // Send the block confirmed message
-        let block = Arc::new(irys_block);
-        let txs = Arc::new(tx_headers);
-        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: block.clone(),
-                all_txs: Arc::clone(&txs),
-                response: tx_migrate,
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
-            .expect("send migrate block");
-        rx_migrate
-            .await
-            .expect("Failed to receive migration result")
             .expect("Failed to index second block");
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
-        let block_index_guard = rx.await.expect("receive block index guard");
+        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 
         let ledger_chunk_offset = context
             .partition_assignment
@@ -3439,7 +3408,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -3466,25 +3435,25 @@ mod tests {
             txs.push(tx);
         }
 
+        let chunk_size = context.consensus_config.chunk_size as usize;
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
                 test_poa_with_malicious_merkle_data(
-                    &context,
+                    &mut context,
                     &txs,
                     &mut poa_chunk,
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
-                )
-                .await;
+                    chunk_size,
+                );
             }
         }
     }
 
-    async fn test_poa_with_malicious_merkle_data(
-        context: &TestContext,
+    fn test_poa_with_malicious_merkle_data(
+        context: &mut TestContext,
         txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
@@ -3613,7 +3582,7 @@ mod tests {
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
-                    tx_ids: H256List(data_tx_ids.clone()),
+                    tx_ids: H256List(data_tx_ids),
                     total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
@@ -3623,29 +3592,21 @@ mod tests {
             ..IrysBlockHeaderV1::default()
         });
 
-        // Send the block confirmed message
-        let block = Arc::new(irys_block);
-        let txs = Arc::new(tx_headers);
-        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: block.clone(),
-                all_txs: Arc::clone(&txs),
-                response: tx_migrate,
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
-            .expect("send migrate block");
-        rx_migrate
-            .await
-            .expect("Failed to receive migration result")
             .expect("Failed to index second block");
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
-        let block_index_guard = rx.await.expect("receive block index guard");
+        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 
         let ledger_chunk_offset = context
             .partition_assignment
