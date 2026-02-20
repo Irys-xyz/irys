@@ -22,6 +22,10 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
+/// Grace period after triggering a retry block request, giving validation time to start
+/// before the sync loop continues.
+const RETRY_BLOCK_VALIDATION_GRACE: Duration = Duration::from_millis(500);
+
 /// Sync service errors
 #[derive(Debug, thiserror::Error)]
 pub enum ChainSyncError {
@@ -1068,9 +1072,11 @@ async fn replenish_block_batch(
         let estimated_height =
             estimate_canonical_height(peer_list, gossip_client, start_sync_from_height as u64)
                 .await;
-        let safe_threshold = (sync_state.sync_target_height().saturating_add(params.migration_depth)).saturating_sub(1) as u64;
-        if estimated_height > safe_threshold
-        {
+        let safe_threshold = (sync_state
+            .sync_target_height()
+            .saturating_add(params.migration_depth))
+        .saturating_sub(1) as u64;
+        if estimated_height > safe_threshold {
             error!(
                 "block index request for entries >{} returned no extra results, but the estimated network height is {} (threshold: {})",
                 sync_target, estimated_height, safe_threshold
@@ -1159,7 +1165,7 @@ async fn wait_for_queue_slot<B: BlockDiscoveryFacade, M: MempoolFacade>(
                         retry_block.block_hash
                     );
                     // Give some time for validation to start, then continue the loop
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(RETRY_BLOCK_VALIDATION_GRACE).await;
                 }
                 Ok(Err(e)) => {
                     warn!(

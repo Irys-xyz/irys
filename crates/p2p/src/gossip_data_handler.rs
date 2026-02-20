@@ -602,7 +602,13 @@ where
 
         let block_header = match maybe_header {
             Some(header) => header,
-            None => self.fetch_header_with_retries(block_hash).await?,
+            None => {
+                self.fetch_header_with_retries(
+                    block_hash,
+                    self.sync_state.is_syncing_from_a_trusted_peer(),
+                )
+                .await?
+            }
         };
 
         // Check sync range
@@ -1054,12 +1060,16 @@ where
     async fn fetch_header_with_retries(
         &self,
         block_hash: BlockHash,
+        use_trusted_peers_only: bool,
     ) -> GossipResult<Arc<IrysBlockHeader>> {
         let mut fetched_header = None;
         let mut failed_attempts: Vec<(Option<IrysPeerId>, GossipError)> = Vec::new();
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
-            match self.pull_block_header(block_hash, false).await {
+            match self
+                .pull_block_header(block_hash, use_trusted_peers_only)
+                .await
+            {
                 Ok((source_peer_id, header)) => {
                     if !header.is_signature_valid() {
                         warn!(
