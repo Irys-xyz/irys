@@ -180,6 +180,11 @@ impl P2PService {
     {
         debug!("Starting the gossip service");
 
+        let chunk_ingress =
+            irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(
+                &service_senders,
+            );
+
         let block_pool = BlockPool::new(
             db,
             block_discovery,
@@ -198,6 +203,7 @@ impl P2PService {
         let consensus_config_hash = config.consensus.keccak256_hash();
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
+            chunk_ingress,
             block_pool: Arc::clone(&arc_pool),
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),

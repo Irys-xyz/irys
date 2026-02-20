@@ -15,8 +15,8 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, ChunkIngressError, CriticalChunkIngressError,
-    MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
+    ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -45,6 +45,7 @@ where
     TBlockDiscovery: BlockDiscoveryFacade,
 {
     pub mempool: TMempoolFacade,
+    pub chunk_ingress: ChunkIngressFacadeImpl,
     pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub(crate) cache: Arc<GossipCache>,
     pub gossip_client: GossipClient,
@@ -68,6 +69,7 @@ where
     fn clone(&self) -> Self {
         Self {
             mempool: self.mempool.clone(),
+            chunk_ingress: self.chunk_ingress.clone(),
             block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
             gossip_client: self.gossip_client.clone(),
@@ -102,7 +104,7 @@ where
 
         record_gossip_chunk_received(chunk_size);
 
-        match self.mempool.handle_chunk_ingress(chunk).await {
+        match self.chunk_ingress.handle_chunk_ingress(chunk).await {
             Ok(()) => {
                 // Record processing duration on success
                 record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
@@ -241,20 +243,23 @@ where
         // TODO: Check to see if this proof is in the DB LRU Cache
 
         match self
-            .mempool
+            .chunk_ingress
             .handle_ingest_ingress_proof(proof)
             .await
             .map_err(GossipError::from)
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
-                debug!("Ingress Proof sent to mempool");
+                debug!("Ingress Proof sent to chunk ingress");
                 // Only record as seen after successful validation
                 self.cache
                     .record_seen(source_peer_id, GossipCacheKey::IngressProof(proof_hash))?;
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending ingress proof to mempool: {}", error);
+                error!(
+                    "Error when sending ingress proof to chunk ingress: {}",
+                    error
+                );
                 Err(error)
             }
         }

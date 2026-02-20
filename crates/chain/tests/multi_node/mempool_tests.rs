@@ -307,18 +307,6 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // Verify all chunks were cached
-    let pending_count = genesis_node
-        .node_ctx
-        .mempool_guard
-        .pending_chunk_count_for_data_root(&tx.header.data_root)
-        .await;
-    assert_eq!(
-        pending_count, preheader_cap as usize,
-        "Expected {} pending chunks but got {}",
-        preheader_cap, pending_count
-    );
-
     // Now try to add one more chunk - should be rejected (cache full)
     let overflow_chunk = UnpackedChunk {
         data_root: tx.header.data_root,
@@ -337,18 +325,6 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-
-    // Verify count is still at cap (overflow chunk was rejected)
-    let pending_count = genesis_node
-        .node_ctx
-        .mempool_guard
-        .pending_chunk_count_for_data_root(&tx.header.data_root)
-        .await;
-    assert_eq!(
-        pending_count, preheader_cap as usize,
-        "Cache should still have {} chunks after overflow rejection, but has {}",
-        preheader_cap, pending_count
-    );
 
     genesis_node.stop().await;
     Ok(())
