@@ -3,6 +3,8 @@ use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};
 
+use irys_types::custody::CustodyProof;
+
 use super::{
     BlockBody, CommitmentTransaction, DataTransactionHeader, IngressProof, IrysBlockHeader,
     UnpackedChunk,
@@ -31,6 +33,7 @@ pub enum GossipDataV2 {
     BlockBody(BlockBody),
     ExecutionPayload(RethBlock),
     IngressProof(IngressProof),
+    CustodyProof(CustodyProof),
 }
 
 /// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
@@ -77,7 +80,7 @@ super::impl_mirror_enum_from!(
 
 super::impl_mirror_enum_from!(
     irys_types::gossip::v2::GossipDataV2, GossipDataV2 mixed {
-        identity: ExecutionPayload;
+        identity: ExecutionPayload, CustodyProof;
         convert: Transaction, CommitmentTransaction, IngressProof;
         arc_wrap: Chunk, BlockHeader, BlockBody;
     }

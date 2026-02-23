@@ -91,6 +91,15 @@ fn fixture_ingress_proof() -> wire::IngressProof {
     canonical_ingress_proof().into()
 }
 
+fn fixture_custody_proof() -> irys_types::custody::CustodyProof {
+    irys_types::custody::CustodyProof {
+        challenged_miner: test_address(0xAA),
+        partition_hash: test_h256(0x11),
+        challenge_seed: test_h256(0x22),
+        openings: Vec::new(),
+    }
+}
+
 fn fixture_block_body() -> wire::BlockBody {
     canonical_block_body().into()
 }
@@ -412,6 +421,8 @@ fixture_tests! {
         wire::GossipDataV2::BlockBody(fixture_block_body_none()),
     v2_gossip_data_ingress_proof =>
         wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
+    v2_gossip_data_custody_proof =>
+        wire::GossipDataV2::CustodyProof(fixture_custody_proof()),
     v2_gossip_data_execution_payload =>
         wire::GossipDataV2::ExecutionPayload(fixture_execution_payload()),
 
@@ -742,6 +753,7 @@ assert_fixture_coverage!(
     wire::GossipDataV2::BlockBody(_) => "v2_gossip_data_block_body",
     wire::GossipDataV2::ExecutionPayload(_) => "v2_gossip_data_execution_payload",
     wire::GossipDataV2::IngressProof(_) => "v2_gossip_data_ingress_proof",
+    wire::GossipDataV2::CustodyProof(_) => "v2_gossip_data_custody_proof",
 );
 
 assert_fixture_coverage!(
