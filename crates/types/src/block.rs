@@ -1221,6 +1221,15 @@ impl SealedBlock {
         })
     }
 
+    /// Test-only constructor that skips signature and hash validation.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_unchecked(header: Arc<IrysBlockHeader>, transactions: BlockTransactions) -> Self {
+        Self {
+            header,
+            transactions: Arc::new(transactions),
+        }
+    }
+
     pub fn header(&self) -> &Arc<IrysBlockHeader> {
         &self.header
     }
