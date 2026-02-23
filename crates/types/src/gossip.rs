@@ -160,8 +160,8 @@ pub mod v1 {
 
 pub mod v2 {
     use crate::{
-        BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
-        GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+        custody::CustodyProof, BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction,
+        DataTransactionHeader, GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
     use reth_primitives::Block;
@@ -243,6 +243,7 @@ pub mod v2 {
         BlockBody(Arc<BlockBody>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+        CustodyProof(CustodyProof),
     }
 
     impl From<SealedBlock<Block>> for GossipDataV2 {
@@ -283,7 +284,7 @@ pub mod v2 {
                 Self::IngressProof(ingress_proof) => {
                     Some(super::v1::GossipDataV1::IngressProof(ingress_proof.clone()))
                 }
-                Self::BlockBody(_) => None, // BlockBody does not exist in v1
+                Self::BlockBody(_) | Self::CustodyProof(_) => None,
             }
         }
 
@@ -316,6 +317,9 @@ pub mod v2 {
                         ingress_proof.data_root(),
                         ingress_proof.recover_signer()
                     )
+                }
+                Self::CustodyProof(proof) => {
+                    format!("custody proof for partition {}", proof.partition_hash)
                 }
             }
         }
@@ -391,6 +395,7 @@ pub enum GossipCacheKey {
     Block(BlockHash),
     ExecutionPayload(B256),
     IngressProof(H256),
+    CustodyProof(H256),
 }
 
 impl GossipCacheKey {

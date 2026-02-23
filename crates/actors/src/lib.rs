@@ -8,6 +8,7 @@ pub mod block_validation;
 pub mod cache_service;
 pub mod chunk_migration_service;
 pub mod commitment_refunds;
+pub mod custody_proof_service;
 pub mod data_sync_service;
 pub mod mempool_guard;
 pub mod mempool_service;

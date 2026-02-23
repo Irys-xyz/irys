@@ -15,6 +15,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
+    custody_proof_service::CustodyProofService,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
@@ -1400,6 +1401,16 @@ impl IrysNode {
                 service_senders.mempool.clone(), // clone: UnboundedSender is cheaply cloneable
                 config.clone(),                  // clone: Config is Arc-wrapped internally
                 receivers.blob_extraction,
+                runtime_handle.clone(),
+            );
+        }
+
+        if config.consensus.enable_custody_proofs {
+            CustodyProofService::spawn_service(
+                config.clone(),                           // clone: Config is Arc-wrapped internally
+                storage_modules_guard.clone(),            // clone: Arc-based read guard
+                service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
+                receivers.custody_proof,
                 runtime_handle.clone(),
             );
         }

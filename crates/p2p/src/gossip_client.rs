@@ -685,6 +685,15 @@ impl GossipClient {
                 )
                 .await
             }
+            GossipDataV2::CustodyProof(custody_proof) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::CustodyProof,
+                    custody_proof,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
         }
     }
 
