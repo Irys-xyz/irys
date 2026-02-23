@@ -1665,7 +1665,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ledger,
         self.diag_wait_state().await
     ))]
-    pub async fn wait_for_block_parent(
+    pub async fn wait_for_block_containing_tx(
         &self,
         txid: H256,
         ledger: DataLedger,
@@ -1679,7 +1679,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 if let Ok(block) = self.get_block_by_hash(&block_hash) {
                     if block.data_ledgers[ledger].tx_ids.0.contains(&txid) {
                         tracing::info!(
-                            "found block parent for tx {} on {} after {} attempt(s)",
+                            "found block containing tx {} on {} after {} attempt(s)",
                             txid,
                             self.name.clone().unwrap_or_else(|| "genesis".to_string()),
                             attempt
@@ -1692,7 +1692,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Err(eyre::eyre!(
-            "block parent for tx {} not found on {} after {} seconds",
+            "block containing tx {} not found on {} after {} seconds",
             txid,
             self.name.clone().unwrap_or_else(|| "genesis".to_string()),
             max_seconds
@@ -2191,6 +2191,27 @@ impl IrysNodeTest<IrysNodeCtx> {
             return Ok(tx.clone());
         }
         Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+    }
+
+    /// Polls the mempool until the transaction's `included_height` is set.
+    /// The mempool updates `included_height` asynchronously after `BlockConfirmed`.
+    pub async fn wait_for_tx_included(
+        &self,
+        tx_id: &H256,
+        max_seconds: usize,
+    ) -> eyre::Result<DataTransactionHeader> {
+        for _ in 0..(max_seconds * 10) {
+            let header = self.get_storage_tx_header_from_mempool(tx_id).await?;
+            if header.metadata().included_height.is_some() {
+                return Ok(header);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "included_height not set for tx {} after {} seconds",
+            tx_id,
+            max_seconds
+        ))
     }
 
     /// read commitment tx from mempool
@@ -3765,10 +3786,10 @@ where
     }
 }
 
-/// Finds and returns the parent block header containing a given transaction ID.
+/// Finds and returns the block header containing a given transaction ID.
 /// Takes a transaction ID, ledger type, and database connection.
 /// Returns None if the transaction isn't found in any block.
-pub fn get_block_parent(
+pub fn get_block_containing_tx(
     txid: H256,
     ledger: DataLedger,
     db: &DatabaseProvider,
@@ -3811,20 +3832,20 @@ pub fn get_block_parent(
     None
 }
 
-/// Polls `get_block_parent` until the block header appears in `IrysBlockHeaders`.
+/// Polls `get_block_containing_tx` until the block header appears in `IrysBlockHeaders`.
 /// The table is populated asynchronously after block migration, so a direct read
 /// may return `None` even though the block has already been mined.
 #[diag_slow(state = format!("txid={} ledger={:?}", txid, ledger))]
-pub async fn wait_for_block_parent(
+pub async fn wait_for_block_containing_tx(
     txid: H256,
     ledger: DataLedger,
     db: &DatabaseProvider,
     max_seconds: usize,
 ) -> eyre::Result<IrysBlockHeader> {
     for attempt in 1..=max_seconds {
-        if let Some(block) = get_block_parent(txid, ledger, db) {
+        if let Some(block) = get_block_containing_tx(txid, ledger, db) {
             tracing::info!(
-                "found block parent for tx {} after {} attempt(s)",
+                "found block containing tx {} after {} attempt(s)",
                 txid,
                 attempt
             );
@@ -3833,7 +3854,7 @@ pub async fn wait_for_block_parent(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     Err(eyre::eyre!(
-        "block parent for tx {} not found in IrysBlockHeaders after {} seconds",
+        "block containing tx {} not found in IrysBlockHeaders after {} seconds",
         txid,
         max_seconds
     ))

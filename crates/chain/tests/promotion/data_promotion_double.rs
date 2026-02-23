@@ -173,7 +173,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let db = node.node_ctx.db.clone();
     let block_tx1 = node
         .future_or_mine_on_timeout(
-            node.wait_for_block_parent(txs[0].header.id, DataLedger::Publish, 60),
+            node.wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60),
             Duration::from_secs(5),
         )
         .await??;
@@ -334,9 +334,9 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     assert!(result.is_ok());
 
     let block_tx1 = node
-        .wait_for_block_parent(txs[0].header.id, DataLedger::Publish, 60)
+        .wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60)
         .await?;
-    // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
+    // let block_tx2 = get_block_containing_tx(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];

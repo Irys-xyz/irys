@@ -149,50 +149,13 @@ async fn find_tx_in_blocks(
     tx_id: &IrysTransactionId,
     max_height: u64,
 ) -> Option<u64> {
-    const MAX_RETRIES: u32 = 10;
-    const RETRY_DELAY_MS: u64 = 1000;
-
-    for attempt in 1..=MAX_RETRIES {
-        let mut all_blocks_checked = true;
-
-        for height in 1..=max_height {
-            if let Ok(block) = node.get_block_by_height(height).await {
-                if block.commitment_tx_ids().contains(tx_id) {
-                    return Some(height);
-                }
-            } else {
-                tracing::debug!(
-                    "Block at height {} not yet available (attempt {}/{})",
-                    height,
-                    attempt,
-                    MAX_RETRIES
-                );
-                all_blocks_checked = false;
-                break;
+    for height in 1..=max_height {
+        if let Ok(block) = node.get_block_by_height(height).await {
+            if block.commitment_tx_ids().contains(tx_id) {
+                return Some(height);
             }
         }
-
-        if all_blocks_checked {
-            // Successfully checked all blocks, tx not found
-            break;
-        }
-
-        if attempt < MAX_RETRIES {
-            tracing::debug!(
-                "Retrying block search after {} ms (attempt {}/{})",
-                RETRY_DELAY_MS,
-                attempt,
-                MAX_RETRIES
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
-        }
     }
-
-    tracing::debug!(
-        "Transaction {} not found in blocks 1..={}",
-        tx_id,
-        max_height
-    );
     None
 }
 

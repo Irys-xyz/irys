@@ -173,13 +173,13 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
 
     let block_tx1 = node
         .future_or_mine_on_timeout(
-            node.wait_for_block_parent(txs[0].header.id, DataLedger::Publish, 60),
+            node.wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60),
             Duration::from_secs(5),
         )
         .await??;
     let block_tx2 = node
         .future_or_mine_on_timeout(
-            node.wait_for_block_parent(txs[2].header.id, DataLedger::Publish, 60),
+            node.wait_for_block_containing_tx(txs[2].header.id, DataLedger::Publish, 60),
             Duration::from_secs(5),
         )
         .await??;
