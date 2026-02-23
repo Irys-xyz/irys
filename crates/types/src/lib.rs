@@ -14,6 +14,7 @@ pub mod commitment_v1;
 pub mod commitment_v2;
 pub mod config;
 pub mod conversions;
+pub mod custody;
 pub mod difficulty_adjustment_config;
 pub mod gossip;
 pub mod hardfork_config;
