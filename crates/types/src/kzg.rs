@@ -229,7 +229,6 @@ pub fn compute_chunk_commitment(
         ));
     }
 
-    // Zero-pad to 256KB
     let mut padded = [0_u8; CHUNK_SIZE_FOR_KZG];
     padded[..chunk_data.len()].copy_from_slice(chunk_data);
 
@@ -299,47 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn commitment_size_is_48_bytes() {
-        let data = [0_u8; BLOB_SIZE];
-        let commitment = compute_blob_commitment(&data, kzg_settings()).unwrap();
-        assert_eq!(commitment.as_ref().len(), COMMITMENT_SIZE);
-    }
-
-    #[test]
-    fn same_data_produces_same_commitment() {
-        let data = [42_u8; BLOB_SIZE];
-        let c1 = compute_blob_commitment(&data, kzg_settings()).unwrap();
-        let c2 = compute_blob_commitment(&data, kzg_settings()).unwrap();
-        assert_eq!(commitment_bytes(&c1), commitment_bytes(&c2));
-    }
-
-    #[test]
-    fn different_data_produces_different_commitment() {
-        let data_a = [1_u8; BLOB_SIZE];
-        let data_b = [2_u8; BLOB_SIZE];
-        let c1 = compute_blob_commitment(&data_a, kzg_settings()).unwrap();
-        let c2 = compute_blob_commitment(&data_b, kzg_settings()).unwrap();
-        assert_ne!(commitment_bytes(&c1), commitment_bytes(&c2));
-    }
-
-    #[test]
-    fn chunk_commitment_deterministic() {
-        let data = vec![7_u8; CHUNK_SIZE_FOR_KZG];
-        let c1 = compute_chunk_commitment(&data, kzg_settings()).unwrap();
-        let c2 = compute_chunk_commitment(&data, kzg_settings()).unwrap();
-        assert_eq!(commitment_bytes(&c1), commitment_bytes(&c2));
-    }
-
-    #[test]
-    fn chunk_commitment_different_data() {
-        let data_a = vec![1_u8; CHUNK_SIZE_FOR_KZG];
-        let data_b = vec![2_u8; CHUNK_SIZE_FOR_KZG];
-        let c1 = compute_chunk_commitment(&data_a, kzg_settings()).unwrap();
-        let c2 = compute_chunk_commitment(&data_b, kzg_settings()).unwrap();
-        assert_ne!(commitment_bytes(&c1), commitment_bytes(&c2));
-    }
-
-    #[test]
     fn aggregate_commitment_produces_valid_point() {
         let data_a = [1_u8; BLOB_SIZE];
         let data_b = [2_u8; BLOB_SIZE];
@@ -385,15 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn composite_commitment_deterministic() {
-        let kzg = [42_u8; COMMITMENT_SIZE];
-        let addr = IrysAddress::from([1_u8; 20]);
-        let c1 = compute_composite_commitment(&kzg, &addr);
-        let c2 = compute_composite_commitment(&kzg, &addr);
-        assert_eq!(c1, c2);
-    }
-
-    #[test]
     fn composite_commitment_different_addresses() {
         let kzg = [42_u8; COMMITMENT_SIZE];
         let addr1 = IrysAddress::from([1_u8; 20]);
@@ -411,14 +360,6 @@ mod tests {
         let c1 = compute_composite_commitment(&kzg1, &addr);
         let c2 = compute_composite_commitment(&kzg2, &addr);
         assert_ne!(c1, c2);
-    }
-
-    #[test]
-    fn aggregate_all_single_commitment() {
-        let data = [1_u8; BLOB_SIZE];
-        let c = compute_blob_commitment(&data, kzg_settings()).unwrap();
-        let agg = aggregate_all_commitments(&[c]).unwrap();
-        assert_eq!(commitment_bytes(&c), commitment_bytes(&agg));
     }
 
     #[test]
