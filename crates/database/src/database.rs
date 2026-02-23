@@ -6,14 +6,16 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
-    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
-    IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
+    CompactLedgerIndexItem, CompactPerChunkCommitment, IngressProofs, IrysBlockHeaders,
+    IrysBlockIndexItems, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata,
+    MigratedBlockHashes, PeerListItems, PerChunkKzgCommitments,
 };
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
+use irys_types::kzg::{KzgCommitmentBytes, PerChunkCommitment};
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
     DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
@@ -731,6 +733,54 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     } else {
         Ok(None)
     }
+}
+
+pub fn get_peer_id<T: DbTx>(tx: &T) -> Result<Option<IrysPeerId>, DatabaseError> {
+    if let Some(bytes) = tx.get::<Metadata>(MetadataKey::PeerId)? {
+        let arr: [u8; 20] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other("PeerId metadata does not have exactly 20 bytes".to_string())
+        })?;
+
+        Ok(Some(IrysPeerId::from(arr)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_peer_id<T: DbTxMut>(tx: &T, peer_id: IrysPeerId) -> Result<(), DatabaseError> {
+    let bytes: [u8; 20] = peer_id.into();
+    tx.put::<Metadata>(MetadataKey::PeerId, bytes.to_vec())
+}
+
+/// Store per-chunk KZG commitments for a data_root during V2 ingress proof generation.
+pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    commitments: &[(u32, KzgCommitmentBytes)],
+) -> eyre::Result<()> {
+    for &(chunk_index, commitment) in commitments {
+        tx.put::<PerChunkKzgCommitments>(
+            data_root,
+            CompactPerChunkCommitment(PerChunkCommitment {
+                chunk_index,
+                commitment,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Retrieve a single per-chunk KZG commitment by data_root and chunk_index.
+pub fn get_per_chunk_kzg_commitment<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    chunk_index: u32,
+) -> eyre::Result<Option<KzgCommitmentBytes>> {
+    let mut cursor = tx.cursor_dup_read::<PerChunkKzgCommitments>()?;
+    Ok(cursor
+        .seek_by_key_subkey(data_root, chunk_index)?
+        .filter(|e| e.chunk_index == chunk_index)
+        .map(|e| e.commitment))
 }
 
 #[cfg(test)]
