@@ -15,3 +15,5 @@ emission_simulation.csv
 .idea/
 ecosystem.config.js
 docker/build-output/
+.worktrees/
+.claude/local/

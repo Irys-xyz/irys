@@ -1,11 +1,11 @@
 pub mod block_discovery;
-pub mod block_index_service;
 pub mod block_migration_service;
 pub mod block_producer;
 pub mod block_tree_service;
 pub mod block_validation;
 
 pub mod cache_service;
+pub mod chunk_ingress_service;
 pub mod chunk_migration_service;
 pub mod commitment_refunds;
 pub mod data_sync_service;
@@ -25,6 +25,11 @@ pub mod transaction_status;
 pub mod validation_service;
 
 pub use block_producer::*;
+pub use chunk_ingress_service::{
+    AdvisoryChunkIngressError, ChunkIngressError, ChunkIngressMessage, ChunkIngressService,
+    ChunkIngressState, CriticalChunkIngressError, IngressProofError, IngressProofGenerationError,
+    PriorityPendingChunks,
+};
 pub use data_sync_service::*;
 pub use mempool_guard::*;
 pub use mempool_service::*;
