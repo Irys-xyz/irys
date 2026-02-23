@@ -8,6 +8,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
+use irys_types::kzg::PerChunkCommitment;
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
 };
@@ -89,6 +90,7 @@ add_wrapper_struct!((LedgerIndexItem, CompactLedgerIndexItem));
 add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata));
 add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
+add_wrapper_struct!((PerChunkCommitment, CompactPerChunkCommitment));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
@@ -108,6 +110,7 @@ impl_compression_for_compact!(
     CompactBase64,
     CompactCachedIngressProof,
     CompactLedgerIndexItem,
+    CompactPerChunkCommitment,
     CompactCommitmentTxMetadata,
     CompactDataTxMetadata
 );
@@ -145,6 +148,14 @@ impl ValueWithSubKey for CompactCachedIngressProof {
 
     fn get_subkey(&self) -> Self::SubKey {
         self.0.address
+    }
+}
+
+impl ValueWithSubKey for CompactPerChunkCommitment {
+    type SubKey = u32;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.chunk_index
     }
 }
 
@@ -230,6 +241,14 @@ table CachedChunks {
 table CachedIngressLeaves {
     type Key = CachedIngressLeafKey;
     type Value = CachedIngressLeaf;
+    type SubKey = u32;
+}
+
+/// Per-chunk KZG commitments stored during V2 ingress proof generation.
+/// Used for custody proof verification (KZG opening proofs).
+table PerChunkKzgCommitments {
+    type Key = DataRoot;
+    type Value = CompactPerChunkCommitment;
     type SubKey = u32;
 }
 

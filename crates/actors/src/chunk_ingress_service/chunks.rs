@@ -986,20 +986,22 @@ pub fn generate_ingress_proof(
     enable_shadow_kzg_logging: bool,
     use_kzg_ingress_proofs: bool,
 ) -> eyre::Result<IngressProof> {
-    let proof = if use_kzg_ingress_proofs {
+    let (proof, per_chunk_commitments) = if use_kzg_ingress_proofs {
         let chunks = load_cached_chunk_bytes(&db, data_root)?;
-        irys_types::ingress::generate_ingress_proof_v2(
+        let (proof, per_chunk) = irys_types::ingress::generate_ingress_proof_v2(
             &signer,
             data_root,
             &chunks,
             chain_id,
             anchor,
             irys_types::kzg::default_kzg_settings(),
-        )?
+        )?;
+        (proof, Some(per_chunk))
     } else {
-        irys_types::ingress::generate_ingress_proof_from_leaves(
+        let proof = irys_types::ingress::generate_ingress_proof_from_leaves(
             &signer, data_root, leaves, chain_id, anchor,
-        )?
+        )?;
+        (proof, None)
     };
 
     info!(
@@ -1007,7 +1009,24 @@ pub fn generate_ingress_proof(
         &proof.proof_id(),
         &data_root
     );
-    db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    db.update_scoped(|rw_tx| -> eyre::Result<()> {
+        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)?;
+
+        if let Some(ref per_chunk) = per_chunk_commitments {
+            let indexed: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)> = per_chunk
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let idx =
+                        u32::try_from(i).map_err(|_| eyre::eyre!("chunk index exceeds u32"))?;
+                    Ok((idx, *c))
+                })
+                .collect::<eyre::Result<Vec<_>>>()?;
+            irys_database::store_per_chunk_kzg_commitments(rw_tx, data_root, &indexed)?;
+        }
+
+        Ok(())
+    })??;
 
     if enable_shadow_kzg_logging && !use_kzg_ingress_proofs {
         if let Err(e) = shadow_log_kzg_commitments(&db, data_root) {
@@ -1086,7 +1105,8 @@ fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyr
                             .iter()
                             .fold(String::with_capacity(96), |mut s, b| {
                                 use std::fmt::Write as _;
-                                let _ = write!(s, "{b:02x}");
+                                // write! to String is infallible
+                                write!(s, "{b:02x}").expect("write to String cannot fail");
                                 s
                             });
                     info!(

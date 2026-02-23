@@ -2,16 +2,13 @@ use irys_types::H256;
 use irys_types::{SendTraced as _, Traced};
 use reth::revm::primitives::B256;
 use reth_transaction_pool::blobstore::{BlobStore, BlobStoreError};
-use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
 use crate::mempool_service::MempoolServiceMessage;
 
-/// Messages sent to the blob extraction service.
 #[derive(Debug)]
 pub enum BlobExtractionMessage {
-    /// Extract blobs from a locally-produced block containing EIP-4844 transactions.
     ExtractBlobs {
         block_hash: H256,
         blob_tx_hashes: Vec<B256>,
@@ -24,14 +21,14 @@ pub enum BlobExtractionMessage {
 pub struct BlobExtractionService<S: BlobStore> {
     blob_store: S,
     mempool_sender: UnboundedSender<Traced<MempoolServiceMessage>>,
-    config: Arc<irys_types::Config>,
+    config: irys_types::Config,
 }
 
 impl<S: BlobStore> BlobExtractionService<S> {
     pub fn spawn_service(
         blob_store: S,
         mempool_sender: UnboundedSender<Traced<MempoolServiceMessage>>,
-        config: Arc<irys_types::Config>,
+        config: irys_types::Config,
         rx: UnboundedReceiver<BlobExtractionMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) {
@@ -117,8 +114,8 @@ impl<S: BlobStore> BlobExtractionService<S> {
 
                 let data_root = proof.data_root();
 
-                let blob_len =
-                    u64::try_from(blob.len()).map_err(|_| eyre::eyre!("blob length overflow"))?;
+                let chunk_size = u64::try_from(irys_types::kzg::CHUNK_SIZE_FOR_KZG)
+                    .map_err(|_| eyre::eyre!("chunk size overflow"))?;
 
                 let tx_header = irys_types::transaction::DataTransactionHeader::V1(
                     irys_types::transaction::DataTransactionHeaderV1WithMetadata {
@@ -127,12 +124,12 @@ impl<S: BlobStore> BlobExtractionService<S> {
                             anchor,
                             signer: signer.address(),
                             data_root,
-                            data_size: blob_len,
+                            data_size: chunk_size,
                             prefix_size: 0,
                             prefix_hash: H256::zero(),
                             term_fee: Default::default(),
                             perm_fee: None,
-                            ledger_id: irys_types::block::DataLedger::Submit as u32,
+                            ledger_id: u32::from(irys_types::block::DataLedger::Submit),
                             chain_id,
                             signature: Default::default(),
                             metadata_format: 0,
