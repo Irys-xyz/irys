@@ -137,14 +137,15 @@ impl ChunkIngressServiceInner {
         ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
         let latest_height =
-            Self::get_latest_block_height_static(block_tree_read_guard).map_err(|_e| {
-                IngressProofError::Other(
-                    "unable to get canonical chain from block tree ".to_owned(),
-                )
-            })?;
+            crate::mempool_service::Inner::get_latest_block_height_static(block_tree_read_guard)
+                .map_err(|_e| {
+                    IngressProofError::Other(
+                        "unable to get canonical chain from block tree ".to_owned(),
+                    )
+                })?;
 
         // TODO: add an ingress proof invalid LRU, like we have for txs
-        let anchor_height = match Self::get_anchor_height_static(
+        let anchor_height = match crate::mempool_service::Inner::get_anchor_height_static(
             block_tree_read_guard,
             irys_db,
             ingress_proof.anchor,

@@ -14,12 +14,11 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use irys_database::db::IrysDatabaseExt as _;
-use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, StorageModulesReadGuard};
+use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, ChunkPathHash, Config, DataRoot,
-    TokioServiceHandle, H256,
+    TokioServiceHandle,
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
@@ -114,50 +113,6 @@ impl ChunkIngressServiceInner {
             ChunkIngressMessage::ProcessPendingChunks(data_root) => {
                 self.process_pending_chunks_for_root(data_root).await;
             }
-        }
-    }
-
-    /// Helper to get the latest block height from the canonical chain.
-    pub(crate) fn get_latest_block_height_static(
-        block_tree_read_guard: &BlockTreeReadGuard,
-    ) -> Result<u64, String> {
-        let canon_chain = block_tree_read_guard.read().get_canonical_chain();
-        let latest = canon_chain
-            .0
-            .last()
-            .ok_or_else(|| "unable to get canonical chain from block tree".to_owned())?;
-        Ok(latest.height())
-    }
-
-    /// Resolves an anchor (block hash) to its height.
-    /// If it couldn't find the anchor, returns None.
-    /// Set canonical to true to enforce that the anchor must be part of the current canonical chain.
-    pub(crate) fn get_anchor_height_static(
-        block_tree_read_guard: &BlockTreeReadGuard,
-        irys_db: &DatabaseProvider,
-        anchor: H256,
-        canonical: bool,
-    ) -> eyre::Result<Option<u64>> {
-        if let Some(height) = {
-            let guard = block_tree_read_guard.read();
-            if canonical {
-                guard
-                    .get_canonical_chain()
-                    .0
-                    .iter()
-                    .find(|b| b.block_hash() == anchor)
-                    .map(BlockTreeEntry::height)
-            } else {
-                guard.get_block(&anchor).map(|h| h.height)
-            }
-        } {
-            Ok(Some(height))
-        } else if let Some(hdr) =
-            irys_db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
-        {
-            Ok(Some(hdr.height))
-        } else {
-            Ok(None)
         }
     }
 
