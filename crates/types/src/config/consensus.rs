@@ -121,37 +121,28 @@ pub struct ConsensusConfig {
     #[serde(default)]
     pub enable_shadow_kzg_logging: bool,
 
-    /// Generate V2 (KZG-based) ingress proofs instead of V1 (SHA256 merkle only).
-    /// When enabled, new ingress proofs include a KZG commitment and composite
-    /// commitment binding the data to the signer's address.
+    /// Use V2 proofs for new transactions.
     #[serde(default)]
     pub use_kzg_ingress_proofs: bool,
 
-    /// Accept V2 (KZG-based) ingress proofs from peers. When false, V2 proofs
-    /// received via gossip or in blocks are rejected. Must be true when
-    /// `use_kzg_ingress_proofs` is true.
+    /// Accept V2 proofs from peers.
     #[serde(default)]
     pub accept_kzg_ingress_proofs: bool,
 
-    /// Require V2 (KZG-based) ingress proofs exclusively. When true, V1 proofs
-    /// are rejected. Implies `accept_kzg_ingress_proofs = true`.
+    /// Reject V1 proofs. Implies `accept_kzg_ingress_proofs`.
     #[serde(default)]
     pub require_kzg_ingress_proofs: bool,
 
-    /// Enable EIP-4844 blob transaction support. When false, blob transactions
-    /// are rejected at the txpool, EVM execution, and block validation layers.
     #[serde(default)]
     pub enable_blobs: bool,
 
-    /// Enable custody proofs via KZG opening. Requires `accept_kzg_ingress_proofs`.
+    /// Requires `accept_kzg_ingress_proofs`.
     #[serde(default)]
     pub enable_custody_proofs: bool,
 
-    /// Number of chunks challenged per custody proof (K). Default: 20.
     #[serde(default = "default_custody_challenge_count")]
     pub custody_challenge_count: u32,
 
-    /// Number of blocks a miner has to respond to a custody challenge. Default: 10.
     #[serde(default = "default_custody_response_window")]
     pub custody_response_window: u64,
 
@@ -463,29 +454,25 @@ impl ConsensusConfig {
     /// Enforce logical implications between KZG/blob config flags.
     /// Call before wrapping in `Arc` to fix contradictions early.
     pub fn normalize(&mut self) {
-        if self.enable_blobs && !self.accept_kzg_ingress_proofs {
-            tracing::warn!(
-                "enable_blobs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
-            );
-            self.accept_kzg_ingress_proofs = true;
-        }
-        if self.require_kzg_ingress_proofs && !self.accept_kzg_ingress_proofs {
-            tracing::warn!(
-                "require_kzg_ingress_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
-            );
-            self.accept_kzg_ingress_proofs = true;
-        }
-        if self.use_kzg_ingress_proofs && !self.accept_kzg_ingress_proofs {
-            tracing::warn!(
-                "use_kzg_ingress_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
-            );
-            self.accept_kzg_ingress_proofs = true;
-        }
-        if self.enable_custody_proofs && !self.accept_kzg_ingress_proofs {
-            tracing::warn!(
-                "enable_custody_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
-            );
-            self.accept_kzg_ingress_proofs = true;
+        for flag_name in [
+            "enable_blobs",
+            "require_kzg_ingress_proofs",
+            "use_kzg_ingress_proofs",
+            "enable_custody_proofs",
+        ] {
+            let flag_set = match flag_name {
+                "enable_blobs" => self.enable_blobs,
+                "require_kzg_ingress_proofs" => self.require_kzg_ingress_proofs,
+                "use_kzg_ingress_proofs" => self.use_kzg_ingress_proofs,
+                "enable_custody_proofs" => self.enable_custody_proofs,
+                _ => unreachable!(),
+            };
+            if flag_set && !self.accept_kzg_ingress_proofs {
+                tracing::warn!(
+                    "{flag_name}=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+                );
+                self.accept_kzg_ingress_proofs = true;
+            }
         }
     }
 

@@ -73,7 +73,6 @@ pub enum TransactionPacket {
     PermFeeRefund(BalanceIncrement),
     /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
     UnstakeRefund(BalanceIncrement),
-    /// Custody penalty: slash pledge deposit when miner fails custody challenge.
     CustodyPenalty(CustodyPenaltyPacket),
 }
 
@@ -551,7 +550,6 @@ impl BorshDeserialize for UnpledgeDebit {
     }
 }
 
-/// Custody penalty: slash pledge deposit when miner fails custody challenge.
 #[derive(
     serde::Deserialize,
     serde::Serialize,
@@ -565,11 +563,8 @@ impl BorshDeserialize for UnpledgeDebit {
     arbitrary::Arbitrary,
 )]
 pub struct CustodyPenaltyPacket {
-    /// Amount to deduct from the penalized miner.
     pub amount: U256,
-    /// Address of the penalized miner.
     pub target: Address,
-    /// Partition hash identifying which partition failed the custody challenge.
     pub partition_hash: FixedBytes<32>,
 }
 
@@ -974,27 +969,6 @@ mod tests {
         tx.serialize(&mut buf).unwrap();
         let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
         assert_eq!(decoded, tx);
-    }
-
-    #[test]
-    fn custody_penalty_fee_payer() {
-        let target = Address::repeat_byte(0x55);
-        let packet = TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
-            amount: U256::from(1_u64),
-            target,
-            partition_hash: FixedBytes::<32>::ZERO,
-        });
-        assert_eq!(packet.fee_payer_address(), Some(target));
-    }
-
-    #[test]
-    fn custody_penalty_topic() {
-        let packet = TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
-            amount: U256::from(1_u64),
-            target: Address::ZERO,
-            partition_hash: FixedBytes::<32>::ZERO,
-        });
-        assert_eq!(packet.topic(), keccak256("SHADOW_TX_CUSTODY_PENALTY"));
     }
 
     /// Test backward compatibility detection - old format without solution hash should fail

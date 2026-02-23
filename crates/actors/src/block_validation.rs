@@ -2941,6 +2941,7 @@ pub fn validate_custody_proofs(
             },
             kzg_settings,
             consensus_config.custody_challenge_count,
+            consensus_config.num_chunks_in_partition,
         )?;
 
         match result {
@@ -2953,6 +2954,15 @@ pub fn validate_custody_proofs(
                     "custody proof for miner {:?} partition {:?}: expected {expected} openings, got {got}",
                     proof.challenged_miner,
                     proof.partition_hash,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::InvalidOffset {
+                chunk_offset,
+                expected,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: offset mismatch at chunk_offset={chunk_offset}, expected={expected}",
+                    proof.challenged_miner,
                 );
             }
             irys_types::custody::CustodyVerificationResult::MissingCommitment {

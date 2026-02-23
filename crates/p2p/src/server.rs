@@ -938,6 +938,12 @@ where
         proof_json: web::Json<GossipRequestV2<CustodyProof>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        if !server.data_handler.config.consensus.enable_custody_proofs {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -959,9 +965,18 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        let cache_key = irys_types::GossipCacheKey::CustodyProof(v2_request.data.partition_hash);
+        if let Err(e) = server
+            .data_handler
+            .cache
+            .record_seen(source_peer_id, cache_key)
+        {
+            warn!(error = ?e, "Failed to record custody proof in gossip cache");
+        }
+
         debug!(
             partition.hash = %v2_request.data.partition_hash,
-            "Received custody proof via gossip (handler stub)",
+            "Received custody proof via gossip",
         );
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))

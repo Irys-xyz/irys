@@ -537,7 +537,6 @@ pub fn set_peer_id<T: DbTxMut>(tx: &T, peer_id: IrysPeerId) -> Result<(), Databa
     tx.put::<Metadata>(MetadataKey::PeerId, bytes.to_vec())
 }
 
-/// Store per-chunk KZG commitments for a data_root during V2 ingress proof generation.
 pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
@@ -555,7 +554,6 @@ pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
     Ok(())
 }
 
-/// Retrieve a single per-chunk KZG commitment by data_root and chunk_index.
 pub fn get_per_chunk_kzg_commitment<T: DbTx>(
     tx: &T,
     data_root: DataRoot,

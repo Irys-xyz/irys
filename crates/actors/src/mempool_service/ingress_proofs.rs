@@ -338,12 +338,10 @@ pub fn generate_and_store_ingress_proof(
         ));
     }
 
-    // Generate + persist
-    // Notify start of proof generation
     let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
 
     let proof_res = crate::mempool_service::chunks::generate_ingress_proof(
-        db.clone(),
+        db.clone(), // clone: Arc-wrapped DatabaseProvider — cheap ref-count bump
         data_root,
         data_size,
         chunk_size,
@@ -424,7 +422,7 @@ pub fn reanchor_and_store_ingress_proof(
         .get_latest_canonical_entry()
         .block_hash;
 
-    let mut proof = proof.clone();
+    let mut proof = proof.clone(); // clone: need owned value for set_anchor + sign mutation
     proof.set_anchor(latest_anchor);
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
@@ -458,7 +456,7 @@ pub fn gossip_ingress_proof(
     // Validate anchor freshness prior to broadcast
     match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, ingress_proof) {
         Ok(()) => {
-            let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
+            let msg = GossipBroadcastMessageV2::from(ingress_proof.clone()); // clone: consumed by channel send
             if let Err(e) = gossip_sender.send(msg) {
                 tracing::error!(proof.data_root = ?ingress_proof.data_root(), "Failed to gossip regenerated ingress proof: {e}");
             }

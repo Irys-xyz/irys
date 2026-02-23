@@ -61,8 +61,6 @@ impl Config {
             .number_of_ingress_proofs_from_assignees_at(timestamp)
     }
 
-    // validate configuration invariants
-    // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
         // ensures the block tree is able to contain all unmigrated blocks
         ensure!(
@@ -112,17 +110,31 @@ impl Config {
             "num_chunks_in_partition must be a multiple of num_chunks_in_recall_range"
         );
 
-        if self.consensus.require_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
-            bail!("require_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — contradictory config");
-        }
-        if self.consensus.enable_blobs && !self.consensus.accept_kzg_ingress_proofs {
-            bail!("enable_blobs=true but accept_kzg_ingress_proofs=false — blob V2 proofs would be rejected");
-        }
-        if self.consensus.use_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
-            bail!("use_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — generated proofs would be rejected");
-        }
-        if self.consensus.enable_custody_proofs && !self.consensus.accept_kzg_ingress_proofs {
-            bail!("enable_custody_proofs=true but accept_kzg_ingress_proofs=false — custody proofs require KZG commitments");
+        for (flag_name, flag_set, reason) in [
+            (
+                "require_kzg_ingress_proofs",
+                self.consensus.require_kzg_ingress_proofs,
+                "contradictory config",
+            ),
+            (
+                "enable_blobs",
+                self.consensus.enable_blobs,
+                "blob V2 proofs would be rejected",
+            ),
+            (
+                "use_kzg_ingress_proofs",
+                self.consensus.use_kzg_ingress_proofs,
+                "generated proofs would be rejected",
+            ),
+            (
+                "enable_custody_proofs",
+                self.consensus.enable_custody_proofs,
+                "custody proofs require KZG commitments",
+            ),
+        ] {
+            if flag_set && !self.consensus.accept_kzg_ingress_proofs {
+                bail!("{flag_name}=true but accept_kzg_ingress_proofs=false — {reason}");
+            }
         }
 
         Ok(())

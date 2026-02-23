@@ -120,7 +120,6 @@ impl IngressProof {
         }
     }
 
-    /// Check if this proof version is accepted by the given config flags.
     pub fn check_version_accepted(
         &self,
         accept_kzg: bool,
@@ -133,8 +132,7 @@ impl IngressProof {
         }
     }
 
-    /// Returns the V1 merkle proof hash, or V2 composite commitment.
-    /// Used as a unique proof identifier (e.g. for gossip deduplication).
+    /// Unique identifier for gossip deduplication.
     pub fn proof_id(&self) -> H256 {
         match self {
             Self::V1(v1) => v1.proof,
@@ -388,11 +386,7 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     Ok(proof)
 }
 
-/// Generate a V2 ingress proof with KZG commitment for native Irys data.
-///
-/// Unlike V1 which only hashes chunks into a merkle tree, V2 also computes
-/// a KZG commitment over the chunk data and binds it to the signer's address
-/// via a composite commitment.
+/// Generates KZG commitment over chunks and binds it to signer via composite commitment.
 pub fn generate_ingress_proof_v2(
     signer: &IrysSigner,
     data_root: DataRoot,
@@ -556,7 +550,6 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
                 return Ok(false);
             }
 
-            // Verify data_root matches the merkle root of the provided chunks
             let (_, regular_leaves) = generate_ingress_leaves(
                 chunks_vec.iter().map(|c| Ok(c.as_ref())),
                 recovered_address,
