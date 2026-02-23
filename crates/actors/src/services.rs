@@ -1,7 +1,7 @@
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
-    block_index_service::BlockIndexServiceMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
@@ -88,6 +88,7 @@ impl ServiceSenders {
 #[derive(Debug)]
 pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
+    pub chunk_ingress: UnboundedReceiver<ChunkIngressMessage>,
     pub chunk_migration: UnboundedReceiver<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
@@ -95,7 +96,6 @@ pub struct ServiceReceivers {
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
-    pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
@@ -110,6 +110,7 @@ pub struct ServiceReceivers {
 #[derive(Debug)]
 pub struct ServiceSendersInner {
     pub chunk_cache: UnboundedSender<CacheServiceAction>,
+    pub chunk_ingress: UnboundedSender<ChunkIngressMessage>,
     pub chunk_migration: UnboundedSender<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
@@ -117,7 +118,6 @@ pub struct ServiceSendersInner {
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
-    pub block_index: UnboundedSender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
@@ -133,6 +133,8 @@ pub struct ServiceSendersInner {
 impl ServiceSendersInner {
     pub fn init() -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
+        let (chunk_ingress_sender, chunk_ingress_receiver) =
+            unbounded_channel::<ChunkIngressMessage>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
@@ -143,8 +145,6 @@ impl ServiceSendersInner {
             unbounded_channel::<GossipBroadcastMessageV2>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
-        let (block_index_sender, block_index_receiver) =
-            unbounded_channel::<BlockIndexServiceMessage>();
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -163,6 +163,7 @@ impl ServiceSendersInner {
         let mining_bus = MiningBus::new();
         let senders = Self {
             chunk_cache: chunk_cache_sender,
+            chunk_ingress: chunk_ingress_sender,
             chunk_migration: chunk_migration_sender,
             mempool: mempool_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
@@ -170,7 +171,6 @@ impl ServiceSendersInner {
             data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
-            block_index: block_index_sender,
             validation_service: validation_sender,
             block_producer: block_producer_sender,
             reth_service: reth_service_sender,
@@ -184,6 +184,7 @@ impl ServiceSendersInner {
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
+            chunk_ingress: chunk_ingress_receiver,
             chunk_migration: chunk_migration_receiver,
             mempool: mempool_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,
@@ -191,7 +192,6 @@ impl ServiceSendersInner {
             data_sync: ds_receiver,
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
-            block_index: block_index_receiver,
             validation_service: validation_receiver,
             block_producer: block_producer_receiver,
             reth_service: reth_service_receiver,

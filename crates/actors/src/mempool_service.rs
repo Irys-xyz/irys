@@ -1,18 +1,10 @@
-pub(crate) mod chunk_data_writer;
-pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;
 pub mod facade;
-pub mod ingress_proofs;
 pub mod lifecycle;
-mod metrics;
-mod pending_chunks;
 pub mod pledge_provider;
 pub mod types;
 
-pub use pending_chunks::PriorityPendingChunks;
-
-pub use chunks::*;
 pub use facade::*;
 use irys_database::db_cache::CachedDataRoot;
 pub use types::*;
@@ -20,6 +12,7 @@ pub use types::*;
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
+use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -31,10 +24,7 @@ use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{
-    get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
-    StorageModulesReadGuard,
-};
+use irys_domain::{get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus};
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
@@ -49,8 +39,8 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
+    CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
+    MempoolConfig,
 };
 use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
@@ -193,12 +183,11 @@ pub struct Inner {
     pub mempool_state: AtomicMempoolState,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
-    pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
-    /// Async write-behind buffer for chunk MDBX writes
-    pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+    /// Shared state handle for reading chunk ingress pending count
+    pub chunk_ingress_state: ChunkIngressState,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -206,14 +195,6 @@ pub struct Inner {
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
     BlockConfirmed(Arc<SealedBlock>),
-    /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
-    IngestChunk(
-        UnpackedChunk,
-        oneshot::Sender<Result<(), ChunkIngressError>>,
-    ),
-    IngestChunkFireAndForget(UnpackedChunk),
-    IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
-
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool (from API)
@@ -280,9 +261,6 @@ impl MempoolServiceMessage {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::BlockConfirmed(_) => "BlockConfirmed",
-            Self::IngestChunk(_, _) => "IngestChunk",
-            Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
-            Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::CommitmentTxExists(_, _) => "CommitmentTxExists",
             Self::IngestCommitmentTxFromApi(_, _) => "IngestCommitmentTxFromApi",
             Self::IngestCommitmentTxFromGossip(_, _) => "IngestCommitmentTxFromGossip",
@@ -341,26 +319,6 @@ impl Inner {
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
-            }
-            MempoolServiceMessage::IngestChunk(chunk, response) => {
-                let response_value: Result<(), ChunkIngressError> =
-                    self.handle_chunk_ingress_message(chunk).await;
-                if let Err(ref e) = response_value {
-                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
-                }
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!(
-                        "handle_chunk_ingress_message response.send() error: {:?}",
-                        e
-                    );
-                };
-            }
-            MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
-                let result = self.handle_chunk_ingress_message(chunk).await;
-                if let Err(e) = result {
-                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
-                    tracing::error!("handle_chunk_ingress_message error: {:?}", e);
-                }
             }
             MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
                 let response_value = self.handle_get_best_mempool_txs(block_id).await;
@@ -421,12 +379,6 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 }
             }
-            MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                let response_value = self.handle_ingest_ingress_proof(ingress_proof);
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
             MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
                 let response_value = self.remove_from_blacklists(tx_ids).await;
                 if let Err(e) = response.send(response_value) {
@@ -465,7 +417,7 @@ impl Inner {
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
         Ok(self
             .mempool_state
-            .get_status(&self.config.node_config)
+            .get_status(&self.config.node_config, &self.chunk_ingress_state)
             .await)
     }
 
@@ -1276,9 +1228,13 @@ impl Inner {
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
                     .filter(|(_root, cached_proof)| {
-                        let expired = self
-                            .is_ingress_proof_expired(&cached_proof.proof)
-                            .expired_or_invalid;
+                        let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
+                            &self.block_tree_read_guard,
+                            &self.irys_db,
+                            &self.config,
+                            &cached_proof.proof,
+                        )
+                        .expired_or_invalid;
                         !expired
                     })
                     .collect::<Vec<_>>();
@@ -1955,7 +1911,14 @@ impl AtomicMempoolState {
         write.recent_invalid_payload_fingerprints.clear();
     }
 
-    pub async fn get_status(&self, config: &NodeConfig) -> MempoolStatus {
+    pub async fn get_status(
+        &self,
+        config: &NodeConfig,
+        chunk_ingress: &ChunkIngressState,
+    ) -> MempoolStatus {
+        // Read chunk ingress count first to avoid holding the mempool lock across the await.
+        let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
+
         let state = self.read().await;
 
         // Calculate total data size
@@ -2008,7 +1971,7 @@ impl AtomicMempoolState {
         MempoolStatus {
             data_tx_count: state.valid_submit_ledger_tx.len(),
             commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
-            pending_chunks_count: state.pending_chunks.len(),
+            pending_chunks_count,
             pending_pledges_count: state.pending_pledges.len(),
             recent_valid_tx_count: state.recent_valid_tx.len(),
             recent_invalid_tx_count: state.recent_invalid_tx.len(),
@@ -2079,13 +2042,6 @@ impl AtomicMempoolState {
         mempool_guard.recent_valid_tx.put(header.id, ());
     }
 
-    pub async fn is_a_recent_valid_chunk(&self, chunk_path_hash: &ChunkPathHash) -> bool {
-        let mempool_state_guard = self.read().await;
-        mempool_state_guard
-            .recent_valid_chunks
-            .contains(chunk_path_hash)
-    }
-
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
@@ -2104,27 +2060,6 @@ impl AtomicMempoolState {
                     .count() as u64
             })
             .unwrap_or(0)
-    }
-
-    pub async fn put_chunk(&self, chunk: UnpackedChunk) {
-        let mempool_state_write_guard = &mut self.write().await;
-        mempool_state_write_guard.pending_chunks.put(chunk);
-    }
-
-    pub async fn pending_chunk_count_for_data_root(&self, data_root: &DataRoot) -> usize {
-        self.read()
-            .await
-            .pending_chunks
-            .get(data_root)
-            .map(lru::LruCache::len)
-            .unwrap_or(0)
-    }
-
-    pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
-        let mut mempool_state_guard = self.write().await;
-        mempool_state_guard
-            .recent_valid_chunks
-            .put(chunk_path_hash, ());
     }
 
     /// Inserts tx into the mempool and marks it as recently valid.
@@ -2273,13 +2208,6 @@ impl AtomicMempoolState {
         }
 
         false
-    }
-
-    pub async fn pop_pending_chunks_cache(
-        &self,
-        data_root: &DataRoot,
-    ) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
-        self.write().await.pending_chunks.pop(data_root)
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -2715,11 +2643,6 @@ pub struct MempoolState {
     pub recent_invalid_payload_fingerprints: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
     pub recent_valid_tx: LruCache<H256, ()>,
-    /// Tracks recently processed chunk hashes to prevent re-gossip
-    pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
-    /// Priority-based cache for out of order gossip chunks.
-    /// Evicts entries with fewer chunks first to mitigate cache poisoning attacks.
-    pub pending_chunks: PriorityPendingChunks,
     pub pending_pledges: LruCache<IrysAddress, LruCache<IrysTransactionId, CommitmentTransaction>>,
     pub stake_and_pledge_whitelist: HashSet<IrysAddress>,
 }
@@ -2730,7 +2653,6 @@ pub fn create_state(
     config: &MempoolConfig,
     stake_and_pledge_whitelist: &[IrysAddress],
 ) -> MempoolState {
-    let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         valid_submit_ledger_tx: BTreeMap::new(),
@@ -2743,11 +2665,6 @@ pub fn create_state(
             NonZeroUsize::new(config.max_invalid_items).unwrap(),
         ),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
-        recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
-        pending_chunks: PriorityPendingChunks::new(
-            max_pending_chunk_items,
-            config.max_preheader_chunks_per_item,
-        ),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
     }
@@ -3012,52 +2929,6 @@ pub struct MempoolTxs {
     pub publish_tx: PublishLedgerWithTxs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum IngressProofError {
-    /// The proofs signature is invalid
-    #[error("Ingress proof signature is invalid")]
-    InvalidSignature,
-    /// There was a database error storing the proof
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    /// The proof does not come from a staked address
-    #[error("Unstaked address")]
-    UnstakedAddress,
-    /// The ingress proof is anchored to an unknown/expired anchor
-    #[error("Invalid anchor: {0}")]
-    InvalidAnchor(BlockHash),
-    /// Catch-all variant for other errors.
-    #[error("Ingress proof error: {0}")]
-    Other(String),
-}
-
-/// Errors that can occur when generating an ingress proof locally.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum IngressProofGenerationError {
-    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
-    #[error("Node is not staked in current epoch")]
-    NodeNotStaked,
-    /// Proof generation is already in progress for this data root.
-    #[error("Proof generation already in progress")]
-    AlreadyGenerating,
-    /// Failed to communicate with cache service.
-    #[error("Cache service error: {0}")]
-    CacheServiceError(String),
-    /// Invalid data size for the transaction.
-    #[error("Invalid data size: {0}")]
-    InvalidDataSize(String),
-    /// Failed to generate the proof.
-    #[error("Proof generation failed: {0}")]
-    GenerationFailed(String),
-}
-
-impl IngressProofGenerationError {
-    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
-    pub fn is_benign(&self) -> bool {
-        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
-    }
-}
-
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
 pub struct MempoolService {
@@ -3078,12 +2949,12 @@ impl MempoolService {
     pub fn spawn_service(
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
-        storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
         rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
+        chunk_ingress_state: ChunkIngressState,
     ) -> eyre::Result<TokioServiceHandle> {
         info!("Spawning mempool service");
 
@@ -3097,9 +2968,7 @@ impl MempoolService {
         let config = config.clone();
         let mempool_config = &config.mempool;
         let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
-        let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
-        let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
 
@@ -3115,11 +2984,6 @@ impl MempoolService {
                 let mut stake_and_pledge_whitelist = HashSet::new();
                 stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
-                let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
-                    irys_db.clone(),
-                    chunk_writer_buffer_size,
-                );
-
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
@@ -3132,12 +2996,11 @@ impl MempoolService {
                         mempool_state,
                         reth_node_adapter,
                         service_senders,
-                        storage_modules_guard,
                         pledge_provider,
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
-                        chunk_data_writer,
+                        chunk_ingress_state,
                     }),
                 };
                 mempool_service
@@ -3272,18 +3135,6 @@ impl MempoolService {
             Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
         }
 
-        // Flush write-behind chunk buffer so all queued chunks are committed to MDBX
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            self.inner.chunk_data_writer.flush(),
-        )
-        .await
-        {
-            Ok(Ok(())) => tracing::debug!("Flushed chunk data writer successfully"),
-            Ok(Err(e)) => tracing::error!("Error flushing chunk data writer: {:?}", e),
-            Err(_) => tracing::warn!("Timeout flushing chunk data writer, continuing shutdown"),
-        }
-
         // Persist to disk with timeout
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -3388,7 +3239,7 @@ fn check_funding<T: IrysTransactionCommon>(
 }
 
 /// Waits for `fut` to finish while printing every `n_secs`.
-async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+pub(crate) async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -3405,7 +3256,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let _ = span.enter();
+                let _guard = span.enter();
                 warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {
@@ -3480,8 +3331,6 @@ mod bounded_mempool_tests {
             recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            pending_chunks: PriorityPendingChunks::new(10, 100),
             pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
             stake_and_pledge_whitelist: HashSet::new(),
         }
