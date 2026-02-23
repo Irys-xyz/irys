@@ -185,18 +185,18 @@ pub enum DataSourceType {
 }
 
 impl DataSourceType {
-    pub fn from_u8(val: u8) -> Self {
+    pub fn from_u8(val: u8) -> eyre::Result<Self> {
         match val {
-            0 => Self::NativeData,
-            1 => Self::EvmBlob,
-            _ => Self::NativeData,
+            0 => Ok(Self::NativeData),
+            1 => Ok(Self::EvmBlob),
+            _ => Err(eyre::eyre!("unknown DataSourceType discriminant: {val}")),
         }
     }
 }
 
 impl<'a> Arbitrary<'a> for DataSourceType {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(Self::from_u8(u.int_in_range(0..=1)?))
+        Self::from_u8(u.int_in_range(0..=1)?).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -207,7 +207,10 @@ impl Compact for DataSourceType {
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        (Self::from_u8(buf[0]), &buf[1..])
+        // Compact deserialization: default to NativeData for forward compatibility
+        // with unknown discriminants in stored data
+        let source = Self::from_u8(buf[0]).unwrap_or_default();
+        (source, &buf[1..])
     }
 }
 
@@ -224,16 +227,15 @@ pub struct IngressProofV2 {
 
 impl Compact for IngressProofV2 {
     fn to_compact<B: BufMut + AsMut<[u8]>>(&self, buf: &mut B) -> usize {
-        let mut flags = 0_usize;
-        // signature has no flag — always present, written first
-        flags += self.signature.to_compact(buf);
-        flags += self.data_root.to_compact(buf);
-        flags += self.kzg_commitment.to_compact(buf);
-        flags += self.composite_commitment.to_compact(buf);
-        flags += self.chain_id.to_compact(buf);
-        flags += self.anchor.to_compact(buf);
-        flags += self.source_type.to_compact(buf);
-        flags
+        let mut written = 0_usize;
+        written += self.signature.to_compact(buf);
+        written += self.data_root.to_compact(buf);
+        written += self.kzg_commitment.to_compact(buf);
+        written += self.composite_commitment.to_compact(buf);
+        written += self.chain_id.to_compact(buf);
+        written += self.anchor.to_compact(buf);
+        written += self.source_type.to_compact(buf);
+        written
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
@@ -277,6 +279,7 @@ impl Versioned for IngressProofV2 {
     const VERSION: u8 = 2;
 }
 
+/// Signature excluded from RLP: this encoding is used for signature_hash computation
 impl alloy_rlp::Encodable for IngressProofV2 {
     fn encode(&self, out: &mut dyn BufMut) {
         let header = alloy_rlp::Header {
@@ -317,7 +320,8 @@ impl alloy_rlp::Decodable for IngressProofV2 {
             composite_commitment,
             chain_id,
             anchor,
-            source_type: DataSourceType::from_u8(source_type_u8),
+            source_type: DataSourceType::from_u8(source_type_u8)
+                .map_err(|_| alloy_rlp::Error::Custom("unknown DataSourceType discriminant"))?,
         })
     }
 }
@@ -389,7 +393,6 @@ pub fn generate_ingress_proof_v2(
         KzgCommitmentBytes,
     };
 
-    // Step 1: Compute per-chunk KZG commitments and aggregate
     let chunk_commitments: Vec<c_kzg::KzgCommitment> = chunks
         .iter()
         .map(|chunk| compute_chunk_commitment(chunk.as_ref(), kzg_settings))
@@ -401,10 +404,8 @@ pub fn generate_ingress_proof_v2(
         .try_into()
         .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))?;
 
-    // Step 2: Compute composite commitment binding KZG to signer
     let composite = compute_composite_commitment(&kzg_bytes, &signer.address());
 
-    // Step 3: Build and sign the V2 proof
     let mut proof = IngressProof::V2(IngressProofV2 {
         signature: Default::default(),
         data_root,
@@ -440,11 +441,9 @@ pub fn generate_ingress_proof_v2_from_blob(
         CHUNK_SIZE_FOR_KZG,
     );
 
-    // Zero-pad blob to 256KB Irys chunk size
     let mut padded = vec![0_u8; CHUNK_SIZE_FOR_KZG];
     padded[..blob_data.len()].copy_from_slice(blob_data);
 
-    // Compute data_root from the padded chunk using the standard merkle tree
     let (leaves, _) = generate_ingress_leaves(
         std::iter::once(Ok(padded.as_slice())),
         signer.address(),
@@ -452,7 +451,6 @@ pub fn generate_ingress_proof_v2_from_blob(
     )?;
     let root = generate_data_root(leaves)?;
 
-    // Composite commitment binds the sidecar KZG commitment to the signer
     let composite = compute_composite_commitment(kzg_commitment, &signer.address());
 
     let mut proof = IngressProof::V2(IngressProofV2 {

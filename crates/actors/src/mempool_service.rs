@@ -486,17 +486,23 @@ impl Inner {
         }
 
         let data_root = tx_header.data_root;
+        let chunk_len = match u64::try_from(chunk_data.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                warn!(data_root = %data_root, "Chunk data length overflows u64");
+                return;
+            }
+        };
         debug!(
             data_root = %data_root,
             data_size = tx_header.data_size,
-            chunk_data_len = chunk_data.len(),
+            chunk_data_len = chunk_len,
             "Ingesting blob-derived data transaction",
         );
 
-        // 1. Cache the chunk data first (creates CachedDataRoots entry)
         let chunk = UnpackedChunk {
             data_root,
-            data_size: chunk_data.len() as u64,
+            data_size: chunk_len,
             data_path: Default::default(),
             bytes: chunk_data.into(),
             tx_offset: TxChunkOffset(0),
@@ -506,13 +512,11 @@ impl Inner {
             return;
         }
 
-        // 2. Store the data tx header via the gossip ingress path
         if let Err(e) = self.handle_data_tx_ingress_message_gossip(tx_header).await {
             warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
             return;
         }
 
-        // 3. Store the ingress proof
         if let Err(e) = self.handle_ingest_ingress_proof(ingress_proof) {
             warn!(data_root = %data_root, error = ?e, "Failed to store blob ingress proof");
         }

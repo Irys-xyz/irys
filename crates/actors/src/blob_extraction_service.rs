@@ -67,6 +67,11 @@ impl<S: BlobStore> BlobExtractionService<S> {
     fn handle_extract_blobs(&self, block_hash: H256, blob_tx_hashes: &[B256]) -> eyre::Result<()> {
         use irys_types::ingress::generate_ingress_proof_v2_from_blob;
 
+        if !self.config.consensus.enable_blobs {
+            warn!("Received blob extraction request but blobs are disabled");
+            return Ok(());
+        }
+
         let signer = self.config.irys_signer();
         let chain_id = self.config.consensus.chain_id;
         let anchor: H256 = block_hash;
@@ -111,6 +116,9 @@ impl<S: BlobStore> BlobExtractionService<S> {
 
                 let data_root = proof.data_root();
 
+                let blob_len =
+                    u64::try_from(blob.len()).map_err(|_| eyre::eyre!("blob length overflow"))?;
+
                 let tx_header = irys_types::transaction::DataTransactionHeader::V1(
                     irys_types::transaction::DataTransactionHeaderV1WithMetadata {
                         tx: irys_types::transaction::DataTransactionHeaderV1 {
@@ -118,7 +126,7 @@ impl<S: BlobStore> BlobExtractionService<S> {
                             anchor,
                             signer: signer.address(),
                             data_root,
-                            data_size: blob.len() as u64,
+                            data_size: blob_len,
                             header_size: 0,
                             term_fee: Default::default(),
                             perm_fee: None,
@@ -131,17 +139,19 @@ impl<S: BlobStore> BlobExtractionService<S> {
                     },
                 );
 
-                // Zero-pad blob to 256KB Irys chunk
                 let mut chunk_data = vec![0_u8; irys_types::kzg::CHUNK_SIZE_FOR_KZG];
                 chunk_data[..blob.len()].copy_from_slice(blob.as_ref());
 
-                let _ = self
-                    .mempool_sender
-                    .send(MempoolServiceMessage::IngestBlobDerivedTx {
-                        tx_header,
-                        ingress_proof: proof,
-                        chunk_data,
-                    });
+                if let Err(e) =
+                    self.mempool_sender
+                        .send(MempoolServiceMessage::IngestBlobDerivedTx {
+                            tx_header,
+                            ingress_proof: proof,
+                            chunk_data,
+                        })
+                {
+                    warn!(data_root = %data_root, error = %e, "Failed to send blob-derived tx to mempool");
+                }
 
                 total_blobs += 1;
             }

@@ -759,7 +759,6 @@ pub fn generate_ingress_proof(
         });
 
         let proof = if use_kzg_ingress_proofs {
-            // V2: collect chunks for KZG commitment computation
             let chunks: Vec<Vec<u8>> = iter.collect::<eyre::Result<Vec<_>>>()?;
             irys_types::ingress::generate_ingress_proof_v2(
                 &signer,
@@ -770,7 +769,6 @@ pub fn generate_ingress_proof(
                 irys_types::kzg::default_kzg_settings(),
             )?
         } else {
-            // V1: pass lazy iterator for SHA256 merkle proof
             irys_types::ingress::generate_ingress_proof(
                 &signer, data_root, iter, chain_id, anchor,
             )?
@@ -828,11 +826,15 @@ fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyr
             let chunk_start = Instant::now();
             match compute_chunk_commitment(&chunk_bin, settings) {
                 Ok(commitment) => {
-                    let hex: String = commitment
-                        .as_ref()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                    let hex =
+                        commitment
+                            .as_ref()
+                            .iter()
+                            .fold(String::with_capacity(96), |mut s, b| {
+                                use std::fmt::Write as _;
+                                let _ = write!(s, "{b:02x}");
+                                s
+                            });
                     info!(
                         data_root = %data_root,
                         chunk_index = i,

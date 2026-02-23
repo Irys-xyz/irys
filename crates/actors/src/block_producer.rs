@@ -806,12 +806,14 @@ pub trait BlockProdStrategy {
                     blob_txs = blob_tx_hashes.len(),
                     "Triggering blob extraction for EIP-4844 transactions",
                 );
-                let _ = self.inner().service_senders.blob_extraction.send(
+                if let Err(e) = self.inner().service_senders.blob_extraction.send(
                     BlobExtractionMessage::ExtractBlobs {
                         block_hash: block.block_hash,
                         blob_tx_hashes,
                     },
-                );
+                ) {
+                    warn!(error = %e, "Failed to send blob extraction request");
+                }
             }
         }
 
