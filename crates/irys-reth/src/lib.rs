@@ -2671,7 +2671,8 @@ pub mod test_utils {
                         | TransactionPacket::IngressProofReward(_)
                         | TransactionPacket::PermFeeRefund(_)
                         | TransactionPacket::UnstakeRefund(_)
-                        | TransactionPacket::UpdateRewardAddress(_) => DEFAULT_PRIORITY_FEE,
+                        | TransactionPacket::UpdateRewardAddress(_)
+                        | TransactionPacket::CustodyPenalty(_) => DEFAULT_PRIORITY_FEE,
                     },
                 };
 
