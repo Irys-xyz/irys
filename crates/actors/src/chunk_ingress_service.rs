@@ -367,7 +367,7 @@ impl ChunkIngressService {
                 )));
             }
             ChunkIngressMessage::IngestIngressProof(_, reply) => {
-                let _ = reply.send(Err(IngressProofError::DatabaseError(
+                let _ = reply.send(Err(IngressProofError::Other(
                     "service overloaded: timed out waiting for handler permit".into(),
                 )));
             }
