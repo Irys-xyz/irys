@@ -5,7 +5,7 @@
 
 use eyre::Result;
 use opentelemetry::{
-    trace::{TraceId, TracerProvider as _},
+    trace::{SpanId, TraceId, TracerProvider as _},
     KeyValue,
 };
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -15,7 +15,7 @@ use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
     propagation::TraceContextPropagator,
     resource::Resource,
-    trace::{IdGenerator, SdkTracerProvider, SpanId},
+    trace::{IdGenerator, SdkTracerProvider},
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
