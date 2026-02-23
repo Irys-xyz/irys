@@ -1,4 +1,6 @@
-use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
+use crate::mempool_service::{
+    validate_commitment_transaction, validate_tx_signature, Inner, TxIngressError, TxReadError,
+};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
@@ -34,7 +36,10 @@ impl Inner {
             }
         }
         // Validate tx signature first to prevent ID poisoning
-        if let Err(e) = self.validate_signature(commitment_tx).await {
+        if let Err(e) = validate_tx_signature(commitment_tx) {
+            self.mempool_state
+                .mark_fingerprint_as_invalid(commitment_tx.fingerprint())
+                .await;
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
                 &commitment_tx,

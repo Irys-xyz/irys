@@ -1,4 +1,5 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
+use crate::mempool_service::validate_tx_signature;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
@@ -64,7 +65,12 @@ impl Inner {
         }
 
         // Validate signature
-        self.validate_signature(tx).await?;
+        if let Err(e) = validate_tx_signature(tx) {
+            self.mempool_state
+                .mark_fingerprint_as_invalid(tx.fingerprint())
+                .await;
+            return Err(e);
+        }
 
         // Validate anchor and compute expiry
         let anchor_height = self.validate_tx_anchor(tx).await?;

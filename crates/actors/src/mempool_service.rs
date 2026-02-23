@@ -1522,52 +1522,6 @@ impl Inner {
         }
     }
 
-    // Helper to verify signature
-    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
-    pub async fn validate_signature<
-        T: irys_types::versioning::Signable
-            + IrysTransactionCommon
-            + std::fmt::Debug
-            + serde::Serialize,
-    >(
-        &self,
-        tx: &T,
-    ) -> Result<(), TxIngressError> {
-        if tx.is_signature_valid() {
-            info!(
-                "Tx {} signature is valid for signer {}",
-                &tx.id(),
-                &tx.signer()
-            );
-            Ok(())
-        } else {
-            // Record invalid payload fingerprint derived from both the signature and the
-            // signing preimage (prehash). This avoids poisoning legitimate transactions that
-            // share the same signature bytes but differ in signed content.
-            let fingerprint = tx.fingerprint();
-
-            self.mempool_state
-                .mark_fingerprint_as_invalid(fingerprint)
-                .await;
-
-            warn!(
-                "Tx {} signature is invalid (fingerprint {:?})",
-                &tx.id(),
-                fingerprint
-            );
-            debug!(
-                target = "invalid_tx_header_json",
-                "Invalid tx: {:#}",
-                &serde_json::to_string(&tx).unwrap_or_else(|e| format!(
-                    // fallback to debug printing the header
-                    "error serializing block header: {}\n{:?}",
-                    &e, &tx
-                ))
-            );
-            Err(TxIngressError::InvalidSignature(tx.signer()))
-        }
-    }
-
     async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {
         self.mempool_state
             .extend_stake_and_pledge_whitelist(new_entries)
@@ -1619,6 +1573,44 @@ fn calculate_term_storage_fee(
         ema.ema_for_public_pricing(),
     )
     .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
+}
+
+/// Validate a transaction's cryptographic signature.
+/// Returns Ok(()) if valid, Err(InvalidSignature) if invalid.
+/// Does NOT mark the fingerprint as invalid — callers must do that themselves.
+#[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
+pub(crate) fn validate_tx_signature<
+    T: irys_types::versioning::Signable
+        + IrysTransactionCommon
+        + std::fmt::Debug
+        + serde::Serialize,
+>(
+    tx: &T,
+) -> Result<(), TxIngressError> {
+    if tx.is_signature_valid() {
+        info!(
+            "Tx {} signature is valid for signer {}",
+            &tx.id(),
+            &tx.signer()
+        );
+        Ok(())
+    } else {
+        let fingerprint = tx.fingerprint();
+        warn!(
+            "Tx {} signature is invalid (fingerprint {:?})",
+            &tx.id(),
+            fingerprint
+        );
+        debug!(
+            target = "invalid_tx_header_json",
+            "Invalid tx: {:#}",
+            &serde_json::to_string(&tx).unwrap_or_else(|e| format!(
+                "error serializing block header: {}\n{:?}",
+                &e, &tx
+            ))
+        );
+        Err(TxIngressError::InvalidSignature(tx.signer()))
+    }
 }
 
 /// Promotion readiness evaluation outcomes.
