@@ -30,28 +30,19 @@ impl Inner {
         let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
         let commitment_txids = block.commitment_tx_ids();
 
-        for txid in submit_txids.iter().chain(publish_txids.iter()) {
-            self.mempool_state
-                .set_data_tx_included_height_overwrite(*txid, block.height)
-                .await;
-        }
-
-        for txid in commitment_txids.iter() {
-            self.mempool_state
-                .set_commitment_tx_included_height(*txid, block.height)
-                .await;
-        }
-
-        for txid in publish_txids.iter() {
-            if self
-                .mempool_state
-                .set_promoted_height(*txid, block.height)
-                .await
-                .is_some()
-            {
-                debug!(tx.id = %txid, promoted_height = block.height, "Promoted tx in mempool");
-            }
-        }
+        let submit_and_publish: Vec<H256> = submit_txids
+            .iter()
+            .chain(publish_txids.iter())
+            .copied()
+            .collect();
+        self.mempool_state
+            .apply_block_confirmed_updates(
+                &submit_and_publish,
+                commitment_txids,
+                publish_txids,
+                block.height,
+            )
+            .await;
 
         // Update `CachedDataRoots` so that this block_hash is cached for each data_root
         for submit_tx in sealed_block

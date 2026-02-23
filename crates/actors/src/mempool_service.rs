@@ -2385,6 +2385,65 @@ impl AtomicMempoolState {
             .await
     }
 
+    /// Applies all metadata updates for a confirmed block under a single write lock.
+    ///
+    /// This batches the work of `set_data_tx_included_height_overwrite`,
+    /// `set_commitment_tx_included_height`, and `set_promoted_height` to avoid
+    /// acquiring the write lock once per transaction (~120 times per block).
+    pub async fn apply_block_confirmed_updates(
+        &self,
+        submit_and_publish_txids: &[H256],
+        commitment_txids: &[H256],
+        publish_txids: &[H256],
+        height: u64,
+    ) {
+        let mut state = self.write().await;
+
+        // 1. Set included_height (with overwrite) for submit + publish data txs
+        for txid in submit_and_publish_txids {
+            if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(txid) {
+                wrapped_tx.metadata_mut().included_height = Some(height);
+                tracing::debug!(
+                    tx.id = %txid,
+                    included_height = height,
+                    overwrite = true,
+                    "Set included_height in mempool"
+                );
+                state.recent_valid_tx.put(*txid, ());
+            }
+        }
+
+        // 2. Set included_height for commitment txs
+        'next_commitment: for tx_id in commitment_txids {
+            // Check valid commitment transactions
+            for txs in state.valid_commitment_tx.values_mut() {
+                if let Some(tx) = txs.iter_mut().find(|t| t.id() == *tx_id) {
+                    tx.metadata_mut().included_height = Some(height);
+                    continue 'next_commitment;
+                }
+            }
+
+            // Check pending pledges
+            for (_, pledges_cache) in state.pending_pledges.iter_mut() {
+                if let Some(tx) = pledges_cache.get_mut(tx_id) {
+                    tx.metadata_mut().included_height = Some(height);
+                    continue 'next_commitment;
+                }
+            }
+        }
+
+        // 3. Set promoted_height for publish txs
+        for txid in publish_txids {
+            if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(txid) {
+                if wrapped_header.metadata().promoted_height.is_none() {
+                    wrapped_header.metadata_mut().promoted_height = Some(height);
+                }
+                tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
+                state.recent_valid_tx.put(*txid, ());
+            }
+        }
+    }
+
     /// Atomically clears the included_height on a data transaction in the mempool.
     /// Returns true if the tx was found and updated, false otherwise.
     pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
