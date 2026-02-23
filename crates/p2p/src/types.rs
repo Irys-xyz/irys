@@ -580,6 +580,7 @@ pub enum GossipRoutes {
     Block,
     BlockBody,
     IngressProof,
+    CustodyProof,
     ExecutionPayload,
     GetData,
     PullData,
@@ -602,6 +603,7 @@ impl GossipRoutes {
             Self::Block => "/block",
             Self::BlockBody => "/block_body",
             Self::IngressProof => "/ingress_proof",
+            Self::CustodyProof => "/custody_proof",
             Self::ExecutionPayload => "/execution_payload",
             Self::GetData => "/get_data",
             Self::PullData => "/pull_data",
@@ -636,6 +638,7 @@ mod tests {
     #[case(GossipRoutes::Block, "/block")]
     #[case(GossipRoutes::BlockBody, "/block_body")]
     #[case(GossipRoutes::IngressProof, "/ingress_proof")]
+    #[case(GossipRoutes::CustodyProof, "/custody_proof")]
     #[case(GossipRoutes::ExecutionPayload, "/execution_payload")]
     #[case(GossipRoutes::GetData, "/get_data")]
     #[case(GossipRoutes::PullData, "/pull_data")]
