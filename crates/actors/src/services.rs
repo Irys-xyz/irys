@@ -1,3 +1,4 @@
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
@@ -87,6 +88,7 @@ impl ServiceSenders {
 #[derive(Debug)]
 pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
+    pub chunk_ingress: UnboundedReceiver<ChunkIngressMessage>,
     pub chunk_migration: UnboundedReceiver<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
@@ -108,6 +110,7 @@ pub struct ServiceReceivers {
 #[derive(Debug)]
 pub struct ServiceSendersInner {
     pub chunk_cache: UnboundedSender<CacheServiceAction>,
+    pub chunk_ingress: UnboundedSender<ChunkIngressMessage>,
     pub chunk_migration: UnboundedSender<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
@@ -130,6 +133,8 @@ pub struct ServiceSendersInner {
 impl ServiceSendersInner {
     pub fn init() -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
+        let (chunk_ingress_sender, chunk_ingress_receiver) =
+            unbounded_channel::<ChunkIngressMessage>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
@@ -158,6 +163,7 @@ impl ServiceSendersInner {
         let mining_bus = MiningBus::new();
         let senders = Self {
             chunk_cache: chunk_cache_sender,
+            chunk_ingress: chunk_ingress_sender,
             chunk_migration: chunk_migration_sender,
             mempool: mempool_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
@@ -178,6 +184,7 @@ impl ServiceSendersInner {
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
+            chunk_ingress: chunk_ingress_receiver,
             chunk_migration: chunk_migration_receiver,
             mempool: mempool_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,

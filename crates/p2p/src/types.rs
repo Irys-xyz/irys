@@ -1,6 +1,6 @@
 use crate::block_pool::{AdvisoryBlockPoolError, BlockPoolError, CriticalBlockPoolError};
 use irys_actors::{
-    mempool_service::{IngressProofError, TxIngressError},
+    chunk_ingress_service::IngressProofError, mempool_service::TxIngressError,
     AdvisoryChunkIngressError, ChunkIngressError,
 };
 use irys_types::{CommitmentValidationError, PeerNetworkError};

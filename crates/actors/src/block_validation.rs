@@ -2457,11 +2457,16 @@ pub async fn data_txs_are_valid(
                                 continue;
                             }
 
-                            // Ingest via mempool to persist and validate
+                            // Ingest via chunk ingress service to persist and validate
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
-                                .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .chunk_ingress
+                                .send(
+                                    crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
+                                        unpacked,
+                                        Some(ing_tx),
+                                    ),
+                                )
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
