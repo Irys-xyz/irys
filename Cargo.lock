@@ -5220,6 +5220,7 @@ dependencies = [
  "alloy-sol-types",
  "assert_matches",
  "base58",
+ "clap",
  "core_affinity",
  "dotenvy",
  "eyre",

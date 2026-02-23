@@ -1,7 +1,13 @@
-use irys_chain::{utils::load_config, IrysNode};
+use clap::Parser as _;
+use irys_chain::{
+    cli::{merge::apply_cli_overrides, Commands, IrysCli, NodeCommand},
+    utils::{load_config, load_config_from_path},
+    IrysNode,
+};
 use irys_testing_utils::setup_panic_hook;
-use irys_types::ShutdownReason;
+use irys_types::{NodeConfig, ShutdownReason};
 use irys_utils::shutdown::spawn_shutdown_watchdog;
+use std::path::PathBuf;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -49,10 +55,37 @@ async fn main() -> eyre::Result<()> {
 
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
-    // load the config
-    let config = load_config()?;
 
-    // start the node
+    // Parse CLI
+    let cli = IrysCli::parse();
+
+    let config = match cli.command {
+        Some(Commands::Node(cmd)) => run_node_config(*cmd)?,
+        None => load_config()?,
+    };
+
+    start_node(config).await
+}
+
+/// Resolve config for the `irys node` subcommand: load TOML then apply CLI overrides.
+fn run_node_config(cmd: NodeCommand) -> eyre::Result<NodeConfig> {
+    let config_path = cmd
+        .config
+        .clone()
+        .or_else(|| std::env::var("CONFIG").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("config.toml"));
+
+    if cmd.generate_config {
+        load_config_from_path(&config_path, true)?;
+        unreachable!("load_config_from_path with generate=true always returns Err");
+    }
+
+    let config = load_config_from_path(&config_path, false)?;
+    apply_cli_overrides(config, &cmd)
+}
+
+/// Start the node with a fully resolved config.
+async fn start_node(config: NodeConfig) -> eyre::Result<()> {
     info!("starting the node, mode: {:?}", &config.node_mode);
     let handle = IrysNode::new(config)?.start().await?;
     handle.start_mining()?;
