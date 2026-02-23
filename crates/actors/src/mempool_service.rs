@@ -9,7 +9,8 @@ pub use facade::*;
 pub use types::*;
 
 use crate::block_tree_service::ReorgEvent;
-use crate::chunk_ingress_service::ChunkIngressState;
+use crate::chunk_ingress_service::facade::ChunkIngressFacadeImpl;
+use crate::chunk_ingress_service::{ChunkIngressError, ChunkIngressState, IngressProofError};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -19,6 +20,9 @@ use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file}
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
+use irys_types::TxChunkOffset;
+use irys_types::chunk::UnpackedChunk;
+use irys_types::ingress::IngressProof;
 use irys_types::{
     BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig, SealedBlock,
     U256, app_state::DatabaseProvider,
@@ -214,6 +218,13 @@ pub enum MempoolServiceMessage {
     /// Avoid holding the guard across long‑running operations to prevent
     /// reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
+    /// Ingest a blob-derived data transaction with its pre-computed ingress proof
+    /// and zero-padded chunk data. Created by the blob extraction service.
+    IngestBlobDerivedTx {
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+    },
 }
 
 impl MempoolServiceMessage {
@@ -232,6 +243,7 @@ impl MempoolServiceMessage {
             Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetReadGuard(_) => "GetReadGuard",
+            Self::IngestBlobDerivedTx { .. } => "IngestBlobDerivedTx",
         }
     }
 }
@@ -343,8 +355,83 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
+            MempoolServiceMessage::IngestBlobDerivedTx {
+                tx_header,
+                ingress_proof,
+                chunk_data,
+            } => {
+                self.handle_ingest_blob_derived_tx(tx_header, ingress_proof, chunk_data)
+                    .await;
+            }
         }
         Ok(())
+    }
+
+    async fn handle_ingest_blob_derived_tx(
+        &self,
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+    ) {
+        if matches!(&ingress_proof, IngressProof::V2(_))
+            && !self.config.consensus.accept_kzg_ingress_proofs
+        {
+            warn!(
+                data_root = %tx_header.data_root,
+                "Dropping blob-derived tx: V2 proofs not accepted by config"
+            );
+            return;
+        }
+
+        let data_root = tx_header.data_root;
+        debug!(
+            data_root = %data_root,
+            data_size = tx_header.data_size,
+            chunk_data_len = chunk_data.len(),
+            "Ingesting blob-derived data transaction",
+        );
+
+        // 1. Cache the chunk data first (creates CachedDataRoots entry)
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: chunk_data.len() as u64,
+            data_path: Default::default(),
+            bytes: chunk_data.into(),
+            tx_offset: TxChunkOffset(0),
+        };
+        if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to cache blob chunk data");
+            return;
+        }
+
+        // 2. Store the data tx header via the gossip ingress path
+        if let Err(e) = self.handle_data_tx_ingress_message_gossip(tx_header).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
+            return;
+        }
+
+        // 3. Store the ingress proof
+        if let Err(e) = self.handle_ingest_ingress_proof(ingress_proof).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to store blob ingress proof");
+        }
+    }
+
+    async fn handle_chunk_ingress_message(
+        &self,
+        chunk: UnpackedChunk,
+    ) -> Result<(), ChunkIngressError> {
+        ChunkIngressFacadeImpl::from(&self.service_senders)
+            .handle_chunk_ingress(chunk)
+            .await
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        ChunkIngressFacadeImpl::from(&self.service_senders)
+            .handle_ingest_ingress_proof(ingress_proof)
+            .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]

@@ -8,6 +8,7 @@ use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
     BlockValidationTracker, DataSyncService, StorageModuleService,
+    blob_extraction_service::BlobExtractionService,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -1973,6 +1974,18 @@ impl IrysNode {
             shutdown_token.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
+
+        // Spawn blob extraction service (when blobs are enabled)
+        if config.consensus.enable_blobs {
+            let blob_store = reth_node_adapter.pool.blob_store().clone();
+            BlobExtractionService::spawn_service(
+                blob_store,
+                service_senders.mempool.clone(),
+                Arc::new(config.clone()),
+                receivers.blob_extraction,
+                runtime_handle.clone(),
+            );
+        }
 
         // Get the mempool state to create the pledge provider
         let (tx, rx) = oneshot::channel();

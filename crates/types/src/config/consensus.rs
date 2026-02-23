@@ -605,6 +605,29 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
+    /// Enforce logical implications between KZG/blob config flags.
+    /// Call before wrapping in `Arc` to fix contradictions early.
+    pub fn normalize(&mut self) {
+        if self.enable_blobs && !self.accept_kzg_ingress_proofs {
+            tracing::warn!(
+                "enable_blobs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+            );
+            self.accept_kzg_ingress_proofs = true;
+        }
+        if self.require_kzg_ingress_proofs && !self.accept_kzg_ingress_proofs {
+            tracing::warn!(
+                "require_kzg_ingress_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+            );
+            self.accept_kzg_ingress_proofs = true;
+        }
+        if self.use_kzg_ingress_proofs && !self.accept_kzg_ingress_proofs {
+            tracing::warn!(
+                "use_kzg_ingress_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+            );
+            self.accept_kzg_ingress_proofs = true;
+        }
+    }
+
     // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
     pub const CHUNKS_PER_PARTITION_20TB: u64 = 75_534_400;
 
@@ -1209,7 +1232,6 @@ mod tests {
         let mut peer_config = ConsensusConfig::testing();
         peer_config.expected_genesis_hash = Some(fake_hash);
 
-        // Simulate what Genesis node does at runtime
         genesis_config.expected_genesis_hash = Some(fake_hash);
 
         assert_eq!(
@@ -1528,5 +1550,50 @@ mod tests {
                 prop_assert_eq!(sorted_once, sorted_twice);
             }
         }
+    }
+
+    #[test]
+    fn normalize_enable_blobs_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.enable_blobs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_require_kzg_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.require_kzg_ingress_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_use_kzg_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.use_kzg_ingress_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_idempotent() {
+        let mut config = ConsensusConfig::testing();
+        config.enable_blobs = true;
+        config.normalize();
+        let snapshot_accept = config.accept_kzg_ingress_proofs;
+        config.normalize();
+        assert_eq!(config.accept_kzg_ingress_proofs, snapshot_accept);
+    }
+
+    #[test]
+    fn normalize_noop_when_consistent() {
+        let mut config = ConsensusConfig::testing();
+        let before = config.accept_kzg_ingress_proofs;
+        config.normalize();
+        assert_eq!(config.accept_kzg_ingress_proofs, before);
     }
 }
