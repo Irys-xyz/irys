@@ -594,7 +594,7 @@ pub fn reanchor_and_store_ingress_proof(
         .get_latest_canonical_entry()
         .block_hash();
 
-    let mut proof = proof.clone();
+    let mut proof = proof.clone(); // clone: need owned value for set_anchor + sign mutation
     proof.set_anchor(latest_anchor);
     signer
         .sign_ingress_proof(&mut proof)

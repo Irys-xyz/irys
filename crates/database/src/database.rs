@@ -2012,7 +2012,6 @@ pub fn prune_block_stream_below<T: DbTxMut>(tx: &T, keep_from_seq: u64) -> eyre:
     Ok(())
 }
 
-/// Store per-chunk KZG commitments for a data_root during V2 ingress proof generation.
 pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
@@ -2030,7 +2029,6 @@ pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
     Ok(())
 }
 
-/// Retrieve a single per-chunk KZG commitment by data_root and chunk_index.
 pub fn get_per_chunk_kzg_commitment<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
