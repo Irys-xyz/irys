@@ -65,8 +65,10 @@ async fn main() -> eyre::Result<()> {
         Some(rx) => match rx.await {
             Ok(reason) => reason,
             Err(_) => {
-                error!("Reth thread panicked");
-                ShutdownReason::FatalError("Reth thread panicked".to_string())
+                error!("Reth completion sender dropped without sending (thread may have panicked)");
+                ShutdownReason::FatalError(
+                    "Reth completion sender dropped without sending".to_string(),
+                )
             }
         },
         None => {

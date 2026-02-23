@@ -206,12 +206,12 @@ impl IrysNodeCtx {
         // Await reth thread completion (async, with timeout)
         let rx = self.reth_done_rx.lock().unwrap().take();
         match rx {
-            Some(rx) => match tokio::time::timeout(Duration::from_secs(20), rx).await {
+            Some(rx) => match tokio::time::timeout(RETH_THREAD_STOP_TIMEOUT, rx).await {
                 Ok(Ok(reason)) => info!("Reth thread stopped: {}", reason),
                 Ok(Err(_)) => {
-                    error!("Reth thread likely panicked (completion channel dropped)")
+                    error!("Reth completion sender dropped (thread may have panicked)")
                 }
-                Err(_) => error!("Reth thread did not stop within 20s"),
+                Err(_) => error!("Reth thread did not stop within {RETH_THREAD_STOP_TIMEOUT:?}"),
             },
             None => debug!("Reth completion receiver already consumed"),
         }
@@ -373,6 +373,10 @@ const ACTOR_SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTOR_THREAD_TIMEOUT: Duration = Duration::from_secs(25);
 /// Timeout for the TaskManager graceful shutdown.
 const TASK_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the reth thread to complete its full shutdown sequence.
+/// Budget: send(5s) + actor(25s) + service_set(~10 services × 10s) + task_manager(10s).
+/// Using 60s to cover typical case with margin; worst-case depends on service count.
+const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl IrysNode {
     /// Creates a new node builder instance.
@@ -1245,6 +1249,8 @@ impl IrysNode {
                         Err(_) => error!("Actor main thread did not finish within {ACTOR_THREAD_TIMEOUT:?}"),
                     }
 
+                    // Each service has an individual 10s shutdown timeout (see ServiceSet::initiate_shutdown),
+                    // so this is bounded by ~10s × service_count, not unbounded.
                     service_set.graceful_shutdown().await;
                     debug!(
                         "Shutting down the rest of the reth jobs in case there are unfinished ones"

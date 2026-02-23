@@ -180,10 +180,18 @@ impl TokioServiceHandle {
 
     pub async fn stop_and_join_with_timeout(self, timeout: Duration) {
         self.shutdown_signal.fire();
+        let abort_handle = self.handle.abort_handle();
         match tokio::time::timeout(timeout, self.handle).await {
             Ok(Ok(())) => tracing::debug!("Service '{}' shut down", self.name),
             Ok(Err(e)) => tracing::error!("Service '{}' panicked: {}", self.name, e),
-            Err(_) => tracing::error!("Service '{}' timed out after {:?}", self.name, timeout),
+            Err(_) => {
+                tracing::error!(
+                    "Service '{}' timed out after {:?}, aborting",
+                    self.name,
+                    timeout
+                );
+                abort_handle.abort();
+            }
         }
     }
 }
