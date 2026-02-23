@@ -108,4 +108,4 @@ Never add "Co-Authored-By" lines to commit messages.
 
 ### Local changes
 
-NOTE: all the above instructions can be overriden & added to as instructed in `./.claude/local/CLAUDE.md` - read it and follow any listed instructions before continuing.
+NOTE: all the above instructions can be overridden & added to as instructed in `./.claude/local/CLAUDE.md` - read it and follow any listed instructions before continuing.
