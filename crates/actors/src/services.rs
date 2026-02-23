@@ -1,3 +1,4 @@
+use crate::blob_extraction_service::BlobExtractionMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
@@ -112,6 +113,7 @@ pub struct ServiceReceivers {
     pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
     pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
+    pub blob_extraction: UnboundedReceiver<BlobExtractionMessage>,
     pub packing: tokio::sync::mpsc::Receiver<PackingRequest>,
 }
 
@@ -135,6 +137,7 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub blob_extraction: UnboundedSender<BlobExtractionMessage>,
     pub mining_bus: MiningBus,
     pub packing_sender: PackingSender,
 }
@@ -171,6 +174,8 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
+        let (blob_extraction_sender, blob_extraction_receiver) =
+            unbounded_channel::<BlobExtractionMessage>();
         let (packing_sender, packing_receiver) = PackingService::channel(5_000);
 
         let mining_bus = MiningBus::new();
@@ -193,6 +198,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
+            blob_extraction: blob_extraction_sender,
             mining_bus,
             packing_sender,
         };
@@ -215,6 +221,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_receiver,
             peer_network: peer_network_receiver,
             block_discovery: block_discovery_receiver,
+            blob_extraction: blob_extraction_receiver,
             packing: packing_receiver,
         };
         (senders, receivers)

@@ -1,3 +1,4 @@
+pub mod blob_extraction_service;
 pub mod block_discovery;
 pub mod block_index_service;
 pub mod block_producer;

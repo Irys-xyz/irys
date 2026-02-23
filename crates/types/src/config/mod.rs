@@ -1,4 +1,4 @@
-use eyre::ensure;
+use eyre::{bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
 
@@ -16,7 +16,8 @@ pub struct Config(Arc<CombinedConfigInner>);
 
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
-        let consensus = node_config.consensus_config();
+        let mut consensus = node_config.consensus_config();
+        consensus.normalize();
 
         Self(Arc::new(CombinedConfigInner {
             consensus,
@@ -110,6 +111,16 @@ impl Config {
                 .is_multiple_of(self.consensus.num_chunks_in_recall_range),
             "num_chunks_in_partition must be a multiple of num_chunks_in_recall_range"
         );
+
+        if self.consensus.require_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("require_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — contradictory config");
+        }
+        if self.consensus.enable_blobs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("enable_blobs=true but accept_kzg_ingress_proofs=false — blob V2 proofs would be rejected");
+        }
+        if self.consensus.use_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("use_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — generated proofs would be rejected");
+        }
 
         Ok(())
     }

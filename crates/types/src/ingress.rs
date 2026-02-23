@@ -419,6 +419,56 @@ pub fn generate_ingress_proof_v2(
     Ok(proof)
 }
 
+/// Generate a V2 ingress proof for blob-derived data (EIP-4844).
+///
+/// The KZG commitment is taken directly from the blob transaction sidecar
+/// rather than recomputed — the sidecar uses the same c-kzg trusted setup.
+/// The blob data (128KB) is zero-padded to a 256KB Irys chunk for data_root
+/// computation.
+pub fn generate_ingress_proof_v2_from_blob(
+    signer: &IrysSigner,
+    blob_data: &[u8],
+    kzg_commitment: &[u8; 48],
+    chain_id: u64,
+    anchor: H256,
+) -> eyre::Result<IngressProof> {
+    use crate::kzg::{compute_composite_commitment, KzgCommitmentBytes, CHUNK_SIZE_FOR_KZG};
+
+    eyre::ensure!(
+        blob_data.len() <= CHUNK_SIZE_FOR_KZG,
+        "blob data exceeds max chunk size ({})",
+        CHUNK_SIZE_FOR_KZG,
+    );
+
+    // Zero-pad blob to 256KB Irys chunk size
+    let mut padded = vec![0_u8; CHUNK_SIZE_FOR_KZG];
+    padded[..blob_data.len()].copy_from_slice(blob_data);
+
+    // Compute data_root from the padded chunk using the standard merkle tree
+    let (leaves, _) = generate_ingress_leaves(
+        std::iter::once(Ok(padded.as_slice())),
+        signer.address(),
+        false,
+    )?;
+    let root = generate_data_root(leaves)?;
+
+    // Composite commitment binds the sidecar KZG commitment to the signer
+    let composite = compute_composite_commitment(kzg_commitment, &signer.address());
+
+    let mut proof = IngressProof::V2(IngressProofV2 {
+        signature: Default::default(),
+        data_root: root.id.into(),
+        kzg_commitment: KzgCommitmentBytes::from(*kzg_commitment),
+        composite_commitment: composite,
+        chain_id,
+        anchor,
+        source_type: DataSourceType::EvmBlob,
+    });
+
+    signer.sign_ingress_proof(&mut proof)?;
+    Ok(proof)
+}
+
 pub fn verify_ingress_proof<C: AsRef<[u8]>>(
     proof: &IngressProof,
     chunks: impl IntoIterator<Item = C>,
@@ -499,7 +549,9 @@ mod tests {
         ConsensusConfig, IngressProof, H256,
     };
 
-    use super::{generate_ingress_proof, generate_ingress_proof_v2};
+    use super::{
+        generate_ingress_proof, generate_ingress_proof_v2, generate_ingress_proof_v2_from_blob,
+    };
 
     /// Generate KZG-safe data: each 32-byte field element's first byte must be < 0x74.
     /// Uses a simple fill value that satisfies the BLS12-381 modulus constraint.
@@ -900,6 +952,140 @@ mod tests {
         }
 
         assert!(!verify_ingress_proof(&proof, chunks.iter(), 1)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn v2_blob_generate_and_verify_roundtrip() -> eyre::Result<()> {
+        use crate::ingress::DataSourceType;
+
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        let chain_id = 1_u64;
+        let anchor = H256::random();
+
+        // Simulate a 128KB EIP-4844 blob with KZG-safe data
+        let blob_size = 131_072;
+        let blob_data = kzg_safe_data(blob_size, 42);
+
+        // Compute a real KZG commitment from the blob data (zero-padded to 256KB)
+        let kzg_settings = crate::kzg::default_kzg_settings();
+        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
+
+        let proof = generate_ingress_proof_v2_from_blob(
+            &signer,
+            &blob_data,
+            &commitment_bytes,
+            chain_id,
+            anchor,
+        )?;
+
+        // Source type must be EvmBlob
+        match &proof {
+            IngressProof::V2(v2) => {
+                assert_eq!(v2.source_type, DataSourceType::EvmBlob);
+                assert_eq!(v2.kzg_commitment.0, commitment_bytes);
+            }
+            _ => panic!("expected V2 proof"),
+        }
+
+        // Verify with the zero-padded chunk (256KB) — the verifier recomputes
+        // the KZG commitment from the provided chunks
+        let mut padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
+        padded[..blob_data.len()].copy_from_slice(&blob_data);
+
+        assert!(verify_ingress_proof(&proof, [padded.as_slice()], chain_id)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn v2_blob_sidecar_commitment_preserved() -> eyre::Result<()> {
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+
+        let blob_data = kzg_safe_data(131_072, 55);
+
+        // Compute commitment from the blob data
+        let kzg_settings = crate::kzg::default_kzg_settings();
+        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
+
+        let proof = generate_ingress_proof_v2_from_blob(
+            &signer,
+            &blob_data,
+            &commitment_bytes,
+            1,
+            H256::random(),
+        )?;
+
+        // The KZG commitment in the proof must be exactly the one we provided
+        match &proof {
+            IngressProof::V2(v2) => assert_eq!(v2.kzg_commitment.0, commitment_bytes),
+            _ => panic!("expected V2 proof"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn v2_blob_wrong_data_fails_verification() -> eyre::Result<()> {
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        let chain_id = 1_u64;
+
+        let blob_data = kzg_safe_data(131_072, 42);
+        let kzg_settings = crate::kzg::default_kzg_settings();
+        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
+
+        let proof = generate_ingress_proof_v2_from_blob(
+            &signer,
+            &blob_data,
+            &commitment_bytes,
+            chain_id,
+            H256::random(),
+        )?;
+
+        // Verify with different data (wrong fill value) — should fail
+        let bad_blob = kzg_safe_data(131_072, 7);
+        let mut bad_padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
+        bad_padded[..bad_blob.len()].copy_from_slice(&bad_blob);
+
+        assert!(!verify_ingress_proof(
+            &proof,
+            [bad_padded.as_slice()],
+            chain_id
+        )?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn v2_blob_wrong_chain_id_fails() -> eyre::Result<()> {
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+
+        let blob_data = kzg_safe_data(131_072, 42);
+        let kzg_settings = crate::kzg::default_kzg_settings();
+        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
+
+        let proof = generate_ingress_proof_v2_from_blob(
+            &signer,
+            &blob_data,
+            &commitment_bytes,
+            1,
+            H256::random(),
+        )?;
+
+        let mut padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
+        padded[..blob_data.len()].copy_from_slice(&blob_data);
+
+        // Verify with wrong chain_id — should fail
+        assert!(!verify_ingress_proof(&proof, [padded.as_slice()], 2)?);
 
         Ok(())
     }

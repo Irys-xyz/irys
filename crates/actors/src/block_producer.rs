@@ -1,4 +1,5 @@
 use crate::{
+    blob_extraction_service::BlobExtractionMessage,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
@@ -787,6 +788,33 @@ pub trait BlockProdStrategy {
             .broadcast_block(block, stats, transactions.clone(), &eth_built_payload)
             .await?;
         let Some(block) = block else { return Ok(None) };
+
+        // Extract blobs from any EIP-4844 transactions in the produced block
+        if self.inner().config.consensus.enable_blobs {
+            let blob_tx_hashes: Vec<B256> = eth_built_payload
+                .block()
+                .body()
+                .transactions
+                .iter()
+                .filter(|tx| tx.is_eip4844())
+                .map(|tx| *tx.hash())
+                .collect();
+
+            if !blob_tx_hashes.is_empty() {
+                debug!(
+                    block.hash = %block.block_hash,
+                    blob_txs = blob_tx_hashes.len(),
+                    "Triggering blob extraction for EIP-4844 transactions",
+                );
+                let _ = self.inner().service_senders.blob_extraction.send(
+                    BlobExtractionMessage::ExtractBlobs {
+                        block_hash: block.block_hash,
+                        blob_tx_hashes,
+                    },
+                );
+            }
+        }
+
         Ok(Some((block, eth_built_payload, transactions)))
     }
 
