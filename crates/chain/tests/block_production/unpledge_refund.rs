@@ -75,7 +75,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     let inclusion_block_peer = genesis_node.mine_block().await?;
     genesis_node
-        .wait_until_height(inclusion_block_peer.height, seconds_to_wait)
+        .wait_for_block_at_height(inclusion_block_peer.height, seconds_to_wait)
         .await
         .expect("genesis should sync peer-mined inclusion block");
     let inclusion_block = genesis_node
@@ -192,7 +192,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let (_mined, final_height) = genesis_node.mine_until_next_epoch().await?;
     // Ensure the peer has fully synced the epoch block so SM updates are applied
     peer_node
-        .wait_until_height(final_height, seconds_to_wait)
+        .wait_for_block_at_height(final_height, seconds_to_wait)
         .await
         .expect("peer to sync to epoch height");
     let last_block = genesis_node.get_block_by_height(final_height).await?;
@@ -727,7 +727,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let (_mined, epoch_height) = peer_node.mine_until_next_epoch().await?;
     genesis_node
-        .wait_until_height(epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height, seconds_to_wait)
         .await
         .expect("genesis should sync peer-mined epoch block");
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;

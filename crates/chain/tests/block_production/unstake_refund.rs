@@ -84,7 +84,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     // Advance to epoch boundary so pledges fully clear before unstaking.
     let (_mined, epoch_height_after_unpledge) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height_after_unpledge, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height_after_unpledge, seconds_to_wait)
         .await
         .expect("peer to sync post-unpledge epoch");
     let post_unpledge_epoch_block = genesis_node
@@ -157,8 +157,8 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .await?;
 
     let unstake_inclusion = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_until_height(unstake_inclusion.height, seconds_to_wait)
+    peer_node
+        .wait_for_block_at_height(unstake_inclusion.height, seconds_to_wait)
         .await
         .expect("peer should sync unstake inclusion block");
     let unstake_block = genesis_node
@@ -219,7 +219,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     // Advance to epoch and validate refunds + treasury delta
     let (_produced, epoch_height_after_unstake) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height_after_unstake, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height_after_unstake, seconds_to_wait)
         .await
         .expect("peer to sync unstake refund epoch");
     let epoch_block = genesis_node
@@ -555,8 +555,14 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         },
     )
     .await?;
-    genesis_node.mine_until_next_epoch().await?;
-    genesis_node.mine_until_next_epoch().await?;
+    let (_mined, epoch_height_1) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_for_block_at_height(epoch_height_1, seconds_to_wait)
+        .await?;
+    let (_mined, epoch_height_2) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_for_block_at_height(epoch_height_2, seconds_to_wait)
+        .await?;
 
     // Verify peer has no pledges
     let assigned_partitions: Vec<PartitionAssignment> = {
