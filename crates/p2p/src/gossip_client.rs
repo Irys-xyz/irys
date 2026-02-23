@@ -1571,10 +1571,10 @@ impl GossipClient {
                         peer.0, data_request, reason
                     );
                     match reason {
-                        RejectionReason::HandshakeRequired(reason) => {
+                        RejectionReason::HandshakeRequired(handshake_reason) => {
                             warn!(
                                 "Request {:?} requires handshake: {:?}",
-                                data_request, reason
+                                data_request, handshake_reason
                             );
                             peer_list.initiate_handshake(
                                 peer.1.address.api,
@@ -2895,7 +2895,7 @@ mod tests {
 
             match outcome {
                 PeerPullOutcome::Ok((id, _block)) => assert_eq!(id, peer.0),
-                other => panic!("expected Ok, got {:?}", std::mem::discriminant(&other)),
+                other => panic!("expected Ok, got {:?}", other),
             }
         }
 
