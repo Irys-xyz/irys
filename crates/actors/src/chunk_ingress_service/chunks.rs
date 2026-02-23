@@ -1009,10 +1009,32 @@ pub fn generate_ingress_proof(
         &proof.proof_id(),
         &data_root
     );
-    db.update_scoped(|rw_tx| -> eyre::Result<()> {
-        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)?;
+    store_proof_and_commitments(
+        &db,
+        &proof,
+        per_chunk_commitments.as_deref(),
+        data_root,
+        &signer,
+        enable_shadow_kzg_logging,
+        use_kzg_ingress_proofs,
+    )?;
 
-        if let Some(ref per_chunk) = per_chunk_commitments {
+    Ok(proof)
+}
+
+fn store_proof_and_commitments(
+    db: &DatabaseProvider,
+    proof: &IngressProof,
+    per_chunk_commitments: Option<&[irys_types::kzg::KzgCommitmentBytes]>,
+    data_root: DataRoot,
+    signer: &IrysSigner,
+    enable_shadow_kzg_logging: bool,
+    use_kzg_ingress_proofs: bool,
+) -> eyre::Result<()> {
+    db.update_scoped(|rw_tx| -> eyre::Result<()> {
+        irys_database::store_ingress_proof_checked(rw_tx, proof, signer)?;
+
+        if let Some(per_chunk) = per_chunk_commitments {
             let indexed: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)> = per_chunk
                 .iter()
                 .enumerate()
@@ -1029,7 +1051,7 @@ pub fn generate_ingress_proof(
     })??;
 
     if enable_shadow_kzg_logging && !use_kzg_ingress_proofs {
-        if let Err(e) = shadow_log_kzg_commitments(&db, data_root) {
+        if let Err(e) = shadow_log_kzg_commitments(db, data_root) {
             warn!(
                 data_root = %data_root,
                 error = %e,
@@ -1038,7 +1060,7 @@ pub fn generate_ingress_proof(
         }
     }
 
-    Ok(proof)
+    Ok(())
 }
 
 fn load_cached_chunk_bytes(
