@@ -821,10 +821,6 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
     async fn handle_commitment_tx_v2(
         server: Data<Self>,
         commitment_tx_json: web::Json<GossipRequestV2<CommitmentTransaction>>,
@@ -857,11 +853,12 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        tokio::spawn(async move {
-            if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            }
-        });
+        if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            error!("Failed to send commitment transaction: {}", error);
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+        }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
