@@ -17,7 +17,6 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
-    mempool_service::MempoolServiceMessage,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
@@ -1247,40 +1246,6 @@ impl IrysNode {
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
-        // start reth service
-        let reth_service_task = init_reth_service(
-            &irys_db,
-            reth_node_adapter.clone(),
-            service_senders.mempool.clone(),
-            receivers.reth_service,
-            runtime_handle.clone(),
-        );
-        debug!("Reth service initialized");
-        // Get the correct Reth peer info
-        let (peering_tx, peering_rx) = oneshot::channel();
-        service_senders
-            .reth_service
-            .send(RethServiceMessage::GetPeeringInfo {
-                response: peering_tx,
-            })
-            .expect("Reth service channel should be open");
-        let reth_peering = peering_rx
-            .await
-            .expect("Reth service to respond with peering info")?;
-
-        // overwrite config as we now have reth peering information
-        // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
-        let mut node_config = config.node_config.clone();
-        node_config.reth.network.peer_id = reth_peering.peer_id;
-        node_config.reth.network.bind_ip = Some(reth_peering.peering_tcp_addr.ip().to_string());
-        node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
-
-        if node_config.reth.network.public_port == 0 {
-            node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
-        }
-
-        let config = Config::new(node_config, config.peer_id());
-
         let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
 
         // Create cancellation token for graceful shutdown of backfill task
@@ -1340,7 +1305,7 @@ impl IrysNode {
 
         // start the epoch service
         let replay_data =
-            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
+            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, config).await?;
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
@@ -1360,6 +1325,42 @@ impl IrysNode {
             &storage_submodules_config,
             config.clone(),
         )?));
+
+        // Start reth service — needs a BlockTreeReadGuard created from the cache
+        // before the cache Arc is moved into the block tree service.
+        let reth_block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&block_tree_cache));
+        let reth_service_task = init_reth_service(
+            &irys_db,
+            reth_node_adapter.clone(),
+            reth_block_tree_guard,
+            receivers.reth_service,
+            runtime_handle.clone(),
+        );
+        debug!("Reth service initialized");
+        // Get the correct Reth peer info
+        let (peering_tx, peering_rx) = oneshot::channel();
+        service_senders
+            .reth_service
+            .send(RethServiceMessage::GetPeeringInfo {
+                response: peering_tx,
+            })
+            .expect("Reth service channel should be open");
+        let reth_peering = peering_rx
+            .await
+            .expect("Reth service to respond with peering info")?;
+
+        // overwrite config as we now have reth peering information
+        // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
+        let mut node_config = config.node_config.clone();
+        node_config.reth.network.peer_id = reth_peering.peer_id;
+        node_config.reth.network.bind_ip = Some(reth_peering.peering_tcp_addr.ip().to_string());
+        node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
+
+        if node_config.reth.network.public_port == 0 {
+            node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
+        }
+
+        let config = Config::new(node_config, config.peer_id());
 
         // Construct the block migration service
         let block_migration_service = BlockMigrationService::new(
@@ -2229,14 +2230,14 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    block_tree: BlockTreeReadGuard,
     reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
     irys_actors::reth_service::RethService::spawn_service(
         reth_node_adapter,
         irys_db.clone(),
-        mempool_sender,
+        block_tree,
         reth_rx,
         runtime_handle,
     )

@@ -4,7 +4,7 @@ use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
+    db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -572,31 +572,21 @@ impl Inner {
         let block_hash = canonical_head_entry.block_hash();
         let block_height = canonical_head_entry.height();
 
-        // retrieve block from mempool or database
+        // retrieve block from block tree or database
         // be aware that genesis starts its life immediately in the database
-        let mut block = match self
-            .handle_get_block_header_message(block_hash, false)
-            .await
-        {
-            Some(b) => b,
-            None => match self
-                .irys_db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
-            {
-                Ok(Some(header)) => Ok(header),
-                Ok(None) => Err(eyre!(
-                    "No block header found for hash {} ({})",
-                    block_hash,
-                    block_height
-                )),
-                Err(e) => Err(eyre!(
-                    "Failed to get previous block ({}) header: {}",
-                    block_height,
-                    e
-                )),
-            }
-            .expect("to find the block header in the db"),
-        };
+        let mut block = crate::block_header_lookup::get_block_header(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            block_hash,
+            false,
+        )
+        .expect("block header lookup should succeed")
+        .unwrap_or_else(|| {
+            panic!(
+                "No block header found for hash {} ({})",
+                block_hash, block_height
+            )
+        });
 
         // Calculate the minimum block height we need to check for transaction conflicts
         // Only transactions anchored within this depth window are considered valid
@@ -627,20 +617,14 @@ impl Inner {
             }
 
             // Move to the parent block and continue the traversal backwards
-            let parent_block = match self
-                .handle_get_block_header_message(block.previous_block_hash, false)
-                .await
-            {
-                Some(h) => h,
-                None => self
-                    .irys_db
-                    .view(|tx| {
-                        irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
-                    })
-                    .unwrap()
-                    .unwrap()
-                    .expect("to find the parent block header in the database"),
-            };
+            let parent_block = crate::block_header_lookup::get_block_header(
+                &self.block_tree_read_guard,
+                &self.irys_db,
+                block.previous_block_hash,
+                false,
+            )
+            .expect("block header lookup should succeed")
+            .expect("to find the parent block header");
 
             block = parent_block;
         }

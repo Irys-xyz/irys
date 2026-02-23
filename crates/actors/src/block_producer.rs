@@ -17,7 +17,6 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
@@ -426,23 +425,13 @@ pub trait BlockProdStrategy {
 
     /// Fetches a block header from mempool or database
     async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
-        // Try mempool first
-        let (tx, rx) = oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
-
-        match rx.await? {
-            Some(header) => Ok(header),
-            None => {
-                // Fall back to database
-                self.inner()
-                    .db
-                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
-            }
-        }
+        crate::block_header_lookup::get_block_header(
+            &self.inner().block_tree_guard,
+            &self.inner().db,
+            block_hash,
+            false,
+        )?
+        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
     }
 
     /// Gets the EMA snapshot for a given block

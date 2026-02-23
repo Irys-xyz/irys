@@ -2,7 +2,7 @@ use crate::mempool_service::{MempoolServiceMessage, TxIngressError, TxReadError}
 use crate::services::ServiceSenders;
 use crate::MempoolReadGuard;
 use eyre::eyre;
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, H256};
 use irys_types::{IrysAddress, TxKnownStatus};
 use std::collections::HashSet;
 use tokio::sync::mpsc::UnboundedSender;
@@ -30,12 +30,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_id: H256,
     ) -> Result<TxKnownStatus, TxReadError>;
-
-    async fn get_block_header(
-        &self,
-        block_hash: H256,
-        include_chunk: bool,
-    ) -> Result<Option<IrysBlockHeader>, TxReadError>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 
@@ -181,33 +175,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             })?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
-    }
-
-    async fn get_block_header(
-        &self,
-        block_hash: H256,
-        include_chunk: bool,
-    ) -> Result<Option<IrysBlockHeader>, TxReadError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service
-            .send(MempoolServiceMessage::GetBlockHeader(
-                block_hash,
-                include_chunk,
-                tx,
-            ))
-            .map_err(|_| {
-                TxReadError::Other(format!(
-                    "Error sending GetBlockHeader message for block {}",
-                    block_hash
-                ))
-            })?;
-
-        rx.await.map_err(|_| {
-            TxReadError::Other(format!(
-                "GetBlockHeader response error for block {}",
-                block_hash
-            ))
-        })
     }
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {

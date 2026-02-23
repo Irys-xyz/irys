@@ -156,15 +156,6 @@ impl MempoolFacade for MempoolStub {
         }
     }
 
-    async fn get_block_header(
-        &self,
-        block_hash: H256,
-        _include_chunk: bool,
-    ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
-        let blocks = self.blocks.read().expect("to unlock blocks");
-        Ok(blocks.iter().find(|b| b.block_hash == block_hash).cloned())
-    }
-
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
         Ok(())
     }

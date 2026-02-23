@@ -30,7 +30,7 @@ use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
-    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
+    app_state::DatabaseProvider, BoundedFee, Config, IrysTransactionCommon,
     IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{
@@ -240,8 +240,6 @@ pub enum MempoolServiceMessage {
         Vec<IrysTransactionId>,
         oneshot::Sender<Vec<Option<DataTransactionHeader>>>,
     ),
-    /// Get block header from the mempool cache
-    GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
@@ -270,7 +268,6 @@ impl MempoolServiceMessage {
             Self::GetBestMempoolTxs(_, _) => "GetBestMempoolTxs",
             Self::GetCommitmentTxs { .. } => "GetCommitmentTxs",
             Self::GetDataTxs(_, _) => "GetDataTxs",
-            Self::GetBlockHeader(_, _, _) => "GetBlockHeader",
             Self::GetState(_) => "GetState",
             Self::RemoveFromBlacklist(_, _) => "RemoveFromBlacklist",
             Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
@@ -340,14 +337,6 @@ impl Inner {
             }
             MempoolServiceMessage::DataTxExists(txid, response) => {
                 let response_value = self.handle_data_tx_exists_message(txid).await;
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
-            MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
-                let response_value = self
-                    .handle_get_block_header_message(hash, include_chunk)
-                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
@@ -1300,7 +1289,6 @@ impl Inner {
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                     &proofs_only,
                     tx_header,
-                    |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
                     &self.block_tree_read_guard,
                     &self.irys_db,
                     &self.config,
@@ -1411,25 +1399,6 @@ impl Inner {
                 Some(IngressProofsList::from(publish_proofs))
             },
         })
-    }
-
-    /// return block header from mempool, if found
-    /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_hash, include_chunk = include_chunk))]
-    pub async fn handle_get_block_header_message(
-        &self,
-        block_hash: H256,
-        include_chunk: bool,
-    ) -> Option<IrysBlockHeader> {
-        let guard = self.block_tree_read_guard.read();
-        let mut block = guard.get_block(&block_hash).cloned();
-
-        if !include_chunk {
-            if let Some(ref mut b) = block {
-                b.poa.chunk = None
-            }
-        }
-        block
     }
 
     // Resolves an anchor (block hash) to it's height
