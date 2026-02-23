@@ -897,14 +897,12 @@ impl IrysNode {
                 // were missed.
                 if let Some(mut rx) = block_state_rx {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    while let Ok(Ok(Ok(_))) = tokio::time::timeout_at(
+                    irys_actors::services::wait_for_broadcast_quiescence(
+                        &mut rx,
+                        Duration::from_millis(500),
                         deadline,
-                        tokio::time::timeout(Duration::from_millis(500), rx.recv()),
                     )
-                    .await
-                    {
-                        // block event arrived — reset idle timer
-                    }
+                    .await;
                 }
                 let config = config;
                 let latest_block = latest_block;

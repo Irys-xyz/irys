@@ -909,11 +909,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .subscribe_block_state_updates();
         Box::pin(async move {
             let deadline = tokio::time::Instant::now() + deadline;
-            while let Ok(Ok(Ok(_))) =
-                tokio::time::timeout_at(deadline, tokio::time::timeout(idle, rx.recv())).await
-            {
-                // block event arrived — reset idle timer
-            }
+            irys_actors::services::wait_for_broadcast_quiescence(&mut rx, idle, deadline).await;
         })
     }
 
