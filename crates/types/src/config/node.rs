@@ -376,6 +376,135 @@ impl_network_config_with_defaults!(GossipConfig);
 #[serde(deny_unknown_fields)]
 pub struct RethConfig {
     pub network: RethNetworkConfig,
+    #[serde(default)]
+    pub rpc: RethRpcConfig,
+    #[serde(default)]
+    pub txpool: RethTxPoolConfig,
+    #[serde(default)]
+    pub engine: RethEngineConfig,
+    #[serde(default)]
+    pub metrics: RethMetricsConfig,
+}
+
+/// # Reth RPC Configuration
+///
+/// Controls the JSON-RPC server exposed by the Reth EVM node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RethRpcConfig {
+    /// Enable HTTP RPC server
+    pub http: bool,
+    /// HTTP RPC port (separate from the Irys HTTP API port)
+    pub http_port: u16,
+    /// Comma-separated list of RPC modules to enable (e.g. "eth,debug,net,trace")
+    pub http_api: String,
+    /// CORS domain for HTTP RPC ("*" for any)
+    pub http_corsdomain: String,
+    /// Enable WebSocket RPC server
+    pub ws: bool,
+    /// WebSocket RPC port
+    pub ws_port: u16,
+    /// Comma-separated list of RPC modules for WebSocket
+    pub ws_api: String,
+    /// Maximum request size in MB
+    pub max_request_size_mb: u32,
+    /// Maximum response size in MB
+    pub max_response_size_mb: u32,
+    /// Maximum concurrent RPC connections
+    pub max_connections: u32,
+    /// Gas cap for eth_call and related methods
+    pub gas_cap: u64,
+    /// Maximum transaction fee cap in wei (max ~18.4 ETH at u64 range)
+    pub tx_fee_cap: u64,
+}
+
+impl Default for RethRpcConfig {
+    fn default() -> Self {
+        Self {
+            http: true,
+            http_port: 8545,
+            http_api: "eth,debug".to_string(),
+            http_corsdomain: "*".to_string(),
+            ws: false,
+            ws_port: 8546,
+            ws_api: "eth".to_string(),
+            max_request_size_mb: 15,
+            max_response_size_mb: 160,
+            max_connections: 500,
+            gas_cap: 50_000_000,
+            tx_fee_cap: 1_000_000_000_000_000_000, // 1 ETH
+        }
+    }
+}
+
+/// # Reth Transaction Pool Configuration
+///
+/// Controls sizing and behavior of the Reth EVM transaction pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RethTxPoolConfig {
+    /// Maximum number of pending transactions
+    pub pending_max_count: usize,
+    /// Maximum size of pending pool in MB
+    pub pending_max_size_mb: usize,
+    /// Maximum number of basefee transactions
+    pub basefee_max_count: usize,
+    /// Maximum size of basefee pool in MB
+    pub basefee_max_size_mb: usize,
+    /// Maximum number of queued transactions
+    pub queued_max_count: usize,
+    /// Maximum size of queued pool in MB
+    pub queued_max_size_mb: usize,
+    /// Number of additional validation tasks
+    pub additional_validation_tasks: usize,
+    /// Maximum number of transaction slots per account
+    pub max_account_slots: usize,
+    /// Price bump percentage to replace existing transactions
+    pub price_bump: u64,
+}
+
+impl Default for RethTxPoolConfig {
+    fn default() -> Self {
+        Self {
+            pending_max_count: 1_000_000,
+            pending_max_size_mb: 1000,
+            basefee_max_count: 1_000_000,
+            basefee_max_size_mb: 1000,
+            queued_max_count: 1_000_000,
+            queued_max_size_mb: 1000,
+            additional_validation_tasks: 2,
+            max_account_slots: 16,
+            price_bump: 10,
+        }
+    }
+}
+
+/// # Reth Engine Configuration
+///
+/// Controls the Reth consensus engine behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RethEngineConfig {
+    /// Persistence threshold — how many blocks to accumulate before flushing to disk
+    pub persistence_threshold: u64,
+    /// Target number of blocks to keep in memory
+    pub memory_block_buffer_target: u64,
+}
+
+/// # Reth Metrics Configuration
+///
+/// Controls the Prometheus metrics endpoint for the Reth node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RethMetricsConfig {
+    /// Prometheus metrics port (0 for random)
+    pub port: u16,
+}
+
+impl Default for RethMetricsConfig {
+    fn default() -> Self {
+        Self { port: 9001 }
+    }
 }
 
 /// # Reth network Configuration
@@ -861,6 +990,10 @@ impl NodeConfig {
                     bind_port: 0,
                     peer_id: Default::default(),
                 },
+                rpc: Default::default(),
+                txpool: Default::default(),
+                engine: Default::default(),
+                metrics: Default::default(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -1007,6 +1140,10 @@ impl NodeConfig {
                     bind_port: 9009,
                     peer_id: Default::default(),
                 },
+                rpc: Default::default(),
+                txpool: Default::default(),
+                engine: Default::default(),
+                metrics: Default::default(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {

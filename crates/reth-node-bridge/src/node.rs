@@ -7,7 +7,6 @@ use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
     args::{DatabaseArgs, MetricArgs},
     revm::primitives::B256,
-    rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
@@ -20,8 +19,8 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::future::IntoFuture as _;
 use std::net::SocketAddr;
-use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
+use std::{fmt::Formatter, sync::Arc};
 use tracing::{warn, Instrument as _};
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
@@ -113,57 +112,73 @@ pub async fn run_node(
         }
     }
 
+    let irys_reth = &node_config.reth;
+    let bind_ip = irys_reth.network.bind_ip(&node_config.network_defaults);
+
+    // -- Network --
     reth_config.network.discovery.disable_discovery = true;
-    reth_config.rpc.http = true;
-    reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
-        RethRpcModule::Eth,
-        RethRpcModule::Debug,
-    ])));
+    reth_config.network.port = irys_reth.network.bind_port;
+    reth_config.network.addr = bind_ip.parse()?;
 
-    reth_config.rpc.http_addr = node_config
-        .reth
-        .network
-        .bind_ip(&node_config.network_defaults)
-        .parse()?;
-    reth_config.network.port = node_config.reth.network.bind_port;
-    reth_config.network.addr = node_config
-        .reth
-        .network
-        .bind_ip(&node_config.network_defaults)
-        .parse()?;
-
+    // -- Datadir --
     reth_config.datadir.datadir = node_config.reth_data_dir().into();
-    reth_config.rpc.http_corsdomain = Some("*".to_string());
-    reth_config.engine.persistence_threshold = 0;
-    reth_config.engine.memory_block_buffer_target = 0;
 
-    let subpool_max_tx_count = 1_000_000;
-    let subpool_max_size_mb = 1000;
+    // -- RPC (HTTP) --
+    reth_config.rpc.http = irys_reth.rpc.http;
+    reth_config.rpc.http_addr = bind_ip.parse()?;
+    reth_config.rpc.http_port = irys_reth.rpc.http_port;
+    reth_config.rpc.http_api = Some(irys_reth.rpc.http_api.parse().map_err(|e| {
+        eyre::eyre!(
+            "invalid reth.rpc.http_api modules {:?}: {e}",
+            irys_reth.rpc.http_api
+        )
+    })?);
+    reth_config.rpc.http_corsdomain = Some(irys_reth.rpc.http_corsdomain.clone());
 
-    reth_config.txpool.pending_max_count = subpool_max_tx_count;
-    reth_config.txpool.pending_max_size = subpool_max_size_mb;
+    // -- RPC (WebSocket) --
+    reth_config.rpc.ws = irys_reth.rpc.ws;
+    reth_config.rpc.ws_addr = bind_ip.parse()?;
+    reth_config.rpc.ws_port = irys_reth.rpc.ws_port;
+    if irys_reth.rpc.ws {
+        reth_config.rpc.ws_api = Some(irys_reth.rpc.ws_api.parse().map_err(|e| {
+            eyre::eyre!(
+                "invalid reth.rpc.ws_api modules {:?}: {e}",
+                irys_reth.rpc.ws_api
+            )
+        })?);
+    }
 
-    reth_config.txpool.basefee_max_count = subpool_max_tx_count;
-    reth_config.txpool.basefee_max_size = subpool_max_size_mb;
+    // -- RPC limits --
+    reth_config.rpc.rpc_max_request_size.0 = irys_reth.rpc.max_request_size_mb;
+    reth_config.rpc.rpc_max_response_size.0 = irys_reth.rpc.max_response_size_mb;
+    reth_config.rpc.rpc_max_connections.0 = irys_reth.rpc.max_connections;
+    reth_config.rpc.rpc_gas_cap = irys_reth.rpc.gas_cap;
+    reth_config.rpc.rpc_tx_fee_cap = irys_reth.rpc.tx_fee_cap as u128;
 
-    reth_config.txpool.queued_max_count = subpool_max_tx_count;
-    reth_config.txpool.queued_max_size = subpool_max_size_mb;
+    // -- Engine --
+    reth_config.engine.persistence_threshold = irys_reth.engine.persistence_threshold;
+    reth_config.engine.memory_block_buffer_target = irys_reth.engine.memory_block_buffer_target;
+
+    // -- Transaction pool --
+    reth_config.txpool.pending_max_count = irys_reth.txpool.pending_max_count;
+    reth_config.txpool.pending_max_size = irys_reth.txpool.pending_max_size_mb;
+    reth_config.txpool.basefee_max_count = irys_reth.txpool.basefee_max_count;
+    reth_config.txpool.basefee_max_size = irys_reth.txpool.basefee_max_size_mb;
+    reth_config.txpool.queued_max_count = irys_reth.txpool.queued_max_count;
+    reth_config.txpool.queued_max_size = irys_reth.txpool.queued_max_size_mb;
+    reth_config.txpool.additional_validation_tasks = irys_reth.txpool.additional_validation_tasks;
+    reth_config.txpool.max_account_slots = irys_reth.txpool.max_account_slots;
+    reth_config.txpool.price_bump = irys_reth.txpool.price_bump as u128;
     // important: keep blobs disabled in our mempool
     reth_config.txpool.disable_blobs_support = true;
 
-    reth_config.txpool.additional_validation_tasks = 2;
-
-    // Enable Prometheus metrics endpoint for local scraping by OTEL collector sidecar.
-    let metrics_port = if random_ports { "0" } else { "9001" };
-    let metrics_addr: SocketAddr = format!(
-        "{}:{}",
-        node_config
-            .reth
-            .network
-            .bind_ip(&node_config.network_defaults),
-        metrics_port
-    )
-    .parse()?;
+    // -- Metrics --
+    let metrics_port = if random_ports {
+        0
+    } else {
+        irys_reth.metrics.port
+    };
+    let metrics_addr: SocketAddr = format!("{}:{}", bind_ip, metrics_port).parse()?;
     reth_config.metrics = MetricArgs {
         prometheus: Some(metrics_addr),
         ..Default::default()

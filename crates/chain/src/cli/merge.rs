@@ -86,7 +86,7 @@ pub fn apply_cli_overrides(mut config: NodeConfig, cmd: &NodeCommand) -> eyre::R
         config.gossip.public_port = port;
     }
 
-    // -- Reth --
+    // -- Reth network --
     if let Some(port) = cmd.reth.port {
         config.reth.network.bind_port = port;
     }
@@ -95,6 +95,86 @@ pub fn apply_cli_overrides(mut config: NodeConfig, cmd: &NodeCommand) -> eyre::R
     }
     if let Some(port) = cmd.reth.public_port {
         config.reth.network.public_port = port;
+    }
+
+    // -- Reth RPC --
+    if let Some(v) = cmd.reth.rpc_http {
+        config.reth.rpc.http = v;
+    }
+    if let Some(port) = cmd.reth.rpc_http_port {
+        config.reth.rpc.http_port = port;
+    }
+    if let Some(ref api) = cmd.reth.rpc_http_api {
+        config.reth.rpc.http_api = api.clone();
+    }
+    if let Some(ref cors) = cmd.reth.rpc_corsdomain {
+        config.reth.rpc.http_corsdomain = cors.clone();
+    }
+    if let Some(v) = cmd.reth.rpc_ws {
+        config.reth.rpc.ws = v;
+    }
+    if let Some(port) = cmd.reth.rpc_ws_port {
+        config.reth.rpc.ws_port = port;
+    }
+    if let Some(ref api) = cmd.reth.rpc_ws_api {
+        config.reth.rpc.ws_api = api.clone();
+    }
+    if let Some(v) = cmd.reth.rpc_max_request_size_mb {
+        config.reth.rpc.max_request_size_mb = v;
+    }
+    if let Some(v) = cmd.reth.rpc_max_response_size_mb {
+        config.reth.rpc.max_response_size_mb = v;
+    }
+    if let Some(v) = cmd.reth.rpc_max_connections {
+        config.reth.rpc.max_connections = v;
+    }
+    if let Some(v) = cmd.reth.rpc_gas_cap {
+        config.reth.rpc.gas_cap = v;
+    }
+    if let Some(v) = cmd.reth.rpc_tx_fee_cap {
+        config.reth.rpc.tx_fee_cap = v;
+    }
+
+    // -- Reth txpool --
+    if let Some(v) = cmd.reth.txpool_pending_max_count {
+        config.reth.txpool.pending_max_count = v;
+    }
+    if let Some(v) = cmd.reth.txpool_pending_max_size_mb {
+        config.reth.txpool.pending_max_size_mb = v;
+    }
+    if let Some(v) = cmd.reth.txpool_basefee_max_count {
+        config.reth.txpool.basefee_max_count = v;
+    }
+    if let Some(v) = cmd.reth.txpool_basefee_max_size_mb {
+        config.reth.txpool.basefee_max_size_mb = v;
+    }
+    if let Some(v) = cmd.reth.txpool_queued_max_count {
+        config.reth.txpool.queued_max_count = v;
+    }
+    if let Some(v) = cmd.reth.txpool_queued_max_size_mb {
+        config.reth.txpool.queued_max_size_mb = v;
+    }
+    if let Some(v) = cmd.reth.txpool_additional_validation_tasks {
+        config.reth.txpool.additional_validation_tasks = v;
+    }
+    if let Some(v) = cmd.reth.txpool_max_account_slots {
+        config.reth.txpool.max_account_slots = v;
+    }
+    if let Some(v) = cmd.reth.txpool_price_bump {
+        config.reth.txpool.price_bump = v;
+    }
+
+    // -- Reth engine --
+    if let Some(v) = cmd.reth.engine_persistence_threshold {
+        config.reth.engine.persistence_threshold = v;
+    }
+    if let Some(v) = cmd.reth.engine_memory_block_buffer_target {
+        config.reth.engine.memory_block_buffer_target = v;
+    }
+
+    // -- Reth metrics --
+    if let Some(port) = cmd.reth.metrics_port {
+        config.reth.metrics.port = port;
     }
 
     // -- Peer filter --
@@ -779,5 +859,139 @@ mod tests {
         let cmd = parse_node_cmd(&["--genesis-peer-discovery-timeout", "5000"]);
         let merged = apply_cli_overrides(config, &cmd).unwrap();
         assert_eq!(merged.genesis_peer_discovery_timeout_millis, 5000);
+    }
+
+    // -- Reth RPC tests --
+
+    #[test]
+    fn test_reth_rpc_http_port_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&["--reth.rpc-http-port", "9545"]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.rpc.http_port, 9545);
+    }
+
+    #[test]
+    fn test_reth_rpc_modules_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&["--reth.rpc-http-api", "eth,debug,net,trace"]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.rpc.http_api, "eth,debug,net,trace");
+    }
+
+    #[test]
+    fn test_reth_rpc_cors_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&["--reth.rpc-cors", "http://localhost:3000"]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.rpc.http_corsdomain, "http://localhost:3000");
+    }
+
+    #[test]
+    fn test_reth_rpc_ws_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&[
+            "--reth.rpc-ws",
+            "true",
+            "--reth.rpc-ws-port",
+            "9546",
+            "--reth.rpc-ws-api",
+            "eth,net",
+        ]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert!(merged.reth.rpc.ws);
+        assert_eq!(merged.reth.rpc.ws_port, 9546);
+        assert_eq!(merged.reth.rpc.ws_api, "eth,net");
+    }
+
+    #[test]
+    fn test_reth_rpc_limits_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&[
+            "--reth.rpc-max-request-size",
+            "30",
+            "--reth.rpc-max-response-size",
+            "320",
+            "--reth.rpc-max-connections",
+            "1000",
+            "--reth.rpc-gas-cap",
+            "100000000",
+        ]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.rpc.max_request_size_mb, 30);
+        assert_eq!(merged.reth.rpc.max_response_size_mb, 320);
+        assert_eq!(merged.reth.rpc.max_connections, 1000);
+        assert_eq!(merged.reth.rpc.gas_cap, 100_000_000);
+    }
+
+    // -- Reth txpool tests --
+
+    #[test]
+    fn test_reth_txpool_overrides() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&[
+            "--reth.txpool-pending-max-count",
+            "500000",
+            "--reth.txpool-pending-max-size",
+            "500",
+            "--reth.txpool-basefee-max-count",
+            "500000",
+            "--reth.txpool-basefee-max-size",
+            "500",
+            "--reth.txpool-queued-max-count",
+            "500000",
+            "--reth.txpool-queued-max-size",
+            "500",
+            "--reth.txpool-validation-tasks",
+            "4",
+        ]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.txpool.pending_max_count, 500_000);
+        assert_eq!(merged.reth.txpool.pending_max_size_mb, 500);
+        assert_eq!(merged.reth.txpool.basefee_max_count, 500_000);
+        assert_eq!(merged.reth.txpool.basefee_max_size_mb, 500);
+        assert_eq!(merged.reth.txpool.queued_max_count, 500_000);
+        assert_eq!(merged.reth.txpool.queued_max_size_mb, 500);
+        assert_eq!(merged.reth.txpool.additional_validation_tasks, 4);
+    }
+
+    #[test]
+    fn test_reth_txpool_account_slots_and_price_bump() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&[
+            "--reth.txpool-max-account-slots",
+            "32",
+            "--reth.txpool-price-bump",
+            "20",
+        ]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.txpool.max_account_slots, 32);
+        assert_eq!(merged.reth.txpool.price_bump, 20);
+    }
+
+    // -- Reth engine tests --
+
+    #[test]
+    fn test_reth_engine_overrides() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&[
+            "--reth.engine-persistence-threshold",
+            "10",
+            "--reth.engine-memory-block-buffer",
+            "5",
+        ]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.engine.persistence_threshold, 10);
+        assert_eq!(merged.reth.engine.memory_block_buffer_target, 5);
+    }
+
+    // -- Reth metrics tests --
+
+    #[test]
+    fn test_reth_metrics_port_override() {
+        let config = test_config();
+        let cmd = parse_node_cmd(&["--reth.metrics-port", "9090"]);
+        let merged = apply_cli_overrides(config, &cmd).unwrap();
+        assert_eq!(merged.reth.metrics.port, 9090);
     }
 }
