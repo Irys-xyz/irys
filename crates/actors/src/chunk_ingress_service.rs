@@ -266,6 +266,7 @@ impl ChunkIngressService {
                                         }
                                         Ok(Err(err)) => {
                                             error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
+                                            Self::send_timeout_errors(msg);
                                         }
                                         Err(_) => {
                                             warn!("Timed out waiting for chunk ingress message handler permit, dropping message");

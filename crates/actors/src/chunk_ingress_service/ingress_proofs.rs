@@ -365,7 +365,12 @@ pub fn generate_and_store_ingress_proof(
 
     // Generate + persist
     // Notify start of proof generation
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root)) {
+        warn!(
+            ?data_root,
+            "Failed to notify cache of proof generation start: {e}"
+        );
+    }
 
     let proof_res = super::chunks::generate_ingress_proof(
         db.clone(),
@@ -381,9 +386,14 @@ pub fn generate_and_store_ingress_proof(
         Ok(p) => p,
         Err(e) => {
             // Notify completion on error
-            let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+            if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
                 data_root,
-            ));
+            )) {
+                warn!(
+                    ?data_root,
+                    "Failed to notify cache of proof generation completion: {e}"
+                );
+            }
             return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
         }
     };
@@ -391,9 +401,14 @@ pub fn generate_and_store_ingress_proof(
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
     // Notify completion after stored & gossiped
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
         data_root,
-    ));
+    )) {
+        warn!(
+            ?data_root,
+            "Failed to notify cache of proof generation completion: {e}"
+        );
+    }
     Ok(proof)
 }
 
@@ -437,16 +452,20 @@ pub fn reanchor_and_store_ingress_proof(
     }
 
     // Notify start of reanchoring
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
         proof.data_root,
-    ));
+    )) {
+        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation start: {e}");
+    }
 
     if let Err(e) =
         calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
     {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(e);
     }
 
@@ -459,24 +478,30 @@ pub fn reanchor_and_store_ingress_proof(
     // Re-anchor and re-sign
     proof.anchor = latest_anchor;
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     if let Err(e) = store_ingress_proof(db, &proof, signer) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
         proof.data_root,
-    ));
+    )) {
+        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+    }
     Ok(proof)
 }
 
