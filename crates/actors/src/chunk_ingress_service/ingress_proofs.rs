@@ -392,7 +392,6 @@ pub fn generate_and_store_ingress_proof(
         return Err(IngressProofGenerationError::AlreadyGenerating);
     }
 
-    // Notify start of proof generation
     if let Err(e) =
         cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationStarted(data_root))
     {
@@ -503,7 +502,7 @@ pub fn reanchor_and_store_ingress_proof(
         .get_latest_canonical_entry()
         .block_hash();
 
-    let mut proof = proof.clone();
+    let mut proof = proof.clone(); // clone: need owned value for set_anchor + sign mutation
     proof.set_anchor(latest_anchor);
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
         if let Err(e) = cache_sender.send_traced(

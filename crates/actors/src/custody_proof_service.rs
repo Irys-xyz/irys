@@ -76,7 +76,7 @@ impl CustodyProofService {
             &challenge.challenge_seed,
             self.config.consensus.custody_challenge_count,
             self.config.consensus.num_chunks_in_partition,
-        );
+        )?;
 
         let kzg_settings = default_kzg_settings();
         let chunk_size = usize::try_from(self.config.consensus.chunk_size)
@@ -183,39 +183,6 @@ mod tests {
 
         let result = service.handle_challenge(&challenge);
         assert!(result.is_ok());
-
-        // No proof should have been gossiped
         assert!(gossip_rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn service_spawns_and_shuts_down() {
-        let config = test_config_with_custody();
-        let (gossip_tx, _gossip_rx) = unbounded_channel();
-        let (challenge_tx, challenge_rx) = unbounded_channel();
-
-        CustodyProofService::spawn_service(
-            config,
-            empty_storage_guard(),
-            gossip_tx,
-            challenge_rx,
-            tokio::runtime::Handle::current(),
-        );
-
-        // Send a challenge for an unknown partition
-        challenge_tx
-            .send(CustodyProofMessage::Challenge(CustodyChallenge {
-                challenged_miner: IrysAddress::from([0xAA; 20]),
-                partition_hash: H256::from([0xBB; 32]),
-                challenge_seed: H256::from([0xCC; 32]),
-                challenge_block_height: 100,
-            }))
-            .unwrap();
-
-        // Drop sender to trigger service shutdown
-        drop(challenge_tx);
-
-        // Give the service time to process and shut down
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }

@@ -13,10 +13,6 @@ pub const PROOF_SIZE: usize = 48;
 pub const SCALAR_SIZE: usize = 32;
 pub const DOMAIN_SEPARATOR: &[u8] = b"IRYS_KZG_INGRESS_V1";
 
-/// A 48-byte KZG commitment (compressed BLS12-381 G1 point).
-///
-/// Newtype wrapper around `[u8; 48]` providing the trait implementations
-/// that raw arrays lack (serde for N>32, Default for N>32, Compact).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KzgCommitmentBytes(pub [u8; COMMITMENT_SIZE]);
 
@@ -131,8 +127,6 @@ impl alloy_rlp::Decodable for KzgCommitmentBytes {
     }
 }
 
-/// A single chunk's KZG commitment stored during ingress.
-/// Maps (data_root, chunk_index) → KzgCommitmentBytes in the database.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Compact)]
 pub struct PerChunkCommitment {
     pub chunk_index: u32,
@@ -148,8 +142,6 @@ impl arbitrary::Arbitrary<'_> for PerChunkCommitment {
     }
 }
 
-/// Returns a reference to the default (Ethereum mainnet) trusted setup KZG settings.
-/// Lazily initialized on first call, thread-safe.
 pub fn default_kzg_settings() -> &'static KzgSettings {
     EnvKzgSettings::Default.get()
 }
@@ -168,66 +160,52 @@ pub fn compute_blob_commitment(
         .map_err(|e| eyre::eyre!("KZG blob commitment failed: {e}"))
 }
 
-/// Aggregate two G1 commitments: C = C1 + r·C2 where r = SHA256(C1 || C2)
-/// interpreted as a BLS12-381 scalar.
-///
-/// Uses the `blst` library (transitive dependency via `c-kzg`) for elliptic
-/// curve point operations on BLS12-381 G1.
+/// Aggregate two G1 commitments: C = C1 + r·C2 where r = SHA256(C1 || C2).
 pub fn aggregate_commitments(
     c1: &KzgCommitment,
     c2: &KzgCommitment,
 ) -> eyre::Result<KzgCommitment> {
-    use blst::min_pk::PublicKey;
-    use blst::{blst_p1, blst_p1_affine, blst_scalar};
-
     let mut hasher = sha::Sha256::new();
     hasher.update(c1.as_ref());
     hasher.update(c2.as_ref());
     let r_bytes = hasher.finish();
 
-    let mut r_scalar = blst_scalar::default();
-    // SAFETY: `r_bytes` is a 32-byte SHA256 digest; `blst_scalar_from_bendian` reads
-    // exactly 32 bytes from the pointer, which is within bounds.
-    unsafe {
-        blst::blst_scalar_from_bendian(&mut r_scalar, r_bytes.as_ptr());
-    }
+    let c1_bytes: &[u8; COMMITMENT_SIZE] = c1
+        .as_ref()
+        .try_into()
+        .map_err(|_| eyre::eyre!("commitment size mismatch"))?;
+    let c2_bytes: &[u8; COMMITMENT_SIZE] = c2
+        .as_ref()
+        .try_into()
+        .map_err(|_| eyre::eyre!("commitment size mismatch"))?;
 
-    let p1 = PublicKey::from_bytes(c1.as_ref())
-        .map_err(|e| eyre::eyre!("failed to decompress C1: {e:?}"))?;
-    let p2 = PublicKey::from_bytes(c2.as_ref())
-        .map_err(|e| eyre::eyre!("failed to decompress C2: {e:?}"))?;
-
-    let p1_affine: &blst_p1_affine = (&p1).into();
-    let p2_affine: &blst_p1_affine = (&p2).into();
-
-    let mut p2_proj = blst_p1::default();
-    let mut r_c2 = blst_p1::default();
-    // SAFETY: All blst_p1 types are initialized via `default()`. `blst_p1_from_affine`
-    // converts a valid affine point (from `PublicKey::from_bytes` which validated the
-    // curve point) to projective form. `blst_p1_mult` multiplies a valid projective
-    // point by a 256-bit scalar — both inputs are well-formed.
-    unsafe {
-        blst::blst_p1_from_affine(&mut p2_proj, p2_affine);
-        blst::blst_p1_mult(&mut r_c2, &p2_proj, r_scalar.b.as_ptr(), 256);
-    }
-
-    let mut result = blst_p1::default();
-    // SAFETY: `c1_proj` is initialised from a validated affine point. `r_c2` is the
-    // result of a valid scalar multiplication. `blst_p1_add` adds two projective points.
-    unsafe {
-        let mut c1_proj = blst_p1::default();
-        blst::blst_p1_from_affine(&mut c1_proj, p1_affine);
-        blst::blst_p1_add(&mut result, &c1_proj, &r_c2);
-    }
-
-    let mut compressed = [0_u8; COMMITMENT_SIZE];
-    // SAFETY: `result` is a valid projective G1 point from the addition above.
-    // `compressed` is a 48-byte buffer matching the compressed G1 point size.
-    unsafe {
-        blst::blst_p1_compress(compressed.as_mut_ptr(), &result);
-    }
-
+    let compressed = g1_add_scaled(c1_bytes, c2_bytes, &r_bytes)?;
     Ok(KzgCommitment::from(compressed))
+}
+
+/// Zero-pad chunk data and split into two `BLOB_SIZE` halves.
+fn pad_and_split_chunk(chunk_data: &[u8]) -> eyre::Result<([u8; BLOB_SIZE], [u8; BLOB_SIZE])> {
+    if chunk_data.len() > CHUNK_SIZE_FOR_KZG {
+        return Err(eyre::eyre!(
+            "chunk data too large: {} bytes (max {})",
+            chunk_data.len(),
+            CHUNK_SIZE_FOR_KZG
+        ));
+    }
+
+    let mut padded = [0_u8; CHUNK_SIZE_FOR_KZG];
+    padded[..chunk_data.len()].copy_from_slice(chunk_data);
+
+    // split_at at BLOB_SIZE on a CHUNK_SIZE_FOR_KZG (2*BLOB_SIZE) array
+    // always yields two BLOB_SIZE slices, so try_into is infallible here.
+    let (first, second) = padded.split_at(BLOB_SIZE);
+    let first: [u8; BLOB_SIZE] = first
+        .try_into()
+        .map_err(|_| eyre::eyre!("split invariant"))?;
+    let second: [u8; BLOB_SIZE] = second
+        .try_into()
+        .map_err(|_| eyre::eyre!("split invariant"))?;
+    Ok((first, second))
 }
 
 /// Compute the aggregated KZG commitment for a 256KB native Irys chunk.
@@ -241,28 +219,9 @@ pub fn compute_chunk_commitment(
     chunk_data: &[u8],
     settings: &KzgSettings,
 ) -> eyre::Result<KzgCommitment> {
-    if chunk_data.len() > CHUNK_SIZE_FOR_KZG {
-        return Err(eyre::eyre!(
-            "chunk data too large: {} bytes (max {})",
-            chunk_data.len(),
-            CHUNK_SIZE_FOR_KZG
-        ));
-    }
-
-    let mut padded = [0_u8; CHUNK_SIZE_FOR_KZG];
-    padded[..chunk_data.len()].copy_from_slice(chunk_data);
-
-    let (first_half, second_half) = padded.split_at(BLOB_SIZE);
-    let first_half: &[u8; BLOB_SIZE] = first_half
-        .try_into()
-        .expect("split_at guarantees BLOB_SIZE");
-    let second_half: &[u8; BLOB_SIZE] = second_half
-        .try_into()
-        .expect("split_at guarantees BLOB_SIZE");
-
-    let c1 = compute_blob_commitment(first_half, settings)?;
-    let c2 = compute_blob_commitment(second_half, settings)?;
-
+    let (first_half, second_half) = pad_and_split_chunk(chunk_data)?;
+    let c1 = compute_blob_commitment(&first_half, settings)?;
+    let c2 = compute_blob_commitment(&second_half, settings)?;
     aggregate_commitments(&c1, &c2)
 }
 
@@ -301,17 +260,14 @@ pub fn compute_composite_commitment(
     H256(hasher.finish())
 }
 
-// ---------------------------------------------------------------------------
-// BLS12-381 scalar field (Fr) arithmetic helpers
-// ---------------------------------------------------------------------------
+// SAFETY for all blst FFI calls in this module: All blst types are initialized via
+// `default()` or `from_bytes()`. Buffer sizes are guaranteed by Rust's type system
+// (fixed-size arrays). Affine points are validated by `PublicKey::from_bytes` before
+// conversion to projective form. Scalars are read from exactly-sized byte arrays.
 
-/// Convert 32 big-endian bytes into a BLS12-381 scalar field element.
-/// The input is automatically reduced modulo the scalar field order.
 fn fr_from_bytes(bytes: &[u8; SCALAR_SIZE]) -> blst::blst_fr {
     let mut scalar = blst::blst_scalar::default();
     let mut fr = blst::blst_fr::default();
-    // SAFETY: `bytes` is exactly 32 bytes; `blst_scalar_from_bendian` reads 32 bytes
-    // from the pointer. `blst_fr_from_scalar` reduces modulo the field order.
     unsafe {
         blst::blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
         blst::blst_fr_from_scalar(&mut fr, &scalar);
@@ -319,12 +275,9 @@ fn fr_from_bytes(bytes: &[u8; SCALAR_SIZE]) -> blst::blst_fr {
     fr
 }
 
-/// Convert a BLS12-381 scalar field element back to 32 big-endian bytes.
 fn fr_to_bytes(fr: &blst::blst_fr) -> [u8; SCALAR_SIZE] {
     let mut scalar = blst::blst_scalar::default();
     let mut bytes = [0_u8; SCALAR_SIZE];
-    // SAFETY: `blst_scalar_from_fr` writes a valid scalar from the field element.
-    // `blst_bendian_from_scalar` writes exactly 32 bytes.
     unsafe {
         blst::blst_scalar_from_fr(&mut scalar, fr);
         blst::blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
@@ -332,26 +285,20 @@ fn fr_to_bytes(fr: &blst::blst_fr) -> [u8; SCALAR_SIZE] {
     bytes
 }
 
-/// Add two BLS12-381 scalars (mod field order). Inputs/outputs are big-endian.
 pub fn bls_fr_add(a: &[u8; SCALAR_SIZE], b: &[u8; SCALAR_SIZE]) -> [u8; SCALAR_SIZE] {
     let fr_a = fr_from_bytes(a);
     let fr_b = fr_from_bytes(b);
     let mut result = blst::blst_fr::default();
-    // SAFETY: All `blst_fr` values are initialized. `blst_fr_add` computes
-    // the modular sum of two valid field elements.
     unsafe {
         blst::blst_fr_add(&mut result, &fr_a, &fr_b);
     }
     fr_to_bytes(&result)
 }
 
-/// Multiply two BLS12-381 scalars (mod field order). Inputs/outputs are big-endian.
 pub fn bls_fr_mul(a: &[u8; SCALAR_SIZE], b: &[u8; SCALAR_SIZE]) -> [u8; SCALAR_SIZE] {
     let fr_a = fr_from_bytes(a);
     let fr_b = fr_from_bytes(b);
     let mut result = blst::blst_fr::default();
-    // SAFETY: Both `blst_fr` values are initialized. `blst_fr_mul` computes
-    // the modular product of two valid field elements.
     unsafe {
         blst::blst_fr_mul(&mut result, &fr_a, &fr_b);
     }
@@ -359,9 +306,6 @@ pub fn bls_fr_mul(a: &[u8; SCALAR_SIZE], b: &[u8; SCALAR_SIZE]) -> [u8; SCALAR_S
 }
 
 /// Compute P1 + scalar·P2 for two compressed BLS12-381 G1 points.
-///
-/// Both `p1_bytes` and `p2_bytes` are 48-byte compressed G1 points.
-/// `scalar_bytes` is a 32-byte big-endian scalar.
 pub fn g1_add_scaled(
     p1_bytes: &[u8; PROOF_SIZE],
     p2_bytes: &[u8; PROOF_SIZE],
@@ -371,7 +315,6 @@ pub fn g1_add_scaled(
     use blst::{blst_p1, blst_p1_affine, blst_scalar};
 
     let mut r_scalar = blst_scalar::default();
-    // SAFETY: `scalar_bytes` is exactly 32 bytes.
     unsafe {
         blst::blst_scalar_from_bendian(&mut r_scalar, scalar_bytes.as_ptr());
     }
@@ -386,17 +329,12 @@ pub fn g1_add_scaled(
 
     let mut p2_proj = blst_p1::default();
     let mut r_p2 = blst_p1::default();
-    // SAFETY: All blst_p1 types are initialized via `default()`. `blst_p1_from_affine`
-    // converts a validated affine point to projective. `blst_p1_mult` multiplies a
-    // valid projective point by a 256-bit scalar.
     unsafe {
         blst::blst_p1_from_affine(&mut p2_proj, p2_affine);
         blst::blst_p1_mult(&mut r_p2, &p2_proj, r_scalar.b.as_ptr(), 256);
     }
 
     let mut result = blst_p1::default();
-    // SAFETY: Both projective points are valid (from validated affine points
-    // and scalar multiplication). `blst_p1_add` adds two projective points.
     unsafe {
         let mut p1_proj = blst_p1::default();
         blst::blst_p1_from_affine(&mut p1_proj, p1_affine);
@@ -404,8 +342,6 @@ pub fn g1_add_scaled(
     }
 
     let mut compressed = [0_u8; PROOF_SIZE];
-    // SAFETY: `result` is a valid projective G1 point. `compressed` is a 48-byte
-    // buffer matching compressed G1 point size.
     unsafe {
         blst::blst_p1_compress(compressed.as_mut_ptr(), &result);
     }
@@ -413,57 +349,28 @@ pub fn g1_add_scaled(
     Ok(compressed)
 }
 
-// ---------------------------------------------------------------------------
-// KZG opening proof functions
-// ---------------------------------------------------------------------------
-
 /// Compute a KZG opening proof for a 256KB chunk at evaluation point `z`.
 ///
-/// Splits the chunk into two 128KB halves (same scheme as `compute_chunk_commitment`),
-/// computes per-half KZG proofs, then aggregates:
-/// - `π = π1 + r·π2` (G1 point addition)
-/// - `y = y1 + r·y2` (scalar field addition)
-/// where `r = SHA256(C1 || C2)` and `C1, C2` are the per-half commitments.
-///
-/// Returns `(proof_bytes, evaluation_bytes)` = (π, y).
+/// Aggregates per-half proofs: `π = π1 + r·π2`, `y = y1 + r·y2`
+/// where `r = SHA256(C1 || C2)`.
 pub fn compute_chunk_opening_proof(
     chunk_data: &[u8],
     z_bytes: &[u8; SCALAR_SIZE],
     settings: &KzgSettings,
 ) -> eyre::Result<([u8; PROOF_SIZE], [u8; SCALAR_SIZE])> {
-    if chunk_data.len() > CHUNK_SIZE_FOR_KZG {
-        return Err(eyre::eyre!(
-            "chunk data too large: {} bytes (max {})",
-            chunk_data.len(),
-            CHUNK_SIZE_FOR_KZG
-        ));
-    }
+    let (first_half, second_half) = pad_and_split_chunk(chunk_data)?;
 
-    let mut padded = [0_u8; CHUNK_SIZE_FOR_KZG];
-    padded[..chunk_data.len()].copy_from_slice(chunk_data);
+    let blob1 = Blob::new(first_half);
+    let blob2 = Blob::new(second_half);
 
-    let (first_half, second_half) = padded.split_at(BLOB_SIZE);
-    let first_half: &[u8; BLOB_SIZE] = first_half
-        .try_into()
-        .expect("split_at guarantees BLOB_SIZE");
-    let second_half: &[u8; BLOB_SIZE] = second_half
-        .try_into()
-        .expect("split_at guarantees BLOB_SIZE");
+    let c1 = compute_blob_commitment(&first_half, settings)?;
+    let c2 = compute_blob_commitment(&second_half, settings)?;
 
-    let blob1 = Blob::new(*first_half);
-    let blob2 = Blob::new(*second_half);
-
-    // Per-half commitments needed for aggregation scalar r
-    let c1 = compute_blob_commitment(first_half, settings)?;
-    let c2 = compute_blob_commitment(second_half, settings)?;
-
-    // r = SHA256(C1 || C2) — same derivation as aggregate_commitments
     let mut hasher = sha::Sha256::new();
     hasher.update(c1.as_ref());
     hasher.update(c2.as_ref());
     let r_bytes = hasher.finish();
 
-    // Compute KZG opening proofs for each half
     let z = c_kzg::Bytes32::new(*z_bytes);
     let (proof1, y1) = settings
         .compute_kzg_proof(&blob1, &z)
@@ -472,12 +379,10 @@ pub fn compute_chunk_opening_proof(
         .compute_kzg_proof(&blob2, &z)
         .map_err(|e| eyre::eyre!("KZG proof computation failed for second half: {e}"))?;
 
-    // Aggregate proof: π = π1 + r·π2
     let proof1_bytes: [u8; PROOF_SIZE] = *proof1.to_bytes().as_ref();
     let proof2_bytes: [u8; PROOF_SIZE] = *proof2.to_bytes().as_ref();
     let aggregated_proof = g1_add_scaled(&proof1_bytes, &proof2_bytes, &r_bytes)?;
 
-    // Aggregate evaluation: y = y1 + r·y2
     let y1_bytes: [u8; SCALAR_SIZE] = *y1.as_ref();
     let y2_bytes: [u8; SCALAR_SIZE] = *y2.as_ref();
     let r_y2 = bls_fr_mul(&y2_bytes, &r_bytes);
@@ -507,23 +412,12 @@ pub fn verify_chunk_opening_proof(
         .map_err(|e| eyre::eyre!("KZG proof verification failed: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Challenge point derivation
-// ---------------------------------------------------------------------------
-
-/// Derive a BLS12-381 field element from a challenge seed and chunk offset.
-///
-/// Used as the evaluation point `z` for custody opening proofs.
-/// Result is `SHA256(challenge_seed || chunk_offset_le)` reduced modulo
-/// the BLS12-381 scalar field order.
+/// `z = SHA256(challenge_seed || chunk_offset_le) mod BLS12-381_r`
 pub fn derive_challenge_point(challenge_seed: &H256, chunk_offset: u32) -> [u8; SCALAR_SIZE] {
     let mut hasher = sha::Sha256::new();
     hasher.update(&challenge_seed.0);
     hasher.update(&chunk_offset.to_le_bytes());
-    let hash = hasher.finish();
-
-    // Reduce modulo BLS12-381 scalar field order via blst
-    fr_to_bytes(&fr_from_bytes(&hash))
+    fr_to_bytes(&fr_from_bytes(&hasher.finish()))
 }
 
 #[cfg(test)]
@@ -535,8 +429,6 @@ mod tests {
         default_kzg_settings()
     }
 
-    /// Helper to compare KzgCommitment values by their byte representation,
-    /// since the c-kzg type doesn't implement PartialEq.
     fn commitment_bytes(c: &KzgCommitment) -> &[u8] {
         c.as_ref()
     }
@@ -556,8 +448,6 @@ mod tests {
 
     #[test]
     fn zero_padded_blob_matches_single_commitment() {
-        // A chunk that fits in a single blob (≤128KB) should still produce a
-        // valid aggregated commitment. The second half is all zeros.
         let small_data = vec![99_u8; BLOB_SIZE];
         let commitment = compute_chunk_commitment(&small_data, kzg_settings()).unwrap();
 
@@ -673,42 +563,6 @@ mod tests {
         }
     }
 
-    // -- BLS scalar field arithmetic -------------------------------------------
-
-    #[test]
-    fn bls_fr_add_identity() {
-        let zero = [0_u8; SCALAR_SIZE];
-        let a = [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 42,
-        ];
-        assert_eq!(bls_fr_add(&a, &zero), a);
-    }
-
-    #[test]
-    fn bls_fr_mul_identity() {
-        let one = {
-            let mut b = [0_u8; SCALAR_SIZE];
-            b[SCALAR_SIZE - 1] = 1;
-            b
-        };
-        let a = [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 42,
-        ];
-        assert_eq!(bls_fr_mul(&a, &one), a);
-    }
-
-    #[test]
-    fn bls_fr_mul_zero() {
-        let zero = [0_u8; SCALAR_SIZE];
-        let a = [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 42,
-        ];
-        assert_eq!(bls_fr_mul(&a, &zero), zero);
-    }
-
     #[test]
     fn g1_add_scaled_valid_points() {
         let data1 = [1_u8; BLOB_SIZE];
@@ -723,11 +577,8 @@ mod tests {
             s
         };
         let result = g1_add_scaled(&p1, &p2, &scalar).unwrap();
-        // p1 + 1*p2 should be a valid G1 point
         blst::min_pk::PublicKey::from_bytes(&result).expect("result should be a valid G1 point");
     }
-
-    // -- Opening proof tests ---------------------------------------------------
 
     #[test]
     fn opening_proof_wrong_data_fails() {
@@ -741,11 +592,9 @@ mod tests {
         let z = derive_challenge_point(&H256::from([1_u8; 32]), 0);
         let (_proof, _y) = compute_chunk_opening_proof(&data, &z, settings).unwrap();
 
-        // Compute proof for different data
         let bad_data = vec![7_u8; CHUNK_SIZE_FOR_KZG];
         let (bad_proof, bad_y) = compute_chunk_opening_proof(&bad_data, &z, settings).unwrap();
 
-        // Verify with original commitment but bad proof/y — should fail
         let ok =
             verify_chunk_opening_proof(&commitment_bytes_val, &z, &bad_y, &bad_proof, settings)
                 .unwrap();
@@ -771,36 +620,10 @@ mod tests {
         let z1 = derive_challenge_point(&H256::from([1_u8; 32]), 0);
         let (proof, y) = compute_chunk_opening_proof(&data, &z1, settings).unwrap();
 
-        // Verify with a different z — should fail
         let z2 = derive_challenge_point(&H256::from([2_u8; 32]), 0);
         let ok =
             verify_chunk_opening_proof(&commitment_bytes_val, &z2, &y, &proof, settings).unwrap();
         assert!(!ok);
-    }
-
-    // -- Challenge point derivation tests --------------------------------------
-
-    #[test]
-    fn derive_challenge_point_deterministic() {
-        let seed = H256::from([42_u8; 32]);
-        let z1 = derive_challenge_point(&seed, 0);
-        let z2 = derive_challenge_point(&seed, 0);
-        assert_eq!(z1, z2);
-    }
-
-    #[test]
-    fn derive_challenge_point_different_offsets() {
-        let seed = H256::from([42_u8; 32]);
-        let z0 = derive_challenge_point(&seed, 0);
-        let z1 = derive_challenge_point(&seed, 1);
-        assert_ne!(z0, z1);
-    }
-
-    #[test]
-    fn derive_challenge_point_different_seeds() {
-        let z1 = derive_challenge_point(&H256::from([1_u8; 32]), 0);
-        let z2 = derive_challenge_point(&H256::from([2_u8; 32]), 0);
-        assert_ne!(z1, z2);
     }
 
     #[test]

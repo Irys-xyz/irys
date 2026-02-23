@@ -1,6 +1,6 @@
 use irys_types::H256;
 use reth::revm::primitives::B256;
-use reth_transaction_pool::blobstore::{BlobStore, BlobStoreError};
+use reth_transaction_pool::blobstore::BlobStore;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, warn};
 
@@ -62,8 +62,6 @@ impl<S: BlobStore> BlobExtractionService<S> {
     }
 
     fn handle_extract_blobs(&self, block_hash: H256, blob_tx_hashes: &[B256]) -> eyre::Result<()> {
-        use irys_types::ingress::generate_ingress_proof_v2_from_blob;
-
         if !self.config.consensus.enable_blobs {
             warn!("Received blob extraction request but blobs are disabled");
             return Ok(());
@@ -72,7 +70,6 @@ impl<S: BlobStore> BlobExtractionService<S> {
         let signer = self.config.irys_signer();
         let chain_id = self.config.consensus.chain_id;
         let anchor: H256 = block_hash;
-
         let mut total_blobs = 0_u64;
 
         for tx_hash in blob_tx_hashes {
@@ -80,10 +77,6 @@ impl<S: BlobStore> BlobExtractionService<S> {
                 Ok(Some(s)) => s,
                 Ok(None) => {
                     warn!(tx.hash = %tx_hash, "Blob sidecar not found in store (may be pruned)");
-                    continue;
-                }
-                Err(BlobStoreError::Other(e)) => {
-                    warn!(tx.hash = %tx_hash, error = %e, "Blob store error");
                     continue;
                 }
                 Err(e) => {
@@ -101,55 +94,13 @@ impl<S: BlobStore> BlobExtractionService<S> {
             };
 
             for (blob_idx, blob) in sidecar.blobs.iter().enumerate() {
-                let commitment_bytes: &[u8; 48] = sidecar.commitments[blob_idx].as_ref();
-
-                let proof = generate_ingress_proof_v2_from_blob(
+                self.process_single_blob(
                     &signer,
                     blob.as_ref(),
-                    commitment_bytes,
+                    sidecar.commitments[blob_idx].as_ref(),
                     chain_id,
                     anchor,
                 )?;
-
-                let data_root = proof.data_root();
-
-                let chunk_size = u64::try_from(irys_types::kzg::CHUNK_SIZE_FOR_KZG)
-                    .map_err(|_| eyre::eyre!("chunk size overflow"))?;
-
-                let tx_header = irys_types::transaction::DataTransactionHeader::V1(
-                    irys_types::transaction::DataTransactionHeaderV1WithMetadata {
-                        tx: irys_types::transaction::DataTransactionHeaderV1 {
-                            id: H256::zero(),
-                            anchor,
-                            signer: signer.address(),
-                            data_root,
-                            data_size: chunk_size,
-                            header_size: 0,
-                            term_fee: Default::default(),
-                            perm_fee: None,
-                            ledger_id: u32::from(irys_types::block::DataLedger::Submit),
-                            chain_id,
-                            signature: Default::default(),
-                            bundle_format: None,
-                        },
-                        metadata: irys_types::transaction::DataTransactionMetadata::new(),
-                    },
-                );
-
-                let mut chunk_data = vec![0_u8; irys_types::kzg::CHUNK_SIZE_FOR_KZG];
-                chunk_data[..blob.len()].copy_from_slice(blob.as_ref());
-
-                if let Err(e) =
-                    self.mempool_sender
-                        .send(MempoolServiceMessage::IngestBlobDerivedTx {
-                            tx_header,
-                            ingress_proof: proof,
-                            chunk_data,
-                        })
-                {
-                    warn!(data_root = %data_root, error = %e, "Failed to send blob-derived tx to mempool");
-                }
-
                 total_blobs += 1;
             }
         }
@@ -161,6 +112,66 @@ impl<S: BlobStore> BlobExtractionService<S> {
                 txs.count = blob_tx_hashes.len(),
                 "Extracted blobs from block",
             );
+        }
+
+        Ok(())
+    }
+
+    fn process_single_blob(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        blob_data: &[u8],
+        commitment_bytes: &[u8; 48],
+        chain_id: u64,
+        anchor: H256,
+    ) -> eyre::Result<()> {
+        use irys_types::ingress::generate_ingress_proof_v2_from_blob;
+
+        let proof = generate_ingress_proof_v2_from_blob(
+            signer,
+            blob_data,
+            commitment_bytes,
+            chain_id,
+            anchor,
+        )?;
+
+        let data_root = proof.data_root();
+
+        let chunk_size = u64::try_from(irys_types::kzg::CHUNK_SIZE_FOR_KZG)
+            .map_err(|_| eyre::eyre!("chunk size overflow"))?;
+
+        let tx_header = irys_types::transaction::DataTransactionHeader::V1(
+            irys_types::transaction::DataTransactionHeaderV1WithMetadata {
+                tx: irys_types::transaction::DataTransactionHeaderV1 {
+                    id: H256::zero(),
+                    anchor,
+                    signer: signer.address(),
+                    data_root,
+                    data_size: chunk_size,
+                    header_size: 0,
+                    term_fee: Default::default(),
+                    perm_fee: None,
+                    ledger_id: u32::from(irys_types::block::DataLedger::Submit),
+                    chain_id,
+                    signature: Default::default(),
+                    bundle_format: None,
+                },
+                metadata: irys_types::transaction::DataTransactionMetadata::new(),
+            },
+        );
+
+        let mut chunk_data = vec![0_u8; irys_types::kzg::CHUNK_SIZE_FOR_KZG];
+        chunk_data[..blob_data.len()].copy_from_slice(blob_data);
+
+        if let Err(e) = self
+            .mempool_sender
+            .send(MempoolServiceMessage::IngestBlobDerivedTx {
+                tx_header,
+                ingress_proof: proof,
+                chunk_data,
+            })
+        {
+            warn!(data_root = %data_root, error = %e, "Failed to send blob-derived tx to mempool");
         }
 
         Ok(())

@@ -214,8 +214,6 @@ table CachedChunks {
     type Value = CachedChunk;
 }
 
-/// Per-chunk KZG commitments stored during V2 ingress proof generation.
-/// Used for custody proof verification (KZG opening proofs).
 table PerChunkKzgCommitments {
     type Key = DataRoot;
     type Value = CompactPerChunkCommitment;
