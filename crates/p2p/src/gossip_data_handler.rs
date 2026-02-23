@@ -378,7 +378,7 @@ where
                 peer_id: source_peer_id,
                 miner_address,
 
-                data: (*irys_block).clone(),
+                data: Arc::unwrap_or_clone(irys_block),
             },
             peer_info.address.gossip,
         )
@@ -425,7 +425,7 @@ where
                 peer_id: source_peer_id,
                 miner_address,
 
-                data: (*irys_block).clone(),
+                data: Arc::unwrap_or_clone(irys_block),
             },
             peer_info.address.gossip,
         )
