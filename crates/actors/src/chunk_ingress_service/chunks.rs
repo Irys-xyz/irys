@@ -1080,11 +1080,15 @@ fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyr
             let chunk_start = Instant::now();
             match compute_chunk_commitment(&chunk_bin, settings) {
                 Ok(commitment) => {
-                    let hex: String = commitment
-                        .as_ref()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                    let hex =
+                        commitment
+                            .as_ref()
+                            .iter()
+                            .fold(String::with_capacity(96), |mut s, b| {
+                                use std::fmt::Write as _;
+                                let _ = write!(s, "{b:02x}");
+                                s
+                            });
                     info!(
                         data_root = %data_root,
                         chunk_index = i,
