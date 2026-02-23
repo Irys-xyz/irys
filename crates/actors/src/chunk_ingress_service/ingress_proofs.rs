@@ -1,5 +1,5 @@
+use super::ChunkIngressServiceInner;
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
-use crate::mempool_service::{IngressProofError, IngressProofGenerationError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::{
@@ -9,13 +9,60 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{Config, DataRoot, DatabaseProvider, IngressProof, H256};
+use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, H256};
 use reth_db::{Database as _, DatabaseError};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, warn};
 
-impl Inner {
+/// Errors that can occur when ingesting an external ingress proof.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofError {
+    /// The proofs signature is invalid
+    #[error("Ingress proof signature is invalid")]
+    InvalidSignature,
+    /// There was a database error storing the proof
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    /// The proof does not come from a staked address
+    #[error("Unstaked address")]
+    UnstakedAddress,
+    /// The ingress proof is anchored to an unknown/expired anchor
+    #[error("Invalid anchor: {0}")]
+    InvalidAnchor(BlockHash),
+    /// Catch-all variant for other errors.
+    #[error("Ingress proof error: {0}")]
+    Other(String),
+}
+
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+    }
+}
+
+impl ChunkIngressServiceInner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
-    pub fn handle_ingest_ingress_proof(
+    pub(crate) fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
@@ -71,7 +118,7 @@ impl Inner {
         Ok(())
     }
 
-    pub fn validate_ingress_proof_anchor(
+    pub(crate) fn validate_ingress_proof_anchor(
         &self,
         ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
@@ -83,21 +130,22 @@ impl Inner {
         )
     }
 
-    pub fn validate_ingress_proof_anchor_static(
+    pub(crate) fn validate_ingress_proof_anchor_static(
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         config: &Config,
         ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
         let latest_height =
-            Self::get_latest_block_height_static(block_tree_read_guard).map_err(|_e| {
-                IngressProofError::Other(
-                    "unable to get canonical chain from block tree ".to_owned(),
-                )
-            })?;
+            crate::mempool_service::Inner::get_latest_block_height_static(block_tree_read_guard)
+                .map_err(|_e| {
+                    IngressProofError::Other(
+                        "unable to get canonical chain from block tree ".to_owned(),
+                    )
+                })?;
 
         // TODO: add an ingress proof invalid LRU, like we have for txs
-        let anchor_height = match Self::get_anchor_height_static(
+        let anchor_height = match crate::mempool_service::Inner::get_anchor_height_static(
             block_tree_read_guard,
             irys_db,
             ingress_proof.anchor,
@@ -130,7 +178,7 @@ impl Inner {
         }
     }
 
-    pub fn remove_ingress_proof(
+    pub(crate) fn remove_ingress_proof(
         irys_db: &DatabaseProvider,
         data_root: DataRoot,
     ) -> Result<(), IngressProofError> {
@@ -146,20 +194,7 @@ impl Inner {
         Ok(())
     }
 
-    /// Validate the ingress proof anchor, and if invalid, remove the ingress proof from the database.
-    /// Returns `Ok(true)` if the proof is expired (anchor invalid), `Ok(false)` if it is still valid.
-    /// This function DOES NOT delete the proof; deletion is performed exclusively by the cache service.
-    #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
-    pub fn is_ingress_proof_expired(&self, ingress_proof: &IngressProof) -> ProofCheckResult {
-        Self::is_ingress_proof_expired_static(
-            &self.block_tree_read_guard,
-            &self.irys_db,
-            &self.config,
-            ingress_proof,
-        )
-    }
-
-    pub fn is_ingress_proof_expired_static(
+    pub(crate) fn is_ingress_proof_expired_static(
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         config: &Config,
@@ -330,9 +365,14 @@ pub fn generate_and_store_ingress_proof(
 
     // Generate + persist
     // Notify start of proof generation
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root)) {
+        warn!(
+            ?data_root,
+            "Failed to notify cache of proof generation start: {e}"
+        );
+    }
 
-    let proof_res = crate::mempool_service::chunks::generate_ingress_proof(
+    let proof_res = super::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
         data_size,
@@ -346,9 +386,14 @@ pub fn generate_and_store_ingress_proof(
         Ok(p) => p,
         Err(e) => {
             // Notify completion on error
-            let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+            if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
                 data_root,
-            ));
+            )) {
+                warn!(
+                    ?data_root,
+                    "Failed to notify cache of proof generation completion: {e}"
+                );
+            }
             return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
         }
     };
@@ -356,9 +401,14 @@ pub fn generate_and_store_ingress_proof(
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
     // Notify completion after stored & gossiped
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
         data_root,
-    ));
+    )) {
+        warn!(
+            ?data_root,
+            "Failed to notify cache of proof generation completion: {e}"
+        );
+    }
     Ok(proof)
 }
 
@@ -402,16 +452,20 @@ pub fn reanchor_and_store_ingress_proof(
     }
 
     // Notify start of reanchoring
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
         proof.data_root,
-    ));
+    )) {
+        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation start: {e}");
+    }
 
     if let Err(e) =
         calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
     {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(e);
     }
 
@@ -424,24 +478,30 @@ pub fn reanchor_and_store_ingress_proof(
     // Re-anchor and re-sign
     proof.anchor = latest_anchor;
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     if let Err(e) = store_ingress_proof(db, &proof, signer) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
-        ));
+        )) {
+            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+        }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
         proof.data_root,
-    ));
+    )) {
+        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
+    }
     Ok(proof)
 }
 
@@ -453,7 +513,12 @@ pub fn gossip_ingress_proof(
     config: &Config,
 ) {
     // Validate anchor freshness prior to broadcast
-    match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, ingress_proof) {
+    match ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
+        block_tree_guard,
+        db,
+        config,
+        ingress_proof,
+    ) {
         Ok(()) => {
             let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send(msg) {

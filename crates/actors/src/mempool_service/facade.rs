@@ -1,13 +1,9 @@
-use crate::mempool_service::{
-    ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
-};
+use crate::mempool_service::{MempoolServiceMessage, TxIngressError, TxReadError};
 use crate::services::ServiceSenders;
-use crate::{CriticalChunkIngressError, MempoolReadGuard};
+use crate::MempoolReadGuard;
 use eyre::eyre;
-use irys_types::{
-    chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
-};
-use irys_types::{IngressProof, IrysAddress, TxKnownStatus};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+use irys_types::{IrysAddress, TxKnownStatus};
 use std::collections::HashSet;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -29,17 +25,12 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
-    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError>;
     async fn is_known_commitment_transaction(
         &self,
         tx_id: H256,
     ) -> Result<TxKnownStatus, TxReadError>;
 
-    async fn handle_ingest_ingress_proof(
-        &self,
-        ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError>;
     async fn get_block_header(
         &self,
         block_hash: H256,
@@ -173,22 +164,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .expect("to process CommitmentTxIngressMessage")
     }
 
-    async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let chunk_data_root = chunk.data_root;
-        let chunk_tx_offset = chunk.tx_offset;
-        self.service
-            .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-            .map_err(|_| {
-                CriticalChunkIngressError::Other(format!(
-                    "Error sending ChunkIngressMessage for chunk data_root {:?} tx_offset {}",
-                    chunk_data_root, chunk_tx_offset
-                ))
-            })?;
-
-        oneshot_rx.await.expect("to process ChunkIngressMessage")
-    }
-
     async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
@@ -212,29 +187,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             })?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
-    }
-
-    async fn handle_ingest_ingress_proof(
-        &self,
-        ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let data_root = ingress_proof.data_root;
-        self.service
-            .send(MempoolServiceMessage::IngestIngressProof(
-                ingress_proof,
-                oneshot_tx,
-            ))
-            .map_err(|_| {
-                IngressProofError::Other(format!(
-                    "Error sending IngestIngressProof message for data_root {:?}",
-                    data_root
-                ))
-            })?;
-
-        oneshot_rx
-            .await
-            .expect("to process IngestIngressProof message")
     }
 
     async fn get_block_header(
