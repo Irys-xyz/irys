@@ -27,4 +27,16 @@ pub struct NodeArgs {
         env = "REWARD_ADDRESS"
     )]
     pub reward_address: Option<String>,
+
+    /// Enable stake-pledge-drives mode
+    #[arg(long = "stake-pledge-drives")]
+    pub stake_pledge_drives: Option<bool>,
+
+    /// Genesis peer discovery timeout in milliseconds
+    #[arg(
+        id = "node.genesis_peer_discovery_timeout_millis",
+        long = "genesis-peer-discovery-timeout",
+        value_name = "MS"
+    )]
+    pub genesis_peer_discovery_timeout_millis: Option<u64>,
 }
