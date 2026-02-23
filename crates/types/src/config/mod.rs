@@ -1,4 +1,4 @@
-use eyre::ensure;
+use eyre::{bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
 
@@ -16,7 +16,8 @@ pub struct Config(Arc<CombinedConfigInner>);
 
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
-        let consensus = node_config.consensus_config();
+        let mut consensus = node_config.consensus_config();
+        consensus.normalize();
 
         Self(Arc::new(CombinedConfigInner {
             consensus,
@@ -145,6 +146,16 @@ impl Config {
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
+
+        if self.consensus.require_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("require_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — contradictory config");
+        }
+        if self.consensus.enable_blobs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("enable_blobs=true but accept_kzg_ingress_proofs=false — blob V2 proofs would be rejected");
+        }
+        if self.consensus.use_kzg_ingress_proofs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!("use_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — generated proofs would be rejected");
+        }
 
         Ok(())
     }
