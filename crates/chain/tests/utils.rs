@@ -1989,11 +1989,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         sealed_block: Arc<SealedBlock>,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::clone(&sealed_block),
-                false,
-                Some(irys_types::RequestId::new()),
-            )
+            .handle_block(Arc::clone(&sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
@@ -2151,7 +2147,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(sealed_block, false, Some(irys_types::RequestId::new()))
+            .handle_block(sealed_block, false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 

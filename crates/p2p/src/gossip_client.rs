@@ -1367,7 +1367,6 @@ impl GossipClient {
         irys_types::GossipRequestV2 {
             peer_id: self.peer_id,
             miner_address: self.mining_address,
-            request_id: Some(irys_types::RequestId::new()),
             data,
         }
     }

@@ -400,7 +400,6 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
             if let Some(SyncChainServiceMessage::PullPayloadFromTheNetwork {
                 evm_block_hash,
                 use_trusted_peers_only: _,
-                request_id: _,
                 response,
             }) = sync_rx.recv().await
             {

@@ -140,7 +140,6 @@ pub(crate) struct CachedBlock {
     pub(crate) block: Arc<SealedBlock>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
-    pub(crate) request_id: Option<irys_types::RequestId>,
 }
 
 #[derive(Clone, Debug)]
@@ -216,12 +215,8 @@ impl BlockCacheGuard {
         &self,
         block: Arc<SealedBlock>,
         is_fast_tracking: bool,
-        request_id: Option<irys_types::RequestId>,
     ) -> Option<(BlockHash, CachedBlock)> {
-        self.inner
-            .write()
-            .await
-            .add_block(block, is_fast_tracking, request_id)
+        self.inner.write().await.add_block(block, is_fast_tracking)
     }
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
@@ -309,7 +304,6 @@ impl BlockCacheInner {
         &mut self,
         block: Arc<SealedBlock>,
         fast_track: bool,
-        request_id: Option<irys_types::RequestId>,
     ) -> Option<(BlockHash, CachedBlock)> {
         let block_hash = block.header().block_hash;
         let previous_block_hash = block.header().previous_block_hash;
@@ -319,7 +313,6 @@ impl BlockCacheInner {
                 block: Arc::clone(&block),
                 is_processing: true,
                 is_fast_tracking: fast_track,
-                request_id,
             },
         );
 
@@ -469,7 +462,6 @@ where
             block_header.evm_block_hash,
             false,
             Some(Arc::clone(&gossip_data_handler)),
-            None,
         )
         .await
         .map_err(|error| {
@@ -639,7 +631,6 @@ where
         &self,
         block: Arc<SealedBlock>,
         skip_validation_for_fast_track: bool,
-        request_id: Option<irys_types::RequestId>,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
         let block_hash = block.header().block_hash;
         let block_height = block.header().height;
@@ -659,11 +650,7 @@ where
 
         let maybe_evicted_or_updated = self
             .blocks_cache
-            .add_block(
-                Arc::clone(&block),
-                skip_validation_for_fast_track,
-                request_id,
-            )
+            .add_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await;
 
         if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
@@ -797,7 +784,6 @@ where
                 self.sync_service_sender
                     .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
                         block_hash: prev_block_hash,
-                        request_id,
                         response: None,
                     })
             {
@@ -823,7 +809,6 @@ where
                 block.header().evm_block_hash,
                 skip_validation_for_fast_track,
                 None,
-                request_id,
             )
             .await
             {
@@ -907,11 +892,7 @@ where
 
         if let Err(block_discovery_error) = self
             .block_discovery
-            .handle_block(
-                Arc::clone(&block),
-                skip_validation_for_fast_track,
-                request_id,
-            )
+            .handle_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await
         {
             error!(
@@ -940,7 +921,6 @@ where
             self.pull_and_seal_execution_payload_in_background(
                 block.header().evm_block_hash,
                 skip_validation_for_fast_track,
-                request_id,
             );
         }
 
@@ -982,7 +962,6 @@ where
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
         gossip_data_handler: Option<Arc<GossipDataHandler<M, B>>>,
-        request_id: Option<irys_types::RequestId>,
     ) -> GossipResult<()> {
         debug!(
             "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
@@ -1001,11 +980,7 @@ where
 
             if let Some(gossip_data_handler) = gossip_data_handler {
                 let result = gossip_data_handler
-                    .pull_and_add_execution_payload_to_cache(
-                        evm_block_hash,
-                        use_trusted_peers_only,
-                        request_id,
-                    )
+                    .pull_and_add_execution_payload_to_cache(evm_block_hash, use_trusted_peers_only)
                     .await;
                 if let Err(e) = response_sender.send(result) {
                     let err_text = format!(
@@ -1021,7 +996,6 @@ where
                 sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
                     evm_block_hash,
                     use_trusted_peers_only,
-                    request_id,
                     response: response_sender,
                 })
             {
@@ -1059,7 +1033,6 @@ where
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
-        request_id: Option<irys_types::RequestId>,
     ) {
         debug!(
             "Block pool: Handling execution payload for EVM block hash: {:?}",
@@ -1075,7 +1048,6 @@ where
                 evm_block_hash,
                 use_trusted_peers_only,
                 None,
-                request_id,
             )
             .await
             {
@@ -1372,7 +1344,7 @@ mod tests {
         let parent = BlockHash::repeat_byte(0xAA);
         let child1 = make_sealed_block(parent, 10, Default::default());
 
-        cache.add_block(child1.clone(), false, None);
+        cache.add_block(child1.clone(), false);
 
         // parent -> set contains child1
         let set = cache
@@ -1397,8 +1369,8 @@ mod tests {
         let child1 = make_sealed_block(parent, 11, Default::default());
         let child2 = make_sealed_block(parent, 12, Default::default());
 
-        cache.add_block(child1.clone(), true, None); // fast track first
-        cache.add_block(child2.clone(), false, None); // second sibling
+        cache.add_block(child1.clone(), true); // fast track first
+        cache.add_block(child2.clone(), false); // second sibling
 
         let set = cache
             .orphaned_blocks_by_parent
@@ -1427,8 +1399,8 @@ mod tests {
         let parent = BlockHash::repeat_byte(0xCC);
         let child1 = make_sealed_block(parent, 20, Default::default());
         let child2 = make_sealed_block(parent, 21, Default::default());
-        cache.add_block(child1.clone(), false, None);
-        cache.add_block(child2.clone(), false, None);
+        cache.add_block(child1.clone(), false);
+        cache.add_block(child2.clone(), false);
 
         // Remove first child
         cache.remove_block(
@@ -1456,7 +1428,7 @@ mod tests {
     fn change_processing_status() {
         let mut cache = BlockCacheInner::new();
         let block = make_sealed_block(BlockHash::repeat_byte(0xDD), 30, Default::default());
-        cache.add_block(block.clone(), false, None);
+        cache.add_block(block.clone(), false);
 
         assert!(
             cache
@@ -1492,7 +1464,7 @@ mod tests {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAB);
         let child = make_sealed_block(parent, 42, Default::default());
-        cache.add_block(child.clone(), false, None);
+        cache.add_block(child.clone(), false);
         // Sanity: parent entry exists
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
         // Remove only child
@@ -1520,7 +1492,7 @@ mod tests {
         let block_hash = child1.header().block_hash;
 
         // Add block with the BlockBody
-        cache.add_block(child1, false, None);
+        cache.add_block(child1, false);
 
         // Retrieve the cached block
         let cached = cache
@@ -1548,7 +1520,7 @@ mod tests {
         let child1 = make_sealed_block(parent, 101, Default::default());
 
         // Add block with Default::default() BlockBody (as used in existing call sites)
-        cache.add_block(child1.clone(), false, None);
+        cache.add_block(child1.clone(), false);
 
         // Retrieve the cached block
         let cached = cache
@@ -1959,7 +1931,7 @@ mod tests {
         let block = make_sealed_block(parent, 50, Default::default());
         let block_hash = block.header().block_hash;
 
-        cache.add_block(block, false, None);
+        cache.add_block(block, false);
         assert!(cache.blocks.get(&block_hash).is_some());
 
         // Remove with SuccessfullyProcessed reason
@@ -1983,7 +1955,7 @@ mod tests {
         let block = make_sealed_block(parent, 51, Default::default());
         let block_hash = block.header().block_hash;
 
-        cache.add_block(block, false, None);
+        cache.add_block(block, false);
 
         // Remove with a failure reason
         cache.remove_block(

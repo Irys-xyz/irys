@@ -58,7 +58,6 @@ pub enum ValidationServiceMessage {
         block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
         span: tracing::Span,
-        request_id: Option<irys_types::RequestId>,
     },
 }
 
@@ -212,7 +211,6 @@ impl ValidationService {
                             block,
                             skip_vdf_validation,
                             span: parent_span,
-                            request_id,
                         }) => {
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
@@ -220,7 +218,6 @@ impl ValidationService {
                                 self.inner.block_tree_guard.clone(),
                                 skip_vdf_validation,
                                 parent_span,
-                                request_id,
                             );
 
                             coordinator.submit_task(task);
@@ -245,7 +242,7 @@ impl ValidationService {
 
                 // Process VDF completions
                 _ = self.vdf_notify.notified() => {
-                    if let Some((hash, result, request_id)) = coordinator.process_vdf().await {
+                    if let Some((hash, result)) = coordinator.process_vdf().await {
                         match result {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
@@ -262,7 +259,6 @@ impl ValidationService {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
                                         span: tracing::Span::current(),
-                                        request_id,
                                     }
                                 ) {
                                     error!(
@@ -290,7 +286,6 @@ impl ValidationService {
                                     block_hash: validation.block_hash,
                                     validation_result: validation.validation_result,
                                     span: tracing::Span::current(),
-                                    request_id: validation.request_id,
                                 }
                             ) {
                                 error!(
@@ -308,11 +303,11 @@ impl ValidationService {
                                 "Concurrent validation task panicked"
                             };
                             error!(
-                                block.hash = ?removed.as_ref().map(|(h, _)| h),
+                                block.hash = ?removed.as_ref(),
                                 custom.error = %e,
                                 message
                             );
-                            if let Some((hash, request_id)) = removed {
+                            if let Some(hash) = removed {
                                 if let Err(send_err) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
@@ -323,7 +318,6 @@ impl ValidationService {
                                             },
                                         ),
                                         span: tracing::Span::current(),
-                                        request_id,
                                     }
                                 ) {
                                     error!(

@@ -583,11 +583,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(
-            Arc::clone(&block),
-            false,
-            Some(irys_types::RequestId::new()),
-        )
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -618,11 +614,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(
-            Arc::clone(&block),
-            false,
-            Some(irys_types::RequestId::new()),
-        )
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -656,11 +648,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(
-            Arc::clone(&block),
-            false,
-            Some(irys_types::RequestId::new()),
-        )
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     assert!(matches!(
@@ -768,11 +756,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(
-            Arc::clone(&block),
-            false,
-            Some(irys_types::RequestId::new()),
-        )
+        .handle_block(Arc::clone(&block), false)
         .await;
 
     debug!("validation result: {:?}", preval_res);

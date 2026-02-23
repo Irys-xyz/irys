@@ -4,12 +4,18 @@
 //! enabling Reth's internal metrics to be exported via OTLP alongside Irys metrics.
 
 use eyre::Result;
-use opentelemetry::{trace::TracerProvider as _, KeyValue};
+use opentelemetry::{
+    trace::{TraceId, TracerProvider as _},
+    KeyValue,
+};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{
-    logs::SdkLoggerProvider, metrics::SdkMeterProvider, propagation::TraceContextPropagator,
-    resource::Resource, trace::SdkTracerProvider,
+    logs::SdkLoggerProvider,
+    metrics::SdkMeterProvider,
+    propagation::TraceContextPropagator,
+    resource::Resource,
+    trace::{IdGenerator, SdkTracerProvider, SpanId},
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
@@ -117,6 +123,57 @@ fn build_metrics_exporter(
         })
 }
 
+/// OTEL [`IdGenerator`] producing UUID v7 trace IDs (RFC 9562).
+///
+/// Embeds a 48-bit millisecond timestamp in the high bytes of every trace ID
+/// so that IDs are roughly time-ordered when viewed in Tempo/Grafana.
+/// Span IDs are random 8-byte values.
+#[derive(Debug)]
+struct UuidV7IdGenerator;
+
+impl IdGenerator for UuidV7IdGenerator {
+    fn new_trace_id(&self) -> TraceId {
+        use rand::Rng as _;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut bytes = [0_u8; 16];
+
+        let ts_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+
+        // Bytes 0-5: 48-bit timestamp (big-endian)
+        bytes[0] = (ts_ms >> 40) as u8;
+        bytes[1] = (ts_ms >> 32) as u8;
+        bytes[2] = (ts_ms >> 24) as u8;
+        bytes[3] = (ts_ms >> 16) as u8;
+        bytes[4] = (ts_ms >> 8) as u8;
+        bytes[5] = ts_ms as u8;
+
+        // Bytes 6-15: random
+        let mut rng = rand::thread_rng();
+        rng.fill(&mut bytes[6..]);
+
+        // Version 7: byte 6 high nibble = 0x7
+        bytes[6] = (bytes[6] & 0x0F) | 0x70;
+        // Variant: byte 8 top 2 bits = 0b10 (RFC 9562)
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+
+        TraceId::from_bytes(bytes)
+    }
+
+    fn new_span_id(&self) -> SpanId {
+        use rand::Rng as _;
+        let mut bytes = [0_u8; 8];
+        rand::thread_rng().fill(&mut bytes);
+        SpanId::from_bytes(bytes)
+    }
+}
+
 fn build_tracer_provider(
     trace_exporter: opentelemetry_otlp::SpanExporter,
     resource: Resource,
@@ -127,6 +184,7 @@ fn build_tracer_provider(
     opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_resource(resource)
         .with_span_processor(span_processor)
+        .with_id_generator(UuidV7IdGenerator)
         .build()
 }
 
@@ -337,5 +395,44 @@ pub fn flush_telemetry() -> Result<()> {
             errors.len(),
             errors.join("; ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_v7_trace_id_has_correct_version_and_variant() {
+        let gen = UuidV7IdGenerator;
+        let trace_id = gen.new_trace_id();
+        let bytes = trace_id.to_bytes();
+
+        assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
+        assert_eq!(bytes[8] >> 6, 0b10, "variant bits must be 0b10");
+    }
+
+    #[test]
+    fn uuid_v7_trace_ids_are_time_ordered() {
+        let gen = UuidV7IdGenerator;
+        let id1 = gen.new_trace_id();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let id2 = gen.new_trace_id();
+
+        assert!(
+            id1.to_bytes() < id2.to_bytes(),
+            "later trace ID must sort after earlier one"
+        );
+    }
+
+    #[test]
+    fn uuid_v7_span_id_is_nonzero() {
+        let gen = UuidV7IdGenerator;
+        let span_id = gen.new_span_id();
+        assert_ne!(
+            span_id.to_bytes(),
+            [0u8; 8],
+            "span ID must not be all zeros"
+        );
     }
 }

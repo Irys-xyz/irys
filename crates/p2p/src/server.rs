@@ -563,11 +563,7 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let mut v2_request = unpacked_chunk_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
-        let gossip_span = tracing::info_span!("gossip.handle_chunk", %request_id);
+        let v2_request = unpacked_chunk_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -590,11 +586,7 @@ where
             }
         };
 
-        let result = server
-            .data_handler
-            .handle_chunk(v2_request)
-            .instrument(gossip_span)
-            .await;
+        let result = server.data_handler.handle_chunk(v2_request).await;
         drop(permit);
 
         if let Err(error) = result {
@@ -629,10 +621,7 @@ where
             ));
         }
 
-        let mut v2_request = irys_block_header_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
+        let v2_request = irys_block_header_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
@@ -654,7 +643,6 @@ where
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = v2_request.data.block_hash;
         let block_height = v2_request.data.height;
-        let gossip_span = tracing::info_span!("gossip.handle_block_header", %request_id, %block_hash, %block_height);
 
         tokio::spawn(
             async move {
@@ -672,7 +660,7 @@ where
                     }
                 }
             }
-            .instrument(gossip_span),
+            .in_current_span(),
         );
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -699,10 +687,7 @@ where
             ));
         }
 
-        let mut v2_request = block_body_request_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
+        let v2_request = block_body_request_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
@@ -723,7 +708,6 @@ where
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = v2_request.data.block_hash;
-        let gossip_span = tracing::info_span!("gossip.handle_block_body", %request_id, %block_hash);
 
         tokio::spawn(
             async move {
@@ -741,7 +725,7 @@ where
                     }
                 }
             }
-            .instrument(gossip_span),
+            .in_current_span(),
         );
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -764,11 +748,7 @@ where
             ));
         }
 
-        let mut v2_request = irys_execution_payload_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
-        let gossip_span = tracing::info_span!("gossip.handle_execution_payload", %request_id);
+        let v2_request = irys_execution_payload_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -786,7 +766,6 @@ where
         if let Err(error) = server
             .data_handler
             .handle_execution_payload(v2_request)
-            .instrument(gossip_span)
             .await
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -816,11 +795,7 @@ where
             ));
         }
 
-        let mut v2_request = irys_transaction_header_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
-        let gossip_span = tracing::info_span!("gossip.handle_transaction", %request_id);
+        let v2_request = irys_transaction_header_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -835,12 +810,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server
-            .data_handler
-            .handle_transaction(v2_request)
-            .instrument(gossip_span)
-            .await
-        {
+        if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send data transaction header: {}", error);
             return HttpResponse::Ok()
@@ -872,11 +842,7 @@ where
             ));
         }
 
-        let mut v2_request = commitment_tx_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
-        let gossip_span = tracing::info_span!("gossip.handle_commitment_tx", %request_id);
+        let v2_request = commitment_tx_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -891,14 +857,11 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        tokio::spawn(
-            async move {
-                if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-                }
+        tokio::spawn(async move {
+            if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
+                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             }
-            .instrument(gossip_span),
-        );
+        });
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
@@ -920,11 +883,7 @@ where
             ));
         }
 
-        let mut v2_request = proof_json.0;
-        let request_id = *v2_request
-            .request_id
-            .get_or_insert_with(irys_types::RequestId::new);
-        let gossip_span = tracing::info_span!("gossip.handle_ingress_proof", %request_id);
+        let v2_request = proof_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -939,12 +898,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server
-            .data_handler
-            .handle_ingress_proof(v2_request)
-            .instrument(gossip_span)
-            .await
-        {
+        if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send ingress proof: {}", error);
             return HttpResponse::Ok()
@@ -1365,7 +1319,6 @@ where
         let v2_request = GossipRequestV2 {
             peer_id: peer.peer_id,
             miner_address: source_miner_address,
-            request_id: Some(irys_types::RequestId::new()),
             data: v2_data_request,
         };
 
