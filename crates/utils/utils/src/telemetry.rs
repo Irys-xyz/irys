@@ -172,7 +172,7 @@ impl IdGenerator for UuidV7IdGenerator {
         let mut rng = rand::thread_rng();
         loop {
             rng.fill(&mut bytes);
-            if bytes != [0u8; 8] {
+            if bytes != [0_u8; 8] {
                 return SpanId::from_bytes(bytes);
             }
         }
@@ -436,7 +436,7 @@ mod tests {
         let span_id = gen.new_span_id();
         assert_ne!(
             span_id.to_bytes(),
-            [0u8; 8],
+            [0_u8; 8],
             "span ID must not be all zeros"
         );
     }
