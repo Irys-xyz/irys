@@ -860,6 +860,7 @@ where
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
+        debug!("Gossip data handled");
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 

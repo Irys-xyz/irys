@@ -169,8 +169,13 @@ impl IdGenerator for UuidV7IdGenerator {
     fn new_span_id(&self) -> SpanId {
         use rand::Rng as _;
         let mut bytes = [0_u8; 8];
-        rand::thread_rng().fill(&mut bytes);
-        SpanId::from_bytes(bytes)
+        let mut rng = rand::thread_rng();
+        loop {
+            rng.fill(&mut bytes);
+            if bytes != [0u8; 8] {
+                return SpanId::from_bytes(bytes);
+            }
+        }
     }
 }
 
@@ -416,7 +421,7 @@ mod tests {
     fn uuid_v7_trace_ids_are_time_ordered() {
         let gen = UuidV7IdGenerator;
         let id1 = gen.new_trace_id();
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let id2 = gen.new_trace_id();
 
         assert!(
