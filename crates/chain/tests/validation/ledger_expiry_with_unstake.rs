@@ -37,38 +37,28 @@ async fn mine_until_commitment_included(
     ))
 }
 
-#[diag_slow(state = format!(
-    "start_height={} max_blocks_to_scan={}",
-    start_height, max_blocks_to_scan
-))]
-async fn find_shadow_tx_in_window(
+async fn assert_shadow_tx_in_block(
     node: &IrysNodeTest<IrysNodeCtx>,
-    start_height: u64,
-    max_blocks_to_scan: usize,
+    height: u64,
     mut matcher: impl FnMut(&TransactionPacket) -> bool,
-) -> eyre::Result<Option<u64>> {
-    for offset in 0..=max_blocks_to_scan as u64 {
-        let height = start_height + offset;
-
-        while node.get_canonical_chain_height().await < height {
-            node.mine_block().await?;
-        }
-
-        let block = node.get_block_by_height(height).await?;
-        let evm_block = node.wait_for_evm_block(block.evm_block_hash, 30).await?;
-        for tx in evm_block.body.transactions {
-            let mut input = tx.input().as_ref();
-            if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-                if let Some(packet) = shadow.as_v1() {
-                    if matcher(packet) {
-                        return Ok(Some(height));
-                    }
+    description: &str,
+) -> eyre::Result<()> {
+    let block = node.get_block_by_height(height).await?;
+    let evm_block = node.wait_for_evm_block(block.evm_block_hash, 30).await?;
+    for tx in evm_block.body.transactions {
+        let mut input = tx.input().as_ref();
+        if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
+            if let Some(packet) = shadow.as_v1() {
+                if matcher(packet) {
+                    return Ok(());
                 }
             }
         }
     }
-
-    Ok(None)
+    panic!(
+        "Expected {} at block height {}, but no matching shadow tx found",
+        description, height
+    );
 }
 
 #[test_log::test(tokio::test)]
@@ -122,12 +112,10 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
     // Epoch 2: Data expires (data_epoch=0 + submit_ledger_epoch_length=2)
     let (_, expiry_height) = node.mine_until_next_epoch().await?;
 
-    // Verify TermFeeReward goes to custom reward address.
-    // CI can lag inclusion/visibility by a block, so scan a short window.
-    let found_reward = find_shadow_tx_in_window(
+    // Verify TermFeeReward goes to custom reward address at the epoch boundary block.
+    assert_shadow_tx_in_block(
         &node,
         expiry_height,
-        num_blocks_in_epoch,
         |packet| match packet {
             TransactionPacket::TermFeeReward(reward) => {
                 assert_eq!(
@@ -139,15 +127,9 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
             }
             _ => false,
         },
+        "TermFeeReward at expiry",
     )
-    .await?
-    .is_some();
-    assert!(
-        found_reward,
-        "Expected TermFeeReward in window [{}..={}]",
-        expiry_height,
-        expiry_height + num_blocks_in_epoch as u64
-    );
+    .await?;
 
     node.stop().await;
     Ok(())
@@ -205,18 +187,15 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
     node.post_commitment_tx(&unpledge_tx).await?;
     node.wait_for_mempool(unpledge_tx.id(), 30).await?;
     node.mine_block().await?;
-    let unpledge_included_height =
-        mine_until_commitment_included(&node, unpledge_tx.id(), num_blocks_in_epoch * 2).await?;
+    mine_until_commitment_included(&node, unpledge_tx.id(), num_blocks_in_epoch * 2).await?;
 
     // Epoch 2: Unpledge refund issued
     let (_, refund_height) = node.mine_until_next_epoch().await?;
 
-    // Verify UnpledgeRefund goes to miner address.
-    // If unpledge inclusion is delayed near an epoch edge, refund can shift by a block.
-    let found_refund = find_shadow_tx_in_window(
+    // Verify UnpledgeRefund goes to miner address at the epoch boundary block.
+    assert_shadow_tx_in_block(
         &node,
         refund_height,
-        num_blocks_in_epoch,
         |packet| match packet {
             TransactionPacket::UnpledgeRefund(refund) => {
                 assert_eq!(
@@ -228,16 +207,9 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
             }
             _ => false,
         },
+        "UnpledgeRefund at refund height",
     )
-    .await?
-    .is_some();
-    assert!(
-        found_refund,
-        "Expected UnpledgeRefund in window [{}..={}] (unpledge included at height {})",
-        refund_height,
-        refund_height + num_blocks_in_epoch as u64,
-        unpledge_included_height
-    );
+    .await?;
 
     node.stop().await;
     Ok(())
