@@ -857,7 +857,8 @@ impl Inner {
                 irys_types::DataLedger::Publish => {
                     // For Publish ledger, validate both term and perm fees
                     // Calculate expected fees based on current EMA for the next block height
-                    let Ok(expected_term_fee) = self.calculate_term_storage_fee(
+                    let Ok(expected_term_fee) = calculate_term_storage_fee(
+                        &self.config,
                         tx.data_size,
                         &ema_snapshot,
                         next_block_height,
@@ -871,7 +872,8 @@ impl Inner {
                         continue;
                     };
 
-                    let Ok(expected_perm_fee) = self.calculate_perm_storage_fee(
+                    let Ok(expected_perm_fee) = calculate_perm_storage_fee(
+                        &self.config,
                         tx.data_size,
                         expected_term_fee,
                         &ema_snapshot,
@@ -1692,59 +1694,6 @@ impl Inner {
         Ok(latest.height())
     }
 
-    /// Calculate the expected protocol fee for permanent storage
-    /// This includes base network fee + ingress proof rewards
-    #[tracing::instrument(level = "trace", skip_all, err)]
-    pub fn calculate_perm_storage_fee(
-        &self,
-        bytes_to_store: u64,
-        term_fee: U256,
-        ema: &Arc<irys_domain::EmaSnapshot>,
-        timestamp_secs: UnixTimestamp,
-    ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
-        // Calculate total perm fee including ingress proof rewards
-        let total_perm_fee = calculate_perm_storage_total_fee(
-            bytes_to_store,
-            term_fee,
-            ema,
-            &self.config,
-            timestamp_secs,
-        )
-        .map_err(TxIngressError::other_display)?;
-
-        Ok(total_perm_fee)
-    }
-
-    /// Calculate the expected term fee for temporary storage
-    /// This matches the calculation in the pricing API and uses dynamic epoch count
-    #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
-    pub fn calculate_term_storage_fee(
-        &self,
-        bytes_to_store: u64,
-        ema: &Arc<irys_domain::EmaSnapshot>,
-        block_height: u64,
-        timestamp: UnixTimestamp,
-    ) -> Result<U256, TxIngressError> {
-        // Calculate expires for the specified block height using the shared utility
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            block_height,
-            self.config.consensus.epoch.num_blocks_in_epoch,
-            self.config.consensus.epoch.submit_ledger_epoch_length,
-        );
-
-        // Calculate term fee using the storage pricing module
-        let number_of_ingress_proofs_total =
-            self.config.number_of_ingress_proofs_total_at(timestamp);
-        calculate_term_fee(
-            bytes_to_store,
-            epochs_for_storage,
-            &self.config.consensus,
-            number_of_ingress_proofs_total,
-            ema.ema_for_public_pricing(),
-        )
-        .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
-    }
-
     async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {
         self.mempool_state
             .extend_stake_and_pledge_whitelist(new_entries)
@@ -1756,6 +1705,46 @@ impl Inner {
             .get_stake_and_pledge_whitelist_cloned()
             .await
     }
+}
+
+/// Calculate the expected protocol fee for permanent storage
+/// This includes base network fee + ingress proof rewards
+#[tracing::instrument(level = "trace", skip_all, err)]
+fn calculate_perm_storage_fee(
+    config: &Config,
+    bytes_to_store: u64,
+    term_fee: U256,
+    ema: &Arc<irys_domain::EmaSnapshot>,
+    timestamp_secs: UnixTimestamp,
+) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
+    calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, config, timestamp_secs)
+        .map_err(TxIngressError::other_display)
+}
+
+/// Calculate the expected term fee for temporary storage
+/// This matches the calculation in the pricing API and uses dynamic epoch count
+#[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
+fn calculate_term_storage_fee(
+    config: &Config,
+    bytes_to_store: u64,
+    ema: &Arc<irys_domain::EmaSnapshot>,
+    block_height: u64,
+    timestamp: UnixTimestamp,
+) -> Result<U256, TxIngressError> {
+    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+        block_height,
+        config.consensus.epoch.num_blocks_in_epoch,
+        config.consensus.epoch.submit_ledger_epoch_length,
+    );
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp);
+    calculate_term_fee(
+        bytes_to_store,
+        epochs_for_storage,
+        &config.consensus,
+        number_of_ingress_proofs_total,
+        ema.ema_for_public_pricing(),
+    )
+    .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
 }
 
 /// Promotion readiness evaluation outcomes.
