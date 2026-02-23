@@ -1,4 +1,5 @@
 pub mod anchor_validation;
+pub mod blob_extraction_service;
 pub(crate) mod block_ancestry;
 pub mod block_discovery;
 pub mod block_migration_service;
