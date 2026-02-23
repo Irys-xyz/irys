@@ -47,6 +47,7 @@ const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Control flow outcome for `handle_peer_pull_response`.
+#[derive(Debug)]
 enum PeerPullOutcome<T> {
     Ok((IrysPeerId, T)),
     Err(PeerNetworkError),
@@ -1500,10 +1501,7 @@ impl GossipClient {
                 PeerPullOutcome::RetryAfterHandshake => continue,
             }
         }
-        Err(PeerNetworkError::FailedToRequestData(format!(
-            "Failed to pull {:?} from peer after handshake retry",
-            data_request
-        )))
+        unreachable!("loop always returns: attempt 1 never yields RetryAfterHandshake")
     }
 
     /// Pull data using `pull_data_and_update_the_score` with handshake retry.
@@ -1568,7 +1566,7 @@ impl GossipClient {
                     )))
                 }
                 GossipResponse::Rejected(reason) => {
-                    warn!(
+                    debug!(
                         "Peer {:?} rejected {:?} request: {:?}",
                         peer.0, data_request, reason
                     );
@@ -2920,7 +2918,7 @@ mod tests {
             assert!(matches!(outcome, PeerPullOutcome::Err(_)));
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn handshake_required_on_first_attempt_returns_retry() {
             let peer = test_peer();
             let peer_list = PeerList::test_mock().unwrap();
@@ -3071,7 +3069,7 @@ mod tests {
             assert_eq!(peer_id, peer.0);
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn handshake_required_then_success_on_retry() {
             let fixture = TestFixture::new();
             let peer = test_peer();
@@ -3110,7 +3108,7 @@ mod tests {
             assert_eq!(call_count.load(Ordering::SeqCst), 2);
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn handshake_required_both_attempts_returns_err() {
             let fixture = TestFixture::new();
             let peer = test_peer();

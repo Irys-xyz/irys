@@ -35,6 +35,7 @@ dashmap = "6.1.0"
 semver.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
