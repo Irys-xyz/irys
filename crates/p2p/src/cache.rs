@@ -23,6 +23,7 @@ pub struct GossipCache {
     blocks: Cache<BlockHash, Arc<RwLock<HashSet<IrysPeerId>>>>,
     payloads: Cache<B256, Arc<RwLock<HashSet<IrysPeerId>>>>,
     ingress_proofs: Cache<H256, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    custody_proofs: Cache<H256, Arc<RwLock<HashSet<IrysPeerId>>>>,
 }
 
 impl Default for GossipCache {
@@ -40,6 +41,7 @@ impl GossipCache {
             blocks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             payloads: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             ingress_proofs: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
+            custody_proofs: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
         }
     }
 
@@ -119,6 +121,14 @@ impl GossipCache {
                 });
                 peer_set.write().unwrap().insert(peer_id);
             }
+            GossipCacheKey::CustodyProof(partition_hash) => {
+                let peer_set = self.custody_proofs.get(&partition_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.custody_proofs.insert(partition_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(peer_id);
+            }
         }
         Ok(())
     }
@@ -151,6 +161,11 @@ impl GossipCache {
             GossipCacheKey::IngressProof(proof_hash) => self
                 .ingress_proofs
                 .get(proof_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::CustodyProof(partition_hash) => self
+                .custody_proofs
+                .get(partition_hash)
                 .map(|arc| arc.read().unwrap().clone())
                 .unwrap_or_default(),
         };
