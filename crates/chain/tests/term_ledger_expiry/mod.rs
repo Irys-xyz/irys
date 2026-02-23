@@ -584,8 +584,6 @@ impl LedgerExpiryTestContext {
 
         // Check each block for TermFeeReward shadow transactions
         for block in &self.blocks_mined {
-            // Ensure the EVM block is visible before we inspect its transactions.
-            // CI can lag here and return empty tx lists transiently.
             let evm_block = self.wait_for_evm_block(block.evm_block_hash, 30).await?;
             let block_txs = evm_block.body.transactions;
 

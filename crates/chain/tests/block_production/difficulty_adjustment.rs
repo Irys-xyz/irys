@@ -142,7 +142,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
             .add_payload_to_cache(eth_block.block().clone())
             .await;
 
-        wait_for_block_event(&mut block_state_rx, 120, |ev| {
+        wait_for_block_event(&mut block_state_rx, 10, |ev| {
             ev.block_hash == block.block_hash
                 && matches!(ev.validation_result, ValidationResult::Valid)
         })

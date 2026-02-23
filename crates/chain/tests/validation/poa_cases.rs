@@ -93,8 +93,6 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         epoch_block.data_ledgers[DataLedger::Submit]
     );
 
-    // Canonical confirmation alone is not enough on CI: block-index migration may
-    // still be catching up, which causes get_block_bounds/poa_is_valid to race.
     genesis_node
         .wait_until_height_confirmed(new_block.height, 20)
         .await?;
