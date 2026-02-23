@@ -1826,6 +1826,52 @@ impl AtomicMempoolState {
         state.recent_valid_tx.pop(&tx_id);
     }
 
+    /// Batch-removes expired data txs under a single write lock.
+    /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
+    pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) {
+        let mut state = self.write().await;
+        for &(tx_id, anchor) in expired {
+            state.valid_submit_ledger_tx.remove(&tx_id);
+            warn!(
+                "Tx {} is invalid: {:?}",
+                &tx_id,
+                &TxIngressError::InvalidAnchor(anchor).to_string()
+            );
+            state.recent_invalid_tx.put(tx_id, ());
+            state.recent_valid_tx.pop(&tx_id);
+        }
+    }
+
+    /// Batch-removes expired commitment txs under a single write lock.
+    /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
+    pub async fn batch_prune_commitment_txs(&self, expired: &[(H256, H256)]) {
+        let mut state = self.write().await;
+        let txids_set: HashSet<H256> = expired.iter().map(|&(tx_id, _)| tx_id).collect();
+
+        // Mark all as invalid and remove from recent_valid_tx
+        for &(tx_id, anchor) in expired {
+            warn!(
+                "Tx {} is invalid: {:?}",
+                &tx_id,
+                &TxIngressError::InvalidAnchor(anchor).to_string()
+            );
+            state.recent_invalid_tx.put(tx_id, ());
+            state.recent_valid_tx.pop(&tx_id);
+        }
+
+        // Remove from valid_commitment_tx map
+        let addresses_to_check: Vec<IrysAddress> =
+            state.valid_commitment_tx.keys().copied().collect();
+        for address in addresses_to_check {
+            if let Some(transactions) = state.valid_commitment_tx.get_mut(&address) {
+                transactions.retain(|tx| !txids_set.contains(&tx.id()));
+                if transactions.is_empty() {
+                    state.valid_commitment_tx.remove(&address);
+                }
+            }
+        }
+    }
+
     pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
         let mempool_state_guard = self.read().await;
 

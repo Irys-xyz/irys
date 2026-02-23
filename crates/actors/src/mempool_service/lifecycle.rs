@@ -176,6 +176,11 @@ impl Inner {
 
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
     /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
+    ///
+    /// Uses a 3-phase approach to minimize lock acquisitions:
+    /// 1. Single read lock: snapshot all txs
+    /// 2. Outside the lock: evaluate which txs should be pruned (reads block tree + DB, not mempool)
+    /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
         let current_height = match self.get_latest_block_height() {
@@ -188,49 +193,40 @@ impl Inner {
                 return;
             }
         };
-        // re-process all valid data txs
-        let tx_ids = self.mempool_state.all_valid_submit_ledger_ids().await;
-        for tx_id in tx_ids {
-            let tx = {
-                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
-                self.mempool_state
-                    .valid_submit_ledger_tx_cloned(&tx_id)
-                    .await
-            };
 
-            if let Some(tx) = tx {
-                if self.should_prune_tx(current_height, &tx) {
-                    self.mempool_state
-                        .remove_valid_submit_ledger_tx(&tx_id)
-                        .await;
-                    self.mempool_state
-                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
-                        .await;
+        // Uses a snapshot-evaluate-remove pattern. The TOCTOU window between
+        // snapshot and removal is benign: the mempool actor processes messages
+        // serially, so no concurrent mutations can occur between phases.
+
+        // Phase 1: Snapshot all txs under a single read lock each
+        let data_txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
+        let commitment_txs_by_addr = self.mempool_state.all_valid_commitment_txs_cloned().await;
+
+        // Phase 2: Evaluate expiry OUTSIDE the lock (reads block tree + DB, not mempool)
+        let mut expired_data: Vec<(H256, H256)> = Vec::new();
+        for tx in data_txs.values() {
+            if self.should_prune_tx(current_height, tx) {
+                expired_data.push((tx.id, tx.anchor));
+            }
+        }
+
+        let mut expired_commits: Vec<(H256, H256)> = Vec::new();
+        for txs in commitment_txs_by_addr.values() {
+            for tx in txs {
+                if self.should_prune_tx(current_height, tx) {
+                    expired_commits.push((tx.id(), tx.anchor()));
                 }
             }
         }
 
-        // re-process all valid commitment txs
-        let addresses = self
-            .mempool_state
-            .all_valid_commitment_ledger_addresses()
-            .await;
-        for address in addresses {
-            let txs = self
-                .mempool_state
-                .valid_commitment_txs_cloned(&address)
+        // Phase 3: Batch-remove under a single write lock each
+        if !expired_data.is_empty() {
+            self.mempool_state.batch_prune_data_txs(&expired_data).await;
+        }
+        if !expired_commits.is_empty() {
+            self.mempool_state
+                .batch_prune_commitment_txs(&expired_commits)
                 .await;
-
-            if let Some(txs) = txs {
-                for tx in txs {
-                    if self.should_prune_tx(current_height, &tx) {
-                        self.mempool_state.remove_commitment_tx(&tx.id()).await;
-                        self.mempool_state
-                            .mark_tx_as_invalid(tx.id(), TxIngressError::InvalidAnchor(tx.anchor()))
-                            .await;
-                    }
-                }
-            }
         }
     }
 
