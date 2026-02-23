@@ -25,21 +25,19 @@ use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
-use tokio::time::MissedTickBehavior;
-use tracing::{error, info, warn, Instrument as _, Span};
+use tracing::{error, info, warn, Instrument as _};
 
+use crate::mempool_service::wait_with_progress;
 use crate::services::ServiceSenders;
 
 /// Messages handled by the ChunkIngressService
 #[derive(Debug)]
 pub enum ChunkIngressMessage {
-    /// Ingest a chunk with a response channel for the result
+    /// Ingest a chunk, optionally with a response channel for the result
     IngestChunk(
         UnpackedChunk,
-        oneshot::Sender<Result<(), ChunkIngressError>>,
+        Option<oneshot::Sender<Result<(), ChunkIngressError>>>,
     ),
-    /// Ingest a chunk without waiting for a response (fire-and-forget)
-    IngestChunkFireAndForget(UnpackedChunk),
     /// Ingest an ingress proof received from a peer
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Process pending chunks for a data root after its TX header was ingested.
@@ -52,7 +50,6 @@ impl ChunkIngressMessage {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::IngestChunk(_, _) => "IngestChunk",
-            Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
         }
@@ -96,20 +93,23 @@ impl ChunkIngressServiceInner {
         match msg {
             ChunkIngressMessage::IngestChunk(chunk, response) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
-                if let Err(ref e) = result {
+                if let Err(ref e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
+                    if response.is_none() {
+                        error!("handle_chunk_ingress_message error: {:?}", e);
+                    }
                 }
-                let _ = response.send(result);
-            }
-            ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
-                if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
-                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
-                    error!("handle_chunk_ingress_message error: {:?}", e);
+                if let Some(response) = response {
+                    if response.send(result).is_err() {
+                        warn!("IngestChunk response channel closed (caller dropped)");
+                    }
                 }
             }
             ChunkIngressMessage::IngestIngressProof(proof, response) => {
                 let result = self.handle_ingest_ingress_proof(proof);
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    warn!("IngestIngressProof response channel closed (caller dropped)");
+                }
             }
             ChunkIngressMessage::ProcessPendingChunks(data_root) => {
                 self.process_pending_chunks_for_root(data_root).await;
@@ -349,33 +349,5 @@ impl ChunkIngressService {
 
         info!("ChunkIngressService shut down");
         Ok(())
-    }
-}
-
-/// Waits for `fut` to finish while printing every `n_secs`.
-async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let span = Span::current();
-    let fut = fut.instrument(Span::current());
-    tokio::pin!(fut);
-
-    let mut ticker = tokio::time::interval(Duration::from_secs(n_secs));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    // Don't do an immediate tick
-    ticker.tick().await;
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let _guard = span.enter();
-                warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
-            }
-            res = &mut fut => {
-                break res;
-            }
-        }
     }
 }

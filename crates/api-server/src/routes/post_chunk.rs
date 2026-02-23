@@ -36,7 +36,7 @@ pub async fn post_chunk(
 
     // Create a message and send it
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = ChunkIngressMessage::IngestChunk(chunk, oneshot_tx);
+    let tx_ingress_msg = ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx));
 
     // Handle failure to deliver the message (e.g., channel closed)
     if let Err(err) = state.chunk_ingress.send(tx_ingress_msg) {

@@ -325,6 +325,12 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
+    let body = test::read_body(resp).await;
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("PreHeaderOffsetExceedsCap"),
+        "Expected chunk to be rejected with PreHeaderOffsetExceedsCap, got: {body_str}"
+    );
 
     genesis_node.stop().await;
     Ok(())

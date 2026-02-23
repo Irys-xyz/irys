@@ -2463,7 +2463,8 @@ pub async fn data_txs_are_valid(
                                 .chunk_ingress
                                 .send(
                                     crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
-                                        unpacked, ing_tx,
+                                        unpacked,
+                                        Some(ing_tx),
                                     ),
                                 )
                                 .is_err()

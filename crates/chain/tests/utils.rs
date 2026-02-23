@@ -2077,7 +2077,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
                                 let (ctx, crx) = tokio::sync::oneshot::channel();
                                 let _ = peer.node_ctx.service_senders.chunk_ingress.send(
-                                    irys_actors::ChunkIngressMessage::IngestChunk(unpacked, ctx),
+                                    irys_actors::ChunkIngressMessage::IngestChunk(
+                                        unpacked,
+                                        Some(ctx),
+                                    ),
                                 );
                                 let _ = crx.await;
 

@@ -373,7 +373,7 @@ impl GossipServiceTestFixture {
             use irys_actors::ChunkIngressMessage;
             while let Some(message) = chunk_ingress_receiver.recv().await {
                 match message {
-                    ChunkIngressMessage::IngestChunk(chunk, reply) => {
+                    ChunkIngressMessage::IngestChunk(chunk, Some(reply)) => {
                         debug!("Received chunk ingress: data_root {:?}", chunk.data_root);
                         chunk_store
                             .write()
@@ -381,7 +381,7 @@ impl GossipServiceTestFixture {
                             .push(chunk);
                         let _ = reply.send(Ok(()));
                     }
-                    ChunkIngressMessage::IngestChunkFireAndForget(chunk) => {
+                    ChunkIngressMessage::IngestChunk(chunk, None) => {
                         debug!(
                             "Received fire-and-forget chunk: data_root {:?}",
                             chunk.data_root
@@ -1015,10 +1015,10 @@ pub(crate) fn data_handler_stub(
         use irys_actors::ChunkIngressMessage;
         while let Some(message) = chunk_ingress_rx.recv().await {
             match message {
-                ChunkIngressMessage::IngestChunk(_chunk, reply) => {
+                ChunkIngressMessage::IngestChunk(_chunk, Some(reply)) => {
                     let _ = reply.send(Ok(()));
                 }
-                ChunkIngressMessage::IngestChunkFireAndForget(_chunk) => {}
+                ChunkIngressMessage::IngestChunk(_chunk, None) => {}
                 ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
                     let _ = reply.send(Ok(()));
                 }
@@ -1102,10 +1102,10 @@ pub(crate) fn data_handler_with_stubbed_pool(
         use irys_actors::ChunkIngressMessage;
         while let Some(message) = chunk_ingress_rx.recv().await {
             match message {
-                ChunkIngressMessage::IngestChunk(_chunk, reply) => {
+                ChunkIngressMessage::IngestChunk(_chunk, Some(reply)) => {
                     let _ = reply.send(Ok(()));
                 }
-                ChunkIngressMessage::IngestChunkFireAndForget(_chunk) => {}
+                ChunkIngressMessage::IngestChunk(_chunk, None) => {}
                 ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
                     let _ = reply.send(Ok(()));
                 }

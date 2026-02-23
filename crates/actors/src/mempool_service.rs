@@ -3239,7 +3239,7 @@ fn check_funding<T: IrysTransactionCommon>(
 }
 
 /// Waits for `fut` to finish while printing every `n_secs`.
-async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+pub(crate) async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -3256,7 +3256,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let _ = span.enter();
+                let _guard = span.enter();
                 warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {

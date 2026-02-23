@@ -257,8 +257,9 @@ impl DataSyncServiceInner {
         if sm.write_data_chunk(&unpacked_chunk).is_err() {
             // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
             if let Err(e) = self.service_senders.chunk_ingress.send(
-                crate::chunk_ingress_service::ChunkIngressMessage::IngestChunkFireAndForget(
+                crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                     unpacked_chunk,
+                    None,
                 ),
             ) {
                 tracing::warn!(
