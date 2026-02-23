@@ -142,8 +142,12 @@ impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height
     ))]
     pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
-        let anchor_height = match self
-            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
+        let anchor_height = match crate::anchor_validation::get_anchor_height(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            tx.anchor(),
+            false, /* does not need to be canonical */
+        )
         {
             Ok(Some(h)) => h,
             // if we don't know about the anchor, we should prune
@@ -183,7 +187,7 @@ impl Inner {
     /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
-        let current_height = match self.get_latest_block_height() {
+        let current_height = match crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard) {
             Ok(height) => height,
             Err(e) => {
                 error!(

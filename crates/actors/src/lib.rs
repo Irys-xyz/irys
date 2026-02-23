@@ -1,3 +1,4 @@
+pub mod anchor_validation;
 pub mod block_discovery;
 pub mod block_header_lookup;
 pub mod block_migration_service;

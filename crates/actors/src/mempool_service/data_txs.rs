@@ -329,7 +329,7 @@ impl Inner {
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
 
         // Calculate expected fees using the authoritative EMA price
-        let latest_height = self.get_latest_block_height()?;
+        let latest_height = crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
         let next_block_height = latest_height + 1;
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
             next_block_height,
