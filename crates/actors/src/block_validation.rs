@@ -2917,6 +2917,65 @@ fn get_submit_ledger_slot_addresses(
     num_addresses_per_slot
 }
 
+/// Verify custody proofs included in a block.
+///
+/// Returns `Ok(())` if all proofs are valid or custody proofs are disabled.
+/// This function is not yet wired into `validate_block()` — that happens once
+/// blocks carry custody proofs via gossip (Phase 3).
+pub fn validate_custody_proofs(
+    custody_proofs: &[irys_types::custody::CustodyProof],
+    consensus_config: &ConsensusConfig,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    if !consensus_config.enable_custody_proofs {
+        return Ok(());
+    }
+
+    let kzg_settings = irys_types::kzg::default_kzg_settings();
+    let tx = db.tx()?;
+    for proof in custody_proofs {
+        let result = irys_types::custody::verify_custody_proof(
+            proof,
+            |data_root, chunk_index| {
+                irys_database::get_per_chunk_kzg_commitment(&tx, data_root, chunk_index)
+            },
+            kzg_settings,
+            consensus_config.custody_challenge_count,
+        )?;
+
+        match result {
+            irys_types::custody::CustodyVerificationResult::Valid => {}
+            irys_types::custody::CustodyVerificationResult::InvalidOpeningCount {
+                expected,
+                got,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?} partition {:?}: expected {expected} openings, got {got}",
+                    proof.challenged_miner,
+                    proof.partition_hash,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::MissingCommitment {
+                data_root,
+                chunk_index,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: missing commitment for data_root={data_root:?} chunk_index={chunk_index}",
+                    proof.challenged_miner,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::InvalidProof { chunk_offset } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: invalid KZG opening at chunk_offset={chunk_offset}",
+                    proof.challenged_miner,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

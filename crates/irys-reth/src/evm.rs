@@ -1203,6 +1203,29 @@ where
                         target,
                     ))
                 }
+                shadow_tx::TransactionPacket::CustodyPenalty(penalty) => {
+                    let log = Self::create_shadow_log(
+                        penalty.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(penalty.amount, 256),
+                            DynSolValue::Address(penalty.target),
+                        ],
+                    );
+                    let target = penalty.target;
+                    let balance_decrement = shadow_tx::BalanceDecrement {
+                        amount: penalty.amount,
+                        target: penalty.target,
+                        irys_ref: penalty.partition_hash,
+                    };
+                    let res = self.handle_balance_decrement(log, tx_hash, &balance_decrement)?;
+                    Ok((
+                        res.map(|(plain_account, execution_result)| {
+                            (plain_account, execution_result, true)
+                        }),
+                        target,
+                    ))
+                }
             },
         }
     }

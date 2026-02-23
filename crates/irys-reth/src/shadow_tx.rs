@@ -73,6 +73,8 @@ pub enum TransactionPacket {
     PermFeeRefund(BalanceIncrement),
     /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
     UnstakeRefund(BalanceIncrement),
+    /// Custody penalty: slash pledge deposit when miner fails custody challenge.
+    CustodyPenalty(CustodyPenaltyPacket),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -118,6 +120,7 @@ impl TransactionPacket {
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
+            Self::CustodyPenalty(p) => Some(p.target),
         }
     }
 }
@@ -149,6 +152,8 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD"));
     pub static PERM_FEE_REFUND: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+    pub static CUSTODY_PENALTY: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_CUSTODY_PENALTY"));
 }
 
 impl ShadowTransaction {
@@ -221,6 +226,7 @@ impl TransactionPacket {
             Self::TermFeeReward(_) => *TERM_FEE_REWARD,
             Self::IngressProofReward(_) => *INGRESS_PROOF_REWARD,
             Self::PermFeeRefund(_) => *PERM_FEE_REFUND,
+            Self::CustodyPenalty(_) => *CUSTODY_PENALTY,
         }
     }
 }
@@ -237,6 +243,7 @@ pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
 pub const UNSTAKE_DEBIT_ID: u8 = 0x0B;
+pub const CUSTODY_PENALTY_ID: u8 = 0x0C;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -328,6 +335,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[UNPLEDGE_REFUND_ID])?;
                 inner.serialize(writer)
             }
+            Self::CustodyPenalty(inner) => {
+                writer.write_all(&[CUSTODY_PENALTY_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -355,6 +366,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             UNPLEDGE_REFUND_ID => {
                 Self::UnpledgeRefund(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            CUSTODY_PENALTY_ID => {
+                Self::CustodyPenalty(CustodyPenaltyPacket::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -534,6 +548,56 @@ impl BorshDeserialize for UnpledgeDebit {
         reader.read_exact(&mut ref_buf)?;
         let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
         Ok(Self { target, irys_ref })
+    }
+}
+
+/// Custody penalty: slash pledge deposit when miner fails custody challenge.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    arbitrary::Arbitrary,
+)]
+pub struct CustodyPenaltyPacket {
+    /// Amount to deduct from the penalized miner.
+    pub amount: U256,
+    /// Address of the penalized miner.
+    pub target: Address,
+    /// Partition hash identifying which partition failed the custody challenge.
+    pub partition_hash: FixedBytes<32>,
+}
+
+impl BorshSerialize for CustodyPenaltyPacket {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.partition_hash.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for CustodyPenaltyPacket {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut amount_buf = [0_u8; 32];
+        reader.read_exact(&mut amount_buf)?;
+        let amount = U256::from_be_bytes(amount_buf);
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+        let mut hash_buf = [0_u8; 32];
+        reader.read_exact(&mut hash_buf)?;
+        let partition_hash = FixedBytes::<32>::from_slice(&hash_buf);
+        Ok(Self {
+            amount,
+            target,
+            partition_hash,
+        })
     }
 }
 
@@ -871,6 +935,11 @@ mod tests {
                 target: test_address,
                 irys_ref: test_ref,
             }),
+            TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
+                amount: U256::from(1234_u64),
+                target: test_address,
+                partition_hash: test_ref,
+            }),
         ];
 
         for packet in packets {
@@ -888,6 +957,44 @@ mod tests {
             } = decoded;
             assert_eq!(decoded_hash, solution_hash, "Solution hash mismatch");
         }
+    }
+
+    #[test]
+    fn custody_penalty_roundtrip() {
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xaa; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
+                amount: U256::from(5000_u64),
+                target: Address::repeat_byte(0x55),
+                partition_hash: FixedBytes::<32>::from_slice(&[0x77; 32]),
+            }),
+            solution_hash,
+        );
+        let mut buf = Vec::new();
+        tx.serialize(&mut buf).unwrap();
+        let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx);
+    }
+
+    #[test]
+    fn custody_penalty_fee_payer() {
+        let target = Address::repeat_byte(0x55);
+        let packet = TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
+            amount: U256::from(1_u64),
+            target,
+            partition_hash: FixedBytes::<32>::ZERO,
+        });
+        assert_eq!(packet.fee_payer_address(), Some(target));
+    }
+
+    #[test]
+    fn custody_penalty_topic() {
+        let packet = TransactionPacket::CustodyPenalty(CustodyPenaltyPacket {
+            amount: U256::from(1_u64),
+            target: Address::ZERO,
+            partition_hash: FixedBytes::<32>::ZERO,
+        });
+        assert_eq!(packet.topic(), keccak256("SHADOW_TX_CUSTODY_PENALTY"));
     }
 
     /// Test backward compatibility detection - old format without solution hash should fail
