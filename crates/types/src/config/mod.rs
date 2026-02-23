@@ -614,6 +614,11 @@ impl Config {
                 "use_kzg_ingress_proofs=true but accept_kzg_ingress_proofs=false — generated proofs would be rejected"
             );
         }
+        if self.consensus.enable_custody_proofs && !self.consensus.accept_kzg_ingress_proofs {
+            bail!(
+                "enable_custody_proofs=true but accept_kzg_ingress_proofs=false — custody proofs require KZG commitments"
+            );
+        }
 
         Ok(())
     }
