@@ -128,54 +128,61 @@ fn build_metrics_exporter(
 /// Embeds a 48-bit millisecond timestamp in the high bytes of every trace ID
 /// so that IDs are roughly time-ordered when viewed in Tempo/Grafana.
 /// Span IDs are random 8-byte values.
+///
+/// Uses a thread-local [`SmallRng`](rand::rngs::SmallRng) (Xoshiro256++) seeded
+/// once from OS entropy — avoiding the periodic reseeding overhead of `ThreadRng`.
+/// (same approach as the default ID generator used by Otel - very hot, so perf does matter)
+
 #[derive(Debug)]
 struct UuidV7IdGenerator;
 
+thread_local! {
+    static ID_RNG: std::cell::RefCell<rand::rngs::SmallRng> =
+        std::cell::RefCell::new(<rand::rngs::SmallRng as rand::SeedableRng>::from_entropy());
+}
+
+/// warning: both functions here are *very hot*
 impl IdGenerator for UuidV7IdGenerator {
+    // UUIDv7 for globally unique tracing IDs
     fn new_trace_id(&self) -> TraceId {
         use rand::Rng as _;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let mut bytes = [0_u8; 16];
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let ts_ms = d.as_secs() * 1000 + d.subsec_millis() as u64;
 
-        let ts_ms = u64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        )
-        .unwrap_or(u64::MAX);
+        ID_RNG.with(|rng| {
+            let mut rng = rng.borrow_mut();
+            let r0: u64 = rng.gen();
+            let r1: u64 = rng.gen();
 
-        // Bytes 0-5: 48-bit timestamp (big-endian)
-        bytes[0] = (ts_ms >> 40) as u8;
-        bytes[1] = (ts_ms >> 32) as u8;
-        bytes[2] = (ts_ms >> 24) as u8;
-        bytes[3] = (ts_ms >> 16) as u8;
-        bytes[4] = (ts_ms >> 8) as u8;
-        bytes[5] = ts_ms as u8;
+            // High u64: 48-bit timestamp | version 7 nibble | 12 random bits
+            let hi = (ts_ms << 16) | 0x7000 | (r0 & 0x0FFF);
+            // Low u64: variant bits (0b10) | 62 random bits
+            let lo = (r1 & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000;
 
-        // Bytes 6-15: random
-        let mut rng = rand::thread_rng();
-        rng.fill(&mut bytes[6..]);
-
-        // Version 7: byte 6 high nibble = 0x7
-        bytes[6] = (bytes[6] & 0x0F) | 0x70;
-        // Variant: byte 8 top 2 bits = 0b10 (RFC 9562)
-        bytes[8] = (bytes[8] & 0x3F) | 0x80;
-
-        TraceId::from_bytes(bytes)
+            let mut bytes = [0_u8; 16];
+            bytes[..8].copy_from_slice(&hi.to_be_bytes());
+            bytes[8..].copy_from_slice(&lo.to_be_bytes());
+            TraceId::from_bytes(bytes)
+        })
     }
 
+    // u64s for local spans
     fn new_span_id(&self) -> SpanId {
         use rand::Rng as _;
-        let mut bytes = [0_u8; 8];
-        let mut rng = rand::thread_rng();
-        loop {
-            rng.fill(&mut bytes);
-            if bytes != [0_u8; 8] {
-                return SpanId::from_bytes(bytes);
+        ID_RNG.with(|rng| {
+            let mut rng = rng.borrow_mut();
+            loop {
+                let v: u64 = rng.gen();
+                // zero span ID = no span (spec requirement)
+                if v != 0 {
+                    return SpanId::from_bytes(v.to_be_bytes());
+                }
             }
-        }
+        })
     }
 }
 
