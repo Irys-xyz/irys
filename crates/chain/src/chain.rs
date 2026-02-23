@@ -361,6 +361,19 @@ pub struct IrysNode {
     pub irys_db: DatabaseProvider,
 }
 
+/// Timeout for stopping the API server during graceful shutdown.
+const API_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for stopping the gossip service during graceful shutdown.
+const GOSSIP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for the VDF thread to finish during graceful shutdown.
+const VDF_THREAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for sending the shutdown signal to the actor thread.
+const ACTOR_SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for the actor thread to finish (API 5s + gossip 5s + VDF 10s + jitter).
+const ACTOR_THREAD_TIMEOUT: Duration = Duration::from_secs(25);
+/// Timeout for the TaskManager graceful shutdown.
+const TASK_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl IrysNode {
     /// Creates a new node builder instance.
     pub fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
@@ -1096,9 +1109,9 @@ impl IrysNode {
                                 }
 
                                 debug!("Stopping API server");
-                                match tokio::time::timeout(Duration::from_secs(5), server_handle.stop(true)).await {
+                                match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, server_handle.stop(true)).await {
                                     Ok(()) => debug!("API server stopped"),
-                                    Err(_) => error!("API server stop timed out after 5s"),
+                                    Err(_) => error!("API server stop timed out after {API_SERVER_STOP_TIMEOUT:?}"),
                                 }
 
                                 shutdown_reason
@@ -1107,10 +1120,10 @@ impl IrysNode {
                             actix_server.await.unwrap();
                             let shutdown_reason = server_stop_handle.await.unwrap();
 
-                            match tokio::time::timeout(Duration::from_secs(5), gossip_service_handle.stop()).await {
+                            match tokio::time::timeout(GOSSIP_STOP_TIMEOUT, gossip_service_handle.stop()).await {
                                 Ok(Ok(())) => info!("Gossip service stopped"),
                                 Ok(Err(e)) => warn!("Gossip service already stopped: {:?}", e),
-                                Err(_) => error!("Gossip service stop timed out after 5s"),
+                                Err(_) => error!("Gossip service stop timed out after {GOSSIP_STOP_TIMEOUT:?}"),
                             }
 
                             // Send shutdown signal - propagate the original cause
@@ -1123,10 +1136,10 @@ impl IrysNode {
                             }
 
                             debug!("Waiting for VDF thread to finish");
-                            match tokio::time::timeout(Duration::from_secs(10), vdf_done_rx).await {
+                            match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_done_rx).await {
                                 Ok(Ok(())) => debug!("VDF thread finished"),
                                 Ok(Err(_)) => error!("VDF thread likely panicked (completion channel dropped)"),
-                                Err(_) => error!("VDF thread did not finish within 10s"),
+                                Err(_) => error!("VDF thread did not finish within {VDF_THREAD_TIMEOUT:?}"),
                             }
                         }
                         .instrument(span.clone()),
@@ -1209,7 +1222,7 @@ impl IrysNode {
                         shutdown_reason
                     );
                     match tokio::time::timeout(
-                        Duration::from_secs(5),
+                        ACTOR_SHUTDOWN_SEND_TIMEOUT,
                         main_actor_thread_shutdown_tx.send(shutdown_reason.clone()),
                     )
                     .await
@@ -1221,23 +1234,23 @@ impl IrysNode {
                         Err(_) => error!("Timed out sending shutdown signal to actor thread"),
                     }
 
-                    // Actor internal shutdown budget: API 5s + gossip 5s + VDF 10s = 20s.
-                    // Allow 25s to accommodate scheduling jitter under CI load.
+                    // Actor internal shutdown budget: API + gossip + VDF timeouts.
+                    // ACTOR_THREAD_TIMEOUT accommodates scheduling jitter.
                     debug!("Waiting for the main actor thread to finish");
-                    match tokio::time::timeout(Duration::from_secs(25), actor_done_rx).await {
+                    match tokio::time::timeout(ACTOR_THREAD_TIMEOUT, actor_done_rx).await {
                         Ok(Ok(())) => debug!("Actor main thread finished"),
                         Ok(Err(_)) => {
                             error!("Actor thread likely panicked (completion channel dropped)")
                         }
-                        Err(_) => error!("Actor main thread did not finish within 25s"),
+                        Err(_) => error!("Actor main thread did not finish within {ACTOR_THREAD_TIMEOUT:?}"),
                     }
 
                     service_set.graceful_shutdown().await;
                     debug!(
                         "Shutting down the rest of the reth jobs in case there are unfinished ones"
                     );
-                    if !task_manager.graceful_shutdown_with_timeout(Duration::from_secs(10)) {
-                        warn!("TaskManager graceful shutdown timed out after 10s");
+                    if !task_manager.graceful_shutdown_with_timeout(TASK_MANAGER_TIMEOUT) {
+                        warn!("TaskManager graceful shutdown timed out after {TASK_MANAGER_TIMEOUT:?}");
                     }
                     (node_handle.node, shutdown_reason)
                 };
