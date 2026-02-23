@@ -58,6 +58,8 @@ async fn main() -> eyre::Result<()> {
     handle.start_mining()?;
 
     // Await reth thread completion asynchronously
+    // Brief non-contended lock to extract the oneshot receiver.
+    // std::sync::Mutex is intentional: held only for .take(), no contention.
     let reth_done_rx = handle.reth_done_rx.lock().unwrap().take();
     let shutdown_reason = match reth_done_rx {
         Some(rx) => match rx.await {
