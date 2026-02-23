@@ -293,11 +293,13 @@ impl ChunkIngressService {
                                             warn!("Chunk ingress message handler semaphore at capacity, waiting for permit");
                                         }
                                     }
+                                    // Await inline (blocking the loop) for natural backpressure,
+                                    // matching the mempool service pattern.
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    runtime_handle.spawn(async move {
-                                        match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
-                                            Ok(Ok(permit)) => {
+                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                        Ok(Ok(permit)) => {
+                                            runtime_handle.spawn(async move {
                                                 let _permit = permit;
                                                 let task_info = format!("Chunk ingress message handler for {}", msg_type);
                                                 wait_with_progress(
@@ -305,15 +307,16 @@ impl ChunkIngressService {
                                                     20,
                                                     &task_info,
                                                 ).await;
-                                            }
-                                            Ok(Err(err)) => {
-                                                error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
-                                            }
-                                            Err(_) => {
-                                                warn!("Timed out waiting for chunk ingress message handler permit");
-                                            }
+                                            }.instrument(span));
                                         }
-                                    }.instrument(span));
+                                        Ok(Err(err)) => {
+                                            error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
+                                        }
+                                        Err(_) => {
+                                            warn!("Timed out waiting for chunk ingress message handler permit, dropping message");
+                                            Self::send_timeout_errors(msg);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -349,5 +352,28 @@ impl ChunkIngressService {
 
         info!("ChunkIngressService shut down");
         Ok(())
+    }
+
+    /// Send explicit timeout errors through any oneshot channels in a message
+    /// before dropping it, so callers get a descriptive error instead of a
+    /// generic `RecvError` from a silently dropped sender.
+    fn send_timeout_errors(msg: ChunkIngressMessage) {
+        match msg {
+            ChunkIngressMessage::IngestChunk(_, Some(reply)) => {
+                let _ = reply.send(Err(ChunkIngressError::Critical(
+                    CriticalChunkIngressError::Other(
+                        "service overloaded: timed out waiting for handler permit".into(),
+                    ),
+                )));
+            }
+            ChunkIngressMessage::IngestIngressProof(_, reply) => {
+                let _ = reply.send(Err(IngressProofError::DatabaseError(
+                    "service overloaded: timed out waiting for handler permit".into(),
+                )));
+            }
+            // No response channel — nothing to notify.
+            ChunkIngressMessage::IngestChunk(_, None)
+            | ChunkIngressMessage::ProcessPendingChunks(_) => {}
+        }
     }
 }
