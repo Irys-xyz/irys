@@ -475,12 +475,14 @@ impl Inner {
         ingress_proof: IngressProof,
         chunk_data: Vec<u8>,
     ) {
-        if matches!(&ingress_proof, IngressProof::V2(_))
-            && !self.config.consensus.accept_kzg_ingress_proofs
-        {
+        if let Err(reason) = ingress_proof.check_version_accepted(
+            self.config.consensus.accept_kzg_ingress_proofs,
+            self.config.consensus.require_kzg_ingress_proofs,
+        ) {
             warn!(
                 data_root = %tx_header.data_root,
-                "Dropping blob-derived tx: V2 proofs not accepted by config"
+                reason,
+                "Dropping blob-derived tx: proof version rejected by config"
             );
             return;
         }

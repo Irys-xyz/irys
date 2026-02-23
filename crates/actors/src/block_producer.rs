@@ -789,7 +789,6 @@ pub trait BlockProdStrategy {
             .await?;
         let Some(block) = block else { return Ok(None) };
 
-        // Extract blobs from any EIP-4844 transactions in the produced block
         if self.inner().config.consensus.enable_blobs {
             let blob_tx_hashes: Vec<B256> = eth_built_payload
                 .block()

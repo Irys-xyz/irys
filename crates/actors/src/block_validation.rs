@@ -646,20 +646,12 @@ pub async fn prevalidate_block(
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.iter() {
-            // Check proof version is accepted
-            match proof {
-                IngressProof::V2(_) if !config.consensus.accept_kzg_ingress_proofs => {
-                    return Err(PreValidationError::IngressProofVersionRejected(
-                        "V2 proofs not accepted".into(),
-                    ));
-                }
-                IngressProof::V1(_) if config.consensus.require_kzg_ingress_proofs => {
-                    return Err(PreValidationError::IngressProofVersionRejected(
-                        "V1 proofs rejected (V2 required)".into(),
-                    ));
-                }
-                _ => {}
-            }
+            proof
+                .check_version_accepted(
+                    config.consensus.accept_kzg_ingress_proofs,
+                    config.consensus.require_kzg_ingress_proofs,
+                )
+                .map_err(|msg| PreValidationError::IngressProofVersionRejected(msg.into()))?;
 
             proof
                 .pre_validate(&tx_header.data_root)

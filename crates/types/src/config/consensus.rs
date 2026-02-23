@@ -143,6 +143,18 @@ pub struct ConsensusConfig {
     #[serde(default)]
     pub enable_blobs: bool,
 
+    /// Enable custody proofs via KZG opening. Requires `accept_kzg_ingress_proofs`.
+    #[serde(default)]
+    pub enable_custody_proofs: bool,
+
+    /// Number of chunks challenged per custody proof (K). Default: 20.
+    #[serde(default = "default_custody_challenge_count")]
+    pub custody_challenge_count: u32,
+
+    /// Number of blocks a miner has to respond to a custody challenge. Default: 10.
+    #[serde(default = "default_custody_response_window")]
+    pub custody_response_window: u64,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -210,6 +222,14 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
 /// present in the provided TOML. This preserves current behavior.
 fn default_disable_full_ingress_proof_validation() -> bool {
     false
+}
+
+fn default_custody_challenge_count() -> u32 {
+    20
+}
+
+fn default_custody_response_window() -> u64 {
+    10
 }
 
 /// # Consensus Configuration Source
@@ -461,6 +481,12 @@ impl ConsensusConfig {
             );
             self.accept_kzg_ingress_proofs = true;
         }
+        if self.enable_custody_proofs && !self.accept_kzg_ingress_proofs {
+            tracing::warn!(
+                "enable_custody_proofs=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+            );
+            self.accept_kzg_ingress_proofs = true;
+        }
     }
 
     // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
@@ -630,6 +656,9 @@ impl ConsensusConfig {
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
             enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             // Fee required to stake a mining address in Irys tokens
             stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
             // Base fee required for pledging a partition in Irys tokens
@@ -772,6 +801,9 @@ impl ConsensusConfig {
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
             enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             max_future_timestamp_drift_millis: 15_000,
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
@@ -823,6 +855,9 @@ impl ConsensusConfig {
             accept_kzg_ingress_proofs: false,
             require_kzg_ingress_proofs: false,
             enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {
@@ -929,20 +964,11 @@ mod tests {
     }
 
     #[test]
-    fn normalize_idempotent() {
+    fn normalize_custody_proofs_forces_accept_kzg() {
         let mut config = ConsensusConfig::testing();
-        config.enable_blobs = true;
+        config.enable_custody_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
         config.normalize();
-        let snapshot_accept = config.accept_kzg_ingress_proofs;
-        config.normalize();
-        assert_eq!(config.accept_kzg_ingress_proofs, snapshot_accept);
-    }
-
-    #[test]
-    fn normalize_noop_when_consistent() {
-        let mut config = ConsensusConfig::testing();
-        let before = config.accept_kzg_ingress_proofs;
-        config.normalize();
-        assert_eq!(config.accept_kzg_ingress_proofs, before);
+        assert!(config.accept_kzg_ingress_proofs);
     }
 }

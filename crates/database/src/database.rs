@@ -4,14 +4,16 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
+    CompactPerChunkCommitment, IngressProofs, IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders,
+    IrysPoAChunks, Metadata, PeerListItems, PerChunkKzgCommitments,
 };
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
+use irys_types::kzg::{KzgCommitmentBytes, PerChunkCommitment};
 use irys_types::{
     BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
@@ -533,6 +535,37 @@ pub fn get_peer_id<T: DbTx>(tx: &T) -> Result<Option<IrysPeerId>, DatabaseError>
 pub fn set_peer_id<T: DbTxMut>(tx: &T, peer_id: IrysPeerId) -> Result<(), DatabaseError> {
     let bytes: [u8; 20] = peer_id.into();
     tx.put::<Metadata>(MetadataKey::PeerId, bytes.to_vec())
+}
+
+/// Store per-chunk KZG commitments for a data_root during V2 ingress proof generation.
+pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    commitments: &[(u32, KzgCommitmentBytes)],
+) -> eyre::Result<()> {
+    for &(chunk_index, commitment) in commitments {
+        tx.put::<PerChunkKzgCommitments>(
+            data_root,
+            CompactPerChunkCommitment(PerChunkCommitment {
+                chunk_index,
+                commitment,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Retrieve a single per-chunk KZG commitment by data_root and chunk_index.
+pub fn get_per_chunk_kzg_commitment<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    chunk_index: u32,
+) -> eyre::Result<Option<KzgCommitmentBytes>> {
+    let mut cursor = tx.cursor_dup_read::<PerChunkKzgCommitments>()?;
+    Ok(cursor
+        .seek_by_key_subkey(data_root, chunk_index)?
+        .filter(|e| e.chunk_index == chunk_index)
+        .map(|e| e.commitment))
 }
 
 #[cfg(test)]

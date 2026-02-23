@@ -1393,13 +1393,12 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
-        // Spawn blob extraction service (when blobs are enabled)
         if config.consensus.enable_blobs {
             let blob_store = reth_node_adapter.inner.pool.blob_store().clone();
             BlobExtractionService::spawn_service(
                 blob_store,
-                service_senders.mempool.clone(),
-                Arc::new(config.clone()),
+                service_senders.mempool.clone(), // clone: UnboundedSender is cheaply cloneable
+                config.clone(),                  // clone: Config is Arc-wrapped internally
                 receivers.blob_extraction,
                 runtime_handle.clone(),
             );

@@ -19,20 +19,12 @@ impl Inner {
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
-        // Check proof version is accepted by current config
-        match &ingress_proof {
-            IngressProof::V2(_) if !self.config.consensus.accept_kzg_ingress_proofs => {
-                return Err(IngressProofError::RejectedVersion(
-                    "V2 proofs not accepted (accept_kzg_ingress_proofs = false)".into(),
-                ));
-            }
-            IngressProof::V1(_) if self.config.consensus.require_kzg_ingress_proofs => {
-                return Err(IngressProofError::RejectedVersion(
-                    "V1 proofs rejected (require_kzg_ingress_proofs = true)".into(),
-                ));
-            }
-            _ => {}
-        }
+        ingress_proof
+            .check_version_accepted(
+                self.config.consensus.accept_kzg_ingress_proofs,
+                self.config.consensus.require_kzg_ingress_proofs,
+            )
+            .map_err(|msg| IngressProofError::RejectedVersion(msg.into()))?;
 
         // Validate the proofs signature and basic details
         let data_root_val = ingress_proof.data_root();
@@ -133,8 +125,9 @@ impl Inner {
             }
         };
 
-        let min_anchor_height = latest_height
-            .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64);
+        let min_anchor_height = latest_height.saturating_sub(u64::from(
+            config.consensus.mempool.ingress_proof_anchor_expiry_depth,
+        ));
 
         let too_old = anchor_height < min_anchor_height;
 

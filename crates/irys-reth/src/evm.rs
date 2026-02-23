@@ -1340,7 +1340,6 @@ mod tests {
     /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
-        // Build minimal EVM env with Cancun spec enabled
         let factory = IrysEvmFactory::new(false);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;

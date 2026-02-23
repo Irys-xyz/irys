@@ -6,6 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
+use irys_types::kzg::PerChunkCommitment;
 use irys_types::{Base64, IrysAddress, IrysPeerId, PeerListItemInner};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{
@@ -85,6 +86,7 @@ add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata)
 add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
 
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
+add_wrapper_struct!((PerChunkCommitment, CompactPerChunkCommitment));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
@@ -100,6 +102,7 @@ impl_compression_for_compact!(
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof,
+    CompactPerChunkCommitment,
     CompactCommitmentTxMetadata,
     CompactDataTxMetadata
 );
@@ -165,6 +168,14 @@ table CachedChunksIndex {
 table CachedChunks {
     type Key = ChunkPathHash;
     type Value = CachedChunk;
+}
+
+/// Per-chunk KZG commitments stored during V2 ingress proof generation.
+/// Used for custody proof verification (KZG opening proofs).
+table PerChunkKzgCommitments {
+    type Key = DataRoot;
+    type Value = CompactPerChunkCommitment;
+    type SubKey = u32;
 }
 
 /// Indexes ingress proofs by DataRoot and Address
