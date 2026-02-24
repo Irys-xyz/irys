@@ -845,7 +845,6 @@ impl IrysNode {
             tokio::sync::mpsc::channel::<ShutdownReason>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<ShutdownReason>(1);
-        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel::<ShutdownReason>(1);
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
@@ -864,8 +863,6 @@ impl IrysNode {
             genesis_hash,
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
-            vdf_shutdown_sender,
-            vdf_shutdown_receiver,
             reth_handle_receiver,
             service_set_tx,
             irys_node_ctx_tx,
@@ -1073,8 +1070,6 @@ impl IrysNode {
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<ShutdownReason>,
-        vdf_shutdown_sender: mpsc::Sender<ShutdownReason>,
-        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         service_set_sender: oneshot::Sender<ServiceSet>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
@@ -1109,7 +1104,6 @@ impl IrysNode {
                                 &config,
                                 genesis_hash,
                                 reth_shutdown_sender,
-                                vdf_shutdown_receiver,
                                 reth_handle_receiver,
                                 block_index,
                                 latest_block,
@@ -1151,25 +1145,15 @@ impl IrysNode {
                                     Err(_) => error!("API server stop timed out after {API_SERVER_STOP_TIMEOUT:?}"),
                                 }
 
-                                shutdown_reason
                             });
 
                             actix_server.await.unwrap();
-                            let shutdown_reason = server_stop_handle.await.unwrap();
+                            server_stop_handle.await.unwrap();
 
                             match tokio::time::timeout(GOSSIP_STOP_TIMEOUT, gossip_service_handle.stop()).await {
                                 Ok(Ok(())) => info!("Gossip service stopped"),
                                 Ok(Err(e)) => warn!("Gossip service already stopped: {:?}", e),
                                 Err(_) => error!("Gossip service stop timed out after {GOSSIP_STOP_TIMEOUT:?}"),
-                            }
-
-                            // Send shutdown signal - propagate the original cause
-                            let reason = shutdown_reason.unwrap_or_else(|| {
-                                warn!("No shutdown reason received, using default");
-                                ShutdownReason::Signal("unknown".to_string())
-                            });
-                            if let Err(e) = vdf_shutdown_sender.send(reason).await {
-                                warn!("Failed to send VDF shutdown signal: {}", e);
                             }
 
                             debug!("Waiting for VDF thread to finish");
@@ -1312,7 +1296,6 @@ impl IrysNode {
         config: &Config,
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
-        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: BlockIndex,
         latest_block: Arc<IrysBlockHeader>,
@@ -1720,7 +1703,6 @@ impl IrysNode {
         // set up the vdf thread
         let vdf_done_rx = Self::init_vdf_thread(
             &config,
-            vdf_shutdown_receiver,
             receivers.vdf_fast_forward,
             Arc::clone(&is_vdf_mining_enabled),
             latest_block,
@@ -1953,7 +1935,6 @@ impl IrysNode {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         vdf_fast_forward_receiver: UnboundedReceiver<VdfStep>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
@@ -2008,7 +1989,6 @@ impl IrysNode {
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
                     is_vdf_mining_enabled,
-                    vdf_shutdown_receiver,
                     MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
