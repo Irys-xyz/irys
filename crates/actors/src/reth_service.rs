@@ -9,10 +9,7 @@ use reth::{
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
-use tokio::sync::{
-    mpsc::UnboundedReceiver,
-    oneshot,
-};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error, info, Instrument as _};
 
 #[derive(Debug)]
@@ -65,8 +62,9 @@ async fn evm_block_hash_from_block_hash(
 ) -> eyre::Result<B256> {
     debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
-    let irys_header = crate::block_header_lookup::get_block_header(block_tree, db, irys_hash, true)?
-        .ok_or_else(|| eyre!("Block header not found for hash {}", irys_hash))?;
+    let irys_header =
+        crate::block_header_lookup::get_block_header(block_tree, db, irys_hash, true)?
+            .ok_or_else(|| eyre!("Block header not found for hash {}", irys_hash))?;
     debug!(
         block.hash = %irys_hash,
         block.evm_block_hash = %irys_header.evm_block_hash,

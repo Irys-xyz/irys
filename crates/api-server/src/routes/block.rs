@@ -81,25 +81,21 @@ fn get_block_by_hash(
     block_hash: H256,
     with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
-    let irys_header = block_header_lookup::get_block_header(
-        &state.block_tree,
-        &state.db,
-        block_hash,
-        with_poa,
-    )
-    .map_err(|e| {
-        tracing::error!("Error looking up block header: {}", e);
-        ApiError::Internal {
-            err: "DB error".to_string(),
-        }
-    })?
-    .ok_or_else(|| {
-        tracing::warn!("No block header found for hash {}", block_hash);
-        ApiError::ErrNoId {
-            id: block_hash.to_string(),
-            err: "block hash not found".to_string(),
-        }
-    })?;
+    let irys_header =
+        block_header_lookup::get_block_header(&state.block_tree, &state.db, block_hash, with_poa)
+            .map_err(|e| {
+                tracing::error!("Error looking up block header: {}", e);
+                ApiError::Internal {
+                    err: "DB error".to_string(),
+                }
+            })?
+            .ok_or_else(|| {
+                tracing::warn!("No block header found for hash {}", block_hash);
+                ApiError::ErrNoId {
+                    id: block_hash.to_string(),
+                    err: "block hash not found".to_string(),
+                }
+            })?;
 
     let reth_block = match state
         .reth_provider

@@ -147,8 +147,7 @@ impl Inner {
             &self.irys_db,
             tx.anchor(),
             false, /* does not need to be canonical */
-        )
-        {
+        ) {
             Ok(Some(h)) => h,
             // if we don't know about the anchor, we should prune
             // note: this can happen, i.e if we did a block rollback.
@@ -187,16 +186,17 @@ impl Inner {
     /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
-        let current_height = match crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard) {
-            Ok(height) => height,
-            Err(e) => {
-                error!(
+        let current_height =
+            match crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard) {
+                Ok(height) => height,
+                Err(e) => {
+                    error!(
                     "Error getting latest block height from the block tree for anchor expiry: {:?}",
                     &e
                 );
-                return;
-            }
-        };
+                    return;
+                }
+            };
 
         // Uses a snapshot-evaluate-remove pattern. The TOCTOU window between
         // snapshot and removal is benign: the mempool actor processes messages

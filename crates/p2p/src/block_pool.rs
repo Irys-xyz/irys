@@ -1124,9 +1124,7 @@ where
             *block_hash,
             true,
         )
-        .map_err(|db_error| {
-            CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into()
-        })
+        .map_err(|db_error| CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into())
         .map(|block| block.map(Arc::new))
     }
 

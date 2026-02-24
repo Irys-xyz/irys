@@ -45,9 +45,7 @@ pub fn get_anchor_height(
 }
 
 /// Returns the height of the latest block on the canonical chain.
-pub fn get_latest_block_height(
-    block_tree: &BlockTreeReadGuard,
-) -> Result<u64, TxIngressError> {
+pub fn get_latest_block_height(block_tree: &BlockTreeReadGuard) -> Result<u64, TxIngressError> {
     // TODO: `get_canonical_chain` clones the entire canonical chain, we can make do with a ref here
     let canon_chain = block_tree.read().get_canonical_chain();
     let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
@@ -71,10 +69,7 @@ pub fn validate_anchor_for_inclusion(
     let anchor = tx.anchor();
     // ingress proof anchors must be canonical for inclusion
     let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
-        TxIngressError::DatabaseError(format!(
-            "Error getting anchor height for {}: {}",
-            anchor, e
-        ))
+        TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {
         Some(height) => height,
         None => {
@@ -109,10 +104,7 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
 ) -> eyre::Result<bool> {
     let anchor = ingress_proof.anchor;
     let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
-        TxIngressError::DatabaseError(format!(
-            "Error getting anchor height for {}: {}",
-            anchor, e
-        ))
+        TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {
         Some(height) => height,
         None => {
