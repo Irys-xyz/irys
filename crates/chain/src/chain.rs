@@ -266,7 +266,7 @@ impl IrysNodeCtx {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // db_inner dropped here → DatabaseEnv dropped → MDBX lock released
+        // db_inner dropped here -> DatabaseEnv dropped -> MDBX lock released
     }
 
     pub fn get_http_port(&self) -> u16 {
