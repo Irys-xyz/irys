@@ -323,56 +323,13 @@ impl IrysNodeTest<()> {
         let span = self.get_span();
         let _enter = span.enter();
 
-        // Bind listeners ONCE — any bind failure is fatal
         let (cfg, http_listener, gossip_listener) =
             IrysNode::bind_listeners(self.cfg.clone())
                 .expect("Failed to bind TCP listeners");
 
-        // Retry only DB initialization (transient lock contention after stop)
-        const MAX_DB_RETRIES: usize = 10;
-        let mut node = None;
+        let node = IrysNode::new_with_listeners(cfg, http_listener, gossip_listener)
+            .expect("Failed to create IrysNode");
 
-        for attempt in 1..=MAX_DB_RETRIES {
-            match IrysNode::new_with_listeners(
-                cfg.clone(),
-                http_listener.try_clone().expect("Failed to clone HTTP listener"),
-                gossip_listener
-                    .try_clone()
-                    .expect("Failed to clone gossip listener"),
-            ) {
-                Ok(created_node) => {
-                    node = Some(created_node);
-                    break;
-                }
-                Err(err) => {
-                    let err_msg = err.to_string();
-                    let db_not_ready = err_msg.contains("failed to open the database")
-                        || err_msg.contains("unknown error code: 11");
-
-                    if !db_not_ready || attempt == MAX_DB_RETRIES {
-                        panic!(
-                            "Failed to create IrysNode after {} attempts (last error: {})",
-                            attempt, err
-                        );
-                    }
-
-                    tracing::warn!(
-                        attempt,
-                        max_attempts = MAX_DB_RETRIES,
-                        error = %err,
-                        "Node database not ready after stop, retrying"
-                    );
-
-                    sleep(Duration::from_millis((attempt as u64) * 200)).await;
-                }
-            }
-        }
-
-        // Drop originals — the successful node holds its own cloned FDs
-        drop(http_listener);
-        drop(gossip_listener);
-
-        let node = node.expect("node must be set when retry loop exits");
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),

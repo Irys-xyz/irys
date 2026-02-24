@@ -176,6 +176,10 @@ impl IrysNodeCtx {
         info!("stop function called, shutting down due to: {}", reason);
         metrics::record_node_shutdown(reason.as_label());
 
+        // Clone the inner DB Arc so we can wait for all references to drain
+        // after dropping self.
+        let db_inner = Arc::clone(&self.db.0);
+
         // Cancel all subsystems via token (VDF, actor, backfill all observe this)
         self.shutdown_token.cancel();
 
@@ -242,6 +246,25 @@ impl IrysNodeCtx {
         }
 
         self.stop_guard.mark_stopped();
+
+        // Drop self to release our references to all shared state (services,
+        // block pool, gossip handler, etc. — all hold DatabaseProvider clones).
+        drop(self);
+
+        // Wait for all DatabaseProvider clones to be released so the MDBX
+        // file lock is freed before the caller tries to re-open the DB.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&db_inner) > 1 {
+            if Instant::now() > deadline {
+                warn!(
+                    refs = Arc::strong_count(&db_inner),
+                    "DB still has outstanding references after 5s, proceeding"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // db_inner dropped here → DatabaseEnv dropped → MDBX lock released
     }
 
     pub fn get_http_port(&self) -> u16 {
