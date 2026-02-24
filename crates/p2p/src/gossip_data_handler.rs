@@ -1168,9 +1168,10 @@ where
                                 );
                                 self.peer_list.decrease_peer_score_by_peer_id(
                                     &source_peer_id,
-                                    ScoreDecreaseReason::BogusData(
-                                        format!("Failed to seal block: {:?}", e),
-                                    ),
+                                    ScoreDecreaseReason::BogusData(format!(
+                                        "Failed to seal block: {:?}",
+                                        e
+                                    )),
                                 );
                             }
                         }
@@ -1238,9 +1239,10 @@ where
                                 Err(e) => {
                                     self.peer_list.decrease_peer_score_by_peer_id(
                                         &body_source_peer,
-                                        ScoreDecreaseReason::BogusData(
-                                            format!("Failed to seal block: {:?}", e),
-                                        ),
+                                        ScoreDecreaseReason::BogusData(format!(
+                                            "Failed to seal block: {:?}",
+                                            e
+                                        )),
                                     );
                                     let error = GossipError::Internal(
                                         InternalGossipError::Unknown(format!(
