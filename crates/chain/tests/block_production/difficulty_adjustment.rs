@@ -120,7 +120,8 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
             commitment_transactions: transactions.all_system_txs().cloned().collect(),
             data_transactions: transactions.all_data_txs().cloned().collect(),
         };
-        let sealed_block = std::sync::Arc::new(SealedBlock::new(block.as_ref().clone(), body)?);
+        let sealed_block =
+            std::sync::Arc::new(SealedBlock::new(Arc::clone(block), body)?);
 
         send_block_to_block_tree(&genesis_node.node_ctx, sealed_block, false).await?;
     }

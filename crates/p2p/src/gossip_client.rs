@@ -13,7 +13,7 @@ use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
     HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
     IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
+    PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use rand::prelude::SliceRandom as _;
@@ -1317,22 +1317,32 @@ impl GossipClient {
         header: Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
-        self.pull_data_from_network(
-            data_request,
-            Some(&header),
-            use_trusted_peers_only,
-            peer_list,
-            |gossip_data| match gossip_data {
-                GossipDataV2::BlockBody(body) => Ok(body),
-                _ => Err(PeerNetworkError::UnexpectedData(format!(
-                    "Expected BlockBody, got {:?}",
-                    gossip_data.data_type_and_id()
-                ))),
-            },
-        )
-        .await
+        let (peer_id, body) = self
+            .pull_data_from_network(
+                data_request,
+                Some(&header),
+                use_trusted_peers_only,
+                peer_list,
+                |gossip_data| match gossip_data {
+                    GossipDataV2::BlockBody(body) => Ok(Arc::unwrap_or_clone(body)),
+                    _ => Err(PeerNetworkError::UnexpectedData(format!(
+                        "Expected BlockBody, got {:?}",
+                        gossip_data.data_type_and_id()
+                    ))),
+                },
+            )
+            .await?;
+
+        let sealed =
+            SealedBlock::new(Arc::clone(&header), body).map_err(|e| {
+                PeerNetworkError::InvalidBlockBody {
+                    peer_id,
+                    reason: format!("{e:?}"),
+                }
+            })?;
+        Ok((peer_id, sealed))
     }
 
     /// Pull a block body from a specific peer, updating its score accordingly.
@@ -1341,7 +1351,7 @@ impl GossipClient {
         header: &IrysBlockHeader,
         peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
         for attempt in 0..2 {
             match self
@@ -1350,7 +1360,14 @@ impl GossipClient {
             {
                 Ok(response) => match response {
                     GossipResponse::Accepted(Some(data)) => match data {
-                        GossipDataV2::BlockBody(body) => return Ok((peer.0, body)),
+                        GossipDataV2::BlockBody(body) => {
+                            let sealed = SealedBlock::new(header.clone(), Arc::unwrap_or_clone(body))
+                                .map_err(|e| PeerNetworkError::InvalidBlockBody {
+                                    peer_id: peer.0,
+                                    reason: format!("{e:?}"),
+                                })?;
+                            return Ok((peer.0, sealed));
+                        }
                         _ => {
                             return Err(PeerNetworkError::UnexpectedData(format!(
                                 "Expected BlockBody, got {:?}",

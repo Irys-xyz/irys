@@ -23,7 +23,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, H256};
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
@@ -641,18 +641,21 @@ where
             data_source_ip.ip(),
         );
 
-        self.validate_block_body_transaction_ids(&block_body, &block_header, &source_peer_id)?;
-
         // Record block in cache
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
-        let sealed_block = SealedBlock::new((*block_header).clone(), block_body).map_err(|e| {
-            GossipError::Internal(InternalGossipError::Unknown(format!(
-                "Failed to create SealedBlock: {:?}",
-                e
-            )))
-        })?;
+        let sealed_block =
+            SealedBlock::new(Arc::clone(&block_header), block_body).map_err(|e| {
+                self.peer_list.decrease_peer_score_by_peer_id(
+                    &source_peer_id,
+                    ScoreDecreaseReason::BogusData(format!("{e:?}")),
+                );
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "Failed to create SealedBlock: {:?}",
+                    e
+                )))
+            })?;
 
         self.block_pool
             .process_block(Arc::new(sealed_block), skip_block_validation)
@@ -1019,39 +1022,6 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip)
     }
 
-    fn validate_block_body_transaction_ids(
-        &self,
-        block_body: &BlockBody,
-        block_header: &IrysBlockHeader,
-        source_peer_id: &IrysPeerId,
-    ) -> GossipResult<()> {
-        match block_body.tx_ids_match_the_header(block_header) {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                warn!(
-                    "Node {}: Block {} height {} has mismatching transactions between header and body",
-                    self.gossip_client.mining_address, block_header.block_hash, block_header.height
-                );
-
-                self.peer_list.decrease_peer_score_by_peer_id(
-                    source_peer_id,
-                    ScoreDecreaseReason::BogusData(
-                        "Mismatching transactions between header and body".into(),
-                    ),
-                );
-                Err(GossipError::InvalidData(
-                    InvalidDataError::BlockBodyTransactionsMismatch,
-                ))
-            }
-            Err(err) => Err(GossipError::Internal(InternalGossipError::Unknown(
-                format!(
-                    "Error when comparing block body transactions with header for block {}: {}",
-                    block_header.block_hash, err
-                ),
-            ))),
-        }
-    }
-
     /// Fetches a block header from the network with retries, validating the signature on each attempt.
     async fn fetch_header_with_retries(
         &self,
@@ -1152,49 +1122,22 @@ where
             .pull_block_body_from_peer(header, &source_peer, &self.peer_list)
             .await
         {
-            Ok((_peer_id, irys_block_body)) => {
-                match irys_block_body.tx_ids_match_the_header(header) {
-                    Ok(true) => {
-                        debug!(
-                            "Fetched block body for block {} height {} from source peer {}",
-                            block_hash, header.height, source_peer_id
-                        );
-                        match SealedBlock::new(header.clone(), (*irys_block_body).clone()) {
-                            Ok(sealed_block) => return Some(sealed_block),
-                            Err(e) => {
-                                warn!(
-                                    "Failed to create SealedBlock from source peer {} for block {} height {}: {:?}",
-                                    source_peer_id, block_hash, header.height, e
-                                );
-                                self.peer_list.decrease_peer_score_by_peer_id(
-                                    &source_peer_id,
-                                    ScoreDecreaseReason::BogusData(format!(
-                                        "Failed to seal block: {:?}",
-                                        e
-                                    )),
-                                );
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        warn!(
-                            "Source peer {} served mismatching block body for block {} height {}",
-                            source_peer_id, block_hash, header.height
-                        );
-                        self.peer_list.decrease_peer_score_by_peer_id(
-                            &source_peer_id,
-                            ScoreDecreaseReason::BogusData(
-                                "Mismatching transactions between header and body".into(),
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error checking block body from source peer {} for block {} height {}: {}",
-                            source_peer_id, block_hash, header.height, e
-                        );
-                    }
-                }
+            Ok((_peer_id, sealed_block)) => {
+                debug!(
+                    "Fetched block body for block {} height {} from source peer {}",
+                    block_hash, header.height, source_peer_id
+                );
+                return Some(sealed_block);
+            }
+            Err(PeerNetworkError::InvalidBlockBody { peer_id, reason }) => {
+                warn!(
+                    "Source peer {} served invalid block body for block {} height {}: {}",
+                    peer_id, block_hash, header.height, reason
+                );
+                self.peer_list.decrease_peer_score_by_peer_id(
+                    &peer_id,
+                    ScoreDecreaseReason::BogusData(reason),
+                );
             }
             Err(e) => {
                 debug!(
@@ -1227,67 +1170,24 @@ where
                 )
                 .await
             {
-                Ok((body_source_peer, irys_block_body)) => {
-                    match irys_block_body.tx_ids_match_the_header(header) {
-                        Ok(true) => {
-                            debug!(
-                                "Fetched block body for block {} height {} from peer {:?}",
-                                block_hash, header.height, body_source_peer
-                            );
-                            match SealedBlock::new(header.clone(), (*irys_block_body).clone()) {
-                                Ok(sealed_block) => return Ok(sealed_block),
-                                Err(e) => {
-                                    self.peer_list.decrease_peer_score_by_peer_id(
-                                        &body_source_peer,
-                                        ScoreDecreaseReason::BogusData(format!(
-                                            "Failed to seal block: {:?}",
-                                            e
-                                        )),
-                                    );
-                                    let error = GossipError::Internal(
-                                        InternalGossipError::Unknown(format!(
-                                            "Failed to create SealedBlock from peer {:?}: {:?}",
-                                            body_source_peer, e
-                                        )),
-                                    );
-                                    failed_attempts.push((Some(body_source_peer), error));
-                                    continue;
-                                }
-                            }
-                        }
-                        Ok(false) => {
-                            warn!(
-                                "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
-                                self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
-                            );
-
-                            let error = GossipError::InvalidData(
-                                InvalidDataError::BlockBodyTransactionsMismatch,
-                            );
-                            self.peer_list.decrease_peer_score_by_peer_id(
-                                &body_source_peer,
-                                ScoreDecreaseReason::BogusData(
-                                    "Mismatching transactions between header and body".into(),
-                                ),
-                            );
-                            debug!(
-                                "Penalized peer {} for serving bad block body",
-                                body_source_peer
-                            );
-
-                            failed_attempts.push((Some(body_source_peer), error));
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Node {}: Error checking if block body matches header for block {} height {}: {} (attempt {}/{})",
-                                self.gossip_client.mining_address, block_hash, header.height, e, attempt, HEADER_AND_BODY_RETRIES
-                            );
-                            let error = GossipError::Internal(InternalGossipError::Unknown(
-                                format!("Error checking block body match: {}", e),
-                            ));
-                            failed_attempts.push((Some(body_source_peer), error));
-                        }
-                    }
+                Ok((body_source_peer, sealed_block)) => {
+                    debug!(
+                        "Fetched block body for block {} height {} from peer {:?}",
+                        block_hash, header.height, body_source_peer
+                    );
+                    return Ok(sealed_block);
+                }
+                Err(PeerNetworkError::InvalidBlockBody { peer_id, reason }) => {
+                    warn!(
+                        "Node {}: Peer {} served invalid block body for block {} height {} (attempt {}/{}): {}",
+                        self.gossip_client.mining_address, peer_id, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES, reason
+                    );
+                    self.peer_list.decrease_peer_score_by_peer_id(
+                        &peer_id,
+                        ScoreDecreaseReason::BogusData(reason.clone()),
+                    );
+                    let error = GossipError::Internal(InternalGossipError::Unknown(reason));
+                    failed_attempts.push((Some(peer_id), error));
                 }
                 Err(e) => {
                     let error = GossipError::from(e);
