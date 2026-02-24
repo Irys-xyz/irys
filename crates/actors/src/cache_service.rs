@@ -1,7 +1,7 @@
-use crate::ingress_proofs::{
+use crate::chunk_ingress_service::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
-use crate::mempool_service::Inner;
+use crate::chunk_ingress_service::ChunkIngressServiceInner;
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
@@ -500,7 +500,7 @@ impl InnerCacheTask {
                 continue;
             };
 
-            let check_result = Inner::is_ingress_proof_expired_static(
+            let check_result = ChunkIngressServiceInner::is_ingress_proof_expired_static(
                 &self.block_tree_guard,
                 &self.db,
                 &self.config,
@@ -550,7 +550,7 @@ impl InnerCacheTask {
         // Delete expired proofs using a proper removal function
         if !to_delete.is_empty() {
             for root in to_delete.iter() {
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
+                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof(&self.db, *root) {
                     warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -583,7 +583,9 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                if let Err(e) =
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                {
                     warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -611,7 +613,9 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Regeneration disabled, removing ingress proof for data root"
                 );
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                if let Err(e) =
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                {
                     warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }

@@ -105,3 +105,7 @@ Never add "Co-Authored-By" lines to commit messages.
 - `rstest` for parameterized tests, `proptest` for property-based tests
 - Failure tracking: `cargo xtask test` records failures to `target/nextest-failure-tracking/failures.json`
 - Crypto crates (`irys-vdf`, `irys-packing`, `irys-c`, `sha2`, `openssl`) are always compiled with `opt-level = 3`, even in dev builds
+
+### Local changes
+
+NOTE: all the above instructions can be overridden and added to as instructed in `./.claude/local/CLAUDE.md` - if it exists, read it and follow any listed instructions before continuing.
