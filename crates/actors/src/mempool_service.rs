@@ -31,7 +31,7 @@ use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, Traced, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -307,6 +307,10 @@ impl Inner {
             MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "api"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -315,6 +319,10 @@ impl Inner {
             MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "gossip"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -359,13 +367,25 @@ impl Inner {
                 };
             }
             MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                let response_value = self
+                    .handle_data_tx_ingress_message_api(tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "api"
+                    ))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
             MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                let response_value = self
+                    .handle_data_tx_ingress_message_gossip(tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "gossip"
+                    ))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
@@ -2594,8 +2614,6 @@ impl AtomicMempoolState {
         hash_map
     }
 
-    // --- Batch methods for reduced lock contention ---
-
     /// Batch lookup data transactions from mempool in a single READ lock.
     pub async fn batch_valid_submit_ledger_tx_cloned(
         &self,
@@ -2933,8 +2951,8 @@ pub struct MempoolTxs {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    msg_rx: UnboundedReceiver<Traced<MempoolServiceMessage>>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
     inner: Arc<Inner>,
 }
 
@@ -2950,7 +2968,7 @@ impl MempoolService {
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessage>,
+        rx: UnboundedReceiver<Traced<MempoolServiceMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -3028,21 +3046,19 @@ impl MempoolService {
         loop {
             tokio::select! {
                 // Handle regular mempool messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            // Create a new span for each message at process time (not send time)
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let span = tracing::info_span!("mempool_handle_message", msg_type = %msg_type);
+                            let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
 
-                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
                                     let inner = Arc::clone(&self.inner);
-                                    // Permit acquired immediately
                                     runtime_handle.spawn(async move {
-                                        let _permit = permit; // Hold until task completes
+                                        let _permit = permit;
                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                         if let Err(err) = wait_with_progress(
                                             inner.handle_message(msg),
@@ -3063,16 +3079,14 @@ impl MempoolService {
                                             warn!("Mempool message handler semaphore at capacity, waiting for permit");
                                         }
                                     }
-                                    // No permits available, will wait
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    // Wait a minute before crashing out
                                     match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
                                         Ok(permit_result) => {
                                             match permit_result {
                                                 Ok(permit) => {
                                                     runtime_handle.spawn(async move {
-                                                        let _permit = permit; // Hold until task completes
+                                                        let _permit = permit;
                                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
@@ -3121,9 +3135,9 @@ impl MempoolService {
 
         // Process remaining messages with timeout
         let process_remaining = async {
-            while let Ok(msg) = self.msg_rx.try_recv() {
-                let span =
-                    tracing::info_span!("mempool_handle_message", msg_type = %msg.variant_name());
+            while let Ok(traced) = self.msg_rx.try_recv() {
+                let (msg, parent_span) = traced.into_parts();
+                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg.variant_name());
                 self.inner.handle_message(msg).instrument(span).await?;
             }
             Ok::<(), eyre::Error>(())

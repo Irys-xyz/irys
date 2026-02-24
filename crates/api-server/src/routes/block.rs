@@ -7,7 +7,7 @@ use actix_web::{
 use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
+use irys_types::{CombinedBlockHeader, ExecutionHeader, SendTraced as _, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
@@ -37,7 +37,6 @@ pub async fn get_block(
         err: String::from("Invalid block tag"),
     })?;
 
-    // all roads lead to block hash
     let block_hash: H256 = match tag_param {
         BlockParam::Latest => state.block_tree.read().tip,
         BlockParam::BlockHeight(height) => 'outer: {
@@ -86,7 +85,7 @@ async fn get_block_by_hash(
         let (tx, rx) = oneshot::channel();
         state
             .mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(
+            .send_traced(MempoolServiceMessage::GetBlockHeader(
                 block_hash, with_poa, tx,
             ))
             .expect("expected send to mempool to succeed");

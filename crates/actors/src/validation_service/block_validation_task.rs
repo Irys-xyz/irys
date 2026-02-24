@@ -50,6 +50,7 @@ pub(super) struct BlockValidationTask {
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
+    pub parent_span: tracing::Span,
 }
 
 impl PartialEq for BlockValidationTask {
@@ -89,17 +90,19 @@ impl BlockValidationTask {
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         skip_vdf_validation: bool,
+        parent_span: tracing::Span,
     ) -> Self {
         Self {
             sealed_block,
             service_inner,
             block_tree_guard,
             skip_vdf_validation,
+            parent_span,
         }
     }
 
     /// Execute the concurrent validation task
-    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
+    #[tracing::instrument(parent = &self.parent_span, skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference

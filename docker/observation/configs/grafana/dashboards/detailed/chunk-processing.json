@@ -200,7 +200,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         }
@@ -314,13 +314,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /v1/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /v1/chunk\"}[$__rate_interval])))",
           "legendFormat": "API p95",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "Gossip p95",
           "refId": "B"
         }
@@ -400,19 +400,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -498,19 +498,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"mempool_handle_message\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -589,19 +589,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"POST /gossip/v2/chunk\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -657,25 +657,25 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.fetch_data_size\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.fetch_data_size\"}[$__rate_interval])))",
           "legendFormat": "fetch_data_size",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.validate_proof\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.validate_proof\"}[$__rate_interval])))",
           "legendFormat": "validate_proof",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
           "legendFormat": "cache_write",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.write_storage_modules\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.write_storage_modules\"}[$__rate_interval])))",
           "legendFormat": "write_storage_modules",
           "refId": "D"
         }
@@ -701,19 +701,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"chunk.cache_write\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -745,19 +745,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -782,19 +782,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"broadcast_data\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -819,7 +819,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(span_metrics_calls_total{job=~\"$node\", span_name=\"gossip.send_to_peer\"}[$__rate_interval]))",
+          "expr": "sum(rate(traces_span_metrics_calls_total{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval]))",
           "legendFormat": "sends/s",
           "refId": "A"
         }
@@ -844,7 +844,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"gossip.send_to_peer\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"send_data_internal\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p95",
           "refId": "A"
         }

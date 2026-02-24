@@ -478,7 +478,8 @@ async fn partition_expiration_and_repacking_test() {
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {
-        while let Some(cmd) = receivers.block_producer.recv().await {
+        while let Some(traced_cmd) = receivers.block_producer.recv().await {
+            let (cmd, _parent_span) = traced_cmd.into_parts();
             if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
                 // Return Ok(None) for the test
                 response

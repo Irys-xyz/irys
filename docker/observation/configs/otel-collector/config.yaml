@@ -21,8 +21,6 @@ connectors:
     histogram:
       explicit:
         buckets: [1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s]
-    dimensions:
-      - name: service.name
     metrics_expiration: 5m
 
 processors:
@@ -36,7 +34,7 @@ exporters:
     endpoints: ["http://elasticsearch:9200"]
     logs_index: irys-logs
     mapping:
-      mode: ecs
+      mode: none
     sending_queue:
       enabled: true
       num_consumers: 10

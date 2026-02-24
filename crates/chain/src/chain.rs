@@ -61,7 +61,8 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
+    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
+    UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -935,7 +936,7 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx))?;
+                .send_traced(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
             let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
@@ -1260,7 +1261,7 @@ impl IrysNode {
         let (peering_tx, peering_rx) = oneshot::channel();
         service_senders
             .reth_service
-            .send(RethServiceMessage::GetPeeringInfo {
+            .send_traced(RethServiceMessage::GetPeeringInfo {
                 response: peering_tx,
             })
             .expect("Reth service channel should be open");
@@ -1386,9 +1387,11 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
-            response: oneshot_tx,
-        }) {
+        if let Err(e) =
+            block_tree_sender.send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+                response: oneshot_tx,
+            })
+        {
             error!(
                 "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
                 e
@@ -1459,7 +1462,7 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .send_traced(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
@@ -1660,7 +1663,7 @@ impl IrysNode {
         let (fcu_tx, fcu_rx) = oneshot::channel();
         service_senders
             .reth_service
-            .send(RethServiceMessage::ForkChoice {
+            .send_traced(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: fcu_markers.head.block_hash,
                     confirmed_hash: fcu_markers.migration_block.block_hash,
@@ -1849,7 +1852,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
-        vdf_fast_forward_receiver: UnboundedReceiver<VdfStep>,
+        vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
@@ -1991,7 +1994,7 @@ impl IrysNode {
         mining_bus: MiningBus,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-        block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
+        block_producer_rx: UnboundedReceiver<Traced<BlockProducerCommand>>,
         reth_provider: NodeProvider,
         block_index: BlockIndex,
         runtime_handle: tokio::runtime::Handle,
@@ -2082,7 +2085,7 @@ impl IrysNode {
         mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-        block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
+        block_discovery_rx: UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
         runtime_handle: Handle,
     ) -> TokioServiceHandle {
         let block_discovery_inner = BlockDiscoveryServiceInner {
@@ -2129,7 +2132,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
-        reth_service: UnboundedSender<RethServiceMessage>,
+        reth_service: UnboundedSender<Traced<RethServiceMessage>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
@@ -2175,7 +2178,7 @@ fn read_latest_block_data(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
-    reth_service: UnboundedSender<RethServiceMessage>,
+    reth_service: UnboundedSender<Traced<RethServiceMessage>>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
     peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
@@ -2188,7 +2191,7 @@ fn init_peer_list_service(
             async move {
                 let (response_tx, response_rx) = oneshot::channel();
 
-                if let Err(send_error) = reth_service.send(RethServiceMessage::ConnectToPeer {
+                if let Err(send_error) = reth_service.send_traced(RethServiceMessage::ConnectToPeer {
                     peer: reth_peer_info,
                     response: response_tx,
                 }) {
@@ -2229,8 +2232,8 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
-    reth_rx: UnboundedReceiver<RethServiceMessage>,
+    mempool_sender: UnboundedSender<Traced<MempoolServiceMessage>>,
+    reth_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
     irys_actors::reth_service::RethService::spawn_service(

@@ -16,7 +16,7 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DataLedger, DataRoot, DatabaseProvider, IngressProof, LedgerChunkOffset,
-    TokioServiceHandle, UnixTimestamp, GIGABYTE,
+    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -114,7 +114,7 @@ pub struct InnerCacheTask {
     pub block_tree_guard: BlockTreeReadGuard,
     pub block_index_guard: BlockIndexReadGuard,
     pub config: Config,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
+    pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
     pub cache_sender: CacheServiceSender,
 }
@@ -651,7 +651,7 @@ impl InnerCacheTask {
             // Notify service that pruning finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
-                .send(CacheServiceAction::PruneCompleted(completion))
+                .send_traced(CacheServiceAction::PruneCompleted(completion))
             {
                 warn!(custom.error = ?e, "Failed to notify PruneCompleted");
             }
@@ -678,7 +678,7 @@ impl InnerCacheTask {
             // Notify service that epoch processing finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
-                .send(CacheServiceAction::EpochProcessingCompleted(completion))
+                .send_traced(CacheServiceAction::EpochProcessingCompleted(completion))
             {
                 warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
             }
@@ -686,11 +686,11 @@ impl InnerCacheTask {
     }
 }
 
-pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
+pub type CacheServiceSender = UnboundedSender<Traced<CacheServiceAction>>;
 
 #[derive(Debug)]
 pub struct ChunkCacheService {
-    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
+    pub msg_rx: UnboundedReceiver<Traced<CacheServiceAction>>,
     pub shutdown: Shutdown,
     pub cache_task: InnerCacheTask,
     // Serialized execution for each task type
@@ -727,9 +727,9 @@ impl ChunkCacheService {
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
         db: DatabaseProvider,
-        rx: UnboundedReceiver<CacheServiceAction>,
+        rx: UnboundedReceiver<Traced<CacheServiceAction>>,
         config: Config,
-        gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
+        gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
         cache_sender: CacheServiceSender,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -783,7 +783,8 @@ impl ChunkCacheService {
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => {
+                        Some(traced) => {
+                            let (msg, _entered) = traced.into_inner();
                             self.on_handle_message(msg);
                         }
                         None => {
@@ -796,7 +797,8 @@ impl ChunkCacheService {
         }
 
         debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, _entered) = traced.into_inner();
             self.on_handle_message(msg);
         }
 
@@ -809,7 +811,6 @@ impl ChunkCacheService {
     /// Handles two message types:
     /// - `OnBlockMigrated`: Triggers cache pruning based on block height
     /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
-    #[tracing::instrument(level = "trace", skip_all)]
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         debug!(
             queue.pruning_running = ?self.pruning_running,

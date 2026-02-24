@@ -17,6 +17,7 @@ actix-web = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry.workspace = true
 opentelemetry.workspace = true
 tracing-actix-web = { version = "0.7", features = ["opentelemetry_0_31"] }
 eyre.workspace = true
