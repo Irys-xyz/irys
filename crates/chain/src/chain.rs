@@ -135,7 +135,6 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
-    backfill_cancel: CancellationToken,
     backfill_complete: Arc<tokio::sync::Notify>,
 }
 
@@ -1821,7 +1820,6 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
-            backfill_cancel,
             backfill_complete,
         };
 
