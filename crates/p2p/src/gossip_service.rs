@@ -26,6 +26,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::Traced;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -104,7 +105,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageV2>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<Traced<GossipBroadcastMessageV2>>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
@@ -127,7 +128,7 @@ impl P2PService {
     pub fn new(
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
-        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+        broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -349,7 +350,7 @@ impl P2PService {
 }
 
 fn spawn_broadcast_task(
-    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+    mut mempool_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
@@ -362,7 +363,8 @@ fn spawn_broadcast_task(
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
-                            Some(broadcast_message) => {
+                            Some(traced) => {
+                                let (broadcast_message, _parent_span) = traced.into_parts();
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
                                 let peer_list = peer_list.clone();

@@ -21,7 +21,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, SealedBlock,
-    SystemLedger, TokioServiceHandle, H256,
+    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -106,7 +106,7 @@ pub enum BlockDiscoveryInternalError {
     #[error("Database error: {0:?}")]
     DatabaseError(eyre::Report),
     #[error("Failed to send message to the BlockDiscovery service: {0}")]
-    SenderError(#[from] SendError<BlockDiscoveryMessage>),
+    SenderError(#[from] SendError<Traced<BlockDiscoveryMessage>>),
     #[error("Failed to receive message from the BlockDiscovery service: {0}")]
     RecvError(#[from] RecvError),
     #[error("Failed to send message to the epoch service: {0}")]
@@ -126,11 +126,11 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct BlockDiscoveryFacadeImpl {
-    sender: mpsc::UnboundedSender<BlockDiscoveryMessage>,
+    sender: mpsc::UnboundedSender<Traced<BlockDiscoveryMessage>>,
 }
 
 impl BlockDiscoveryFacadeImpl {
-    pub fn new(sender: mpsc::UnboundedSender<BlockDiscoveryMessage>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<Traced<BlockDiscoveryMessage>>) -> Self {
         Self { sender }
     }
 }
@@ -144,11 +144,10 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered {
+            .send_traced(BlockDiscoveryMessage::BlockDiscovered {
                 block,
                 skip_vdf,
                 response: Some(tx),
-                span: tracing::Span::current(),
             })
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
@@ -181,7 +180,7 @@ pub struct BlockDiscoveryServiceInner {
 
 pub struct BlockDiscoveryService {
     shutdown: Shutdown,
-    msg_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+    msg_rx: mpsc::UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
     inner: Arc<BlockDiscoveryServiceInner>,
 }
 
@@ -189,7 +188,7 @@ impl BlockDiscoveryService {
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_discovery")]
     pub fn spawn_service(
         inner: Arc<BlockDiscoveryServiceInner>,
-        rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        rx: mpsc::UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block discovery service");
@@ -232,10 +231,11 @@ impl BlockDiscoveryService {
                     break;
                 },
                 // Handle commands
-                cmd = self.msg_rx.recv() => {
-                    match cmd {
-                        Some(cmd) => {
-                            self.handle_message(cmd).await?;
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
+                            self.handle_message(msg, parent_span).await?;
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -251,13 +251,16 @@ impl BlockDiscoveryService {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
+    async fn handle_message(
+        &self,
+        msg: BlockDiscoveryMessage,
+        parent_span: tracing::Span,
+    ) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered {
                 block,
                 skip_vdf,
                 response,
-                span: parent_span,
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
@@ -289,7 +292,6 @@ pub enum BlockDiscoveryMessage {
         block: Arc<SealedBlock>,
         skip_vdf: bool,
         response: Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
-        span: tracing::Span,
     },
 }
 
@@ -339,7 +341,7 @@ impl BlockDiscoveryServiceInner {
         let previous_block_header = {
             let (tx_prev, rx_prev) = oneshot::channel();
             mempool_sender
-                .send(MempoolServiceMessage::GetBlockHeader(
+                .send_traced(MempoolServiceMessage::GetBlockHeader(
                     parent_block_hash,
                     false,
                     tx_prev,
@@ -765,11 +767,10 @@ impl BlockDiscoveryServiceInner {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 let header_for_broadcast = Arc::clone(new_block_header);
                 block_tree_sender
-                    .send(BlockTreeServiceMessage::BlockPreValidated {
+                    .send_traced(BlockTreeServiceMessage::BlockPreValidated {
                         block,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
-                        span: tracing::Span::current(),
                     })
                     .map_err(|channel_error| {
                         BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
@@ -791,7 +792,7 @@ impl BlockDiscoveryServiceInner {
                 // Send the block to the gossip bus
                 tracing::trace!("sending block to bus: block height {:?}", &block_height);
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessageV2::from(header_for_broadcast))
+                    gossip_sender.send_traced(GossipBroadcastMessageV2::from(header_for_broadcast))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",

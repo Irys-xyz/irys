@@ -5,7 +5,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_types::{CommitmentTransaction, UnixTimestamp, VersionDiscriminant as _};
+use irys_types::{CommitmentTransaction, SendTraced as _, UnixTimestamp, VersionDiscriminant as _};
 
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
@@ -40,10 +40,9 @@ async fn process_commitment_transaction(
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg =
-        MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx, tracing::Span::current());
+    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx);
 
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+    if let Err(err) = state.mempool_service.send_traced(tx_ingress_msg) {
         tracing::error!(
             "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {}",
             err

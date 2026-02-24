@@ -24,7 +24,8 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, TokioServiceHandle,
+    app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, SendTraced as _,
+    TokioServiceHandle, Traced,
 };
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
@@ -57,7 +58,6 @@ pub enum ValidationServiceMessage {
     ValidateBlock {
         block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
-        span: tracing::Span,
     },
 }
 
@@ -66,7 +66,7 @@ pub struct ValidationService {
     /// Graceful shutdown handle
     shutdown: Shutdown,
     /// Message receiver
-    msg_rx: UnboundedReceiver<ValidationServiceMessage>,
+    msg_rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
     /// VDF task completion notifier
@@ -116,7 +116,7 @@ impl ValidationService {
         reth_node_adapter: IrysRethNodeAdapter,
         db: DatabaseProvider,
         execution_payload_provider: ExecutionPayloadCache,
-        rx: UnboundedReceiver<ValidationServiceMessage>,
+        rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
         chain_sync_state: ChainSyncState,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
@@ -205,13 +205,14 @@ impl ValidationService {
                 }
 
                 // Receive new validation messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(ValidationServiceMessage::ValidateBlock {
-                            block,
-                            skip_vdf_validation,
-                            span: parent_span,
-                        }) => {
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (ValidationServiceMessage::ValidateBlock {
+                                block,
+                                skip_vdf_validation,
+                            }, parent_span) = traced.into_parts();
+
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
                                 Arc::clone(&self.inner),
@@ -254,11 +255,10 @@ impl ValidationService {
                                     "VDF validation failed"
                                 );
                                 // Send failure to block tree
-                                if let Err(e) = self.inner.service_senders.block_tree.send(
+                                if let Err(e) = self.inner.service_senders.block_tree.send_traced(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
-                                        span: tracing::Span::current(),
                                     }
                                 ) {
                                     error!(
@@ -280,12 +280,10 @@ impl ValidationService {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
 
-                            // Send the validation result to the block tree service
-                            if let Err(e) = self.inner.service_senders.block_tree.send(
+                            if let Err(e) = self.inner.service_senders.block_tree.send_traced(
                                 crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                     block_hash: validation.block_hash,
                                     validation_result: validation.validation_result,
-                                    span: tracing::Span::current(),
                                 }
                             ) {
                                 error!(
@@ -308,7 +306,7 @@ impl ValidationService {
                                 message
                             );
                             if let Some(hash) = removed {
-                                if let Err(send_err) = self.inner.service_senders.block_tree.send(
+                                if let Err(send_err) = self.inner.service_senders.block_tree.send_traced(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(
@@ -317,7 +315,6 @@ impl ValidationService {
                                                 details: e.to_string(),
                                             },
                                         ),
-                                        span: tracing::Span::current(),
                                     }
                                 ) {
                                     error!(

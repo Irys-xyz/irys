@@ -14,8 +14,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
-    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, UnixTimestampMs, H256,
-    U256,
+    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, SendTraced as _,
+    UnixTimestampMs, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
@@ -512,10 +512,9 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+        .send_traced(MempoolServiceMessage::IngestDataTxFromGossip(
             old_data_tx.header.clone(),
             tx,
-            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
@@ -527,10 +526,9 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+        .send_traced(MempoolServiceMessage::IngestCommitmentTxFromGossip(
             commitment_tx_old.clone(),
             tx,
-            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests

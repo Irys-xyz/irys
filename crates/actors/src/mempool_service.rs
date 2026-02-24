@@ -31,7 +31,7 @@ use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, Traced, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -209,13 +209,11 @@ pub enum MempoolServiceMessage {
     IngestCommitmentTxFromApi(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
-        tracing::Span,
     ),
     /// Ingress CommitmentTransaction into the mempool (from Gossip)
     IngestCommitmentTxFromGossip(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
-        tracing::Span,
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
@@ -223,13 +221,11 @@ pub enum MempoolServiceMessage {
     IngestDataTxFromApi(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
-        tracing::Span,
     ),
     /// validate and process an incoming DataTransactionHeader (from Gossip)
     IngestDataTxFromGossip(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
-        tracing::Span,
     ),
     /// Return filtered list of candidate txns for the provided Irys block hash
     GetBestMempoolTxs(BlockHash, oneshot::Sender<eyre::Result<MempoolTxs>>),
@@ -266,11 +262,11 @@ impl MempoolServiceMessage {
         match self {
             Self::BlockConfirmed(_) => "BlockConfirmed",
             Self::CommitmentTxExists(_, _) => "CommitmentTxExists",
-            Self::IngestCommitmentTxFromApi(_, _, _) => "IngestCommitmentTxFromApi",
-            Self::IngestCommitmentTxFromGossip(_, _, _) => "IngestCommitmentTxFromGossip",
+            Self::IngestCommitmentTxFromApi(_, _) => "IngestCommitmentTxFromApi",
+            Self::IngestCommitmentTxFromGossip(_, _) => "IngestCommitmentTxFromGossip",
             Self::DataTxExists(_, _) => "DataTxExists",
-            Self::IngestDataTxFromApi(_, _, _) => "IngestDataTxFromApi",
-            Self::IngestDataTxFromGossip(_, _, _) => "IngestDataTxFromGossip",
+            Self::IngestDataTxFromApi(_, _) => "IngestDataTxFromApi",
+            Self::IngestDataTxFromGossip(_, _) => "IngestDataTxFromGossip",
             Self::GetBestMempoolTxs(_, _) => "GetBestMempoolTxs",
             Self::GetCommitmentTxs { .. } => "GetCommitmentTxs",
             Self::GetDataTxs(_, _) => "GetDataTxs",
@@ -308,27 +304,25 @@ impl Inner {
                     );
                 }
             }
-            MempoolServiceMessage::IngestCommitmentTxFromApi(
-                commitment_tx,
-                response,
-                parent_span,
-            ) => {
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_api(commitment_tx)
-                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_commitment_tx", source = "api"))
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "api"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestCommitmentTxFromGossip(
-                commitment_tx,
-                response,
-                parent_span,
-            ) => {
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_gossip(commitment_tx)
-                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_commitment_tx", source = "gossip"))
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "gossip"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -372,19 +366,25 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestDataTxFromApi(tx, response, parent_span) => {
+            MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
                 let response_value = self
                     .handle_data_tx_ingress_message_api(tx)
-                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_data_tx", source = "api"))
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "api"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::IngestDataTxFromGossip(tx, response, parent_span) => {
+            MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
                 let response_value = self
                     .handle_data_tx_ingress_message_gossip(tx)
-                    .instrument(tracing::info_span!(parent: &parent_span, "mempool.ingest_data_tx", source = "gossip"))
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "gossip"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -2951,8 +2951,8 @@ pub struct MempoolTxs {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    msg_rx: UnboundedReceiver<Traced<MempoolServiceMessage>>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
     inner: Arc<Inner>,
 }
 
@@ -2968,7 +2968,7 @@ impl MempoolService {
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessage>,
+        rx: UnboundedReceiver<Traced<MempoolServiceMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -3046,21 +3046,19 @@ impl MempoolService {
         loop {
             tokio::select! {
                 // Handle regular mempool messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            // Create a new span for each message at process time (not send time)
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let span = tracing::info_span!("mempool_handle_message", msg_type = %msg_type);
+                            let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
 
-                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
                                     let inner = Arc::clone(&self.inner);
-                                    // Permit acquired immediately
                                     runtime_handle.spawn(async move {
-                                        let _permit = permit; // Hold until task completes
+                                        let _permit = permit;
                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                         if let Err(err) = wait_with_progress(
                                             inner.handle_message(msg),
@@ -3081,16 +3079,14 @@ impl MempoolService {
                                             warn!("Mempool message handler semaphore at capacity, waiting for permit");
                                         }
                                     }
-                                    // No permits available, will wait
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    // Wait a minute before crashing out
                                     match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
                                         Ok(permit_result) => {
                                             match permit_result {
                                                 Ok(permit) => {
                                                     runtime_handle.spawn(async move {
-                                                        let _permit = permit; // Hold until task completes
+                                                        let _permit = permit;
                                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
@@ -3139,9 +3135,9 @@ impl MempoolService {
 
         // Process remaining messages with timeout
         let process_remaining = async {
-            while let Ok(msg) = self.msg_rx.try_recv() {
-                let span =
-                    tracing::info_span!("mempool_handle_message", msg_type = %msg.variant_name());
+            while let Ok(traced) = self.msg_rx.try_recv() {
+                let (msg, parent_span) = traced.into_parts();
+                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg.variant_name());
                 self.inner.handle_message(msg).instrument(span).await?;
             }
             Ok::<(), eyre::Error>(())

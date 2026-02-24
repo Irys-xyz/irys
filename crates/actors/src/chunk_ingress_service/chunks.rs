@@ -16,7 +16,7 @@ use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, H256,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, H256,
 };
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -476,7 +476,7 @@ impl ChunkIngressServiceInner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!(
                 "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",

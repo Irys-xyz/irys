@@ -9,6 +9,7 @@ use irys_actors::MempoolServiceMessage;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_testing_utils::initialize_tracing;
 use irys_types::ingress::generate_ingress_proof;
+use irys_types::SendTraced as _;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
@@ -339,10 +340,9 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+        .send_traced(MempoolServiceMessage::IngestDataTxFromGossip(
             data_tx.header.clone(),
             tx,
-            tracing::Span::current(),
         ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests

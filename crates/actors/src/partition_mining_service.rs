@@ -15,7 +15,8 @@ use irys_storage::ii;
 use irys_types::{
     block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, u256_from_le_bytes, AtomicVdfStepNumber, Config, H256List,
-    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
+    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, SendTraced as _,
+    TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -336,7 +337,7 @@ impl PartitionMiningServiceInner {
                     solution: s,
                     response: response_tx,
                 };
-                if let Err(err) = self.service_senders.block_producer.send(cmd) {
+                if let Err(err) = self.service_senders.block_producer.send_traced(cmd) {
                     error!(
                         "Error submitting solution to block producer for storage_module {} partition_hash {:?} step {}: {:?}",
                         self.storage_module.id,

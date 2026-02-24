@@ -33,7 +33,7 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger,
     H256,
 };
-use irys_types::{DataLedger, SystemLedger};
+use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(
@@ -43,15 +43,13 @@ pub async fn send_block_to_block_tree(
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-    node_ctx
-        .service_senders
-        .block_tree
-        .send(BlockTreeServiceMessage::BlockPreValidated {
+    node_ctx.service_senders.block_tree.send_traced(
+        BlockTreeServiceMessage::BlockPreValidated {
             block,
             skip_vdf_validation,
             response: response_tx,
-            span: tracing::Span::current(),
-        })?;
+        },
+    )?;
 
     response_rx.await??;
     Ok(())
@@ -64,10 +62,9 @@ fn send_block_to_block_validation(
     node_ctx
         .service_senders
         .validation_service
-        .send(ValidationServiceMessage::ValidateBlock {
+        .send_traced(ValidationServiceMessage::ValidateBlock {
             block,
             skip_vdf_validation: false,
-            span: tracing::Span::current(),
         })
         .unwrap();
     Ok(())

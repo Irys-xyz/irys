@@ -35,8 +35,8 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockBody,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
-    SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger, TokioServiceHandle,
-    UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    SealedBlock as IrysSealedBlock, SendTraced as _, Signature, SystemTransactionLedger,
+    TokioServiceHandle, Traced, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -139,7 +139,7 @@ pub struct BlockProducerService {
     /// Graceful shutdown handle
     shutdown: Shutdown,
     /// Command receiver
-    cmd_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
     /// Inner logic
     inner: Arc<BlockProducerInner>,
     /// Enforces block production limits during testing
@@ -251,7 +251,7 @@ impl BlockProducerService {
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
-        rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!(
@@ -300,7 +300,8 @@ impl BlockProducerService {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(cmd) => {
+                        Some(traced) => {
+                            let (cmd, _parent_span) = traced.into_parts();
                             if self.handle_command(cmd).await? {
                                 break;
                             }
@@ -431,7 +432,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+            .send_traced(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
         match rx.await? {
             Some(header) => Ok(header),
@@ -1255,7 +1256,7 @@ pub trait BlockProdStrategy {
             .inner()
             .service_senders
             .gossip_broadcast
-            .send(execution_payload_gossip_data)
+            .send_traced(execution_payload_gossip_data)
         {
             error!(
                 block.hash = ?block.header().block_hash,
@@ -1438,7 +1439,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
+            .send_traced(MempoolServiceMessage::GetBestMempoolTxs(
                 prev_block_header.block_hash,
                 tx,
             ))

@@ -29,8 +29,8 @@ use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IrysBlockHeader,
     IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle, TxChunkOffset,
-    TxKnownStatus, UnpackedChunk, H256,
+    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _, TokioServiceHandle,
+    Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -48,7 +48,7 @@ use tracing::{debug, info, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+    pub internal_message_bus: mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub mempool_state: AtomicMempoolState,
 }
@@ -56,7 +56,7 @@ pub(crate) struct MempoolStub {
 impl MempoolStub {
     #[must_use]
     pub(crate) fn new(
-        internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+        internal_message_bus: mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
         mempool_state: AtomicMempoolState,
     ) -> Self {
         Self {
@@ -94,7 +94,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipBroadcastMessageV2::from(tx_header))
+                .send_traced(GossipBroadcastMessageV2::from(tx_header))
                 .expect("to send transaction");
         });
 
@@ -188,7 +188,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessageV2>>,
+    pub internal_message_bus: Option<mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
@@ -219,7 +219,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessageV2::from(header))
+                    .send_traced(GossipBroadcastMessageV2::from(header))
                     .expect("to send block");
             });
         }
@@ -250,7 +250,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub service_senders: ServiceSenders,
-    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessageV2>>,
+    pub gossip_receiver: Option<mpsc::UnboundedReceiver<Traced<GossipBroadcastMessageV2>>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
     // needs to be held so the directory is removed correctly
@@ -344,7 +344,8 @@ impl GossipServiceTestFixture {
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
-                    Some(step) => {
+                    Some(traced_step) => {
+                        let (step, _parent_span) = traced_step.into_parts();
                         debug!("Received VDF step: {:?}", step);
                         let state = vdf_state.into_inner_cloned();
                         let mut lock = state.write().unwrap();
@@ -403,7 +404,7 @@ impl GossipServiceTestFixture {
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
-        mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+        mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
@@ -945,12 +946,13 @@ async fn handle_block_index(
 /// If `chunk_store` is `Some`, received chunks are pushed into it.
 /// Replies `Ok(())` on any oneshot channel present in the message.
 fn spawn_test_chunk_ingress_consumer(
-    mut rx: UnboundedReceiver<irys_actors::ChunkIngressMessage>,
+    mut rx: UnboundedReceiver<Traced<irys_actors::ChunkIngressMessage>>,
     chunk_store: Option<Arc<RwLock<Vec<UnpackedChunk>>>>,
 ) {
     tokio::spawn(async move {
         use irys_actors::ChunkIngressMessage;
-        while let Some(message) = rx.recv().await {
+        while let Some(traced) = rx.recv().await {
+            let (message, _parent_span) = traced.into_parts();
             match message {
                 ChunkIngressMessage::IngestChunk(chunk, reply) => {
                     if let Some(ref store) = chunk_store {
