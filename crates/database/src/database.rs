@@ -69,8 +69,8 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             .with_shrink_threshold((100 * MEGABYTE).try_into()?)
             // Cache data is non-authoritative and can be rebuilt from chain state,
             // so trade durability for write throughput by skipping fsync operations.
-            // On crash/corruption: delete the cache DB directory; it will be rebuilt
-            // on next startup from authoritative chain data.
+            // SafeNoSync preserves DB integrity on crash (rolls back to last steady
+            // commit) — only recent uncommitted transactions are lost.
             .with_sync_mode(Some(SyncMode::SafeNoSync)),
     );
     open_or_create_db(path, tables, Some(args))
