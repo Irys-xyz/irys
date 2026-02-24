@@ -379,9 +379,11 @@ const TASK_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
 const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl IrysNode {
-    /// Creates a new node builder instance.
-    pub fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
-        // we create the listener here so we know the port before we start passing around `config`
+    /// Binds HTTP and gossip TCP listeners, updates config with assigned ports.
+    /// Call once, then pass results to [`new_with_listeners()`].
+    pub fn bind_listeners(
+        mut node_config: NodeConfig,
+    ) -> eyre::Result<(NodeConfig, TcpListener, TcpListener)> {
         let http_listener = create_listener(
             format!(
                 "{}:{}",
@@ -398,7 +400,7 @@ impl IrysNode {
                 node_config.gossip.bind_port
             )
             .parse()
-            .expect("A valid HTTP IP & port"),
+            .expect("A valid gossip IP & port"),
         )?;
         let local_addr = http_listener
             .local_addr()
@@ -426,12 +428,18 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        // Get or create peer_id from file
+        Ok((node_config, http_listener, gossip_listener))
+    }
+
+    /// Creates an IrysNode with pre-bound listeners.
+    /// Performs peer_id creation, DB initialization, and config validation.
+    pub fn new_with_listeners(
+        node_config: NodeConfig,
+        http_listener: TcpListener,
+        gossip_listener: TcpListener,
+    ) -> eyre::Result<Self> {
         let peer_id = get_or_create_peer_id(&node_config)?;
-
-        // Initialize database
         let irys_db = init_irys_db(&node_config)?;
-
         let config = Config::new(node_config, peer_id);
         config.validate()?;
 

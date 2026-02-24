@@ -23,7 +23,7 @@ use irys_actors::{
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
-use irys_api_server::{create_listener, routes};
+use irys_api_server::routes;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
@@ -74,7 +74,6 @@ use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{
     future::Future,
@@ -270,16 +269,6 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub fn random_port() -> eyre::Result<u16> {
-    let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
-    //the assigned port will be random (decided by the OS)
-    let port = listener
-        .local_addr()
-        .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-        .port();
-    Ok(port)
-}
-
 // Reasons tx could fail to be added to mempool
 #[derive(Debug, thiserror::Error)]
 pub enum AddTxError {
@@ -330,56 +319,59 @@ impl IrysNodeTest<()> {
     }
 
     #[diag_slow(state = "start".to_string())]
-    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
 
-        const MAX_START_RETRIES: usize = 10;
+        // Bind listeners ONCE — any bind failure is fatal
+        let (cfg, http_listener, gossip_listener) =
+            IrysNode::bind_listeners(self.cfg.clone())
+                .expect("Failed to bind TCP listeners");
+
+        // Retry only DB initialization (transient lock contention after stop)
+        const MAX_DB_RETRIES: usize = 10;
         let mut node = None;
 
-        for attempt in 1..=MAX_START_RETRIES {
-            match IrysNode::new(self.cfg.clone()) {
+        for attempt in 1..=MAX_DB_RETRIES {
+            match IrysNode::new_with_listeners(
+                cfg.clone(),
+                http_listener.try_clone().expect("Failed to clone HTTP listener"),
+                gossip_listener
+                    .try_clone()
+                    .expect("Failed to clone gossip listener"),
+            ) {
                 Ok(created_node) => {
                     node = Some(created_node);
                     break;
                 }
                 Err(err) => {
                     let err_msg = err.to_string();
-                    let address_in_use = err_msg.contains("Address already in use");
                     let db_not_ready = err_msg.contains("failed to open the database")
                         || err_msg.contains("unknown error code: 11");
-                    let should_retry = address_in_use || db_not_ready;
 
-                    if !should_retry || attempt == MAX_START_RETRIES {
+                    if !db_not_ready || attempt == MAX_DB_RETRIES {
                         panic!(
                             "Failed to create IrysNode after {} attempts (last error: {})",
                             attempt, err
                         );
                     }
 
-                    if address_in_use {
-                        tracing::warn!(
-                            attempt,
-                            max_attempts = MAX_START_RETRIES,
-                            "Port still in use after stop, retrying with fresh ports"
-                        );
-                        self.cfg.http.bind_port = 0;
-                        self.cfg.http.public_port = 0;
-                        self.cfg.gossip.bind_port = 0;
-                        self.cfg.gossip.public_port = 0;
-                    } else {
-                        tracing::warn!(
-                            attempt,
-                            max_attempts = MAX_START_RETRIES,
-                            error = %err,
-                            "Node database is not ready after stop, retrying startup"
-                        );
-                    }
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = MAX_DB_RETRIES,
+                        error = %err,
+                        "Node database not ready after stop, retrying"
+                    );
 
                     sleep(Duration::from_millis((attempt as u64) * 200)).await;
                 }
             }
         }
+
+        // Drop originals — the successful node holds its own cloned FDs
+        drop(http_listener);
+        drop(gossip_listener);
+
         let node = node.expect("node must be set when retry loop exits");
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {

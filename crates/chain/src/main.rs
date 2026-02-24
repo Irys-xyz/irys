@@ -54,7 +54,10 @@ async fn main() -> eyre::Result<()> {
 
     // start the node
     info!("starting the node, mode: {:?}", &config.node_mode);
-    let handle = IrysNode::new(config)?.start().await?;
+    let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
+    let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
+        .start()
+        .await?;
     handle.start_mining()?;
 
     // Await reth thread completion asynchronously
