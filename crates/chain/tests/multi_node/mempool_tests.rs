@@ -3,7 +3,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
-use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
+use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::{
@@ -28,7 +28,7 @@ use reth::{
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::oneshot, time::sleep};
+use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[tokio::test]
@@ -449,17 +449,12 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool data tx have appeared back in the mempool after a restart
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let get_tx_msg = MempoolServiceMessage::GetDataTxs(vec![storage_tx.header.id], oneshot_tx);
-    if let Err(err) = restarted_node
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(get_tx_msg)
-    {
-        tracing::error!("error sending message to mempool: {:?}", err);
-    }
-    let data_tx_from_mempool = oneshot_rx.await.expect("expected result");
+    let data_tx_from_mempool = irys_actors::mempool_guard::get_data_txs_best_effort(
+        &restarted_node.node_ctx.mempool_guard,
+        &[storage_tx.header.id],
+        &restarted_node.node_ctx.db,
+    )
+    .await;
     assert!(data_tx_from_mempool
         .first()
         .expect("expected a data tx")
@@ -1171,18 +1166,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     );
 
     let a_blk1_tx1_mempool = {
-        let (tx, rx) = oneshot::channel();
-        a_node
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                vec![a_blk1_tx1.header.id],
-                tx,
-            ))?;
-        let mempool_txs = rx.await?;
-        let a_blk1_tx1_mempool = mempool_txs.first().unwrap().clone().unwrap();
-        a_blk1_tx1_mempool
+        let results = irys_actors::mempool_guard::get_data_txs_best_effort(
+            &a_node.node_ctx.mempool_guard,
+            &[a_blk1_tx1.header.id],
+            &a_node.node_ctx.db,
+        )
+        .await;
+        results.into_iter().next().unwrap().unwrap()
     };
 
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
@@ -1861,24 +1851,13 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // call get best txs from the mempool
 
-    let (tx, rx) = oneshot::channel();
-
     // Get the block hash at height - 1
     let previous_height = peer2.get_canonical_chain_height().await - 1;
     let previous_block_hash = peer2
         .get_block_by_height_from_index(previous_height, false)?
         .block_hash;
 
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(
-            previous_block_hash,
-            tx,
-        ))?;
-
-    let best_previous = rx.await??;
+    let best_previous = peer2.get_best_mempool_tx(previous_block_hash).await?;
     // previous block does not have the fund tx, the tx should not be present
     assert_eq!(
         best_previous.submit_tx.len(),

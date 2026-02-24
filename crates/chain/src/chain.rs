@@ -154,6 +154,7 @@ impl IrysNodeCtx {
             supply_state: self.supply_state_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
+            chunk_ingress_state: self.chunk_ingress_state.clone(),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
         }
@@ -1808,6 +1809,7 @@ impl IrysNode {
                     .expect("Missing reth rpc url!"),
                 sync_state,
                 mempool_pledge_provider,
+                chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
             },

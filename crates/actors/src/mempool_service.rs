@@ -18,11 +18,11 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{get_atomic_file, BlockTreeReadGuard};
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
+use irys_types::CommitmentTypeV2;
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysTransactionCommon, IrysTransactionId,
     NodeConfig, SealedBlock, H256, U256,
 };
-use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
     MempoolConfig,
@@ -32,7 +32,6 @@ use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
-use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
 use std::io::Write as _;
@@ -210,30 +209,14 @@ pub enum MempoolServiceMessage {
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Return filtered list of candidate txns for the provided Irys block hash
-    GetBestMempoolTxs(BlockHash, oneshot::Sender<eyre::Result<MempoolTxs>>),
-    // todo update the test utils to use the read guard instead. Then this can be deleted
-    /// Retrieves a list of CommitmentTransactions based on the provided tx ids
-    GetCommitmentTxs {
-        commitment_tx_ids: Vec<IrysTransactionId>,
-        response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
-    },
-    /// Get DataTransactionHeader from mempool or mdbx
-    GetDataTxs(
-        Vec<IrysTransactionId>,
-        oneshot::Sender<Vec<Option<DataTransactionHeader>>>,
-    ),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<IrysAddress>, oneshot::Sender<()>),
     CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<IrysAddress>>),
-    /// Get overall mempool status and metrics
-    GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
     /// Obtain a read guard with broad access to mempool state.
-    /// Prefer more targeted queries (e.g. `GetBestMempoolTxs`, `GetCommitmentTxs`,
-    /// `GetDataTxs`) when possible, and avoid holding the guard across long‑running
-    /// operations to prevent reducing mempool write throughput.
+    /// Avoid holding the guard across long‑running operations to prevent
+    /// reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
 }
 
@@ -248,14 +231,10 @@ impl MempoolServiceMessage {
             Self::DataTxExists(_, _) => "DataTxExists",
             Self::IngestDataTxFromApi(_, _) => "IngestDataTxFromApi",
             Self::IngestDataTxFromGossip(_, _) => "IngestDataTxFromGossip",
-            Self::GetBestMempoolTxs(_, _) => "GetBestMempoolTxs",
-            Self::GetCommitmentTxs { .. } => "GetCommitmentTxs",
-            Self::GetDataTxs(_, _) => "GetDataTxs",
             Self::GetState(_) => "GetState",
             Self::RemoveFromBlacklist(_, _) => "RemoveFromBlacklist",
             Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
-            Self::GetMempoolStatus(_) => "GetMempoolStatus",
             Self::GetReadGuard(_) => "GetReadGuard",
         }
     }
@@ -266,12 +245,6 @@ impl Inner {
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     pub async fn handle_message(&self, msg: MempoolServiceMessage) -> eyre::Result<()> {
         match msg {
-            MempoolServiceMessage::GetDataTxs(txs, response) => {
-                let response_message = self.handle_get_data_tx_message(txs).await;
-                if let Err(e) = response.send(response_message) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
             MempoolServiceMessage::BlockConfirmed(sealed_block) => {
                 let block_hash = sealed_block.header().block_hash;
                 let block_height = sealed_block.header().height;
@@ -297,32 +270,6 @@ impl Inner {
                     .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                     .await;
                 if let Err(e) = response.send(response_message) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
-            MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
-                let ctx = crate::tx_selector::TxSelectionContext {
-                    block_tree: &self.block_tree_read_guard,
-                    db: &self.irys_db,
-                    reth_adapter: &self.reth_node_adapter,
-                    config: &self.config,
-                    mempool_state: &self.mempool_state,
-                    chunk_ingress_state: &self.chunk_ingress_state,
-                };
-                let response_value = crate::tx_selector::select_best_txs(block_id, &ctx).await;
-                // Return selected transactions grouped by type
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
-            MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids,
-                response,
-            } => {
-                let response_value = self
-                    .handle_get_commitment_tx_message(commitment_tx_ids)
-                    .await;
-                if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
@@ -365,12 +312,6 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::GetMempoolStatus(response) => {
-                let response_value = self.handle_get_mempool_status().await;
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
-            }
             MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
                 self.extend_stake_and_pledge_whitelist(new_entries).await;
                 if let Err(e) = response.send(()) {
@@ -391,14 +332,6 @@ impl Inner {
             }
         }
         Ok(())
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
-        Ok(self
-            .mempool_state
-            .get_status(&self.config.node_config, &self.chunk_ingress_state)
-            .await)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
@@ -914,13 +847,8 @@ impl AtomicMempoolState {
             .cloned()
     }
 
-    pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
-        self.read()
-            .await
-            .valid_submit_ledger_tx
-            .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
+    pub async fn all_valid_submit_ledgers_cloned(&self) -> HashMap<H256, DataTransactionHeader> {
+        self.read().await.valid_submit_ledger_tx.clone()
     }
 
     /// For confirmed blocks, we log warnings but don't fail if mempool is full
@@ -970,7 +898,7 @@ impl AtomicMempoolState {
 
     pub async fn all_valid_commitment_txs_cloned(
         &self,
-    ) -> BTreeMap<IrysAddress, Vec<CommitmentTransaction>> {
+    ) -> HashMap<IrysAddress, Vec<CommitmentTransaction>> {
         self.read().await.valid_commitment_tx.clone()
     }
 
@@ -1152,8 +1080,8 @@ impl AtomicMempoolState {
     pub async fn take_all_valid_txs(
         &self,
     ) -> (
-        BTreeMap<H256, DataTransactionHeader>,
-        BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
+        HashMap<H256, DataTransactionHeader>,
+        HashMap<IrysAddress, Vec<CommitmentTransaction>>,
     ) {
         let mut state = self.write().await;
         state.recent_valid_tx.clear();
@@ -1518,35 +1446,6 @@ impl AtomicMempoolState {
         false
     }
 
-    async fn all_commitment_transactions(&self) -> HashMap<H256, CommitmentTransaction> {
-        let mut hash_map = HashMap::new();
-
-        // first flat_map all the commitment transactions
-        let mempool_state_guard = self.read().await;
-
-        // TODO: what the heck is this, this needs to be optimised at least a little bit
-
-        // Get any CommitmentTransactions from the valid commitments Map
-        mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter())
-            .for_each(|tx| {
-                hash_map.insert(tx.id(), tx.clone());
-            });
-
-        // Get any CommitmentTransactions from the pending commitments LRU cache
-        mempool_state_guard
-            .pending_pledges
-            .iter()
-            .flat_map(|(_, inner)| inner.iter())
-            .for_each(|(tx_id, tx)| {
-                hash_map.insert(*tx_id, tx.clone());
-            });
-
-        hash_map
-    }
-
     // --- Batch methods for reduced lock contention ---
 
     /// Batch lookup data transactions from mempool in a single READ lock.
@@ -1583,10 +1482,10 @@ impl AtomicMempoolState {
 #[derive(Debug)]
 pub struct MempoolState {
     /// bounded map with manual capacity enforcement
-    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
+    pub valid_submit_ledger_tx: HashMap<H256, DataTransactionHeader>,
     pub max_submit_txs: usize,
     /// bounded map with manual capacity enforcement
-    pub valid_commitment_tx: BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
+    pub valid_commitment_tx: HashMap<IrysAddress, Vec<CommitmentTransaction>>,
     pub max_commitment_addresses: usize,
     pub max_commitments_per_address: usize,
     /// The miner's signer instance, used to sign ingress proofs
@@ -1608,9 +1507,9 @@ pub fn create_state(
 ) -> MempoolState {
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
-        valid_submit_ledger_tx: BTreeMap::new(),
+        valid_submit_ledger_tx: HashMap::new(),
         max_submit_txs: config.max_valid_submit_txs,
-        valid_commitment_tx: BTreeMap::new(),
+        valid_commitment_tx: HashMap::new(),
         max_commitment_addresses: config.max_valid_commitment_addresses,
         max_commitments_per_address: config.max_commitments_per_address,
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
@@ -1631,7 +1530,7 @@ impl MempoolState {
         &mut self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        use std::collections::btree_map::Entry;
+        use std::collections::hash_map::Entry;
 
         // If tx already exists we still update it.
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
@@ -1682,11 +1581,15 @@ impl MempoolState {
     }
 
     /// Find lowest fee data transaction for eviction.
-    /// Returns (tx_id, fee) tuple.
+    /// Returns (tx_id, fee) tuple. Ties are broken by tx id for determinism.
     fn find_lowest_fee_data_tx(&self) -> Option<(H256, BoundedFee)> {
         self.valid_submit_ledger_tx
             .iter()
-            .min_by_key(|(_, wrapped_tx)| wrapped_tx.user_fee())
+            .min_by(|(id_a, tx_a), (id_b, tx_b)| {
+                tx_a.user_fee()
+                    .cmp(&tx_b.user_fee())
+                    .then_with(|| id_a.cmp(id_b))
+            })
             .map(|(id, wrapped_tx)| (*id, wrapped_tx.user_fee()))
     }
 
@@ -1774,7 +1677,7 @@ impl MempoolState {
     }
 
     /// Find address with lowest total commitment value for eviction.
-    /// Returns (Address, total_value) tuple.
+    /// Returns (Address, total_value) tuple. Ties are broken by address for determinism.
     fn find_lowest_value_address(&self) -> Option<(IrysAddress, U256)> {
         self.valid_commitment_tx
             .iter()
@@ -1785,7 +1688,9 @@ impl MempoolState {
                     .fold(U256::zero(), irys_types::U256::saturating_add);
                 (*addr, total)
             })
-            .min_by_key(|(_, total)| *total)
+            .min_by(|(addr_a, total_a), (addr_b, total_b)| {
+                total_a.cmp(total_b).then_with(|| addr_a.cmp(addr_b))
+            })
     }
 }
 
@@ -2210,9 +2115,9 @@ mod bounded_mempool_tests {
         max_per_address: usize,
     ) -> MempoolState {
         MempoolState {
-            valid_submit_ledger_tx: BTreeMap::new(),
+            valid_submit_ledger_tx: HashMap::new(),
             max_submit_txs: max_data,
-            valid_commitment_tx: BTreeMap::new(),
+            valid_commitment_tx: HashMap::new(),
             max_commitment_addresses: max_addresses,
             max_commitments_per_address: max_per_address,
             recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),

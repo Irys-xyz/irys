@@ -5,12 +5,10 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
     CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
-    IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, UnixTimestamp,
-    VersionDiscriminant as _, H256,
+    IrysTransactionCommon as _, TxKnownStatus, UnixTimestamp, VersionDiscriminant as _, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
-use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
 impl Inner {
@@ -366,34 +364,6 @@ impl Inner {
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),
         }
-    }
-
-    /// read specified commitment txs from mempool
-    #[instrument(level = "trace", skip_all, name = "get_commitment_tx", fields(tx.count = commitment_tx_ids.len()))]
-    pub async fn handle_get_commitment_tx_message(
-        &self,
-        commitment_tx_ids: Vec<H256>,
-    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
-        let all_commitment_transactions = self.mempool_state.all_commitment_transactions().await;
-
-        debug!(
-            "handle_get_commitment_transactions_message: {:?}",
-            all_commitment_transactions
-                .iter()
-                .map(|x| x.0)
-                .collect::<Vec<_>>()
-        );
-
-        // Attempt to locate and retain only the requested tx_ids
-        let mut filtered_map = HashMap::with_capacity(commitment_tx_ids.len());
-        for txid in commitment_tx_ids {
-            if let Some(tx) = all_commitment_transactions.get(&txid) {
-                filtered_map.insert(txid, tx.clone());
-            }
-        }
-
-        // Return only the transactions matching the requested IDs
-        filtered_map
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id()))]

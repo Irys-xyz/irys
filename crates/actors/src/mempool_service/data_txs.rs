@@ -14,9 +14,8 @@ use irys_types::{
     DataLedger, DataTransactionHeader, IrysTransactionCommon as _, IrysTransactionId, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
-use reth_db::Database as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.
@@ -106,58 +105,6 @@ impl Inner {
         metrics::record_data_tx_ingested();
         Ok(())
     }
-    /// Check the mempool and mdbx for data transactions.
-    /// Uses batch mempool lookup (single READ lock) then falls back to DB for missing txs.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.count = txs.len()))]
-    pub async fn handle_get_data_tx_message(
-        &self,
-        txs: Vec<H256>,
-    ) -> Vec<Option<DataTransactionHeader>> {
-        // Batch mempool lookup: single READ lock for all txids
-        let mempool_results = self
-            .mempool_state
-            .batch_valid_submit_ledger_tx_cloned(&txs)
-            .await;
-
-        let mut found_txs = Vec::with_capacity(txs.len());
-
-        for (tx_id, mempool_result) in txs.iter().zip(mempool_results) {
-            if let Some(tx_header) = mempool_result {
-                trace!("Got tx {} from mempool", tx_id);
-                found_txs.push(Some(tx_header));
-                continue;
-            }
-
-            // Fall back to DB for txs not in mempool
-            let db_result = self
-                .irys_db
-                .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
-                .map_err(|e| {
-                    warn!("Failed to open DB read transaction: {}", e);
-                    e
-                })
-                .ok()
-                .and_then(|result| match result {
-                    Ok(Some(tx_header)) => {
-                        trace!("Got tx {} from DB", tx_id);
-                        Some(tx_header)
-                    }
-                    Ok(None) => {
-                        debug!("Tx {} not found in DB", tx_id);
-                        None
-                    }
-                    Err(e) => {
-                        warn!("DB error reading tx {}: {}", tx_id, e);
-                        None
-                    }
-                });
-
-            found_txs.push(db_result);
-        }
-
-        found_txs
-    }
-
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
     pub async fn handle_data_tx_ingress_message_gossip(
         &self,

@@ -1,7 +1,8 @@
 use crate::mempool_service::AtomicMempoolState;
+use irys_database::{db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
-    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
-    DataTransactionMetadata, IrysTransactionId,
+    app_state::DatabaseProvider, CommitmentTransaction, CommitmentTransactionMetadata,
+    DataTransactionHeader, DataTransactionMetadata, IrysTransactionId,
 };
 use std::collections::HashMap;
 
@@ -103,4 +104,32 @@ impl TxMetadata {
             Self::Data(m) => m.promoted_height,
         }
     }
+}
+
+/// Best-effort fetch: mempool first, DB fallback for missing txs.
+/// Preserves the semantics of the old `GetDataTxs` message handler.
+/// Kept as a free function to avoid mixing DB concerns into `MempoolReadGuard`.
+pub async fn get_data_txs_best_effort(
+    guard: &MempoolReadGuard,
+    tx_ids: &[IrysTransactionId],
+    db: &DatabaseProvider,
+) -> Vec<Option<DataTransactionHeader>> {
+    let mempool_results = guard
+        .atomic_state()
+        .batch_valid_submit_ledger_tx_cloned(tx_ids)
+        .await;
+
+    tx_ids
+        .iter()
+        .zip(mempool_results)
+        .map(|(tx_id, mempool_result)| {
+            mempool_result.or_else(|| {
+                db.view_eyre(|read_tx| {
+                    tx_header_by_txid(read_tx, tx_id).map_err(|e| eyre::eyre!("{:?}", e))
+                })
+                .ok()
+                .flatten()
+            })
+        })
+        .collect()
 }
