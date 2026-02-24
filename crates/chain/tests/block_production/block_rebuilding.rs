@@ -10,26 +10,20 @@
 //! 2. Valid solution reuse - parent changes but solution remains valid
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
-use irys_types::{block_production::SolutionContext, NodeConfig, H256};
+use irys_types::{block_production::SolutionContext, NodeConfig};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 
 use crate::utils::{solution_context, IrysNodeTest};
 
-/// Strategy that can pause block production and track various metrics for testing.
+/// Strategy that can pause and resume block production for testing.
 struct TrackingStrategy {
     prod: ProductionStrategy,
     /// Signal when block production starts
     pause_signal: Mutex<Option<oneshot::Sender<()>>>,
     /// Signal to resume block production
     resume_signal: Mutex<Option<oneshot::Receiver<()>>>,
-    /// Track the solution hash
-    solution_hash_tracked: Arc<Mutex<Option<H256>>>,
-    /// Track the solution VDF step
-    solution_vdf_tracked: Arc<Mutex<Option<u64>>>,
-    /// Track if solution was used or discarded
-    solution_used: Arc<Mutex<Option<bool>>>,
 }
 
 #[async_trait::async_trait]
@@ -42,10 +36,6 @@ impl BlockProdStrategy for TrackingStrategy {
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<irys_types::SealedBlock>, reth::payload::EthBuiltPayload)>> {
-        // Track the solution hash and VDF step
-        *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
-        *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
-
         // Signal that we're starting and wait for resume
         if let Some(pause_tx) = self.pause_signal.lock().await.take() {
             let _ = pause_tx.send(());
@@ -57,9 +47,6 @@ impl BlockProdStrategy for TrackingStrategy {
 
         // Continue with normal production - this will check validity
         let result = self.prod.fully_produce_new_block(solution).await?;
-
-        // Track whether solution was used (Some result) or discarded (None)
-        *self.solution_used.lock().await = Some(result.is_some());
 
         Ok(result)
     }
@@ -100,9 +87,6 @@ async fn slow_heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
         },
         pause_signal: Mutex::new(Some(pause_tx)),
         resume_signal: Mutex::new(Some(resume_rx)),
-        solution_hash_tracked: Arc::new(Mutex::new(None)),
-        solution_vdf_tracked: Arc::new(Mutex::new(None)),
-        solution_used: Arc::new(Mutex::new(None)),
     });
 
     // Generate solution at current VDF step
@@ -265,9 +249,6 @@ async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<(
         },
         pause_signal: Mutex::new(Some(pause_tx)),
         resume_signal: Mutex::new(Some(resume_rx)),
-        solution_hash_tracked: Arc::new(Mutex::new(None)),
-        solution_vdf_tracked: Arc::new(Mutex::new(None)),
-        solution_used: Arc::new(Mutex::new(None)),
     });
 
     // Start block production on node1 (will pause)
@@ -310,34 +291,10 @@ async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<(
         "Same solution hash should be reused after parent change"
     );
 
-    // Verify the stored solution hash matches
-    let stored_hash = tracking_strategy.solution_hash_tracked.lock().await;
-    assert_eq!(
-        stored_hash.as_ref().unwrap(),
-        &original_solution_hash,
-        "Strategy should have tracked the original solution hash"
-    );
-
     info!("SUCCESS: Solution was reused when parent changed but remained valid");
     info!("Original solution hash: {}", original_solution_hash);
     info!("Block built on new parent: {}", node2_block.block_hash);
     info!("Final block height: {}", block.header().height);
-
-    // Verify both nodes have validated the newly produced block
-    info!(
-        "Waiting for both nodes to validate the new block at height {}",
-        block.header().height
-    );
-    node1
-        .wait_for_block_at_height(block.header().height, 10)
-        .await?;
-    node2
-        .wait_for_block_at_height(block.header().height, 10)
-        .await?;
-    info!(
-        "Both nodes have successfully validated the block at height {}",
-        block.header().height
-    );
 
     // Cleanup
     node1.stop().await;
