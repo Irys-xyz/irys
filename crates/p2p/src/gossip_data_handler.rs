@@ -603,6 +603,9 @@ where
         let block_header = match maybe_header {
             Some(header) => header,
             None => {
+                // We use `is_syncing_from_a_trusted_peer()` here as an approximation for
+                // `should_skip_block_validation` because the block height is unknown until we
+                // fetch the header, so `should_skip_block_validation` cannot be evaluated yet.
                 self.fetch_header_with_retries(
                     block_hash,
                     self.sync_state.is_syncing_from_a_trusted_peer(),

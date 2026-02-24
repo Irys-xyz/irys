@@ -26,6 +26,9 @@ use tracing::{debug, error, info, instrument, warn, Instrument as _};
 /// before the sync loop continues.
 const RETRY_BLOCK_VALIDATION_GRACE: Duration = Duration::from_millis(500);
 
+/// Number of retry attempts when fetching a block index from peers.
+const BLOCK_INDEX_RETRIES: usize = 5;
+
 /// Sync service errors
 #[derive(Debug, thiserror::Error)]
 pub enum ChainSyncError {
@@ -653,6 +656,7 @@ struct SyncParams {
     migration_depth: usize,
     sync_mode: SyncMode,
     is_trusted_mode: bool,
+    is_a_genesis_node: bool,
     block_batch_size: usize,
     retry_block_request_timeout_secs: u64,
     wait_queue_slot_timeout_secs: u64,
@@ -667,6 +671,7 @@ impl SyncParams {
             migration_depth: config.consensus.block_migration_depth as usize,
             sync_mode,
             is_trusted_mode: matches!(sync_mode, SyncMode::Trusted),
+            is_a_genesis_node: matches!(config.node_config.node_mode, NodeMode::Genesis),
             block_batch_size: config.node_config.sync.block_batch_size,
             retry_block_request_timeout_secs: config
                 .node_config
@@ -691,7 +696,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
 ) -> ChainSyncResult<()> {
     let gossip_client = &gossip_data_handler.gossip_client;
     let params = SyncParams::from_config(config);
-    let is_a_genesis_node = matches!(config.node_config.node_mode, NodeMode::Genesis);
 
     // If the peer doesn't have any blocks, it should start syncing from 1, as the genesis block
     // should always be present
@@ -699,12 +703,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         start_sync_from_height = 1;
     }
 
-    if !check_sync_preconditions(
-        &sync_state,
-        &params,
-        is_a_genesis_node,
-        start_sync_from_height,
-    ) {
+    if !check_sync_preconditions(&sync_state, &params, start_sync_from_height) {
         return Ok(());
     }
 
@@ -714,7 +713,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         config,
         peer_list,
         gossip_client,
-        is_a_genesis_node,
         start_sync_from_height,
     )
     .await?
@@ -722,14 +720,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         return Ok(());
     }
 
-    let block_queue = fetch_initial_block_index(
-        &sync_state,
-        &params,
-        peer_list,
-        gossip_client,
-        is_a_genesis_node,
-    )
-    .await?;
+    let block_queue =
+        fetch_initial_block_index(&sync_state, &params, peer_list, gossip_client).await?;
 
     if !block_queue.is_empty() {
         run_sync_loop(
@@ -763,7 +755,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
 fn check_sync_preconditions(
     sync_state: &ChainSyncState,
     params: &SyncParams,
-    is_a_genesis_node: bool,
     start_sync_from_height: usize,
 ) -> bool {
     if !sync_state.is_gossip_reception_enabled() {
@@ -775,7 +766,7 @@ fn check_sync_preconditions(
     sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(params.is_trusted_mode);
 
-    if is_a_genesis_node && sync_state.sync_target_height() <= 1 {
+    if params.is_a_genesis_node && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
         sync_state.finish_sync();
         return false;
@@ -792,12 +783,11 @@ async fn initialize_sync_mode(
     config: &Config,
     peer_list: &PeerList,
     gossip_client: &GossipClient,
-    is_a_genesis_node: bool,
     start_sync_from_height: usize,
 ) -> ChainSyncResult<bool> {
     debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", params.sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
 
-    if is_a_genesis_node {
+    if params.is_a_genesis_node {
         warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", params.genesis_peer_discovery_timeout_millis);
         match timeout(
             Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
@@ -824,7 +814,7 @@ async fn initialize_sync_mode(
     if params.is_trusted_mode {
         let trusted_peers = peer_list.online_trusted_peers();
         if trusted_peers.is_empty() {
-            return if is_a_genesis_node {
+            return if params.is_a_genesis_node {
                 sync_state.mark_processed(sync_state.sync_target_height());
                 sync_state.finish_sync();
                 Ok(false)
@@ -843,7 +833,7 @@ async fn initialize_sync_mode(
         )
         .await
         {
-            if is_a_genesis_node {
+            if params.is_a_genesis_node {
                 warn!("Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}", err);
             } else {
                 return Err(err);
@@ -855,13 +845,12 @@ async fn initialize_sync_mode(
 }
 
 /// Fetches the initial block index from the network and prepares the block queue.
-/// Returns an empty queue (and marks sync as finished) if no blocks are available.
+/// Returns an empty queue if no blocks are available; lifecycle completion is handled by `finalize_sync`.
 async fn fetch_initial_block_index(
     sync_state: &ChainSyncState,
     params: &SyncParams,
     peer_list: &PeerList,
     gossip_client: &GossipClient,
-    is_a_genesis_node: bool,
 ) -> ChainSyncResult<VecDeque<BlockIndexItem>> {
     let block_index = match get_block_index(
         peer_list,
@@ -869,7 +858,7 @@ async fn fetch_initial_block_index(
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
         params.block_batch_size,
-        5,
+        BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
     .await
@@ -880,7 +869,7 @@ async fn fetch_initial_block_index(
         }
         Err(err) => {
             error!("Sync task: Failed to fetch block index: {}", err);
-            if is_a_genesis_node {
+            if params.is_a_genesis_node {
                 warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
                 vec![]
             } else {
@@ -896,7 +885,6 @@ async fn fetch_initial_block_index(
     if block_queue.is_empty() {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
-        sync_state.finish_sync();
     } else {
         sync_state.set_is_syncing(true);
     }
@@ -1057,7 +1045,7 @@ async fn replenish_block_batch(
         gossip_client,
         *sync_target,
         params.block_batch_size,
-        5,
+        BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
     .await?;
@@ -1887,18 +1875,19 @@ mod tests {
             }
 
             let block_requests = block_requests_clone.lock().unwrap();
-            let requested_first_block = block_requests
+            // The first block should have been requested at least twice (initial + retry)
+            let first_block_request_count = block_requests
                 .iter()
-                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
-            let requested_first_block_again = block_requests
-                .iter()
-                .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
+                .filter(|&block_hash| block_hash == &BlockHash::repeat_byte(1))
+                .count();
             let requested_second_block = block_requests
                 .iter()
                 .find(|&block_hash| block_hash == &BlockHash::repeat_byte(2));
-            assert!(requested_first_block.is_some());
-            // As the first call didn't return anything, the peer tries to fetch it once again
-            assert!(requested_first_block_again.is_some());
+            assert!(
+                first_block_request_count >= 2,
+                "Expected first block to be requested at least twice (retry), but was requested {} times",
+                first_block_request_count
+            );
             assert!(requested_second_block.is_some());
 
             Ok(())
