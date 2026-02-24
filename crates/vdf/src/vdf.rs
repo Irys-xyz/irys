@@ -87,7 +87,7 @@ pub fn run_vdf<B: BlockProvider>(
 
         // check for VDF fast forward step
         while let Ok(traced_ff_step) = fast_forward_receiver.try_recv() {
-            let (proposed_ff_step, _parent_span) = traced_ff_step.into_parts();
+            let (proposed_ff_step, _entered) = traced_ff_step.into_inner();
             // if the step number is ahead of local nodes vdf steps
             if global_step_number < proposed_ff_step.global_step_number {
                 debug!(

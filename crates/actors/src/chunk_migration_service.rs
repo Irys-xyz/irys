@@ -513,7 +513,7 @@ impl ChunkMigrationService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _parent_span) = traced.into_parts();
+                            let (msg, _entered) = traced.into_inner();
                             self.inner.handle_message(msg)?;
                         }
                         None => {
@@ -527,7 +527,7 @@ impl ChunkMigrationService {
 
         // Process remaining messages before shutdown
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _parent_span) = traced.into_parts();
+            let (msg, _entered) = traced.into_inner();
             self.inner.handle_message(msg)?;
         }
 

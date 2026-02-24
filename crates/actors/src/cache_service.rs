@@ -784,7 +784,7 @@ impl ChunkCacheService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _parent_span) = traced.into_parts();
+                            let (msg, _entered) = traced.into_inner();
                             self.on_handle_message(msg);
                         }
                         None => {
@@ -798,7 +798,7 @@ impl ChunkCacheService {
 
         debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _parent_span) = traced.into_parts();
+            let (msg, _entered) = traced.into_inner();
             self.on_handle_message(msg);
         }
 
@@ -811,7 +811,6 @@ impl ChunkCacheService {
     /// Handles two message types:
     /// - `OnBlockMigrated`: Triggers cache pruning based on block height
     /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
-    #[tracing::instrument(level = "trace", skip_all)]
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         debug!(
             queue.pruning_running = ?self.pruning_running,

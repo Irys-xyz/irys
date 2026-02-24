@@ -221,9 +221,9 @@ impl ChunkIngressService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _parent_span) = traced.into_parts();
+                            let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg_type);
+                            let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
@@ -291,8 +291,8 @@ impl ChunkIngressService {
         // Process remaining messages with timeout
         let process_remaining = async {
             while let Ok(traced) = self.msg_rx.try_recv() {
-                let (msg, _parent_span) = traced.into_parts();
-                let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg.variant_name());
+                let (msg, parent_span) = traced.into_parts();
+                let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg.variant_name());
                 self.inner.handle_message(msg).instrument(span).await;
             }
         };

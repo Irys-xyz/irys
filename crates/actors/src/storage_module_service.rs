@@ -713,8 +713,9 @@ impl StorageModuleService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _parent_span) = traced.into_parts();
-                            self.inner.handle_message(msg).await?;
+                            let (msg, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
+                            self.inner.handle_message(msg).instrument(span).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -731,8 +732,9 @@ impl StorageModuleService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _parent_span) = traced.into_parts();
-            self.inner.handle_message(msg).await?
+            let (msg, parent_span) = traced.into_parts();
+            let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
+            self.inner.handle_message(msg).instrument(span).await?
         }
 
         tracing::info!("shutting down StorageModule Service gracefully");

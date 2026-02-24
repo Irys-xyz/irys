@@ -301,8 +301,9 @@ impl BlockProducerService {
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(traced) => {
-                            let (cmd, _parent_span) = traced.into_parts();
-                            if self.handle_command(cmd).await? {
+                            let (cmd, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "block_producer_handle_command");
+                            if self.handle_command(cmd).instrument(span).await? {
                                 break;
                             }
                         }
@@ -320,7 +321,6 @@ impl BlockProducerService {
     }
 
     /// Handles a single command. Returns `true` if the service should shut down.
-    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<bool> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {

@@ -37,7 +37,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, warn, Instrument as _};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -364,15 +364,16 @@ fn spawn_broadcast_task(
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(traced) => {
-                                let (broadcast_message, _parent_span) = traced.into_parts();
+                                let (broadcast_message, parent_span) = traced.into_parts();
+                                let span = tracing::info_span!(parent: &parent_span, "gossip_broadcast");
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
-                                let peer_list = peer_list.clone();
+                                let peer_list = peer_list.clone(); // clone: shared across spawned tasks
                                 tokio::spawn(async move {
                                     if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                         warn!("Failed to broadcast data: {}", error);
                                     }
-                                });
+                                }.instrument(span));
                             },
                             None => break, // channel closed
                         }

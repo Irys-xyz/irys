@@ -152,8 +152,9 @@ impl RethService {
                 command = self.cmd_rx.recv() => {
                     match command {
                         Some(traced) => {
-                            let (command, _parent_span) = traced.into_parts();
-                            self.handle_command(command).await?;
+                            let (command, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "reth_handle_command");
+                            self.handle_command(command).instrument(span).await?;
                         }
                         None => {
                             info!("Reth service command channel closed");
