@@ -555,16 +555,9 @@ where
         let skip_validation_for_fast_track = skip_block_validation;
 
         // Pull block body, trying the sender first before falling back to network
-        let block_body = self
+        let sealed_block = self
             .pull_block_body(&block_header, use_trusted_peers_only, source_peer_id)
             .await?;
-
-        let sealed_block = SealedBlock::new(block_header, block_body).map_err(|e| {
-            GossipError::Internal(InternalGossipError::Unknown(format!(
-                "Failed to create SealedBlock: {:?}",
-                e
-            )))
-        })?;
 
         self.block_pool
             .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
@@ -1121,7 +1114,7 @@ where
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
         source_peer_id: IrysPeerId,
-    ) -> GossipResult<BlockBody> {
+    ) -> GossipResult<SealedBlock> {
         // Try fetching from the source peer first (the peer that sent us the header)
         if let Some(body) = self
             .try_fetch_body_from_source(header, source_peer_id)
@@ -1140,12 +1133,12 @@ where
     }
 
     /// Attempts to fetch the block body from the peer that originally sent us the header.
-    /// Returns `Some(body)` on success, `None` on any failure.
+    /// Returns `Some(sealed_block)` on success, `None` on any failure.
     async fn try_fetch_body_from_source(
         &self,
         header: &IrysBlockHeader,
         source_peer_id: IrysPeerId,
-    ) -> Option<BlockBody> {
+    ) -> Option<SealedBlock> {
         let block_hash = header.block_hash;
         let source_peer_item = self.peer_list.get_peer(&source_peer_id)?;
 
@@ -1166,7 +1159,21 @@ where
                             "Fetched block body for block {} height {} from source peer {}",
                             block_hash, header.height, source_peer_id
                         );
-                        return Some((*irys_block_body).clone());
+                        match SealedBlock::new(header.clone(), (*irys_block_body).clone()) {
+                            Ok(sealed_block) => return Some(sealed_block),
+                            Err(e) => {
+                                warn!(
+                                    "Failed to create SealedBlock from source peer {} for block {} height {}: {:?}",
+                                    source_peer_id, block_hash, header.height, e
+                                );
+                                self.peer_list.decrease_peer_score_by_peer_id(
+                                    &source_peer_id,
+                                    ScoreDecreaseReason::BogusData(
+                                        format!("Failed to seal block: {:?}", e),
+                                    ),
+                                );
+                            }
+                        }
                     }
                     Ok(false) => {
                         warn!(
@@ -1204,7 +1211,7 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<BlockBody> {
+    ) -> GossipResult<SealedBlock> {
         let block_hash = header.block_hash;
         let header_arc = Arc::new(header.clone());
         let mut failed_attempts: Vec<(Option<IrysPeerId>, GossipError)> = Vec::new();
@@ -1226,7 +1233,25 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, body_source_peer
                             );
-                            return Ok((*irys_block_body).clone());
+                            match SealedBlock::new(header.clone(), (*irys_block_body).clone()) {
+                                Ok(sealed_block) => return Ok(sealed_block),
+                                Err(e) => {
+                                    self.peer_list.decrease_peer_score_by_peer_id(
+                                        &body_source_peer,
+                                        ScoreDecreaseReason::BogusData(
+                                            format!("Failed to seal block: {:?}", e),
+                                        ),
+                                    );
+                                    let error = GossipError::Internal(
+                                        InternalGossipError::Unknown(format!(
+                                            "Failed to create SealedBlock from peer {:?}: {:?}",
+                                            body_source_peer, e
+                                        )),
+                                    );
+                                    failed_attempts.push((Some(body_source_peer), error));
+                                    continue;
+                                }
+                            }
                         }
                         Ok(false) => {
                             warn!(
