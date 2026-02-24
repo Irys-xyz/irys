@@ -936,7 +936,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
-
     //
     // Stage 0: SETUP AND STARTUP
     //

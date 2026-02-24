@@ -548,12 +548,16 @@ impl LedgerExpiryTestContext {
     }
 
     /// Get current balance for miner
-    async fn get_miner_balance(&self, block_hash: B256) -> U256 {
-        U256::from_be_bytes(
+    async fn get_miner_balance(&self, block_hash: B256) -> eyre::Result<U256> {
+        // Canonical Irys height can advance before the corresponding EVM header
+        // is queryable via reth RPC under CI load.
+        self.wait_for_evm_block(block_hash, 30).await?;
+
+        Ok(U256::from_be_bytes(
             self.get_balance(self.miner_address, block_hash)
                 .await
                 .to_be_bytes(),
-        )
+        ))
     }
 
     /// Verify balance after initial blocks
@@ -564,7 +568,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.total_block_rewards)
             .saturating_add(self.immediate_term_rewards);
 
-        let actual = self.get_miner_balance(last_block.evm_block_hash).await;
+        let actual = self.get_miner_balance(last_block.evm_block_hash).await?;
 
         assert_eq!(
             actual, expected,
@@ -633,7 +637,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.expected_expiry_fees);
 
         let final_block = self.blocks_mined.last().expect("Should have final block");
-        let actual = self.get_miner_balance(final_block.evm_block_hash).await;
+        let actual = self.get_miner_balance(final_block.evm_block_hash).await?;
 
         info!("Balance breakdown:");
         info!("  Initial balance:           {}", self.initial_balance);
