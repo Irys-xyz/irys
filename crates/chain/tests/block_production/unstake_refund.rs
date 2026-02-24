@@ -571,7 +571,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
             .filter_map(|sm| sm.partition_assignment())
             .collect()
     };
-    tracing::error!(?assigned_partitions);
+    tracing::debug!(?assigned_partitions);
     assert!(
         assigned_partitions.is_empty(),
         "Test requires the peer to have no pledges"
@@ -612,7 +612,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut pledge_tx)
         .expect("sign pledge commitment");
 
-    tracing::error!(
+    tracing::debug!(
         tx.id = ?pledge_tx.id(),
         tx.commitment_type = ?pledge_tx.commitment_type(),
         tx.anchor = ?anchor,
@@ -623,7 +623,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     let pledge_mempool_result = genesis_node
         .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
         .await;
-    tracing::error!(
+    tracing::debug!(
         tx.pledge_mempool_result = ?pledge_mempool_result,
         "Pledge wait_for_mempool result"
     );
@@ -636,7 +636,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
 
-    tracing::error!(
+    tracing::debug!(
         tx.id = ?unstake_tx.id(),
         tx.commitment_type = ?unstake_tx.commitment_type(),
         tx.anchor = ?anchor,
@@ -647,13 +647,13 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     let unstake_mempool_result = genesis_node
         .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await;
-    tracing::error!(
+    tracing::debug!(
         tx.unstake_mempool_result = ?unstake_mempool_result,
         "Unstake wait_for_mempool result"
     );
     unstake_mempool_result?;
 
-    tracing::error!("Both transactions confirmed in mempool, now mining block");
+    tracing::debug!("Both transactions confirmed in mempool, now mining block");
 
     // Mine block and verify pledge is included, unstake is NOT
     let block = genesis_node.mine_block().await?;

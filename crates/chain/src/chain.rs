@@ -895,7 +895,6 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_done_rx = Arc::new(std::sync::Mutex::new(Some(reth_done_rx)));
-        ctx.shutdown_token = shutdown_token;
         let node_config = &ctx.config.node_config;
 
         // Log startup information

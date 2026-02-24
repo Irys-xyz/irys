@@ -149,13 +149,25 @@ async fn find_tx_in_blocks(
     tx_id: &IrysTransactionId,
     max_height: u64,
 ) -> Option<u64> {
+    let mut scanned = 0_u64;
+    let mut skipped = 0_u64;
     for height in 1..=max_height {
         if let Ok(block) = node.get_block_by_height(height).await {
+            scanned += 1;
             if block.commitment_tx_ids().contains(tx_id) {
                 return Some(height);
             }
+        } else {
+            skipped += 1;
         }
     }
+    tracing::debug!(
+        ?tx_id,
+        scanned,
+        skipped,
+        max_height,
+        "tx not found in {scanned} blocks ({skipped} heights failed to load)"
+    );
     None
 }
 

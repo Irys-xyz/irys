@@ -51,7 +51,7 @@ async fn slow_heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Res
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
+async fn slow_heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
     // setup consistent test directory for this test
     let temp_dir = temporary_directory(None, false);
     let test_dir = temp_dir.path().to_path_buf();

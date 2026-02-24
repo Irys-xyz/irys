@@ -99,6 +99,8 @@ pub fn diag_slow(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
+            // `move` is safe here: ownership transfer doesn't conflict with
+            // state diagnostics borrowing captured variables.
             let __diag_fut = async move #body;
         }
     };

@@ -317,6 +317,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
+// "heavy3_" prefix: requires 3 CI threads (see .config/nextest.toml)
 #[test_log::test(tokio::test)]
 async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {

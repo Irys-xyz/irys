@@ -105,6 +105,7 @@ Prefixes combine: `slow_heavy3_my_test` gets 180s timeout AND 3 threads.
 **Cause:** `tokio::sync::broadcast` only delivers to current subscribers. Subscribing after the event fires = missed forever.
 
 **Fix:** Subscribe BEFORE the action, then await:
+
 ```rust
 let quiescent = node.block_quiescence(Duration::from_millis(500), Duration::from_secs(10));
 node.gossip_block_to_peers(&block)?;
