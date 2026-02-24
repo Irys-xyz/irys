@@ -24,8 +24,7 @@ datasources:
         spanStartTimeShift: -5m
         spanEndTimeShift: 5m
         filterByTraceID: true
-        filterBySpanID: false
-        tags: [{key: 'request.id', value: 'request.id'}]
+        filterBySpanID: true
       serviceMap:
         datasourceUid: prometheus
       search:
@@ -45,9 +44,13 @@ datasources:
       index: "irys-logs*"
       timeField: "@timestamp"
       esVersion: "8.17.0"
-      logMessageField: message
-      logLevelField: log.level
+      logMessageField: Body
+      logLevelField: SeverityText
       maxConcurrentShardRequests: 5
+      dataLinks:
+        - datasourceUid: tempo
+          field: traceID
+          url: "$${__value.raw}"
 
   # Prometheus - Metrics
   - name: Prometheus
@@ -59,6 +62,7 @@ datasources:
     editable: true
     jsonData:
       httpMethod: POST
+      timeInterval: "30s"
       exemplarTraceIdDestinations:
         - name: trace_id
           datasourceUid: tempo
