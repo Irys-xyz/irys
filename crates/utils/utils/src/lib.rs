@@ -5,6 +5,18 @@ pub mod listener;
 pub mod shutdown;
 pub mod signal;
 
+/// Extension trait for converting [`std::time::Instant`] elapsed time to milliseconds.
+pub trait ElapsedMs {
+    fn elapsed_ms(&self) -> f64;
+}
+
+impl ElapsedMs for std::time::Instant {
+    #[inline]
+    fn elapsed_ms(&self) -> f64 {
+        self.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 /// Builds a boxed fmt layer configured via the `IRYS_LOG_FORMAT` env var.
 /// When `IRYS_LOG_FORMAT=json`, produces structured JSON output; otherwise plain text.
 pub fn make_fmt_layer<S>() -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>

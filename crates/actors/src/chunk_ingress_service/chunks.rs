@@ -18,6 +18,7 @@ use irys_types::{
     irys::IrysSigner,
     validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, H256,
 };
+use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
@@ -401,7 +402,7 @@ impl ChunkIngressServiceInner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
+        record_validation_duration(validation_start.elapsed_ms());
 
         drop(_proof_span);
 
@@ -428,7 +429,7 @@ impl ChunkIngressServiceInner {
                 .into());
             }
         }
-        record_enqueue_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
+        record_enqueue_duration(storage_start.elapsed_ms());
 
         // Add to recent valid chunks cache to prevent re-processing
         self.recent_valid_chunks

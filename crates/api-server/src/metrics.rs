@@ -1,4 +1,5 @@
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
+use irys_utils::ElapsedMs as _;
 use opentelemetry::KeyValue;
 use std::{
     future::{ready, Future, Ready},
@@ -87,7 +88,7 @@ where
         Box::pin(async move {
             let res = fut.await?;
             let status = res.status().as_u16().to_string();
-            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let duration_ms = start.elapsed_ms();
 
             let attrs = [
                 KeyValue::new("method", method),

@@ -11,6 +11,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::{chunk_ingress_service::ChunkIngressMessage, ChunkIngressError};
 use irys_types::{SendTraced as _, UnpackedChunk};
+use irys_utils::ElapsedMs as _;
 use std::time::Instant;
 use tracing::{info, instrument, warn};
 
@@ -93,7 +94,7 @@ pub async fn post_chunk(
     }
 
     // Record processing duration on success
-    record_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
+    record_chunk_processing_duration(start.elapsed_ms());
 
     // If everything succeeded, return an HTTP 200 OK response
     Ok(HttpResponse::Ok()
