@@ -1,7 +1,8 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
-    mempool_service::{MempoolServiceMessage, MempoolTxs},
+    mempool_service::MempoolTxs,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
@@ -27,6 +28,7 @@ use irys_reth::{
     IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::SystemLedger;
 use irys_types::{
@@ -175,6 +177,10 @@ pub struct BlockProducerInner {
     pub block_index: BlockIndex,
     /// Read guard for mempool state
     pub mempool_guard: MempoolReadGuard,
+    /// Reth node adapter for RPC queries (balance checks during tx selection)
+    pub reth_node_adapter: IrysRethNodeAdapter,
+    /// Shared state handle for chunk ingress (used by tx selection)
+    pub chunk_ingress_state: ChunkIngressState,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
@@ -1423,16 +1429,15 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<MempoolTxs> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
-                prev_block_header.block_hash,
-                tx,
-            ))
-            .expect("to send MempoolServiceMessage");
-        rx.await.expect("to receive txns")
+        let ctx = crate::tx_selector::TxSelectionContext {
+            block_tree: &self.inner().block_tree_guard,
+            db: &self.inner().db,
+            reth_adapter: &self.inner().reth_node_adapter,
+            config: &self.inner().config,
+            mempool_state: self.inner().mempool_guard.atomic_state(),
+            chunk_ingress_state: &self.inner().chunk_ingress_state,
+        };
+        crate::tx_selector::select_best_txs(prev_block_header.block_hash, &ctx).await
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

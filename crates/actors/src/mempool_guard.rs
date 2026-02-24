@@ -63,6 +63,13 @@ impl MempoolReadGuard {
         self.mempool_state.get_data_txs(data_tx_ids).await
     }
 
+    /// Returns a reference to the underlying `AtomicMempoolState`.
+    /// This is primarily used by the block producer to construct a `TxSelectionContext`
+    /// for direct tx selection without going through the mempool message queue.
+    pub fn atomic_state(&self) -> &AtomicMempoolState {
+        &self.mempool_state
+    }
+
     /// Check if a transaction ID is in the recent valid transactions cache.
     pub async fn is_recent_valid_tx(&self, tx_id: &IrysTransactionId) -> bool {
         self.mempool_state.is_recent_valid_tx(tx_id).await

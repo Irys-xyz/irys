@@ -1590,6 +1590,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             block_index,
+            chunk_ingress_state.clone(),
             runtime_handle.clone(),
         );
 
@@ -1995,8 +1996,11 @@ impl IrysNode {
         block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         block_index: BlockIndex,
+        chunk_ingress_state: irys_actors::ChunkIngressState,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
+        let reth_payload_builder = reth_node_adapter.inner.payload_builder_handle.clone();
+        let consensus_engine_handle = reth_node_adapter.inner.beacon_engine_handle.clone();
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
@@ -2008,10 +2012,12 @@ impl IrysNode {
             mempool_guard: mempool_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
-            reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
+            reth_payload_builder,
             reth_provider,
-            consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            consensus_engine_handle,
             block_index,
+            reth_node_adapter,
+            chunk_ingress_state,
         });
 
         // Spawn the service and get the handle
