@@ -146,7 +146,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
             ev.block_hash == block.block_hash
                 && matches!(ev.validation_result, ValidationResult::Valid)
         })
-        .await;
+        .await?;
 
         if *new_tip {
             assert_eq!(

@@ -346,7 +346,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 
     // Mine a block - unstake should NOT be included due to HasActivePledges
     let first_block_after_unstake = genesis_node.mine_block().await?;
-    genesis_node
+    peer_node
         .wait_for_block_at_height(first_block_after_unstake.height, seconds_to_wait)
         .await
         .expect("peer should sync first block after unstake attempt");

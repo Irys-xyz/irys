@@ -1181,7 +1181,7 @@ async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()
     wait_for_block_event(&mut sub, 30, |ev| {
         ev.block_hash == new_block_hash && ev.state != ChainState::NotOnchain(BlockState::Unknown)
     })
-    .await;
+    .await?;
 
     let latest_block_hash = node
         .node_ctx
