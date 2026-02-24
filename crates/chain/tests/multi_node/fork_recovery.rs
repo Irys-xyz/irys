@@ -1,6 +1,5 @@
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
-use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, NodeConfig, UnixTimestamp, H256, U256};
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
@@ -483,10 +482,10 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 
     let extension_height = fork_tip.height;
     genesis_node
-        .wait_until_height(extension_height, seconds_to_wait)
+        .wait_for_block_at_height(extension_height, seconds_to_wait)
         .await?;
     peer_node
-        .wait_until_height(extension_height, seconds_to_wait)
+        .wait_for_block_at_height(extension_height, seconds_to_wait)
         .await?;
 
     let chain_tip_height = genesis_node.get_canonical_chain_height().await;
@@ -604,7 +603,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 ///    - TODO: new balance changes are applied based on the new canonical branch
 #[test_log::test(tokio::test)]
 async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
-    initialize_tracing();
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
@@ -938,7 +936,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
-    initialize_tracing();
 
     //
     // Stage 0: SETUP AND STARTUP
@@ -1640,7 +1637,6 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
 /// reorg to peer B's chain.
 #[test_log::test(tokio::test)]
 async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
-    initialize_tracing();
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
     let num_blocks_in_epoch = 10;
@@ -1858,8 +1854,6 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             sorted_commitments_at(&node_a, 2).await?,
             peer_b_commitment_txs
         );
-        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
-        // expect only the two txs included in Peer B B2
         assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
         assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
         assert_eq!(

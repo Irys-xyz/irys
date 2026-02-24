@@ -23,6 +23,9 @@ impl Parse for DiagSlowArgs {
                 "interval" => {
                     let lit = input.parse::<LitInt>()?;
                     interval_secs = lit.base10_parse::<u64>()?;
+                    if interval_secs == 0 {
+                        return Err(syn::Error::new_spanned(lit, "interval must be > 0"));
+                    }
                 }
                 "state" => {
                     state_expr = Some(input.parse::<Expr>()?);
@@ -54,6 +57,9 @@ fn parse_diag_slow_attr(attr: TokenStream) -> syn::Result<(u64, Option<Expr>)> {
     }
     if let Ok(lit) = syn::parse::<LitInt>(attr.clone()) {
         let secs = lit.base10_parse::<u64>()?;
+        if secs == 0 {
+            return Err(syn::Error::new_spanned(lit, "interval must be > 0"));
+        }
         return Ok((secs, None));
     }
     let args = syn::parse::<DiagSlowArgs>(attr)?;

@@ -1266,7 +1266,7 @@ impl IrysNode {
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            error!("Failed to send shutdown signal to actor thread: {}", e)
+                            debug!("Shutdown signal send failed (receiver likely dropped): {}", e)
                         }
                         Err(_) => error!("Timed out sending shutdown signal to actor thread"),
                     }

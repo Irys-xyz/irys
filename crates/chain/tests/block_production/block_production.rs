@@ -190,6 +190,12 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     // Collect block hashes as we mine
     let mut block_hashes = Vec::new();
 
+    // Subscribe before mining so the receiver accumulates events during block production
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+
     for i in 1..10 {
         info!("manually producing block {}", i);
         node.mine_block().await?;
@@ -215,10 +221,6 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     }
 
     // Verify all collected blocks are on-chain
-    let event_rx = node
-        .node_ctx
-        .service_senders
-        .subscribe_block_state_updates();
     for (idx, hash) in block_hashes.iter().enumerate() {
         let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(
@@ -248,6 +250,12 @@ async fn slow_heavy4_mine_ten_blocks() -> eyre::Result<()> {
     // Collect block hashes as we mine
     let mut block_hashes = Vec::new();
 
+    // Subscribe before mining loop so the receiver accumulates events during block production
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+
     for i in 1..10 {
         let _block_hash = node.wait_for_block_at_height(i + 1, 30).await?;
 
@@ -265,10 +273,6 @@ async fn slow_heavy4_mine_ten_blocks() -> eyre::Result<()> {
     }
 
     // Verify all collected blocks are on-chain
-    let event_rx = node
-        .node_ctx
-        .service_senders
-        .subscribe_block_state_updates();
     for (idx, hash) in block_hashes.iter().enumerate() {
         let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(

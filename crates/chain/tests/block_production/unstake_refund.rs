@@ -555,14 +555,22 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         },
     )
     .await?;
-    let (_mined, epoch_height_1) = genesis_node.mine_until_next_epoch().await?;
+    let (_mined, epoch_height_1) = genesis_node
+        .mine_until_next_epoch()
+        .await
+        .expect("failed to mine until next epoch (first)");
     peer_node
         .wait_for_block_at_height(epoch_height_1, seconds_to_wait)
-        .await?;
-    let (_mined, epoch_height_2) = genesis_node.mine_until_next_epoch().await?;
+        .await
+        .expect("peer did not sync to epoch_height_1");
+    let (_mined, epoch_height_2) = genesis_node
+        .mine_until_next_epoch()
+        .await
+        .expect("failed to mine until next epoch (second)");
     peer_node
         .wait_for_block_at_height(epoch_height_2, seconds_to_wait)
-        .await?;
+        .await
+        .expect("peer did not sync to epoch_height_2");
 
     // Verify peer has no pledges
     let assigned_partitions: Vec<PartitionAssignment> = {

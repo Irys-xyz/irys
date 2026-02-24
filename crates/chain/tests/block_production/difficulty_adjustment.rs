@@ -142,6 +142,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
             .add_payload_to_cache(eth_block.block().clone())
             .await;
 
+        // 60s timeout (not max_seconds) because CI validation can be slower than mining
         wait_for_block_event(&mut block_state_rx, 60, |ev| {
             ev.block_hash == block.block_hash
                 && matches!(ev.validation_result, ValidationResult::Valid)
