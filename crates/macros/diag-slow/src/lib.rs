@@ -48,6 +48,18 @@ impl Parse for DiagSlowArgs {
     }
 }
 
+fn parse_diag_slow_attr(attr: TokenStream) -> syn::Result<(u64, Option<Expr>)> {
+    if attr.is_empty() {
+        return Ok((5, None));
+    }
+    if let Ok(lit) = syn::parse::<LitInt>(attr.clone()) {
+        let secs = lit.base10_parse::<u64>()?;
+        return Ok((secs, None));
+    }
+    let args = syn::parse::<DiagSlowArgs>(attr)?;
+    Ok((args.interval_secs, args.state_expr))
+}
+
 /// Attribute macro that wraps an `async fn` body with periodic "still running"
 /// warnings, so CI logs reveal which helper is hung when a test times out.
 ///
@@ -70,19 +82,9 @@ pub fn diag_slow(attr: TokenStream, item: TokenStream) -> TokenStream {
     // - #[diag_slow(3)]
     // - #[diag_slow(interval = 3, state = <expr>)]
     // - #[diag_slow(state = <expr>)]
-    let (interval_secs, state_expr): (u64, Option<Expr>) = if attr.is_empty() {
-        (5, None)
-    } else if let Ok(lit) = syn::parse::<LitInt>(attr.clone()) {
-        (
-            lit.base10_parse::<u64>()
-                .expect("diag_slow expects a u64 literal"),
-            None,
-        )
-    } else {
-        let args = syn::parse::<DiagSlowArgs>(attr).expect(
-            "diag_slow expects #[diag_slow], #[diag_slow(<u64>)], or #[diag_slow(interval = <u64>, state = <expr>)]",
-        );
-        (args.interval_secs, args.state_expr)
+    let (interval_secs, state_expr) = match parse_diag_slow_attr(attr) {
+        Ok(parsed) => parsed,
+        Err(err) => return err.to_compile_error().into(),
     };
 
     let fn_name = input_fn.sig.ident.to_string();
