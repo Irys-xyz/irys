@@ -54,6 +54,10 @@ services:
     image: grafana/tempo:2.7.2
     container_name: obs-tempo
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     networks:
       observation_network:
         ipv4_address: 172.23.0.101

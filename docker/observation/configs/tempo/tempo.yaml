@@ -17,7 +17,8 @@ distributor:
           endpoint: 0.0.0.0:4318
 
 ingester:
-  max_block_duration: 5m
+  max_block_duration: 2m
+  max_block_bytes: 104857600
 
 querier:
   trace_by_id:
@@ -56,4 +57,4 @@ metrics_generator:
 overrides:
   defaults:
     metrics_generator:
-      processors: [service-graphs, span-metrics, local-blocks]
+      processors: [service-graphs, span-metrics]
