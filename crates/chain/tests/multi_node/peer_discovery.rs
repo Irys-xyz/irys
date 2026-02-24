@@ -509,9 +509,6 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         ctx_genesis_node.node_ctx.sync_state
     );
 
-    // Allow OS to release the ports from the previous PEER1 instance (TCP TIME_WAIT).
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
     info!("Restarting PEER1 node");
     let ctx_peer1_node = stopped_peer_1.start_with_name("PEER1").await;
     info!("PEER1 restarted");
@@ -548,8 +545,6 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
 
     let stopped_genesis = ctx_genesis_node.stop().await;
     info!("GENESIS stopped");
-    // Let background shutdown finish releasing DB/ports before immediate restart on CI.
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Restart genesis
     let ctx_genesis_node = stopped_genesis
