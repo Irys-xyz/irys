@@ -22,8 +22,8 @@ use irys_actors::{
     MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
-use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::routes;
+use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
@@ -324,8 +324,7 @@ impl IrysNodeTest<()> {
         let _enter = span.enter();
 
         let (cfg, http_listener, gossip_listener) =
-            IrysNode::bind_listeners(self.cfg.clone())
-                .expect("Failed to bind TCP listeners");
+            IrysNode::bind_listeners(self.cfg.clone()).expect("Failed to bind TCP listeners");
 
         let node = IrysNode::new_with_listeners(cfg, http_listener, gossip_listener)
             .expect("Failed to create IrysNode");
