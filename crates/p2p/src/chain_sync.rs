@@ -29,6 +29,9 @@ const RETRY_BLOCK_VALIDATION_GRACE: Duration = Duration::from_millis(500);
 /// Number of retry attempts when fetching a block index from peers.
 const BLOCK_INDEX_RETRIES: usize = 5;
 
+/// Fewer retries for the best-effort block index fetch inside queue-slot recovery.
+const QUEUE_SLOT_RETRY_BLOCK_INDEX_RETRIES: usize = 3;
+
 /// Sync service errors
 #[derive(Debug, thiserror::Error)]
 pub enum ChainSyncError {
@@ -1126,7 +1129,7 @@ async fn wait_for_queue_slot<B: BlockDiscoveryFacade, M: MempoolFacade>(
         gossip_client,
         retry_height,
         1, // Just get one block
-        3, // 3 retries for the network call
+        QUEUE_SLOT_RETRY_BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
     .await
