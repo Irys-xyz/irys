@@ -9,7 +9,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_domain::{BlockState, ChainState};
+use irys_domain::ChainState;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
