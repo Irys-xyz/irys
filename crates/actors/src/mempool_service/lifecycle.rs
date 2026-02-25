@@ -83,41 +83,50 @@ impl Inner {
         );
         let new_tip = event.new_tip;
 
+        // Re-submit orphaned txs from old fork back to mempool (normal gossip ingress)
         self.handle_confirmed_data_tx_reorg(&event).await?;
-
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
+        // Revalidate all mempool txs against new canonical chain (in-place, under write lock)
         self.reprocess_all_txs().await?;
 
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
     }
 
-    /// Re-process all currently valid mempool txs
-    /// all this does is take all valid submit & commitment txs, and passes them back through ingress
+    /// Re-validates all mempool txs in-place against the current canonical chain.
+    /// Holds a single write lock for the duration — concurrent readers (select_best_txs)
+    /// see either the pre- or post-revalidation state, never a partial/empty state.
+    ///
+    /// Scope: anchor validity and commitment snapshot status only. Signature, fee,
+    /// value, and funding checks are not repeated — those were verified on ingress
+    /// and are block-height-independent.
     #[instrument(skip_all)]
     pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
-        // re-process all valid txs
-        let (valid_submit_ledger_tx, valid_commitment_tx) =
-            self.mempool_state.take_all_valid_txs().await;
-        for (id, tx) in valid_submit_ledger_tx {
-            match self.handle_data_tx_ingress_message_gossip(tx).await {
-                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
-                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
-            }
-        }
-        for (_address, txs) in valid_commitment_tx {
-            for tx in txs {
-                let id = tx.id();
-                match self.handle_ingress_commitment_tx_message_gossip(tx).await {
-                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
-                    Err(err) => debug!(
-                        "failed to resubmit commitment tx {} to mempool: {:?}",
-                        &id, &err
-                    ),
-                }
-            }
-        }
+        let current_height =
+            crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
+
+        // Pre-fetch commitment snapshot (sync block tree read, before acquiring mempool lock)
+        let (commitment_snapshot, epoch_snapshot) = {
+            let tree = self.block_tree_read_guard.read();
+            (
+                tree.canonical_commitment_snapshot(),
+                tree.canonical_epoch_snapshot(),
+            )
+        };
+
+        // Hold write lock for the entire revalidation
+        let mut state = self.mempool_state.write_for_reorg().await;
+
+        // Revalidate data txs — uses same prune method as prune_pending_txs
+        state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+
+        // Revalidate commitment txs — uses same prune + cache methods as ingress
+        state.revalidate_commitment_txs(
+            |tx| self.should_prune_tx(current_height, tx),
+            |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
+            self.config.node_config.mempool.max_pending_pledge_items,
+        );
 
         Ok(())
     }

@@ -15,7 +15,7 @@ use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_domain::{get_atomic_file, BlockTreeReadGuard};
+use irys_domain::{get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus};
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
@@ -601,56 +601,19 @@ impl AtomicMempoolState {
 
     /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
     pub async fn mark_tx_as_invalid(&self, tx_id: IrysTransactionId, err_reason: impl ToString) {
-        let state = &mut self.write().await;
-        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
-        state.recent_invalid_tx.put(tx_id, ());
-        state.recent_valid_tx.pop(&tx_id);
+        self.write().await.mark_tx_as_invalid(tx_id, err_reason);
     }
 
     /// Batch-removes expired data txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
     pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) {
-        let mut state = self.write().await;
-        for &(tx_id, anchor) in expired {
-            state.valid_submit_ledger_tx.remove(&tx_id);
-            warn!(
-                "Tx {} is invalid: {:?}",
-                &tx_id,
-                &TxIngressError::InvalidAnchor(anchor).to_string()
-            );
-            state.recent_invalid_tx.put(tx_id, ());
-            state.recent_valid_tx.pop(&tx_id);
-        }
+        self.write().await.batch_prune_data_txs(expired);
     }
 
     /// Batch-removes expired commitment txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
     pub async fn batch_prune_commitment_txs(&self, expired: &[(H256, H256)]) {
-        let mut state = self.write().await;
-        let txids_set: HashSet<H256> = expired.iter().map(|&(tx_id, _)| tx_id).collect();
-
-        // Mark all as invalid and remove from recent_valid_tx
-        for &(tx_id, anchor) in expired {
-            warn!(
-                "Tx {} is invalid: {:?}",
-                &tx_id,
-                &TxIngressError::InvalidAnchor(anchor).to_string()
-            );
-            state.recent_invalid_tx.put(tx_id, ());
-            state.recent_valid_tx.pop(&tx_id);
-        }
-
-        // Remove from valid_commitment_tx map
-        let addresses_to_check: Vec<IrysAddress> =
-            state.valid_commitment_tx.keys().copied().collect();
-        for address in addresses_to_check {
-            if let Some(transactions) = state.valid_commitment_tx.get_mut(&address) {
-                transactions.retain(|tx| !txids_set.contains(&tx.id()));
-                if transactions.is_empty() {
-                    state.valid_commitment_tx.remove(&address);
-                }
-            }
-        }
+        self.write().await.batch_prune_commitment_txs(expired);
     }
 
     pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
@@ -890,10 +853,7 @@ impl AtomicMempoolState {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        let mut guard = self.write().await;
-        guard.bounded_insert_data_tx(tx.clone())?;
-        guard.recent_valid_tx.put(tx.id, ());
-        Ok(())
+        self.write().await.insert_tx_and_mark_valid(tx)
     }
 
     pub async fn all_valid_commitment_txs_cloned(
@@ -1273,7 +1233,7 @@ impl AtomicMempoolState {
     }
 
     pub async fn put_recent_invalid(&self, tx_id: H256) {
-        self.write().await.recent_invalid_tx.put(tx_id, ());
+        self.write().await.put_recent_invalid(tx_id);
     }
 
     pub async fn mempool_data_tx_status(&self, txid: &H256) -> Option<TxKnownStatus> {
@@ -1400,21 +1360,9 @@ impl AtomicMempoolState {
         tx: &CommitmentTransaction,
         max_pending_pledge_items: usize,
     ) {
-        let mut guard = self.write().await;
-        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer()) {
-            // Address already exists in cache - add this pledge transaction to its lru cache
-            pledges_cache.put(tx.id(), tx.clone());
-        } else {
-            // First pledge from this address - create a new nested lru cache
-            let mut new_address_cache =
-                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-            // Add the pledge transaction to the new lru cache for the address
-            new_address_cache.put(tx.id(), tx.clone());
-
-            // Add the address cache to the primary lru cache
-            guard.pending_pledges.put(tx.signer(), new_address_cache);
-        }
+        self.write()
+            .await
+            .cache_unstaked_pledge(tx, max_pending_pledge_items);
     }
 
     /// Inserts a commitment into the mempool valid map and marks it as recently valid.
@@ -1423,10 +1371,7 @@ impl AtomicMempoolState {
         &self,
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        let mut guard = self.write().await;
-        guard.bounded_insert_commitment_tx(tx)?;
-        guard.recent_valid_tx.put(tx.id(), ());
-        Ok(())
+        self.write().await.insert_commitment_and_mark_valid(tx)
     }
 
     async fn is_there_a_pledge_for_unstaked_address(&self, signer: &IrysAddress) -> bool {
@@ -1458,6 +1403,12 @@ impl AtomicMempoolState {
             .iter()
             .map(|tx_id| state.valid_submit_ledger_tx.get(tx_id).cloned())
             .collect()
+    }
+
+    /// Returns a write guard for callers that need to hold the lock across
+    /// multiple MempoolState method calls (e.g., reorg revalidation).
+    pub(crate) async fn write_for_reorg(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
+        self.write().await
     }
 
     /// Do not call this function from anywhere outside AtomicMempoolState
@@ -1691,6 +1642,196 @@ impl MempoolState {
             .min_by(|(addr_a, total_a), (addr_b, total_b)| {
                 total_a.cmp(total_b).then_with(|| addr_a.cmp(addr_b))
             })
+    }
+
+    /// Marks a given tx as invalid, adding its ID to `recent_invalid_tx` and removing it from `recent_valid_tx`.
+    pub fn mark_tx_as_invalid(&mut self, tx_id: IrysTransactionId, err_reason: impl ToString) {
+        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
+        self.recent_invalid_tx.put(tx_id, ());
+        self.recent_valid_tx.pop(&tx_id);
+    }
+
+    /// Batch-removes expired data txs.
+    /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
+    pub fn batch_prune_data_txs(&mut self, expired: &[(H256, H256)]) {
+        for &(tx_id, anchor) in expired {
+            self.valid_submit_ledger_tx.remove(&tx_id);
+            warn!(
+                "Tx {} is invalid: {:?}",
+                &tx_id,
+                &TxIngressError::InvalidAnchor(anchor).to_string()
+            );
+            self.recent_invalid_tx.put(tx_id, ());
+            self.recent_valid_tx.pop(&tx_id);
+        }
+    }
+
+    /// Batch-removes expired commitment txs.
+    /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
+    pub fn batch_prune_commitment_txs(&mut self, expired: &[(H256, H256)]) {
+        let txids_set: HashSet<H256> = expired.iter().map(|&(tx_id, _)| tx_id).collect();
+
+        // Mark all as invalid and remove from recent_valid_tx
+        for &(tx_id, anchor) in expired {
+            warn!(
+                "Tx {} is invalid: {:?}",
+                &tx_id,
+                &TxIngressError::InvalidAnchor(anchor).to_string()
+            );
+            self.recent_invalid_tx.put(tx_id, ());
+            self.recent_valid_tx.pop(&tx_id);
+        }
+
+        // Remove from valid_commitment_tx map
+        let addresses_to_check: Vec<IrysAddress> =
+            self.valid_commitment_tx.keys().copied().collect();
+        for address in addresses_to_check {
+            if let Some(transactions) = self.valid_commitment_tx.get_mut(&address) {
+                transactions.retain(|tx| !txids_set.contains(&tx.id()));
+                if transactions.is_empty() {
+                    self.valid_commitment_tx.remove(&address);
+                }
+            }
+        }
+    }
+
+    /// Inserts tx into the mempool and marks it as recently valid.
+    /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
+    pub fn insert_tx_and_mark_valid(
+        &mut self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        self.bounded_insert_data_tx(tx.clone())?;
+        self.recent_valid_tx.put(tx.id, ());
+        Ok(())
+    }
+
+    /// Adds a tx ID to the recent invalid set.
+    pub fn put_recent_invalid(&mut self, tx_id: H256) {
+        self.recent_invalid_tx.put(tx_id, ());
+    }
+
+    /// Caches an unstaked pledge in the two-level LRU structure.
+    pub fn cache_unstaked_pledge(
+        &mut self,
+        tx: &CommitmentTransaction,
+        max_pending_pledge_items: usize,
+    ) {
+        if let Some(pledges_cache) = self.pending_pledges.get_mut(&tx.signer()) {
+            // Address already exists in cache - add this pledge transaction to its lru cache
+            pledges_cache.put(tx.id(), tx.clone());
+        } else {
+            // First pledge from this address - create a new nested lru cache
+            let mut new_address_cache =
+                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+            // Add the pledge transaction to the new lru cache for the address
+            new_address_cache.put(tx.id(), tx.clone());
+
+            // Add the address cache to the primary lru cache
+            self.pending_pledges.put(tx.signer(), new_address_cache);
+        }
+    }
+
+    /// Inserts a commitment into the mempool valid map and marks it as recently valid.
+    /// Uses bounded insertion which may evict transactions when limits are exceeded.
+    pub fn insert_commitment_and_mark_valid(
+        &mut self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        self.bounded_insert_commitment_tx(tx)?;
+        self.recent_valid_tx.put(tx.id(), ());
+        Ok(())
+    }
+
+    /// Revalidates data txs in-place. Removes those with expired/invalid anchors.
+    /// Uses batch_prune_data_txs for the actual removal (same method used by prune_pending_txs).
+    pub fn revalidate_data_txs(
+        &mut self,
+        mut should_prune: impl FnMut(&DataTransactionHeader) -> bool,
+    ) {
+        // Collect txs to prune
+        let expired: Vec<(H256, H256)> = self
+            .valid_submit_ledger_tx
+            .values()
+            .filter(|tx| should_prune(tx))
+            .map(|tx| (tx.id, tx.anchor))
+            .collect();
+
+        if !expired.is_empty() {
+            // Reuse the same prune method that prune_pending_txs uses
+            self.batch_prune_data_txs(&expired);
+        }
+    }
+
+    /// Revalidates commitment txs in-place. Removes those with expired anchors.
+    /// Moves Unstaked commitments (with no pending Stake in the valid set) to pending_pledges
+    /// using the same cache_unstaked_pledge method that ingress uses.
+    ///
+    /// Note: `pending_pledges` is intentionally not revalidated here. Those txs are
+    /// already parked waiting for a future Stake; anchor expiry will be checked when
+    /// they are re-ingested via `process_pending_pledges_for_new_stake`.
+    pub fn revalidate_commitment_txs(
+        &mut self,
+        mut should_prune: impl FnMut(&CommitmentTransaction) -> bool,
+        mut get_snapshot_status: impl FnMut(&CommitmentTransaction) -> CommitmentSnapshotStatus,
+        max_pending_pledge_items: usize,
+    ) {
+        // Pass 1: Identify pruned txs and addresses with valid Stake txs
+        let mut pruned: Vec<(H256, H256)> = Vec::new();
+        let mut addresses_with_valid_stake: HashSet<IrysAddress> = HashSet::new();
+
+        for (_addr, txs) in self.valid_commitment_tx.iter() {
+            for tx in txs {
+                if should_prune(tx) {
+                    pruned.push((tx.id(), tx.anchor()));
+                } else if tx.commitment_type() == CommitmentTypeV2::Stake {
+                    addresses_with_valid_stake.insert(tx.signer());
+                }
+            }
+        }
+
+        // Pass 2: Identify txs to move to pending (Unstaked without pending Stake)
+        let pruned_set: HashSet<H256> = pruned.iter().map(|(id, _)| *id).collect();
+        let mut to_pending: Vec<CommitmentTransaction> = Vec::new();
+        for (_addr, txs) in self.valid_commitment_tx.iter() {
+            for tx in txs {
+                if pruned_set.contains(&tx.id()) {
+                    continue;
+                }
+                if get_snapshot_status(tx) == CommitmentSnapshotStatus::Unstaked
+                    && !addresses_with_valid_stake.contains(&tx.signer())
+                {
+                    to_pending.push(tx.clone());
+                }
+            }
+        }
+
+        // Phase 3: Apply mutations using shared methods
+        if !pruned.is_empty() {
+            self.batch_prune_commitment_txs(&pruned); // same method as prune_pending_txs
+        }
+
+        // Remove moved-to-pending txs from valid set
+        let moved_set: HashSet<H256> = to_pending.iter().map(CommitmentTransaction::id).collect();
+        if !moved_set.is_empty() {
+            self.valid_commitment_tx.retain(|_addr, txs| {
+                txs.retain(|tx| !moved_set.contains(&tx.id()));
+                !txs.is_empty()
+            });
+
+            // Clear recent_valid_tx for moved txs so re-ingress via
+            // process_pending_pledges_for_new_stake is not blocked by
+            // is_known_commitment_in_mempool seeing a stale entry.
+            for tx_id in &moved_set {
+                self.recent_valid_tx.pop(tx_id);
+            }
+        }
+
+        // Cache as unstaked using same method as ingress Unstaked path
+        for tx in &to_pending {
+            self.cache_unstaked_pledge(tx, max_pending_pledge_items);
+        }
     }
 }
 
