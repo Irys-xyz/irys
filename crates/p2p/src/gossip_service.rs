@@ -26,6 +26,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::Traced;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -36,7 +37,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, warn, Instrument as _};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -104,7 +105,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageV2>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<Traced<GossipBroadcastMessageV2>>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
@@ -127,7 +128,7 @@ impl P2PService {
     pub fn new(
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
-        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+        broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -180,6 +181,11 @@ impl P2PService {
     {
         debug!("Starting the gossip service");
 
+        let chunk_ingress =
+            irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(
+                &service_senders,
+            );
+
         let block_pool = BlockPool::new(
             db,
             block_discovery,
@@ -198,6 +204,7 @@ impl P2PService {
         let consensus_config_hash = config.consensus.keccak256_hash();
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
+            chunk_ingress,
             block_pool: Arc::clone(&arc_pool),
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
@@ -343,7 +350,7 @@ impl P2PService {
 }
 
 fn spawn_broadcast_task(
-    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
+    mut mempool_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
@@ -356,15 +363,17 @@ fn spawn_broadcast_task(
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
-                            Some(broadcast_message) => {
+                            Some(traced) => {
+                                let (broadcast_message, parent_span) = traced.into_parts();
+                                let span = tracing::info_span!(parent: &parent_span, "gossip_broadcast");
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
-                                let peer_list = peer_list.clone();
+                                let peer_list = peer_list.clone(); // clone: shared across spawned tasks
                                 tokio::spawn(async move {
                                     if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                         warn!("Failed to broadcast data: {}", error);
                                     }
-                                });
+                                }.instrument(span));
                             },
                             None => break, // channel closed
                         }

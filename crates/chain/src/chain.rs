@@ -61,7 +61,8 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    ServiceSet, SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
+    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
+    UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -133,6 +134,7 @@ pub struct IrysNodeCtx {
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
+    pub chunk_ingress_state: irys_actors::ChunkIngressState,
     backfill_cancel: CancellationToken,
     backfill_complete: Arc<tokio::sync::Notify>,
 }
@@ -141,6 +143,7 @@ impl IrysNodeCtx {
     pub fn get_api_state(&self) -> ApiState {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
+            chunk_ingress: self.service_senders.chunk_ingress.clone(),
             mempool_guard: self.mempool_guard.clone(),
             chunk_provider: self.chunk_provider.clone(),
             peer_list: self.peer_list.clone(),
@@ -933,11 +936,12 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx))?;
+                .send_traced(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
             let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();
+            let chunk_ingress_state = ctx.chunk_ingress_state.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -962,7 +966,7 @@ impl IrysNode {
                         .map(|(_, i)| i)
                         .collect::<Vec<_>>();
 
-                    let mempool_status = mempool.get_status(&config.node_config).await;
+                    let mempool_status = mempool.get_status(&config.node_config, &chunk_ingress_state).await;
 
                     info!(
                     target = "node-state",
@@ -1257,7 +1261,7 @@ impl IrysNode {
         let (peering_tx, peering_rx) = oneshot::channel();
         service_senders
             .reth_service
-            .send(RethServiceMessage::GetPeeringInfo {
+            .send_traced(RethServiceMessage::GetPeeringInfo {
                 response: peering_tx,
             })
             .expect("Reth service channel should be open");
@@ -1383,9 +1387,11 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
-            response: oneshot_tx,
-        }) {
+        if let Err(e) =
+            block_tree_sender.send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+                response: oneshot_tx,
+            })
+        {
             error!(
                 "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
                 e
@@ -1427,16 +1433,28 @@ impl IrysNode {
         let execution_payload_cache =
             ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
 
+        // Spawn chunk ingress service
+        let (chunk_ingress_handle, chunk_ingress_state) =
+            irys_actors::chunk_ingress_service::ChunkIngressService::spawn_service(
+                irys_db.clone(),
+                storage_modules_guard.clone(),
+                &block_tree_guard,
+                receivers.chunk_ingress,
+                &config,
+                &service_senders,
+                runtime_handle.clone(),
+            );
+
         // Spawn mempool service
         let mempool_handle = MempoolService::spawn_service(
             irys_db.clone(),
             reth_node_adapter.clone(),
-            storage_modules_guard.clone(),
             &block_tree_guard,
             receivers.mempool,
             &config,
             &service_senders,
             runtime_handle.clone(),
+            chunk_ingress_state.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
@@ -1444,7 +1462,7 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .send_traced(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
@@ -1645,7 +1663,7 @@ impl IrysNode {
         let (fcu_tx, fcu_rx) = oneshot::channel();
         service_senders
             .reth_service
-            .send(RethServiceMessage::ForkChoice {
+            .send_traced(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: fcu_markers.head.block_hash,
                     confirmed_hash: fcu_markers.migration_block.block_hash,
@@ -1698,6 +1716,7 @@ impl IrysNode {
             is_vdf_mining_enabled,
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
+            chunk_ingress_state,
             backfill_cancel,
             backfill_complete,
         };
@@ -1764,6 +1783,7 @@ impl IrysNode {
 
             // 7. State management
             services.push(mempool_handle);
+            services.push(chunk_ingress_handle);
 
             // 8. Core infrastructure (shutdown last)
             services.push(peer_network_handle);
@@ -1773,6 +1793,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
+                chunk_ingress: service_senders.chunk_ingress.clone(),
                 mempool_guard: mempool_guard.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_guard,
@@ -1831,7 +1852,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
-        vdf_fast_forward_receiver: UnboundedReceiver<VdfStep>,
+        vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
@@ -1973,7 +1994,7 @@ impl IrysNode {
         mining_bus: MiningBus,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-        block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
+        block_producer_rx: UnboundedReceiver<Traced<BlockProducerCommand>>,
         reth_provider: NodeProvider,
         block_index: BlockIndex,
         runtime_handle: tokio::runtime::Handle,
@@ -2064,7 +2085,7 @@ impl IrysNode {
         mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-        block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
+        block_discovery_rx: UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
         runtime_handle: Handle,
     ) -> TokioServiceHandle {
         let block_discovery_inner = BlockDiscoveryServiceInner {
@@ -2111,7 +2132,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
-        reth_service: UnboundedSender<RethServiceMessage>,
+        reth_service: UnboundedSender<Traced<RethServiceMessage>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
@@ -2157,7 +2178,7 @@ fn read_latest_block_data(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
-    reth_service: UnboundedSender<RethServiceMessage>,
+    reth_service: UnboundedSender<Traced<RethServiceMessage>>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
     peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
@@ -2170,7 +2191,7 @@ fn init_peer_list_service(
             async move {
                 let (response_tx, response_rx) = oneshot::channel();
 
-                if let Err(send_error) = reth_service.send(RethServiceMessage::ConnectToPeer {
+                if let Err(send_error) = reth_service.send_traced(RethServiceMessage::ConnectToPeer {
                     peer: reth_peer_info,
                     response: response_tx,
                 }) {
@@ -2211,8 +2232,8 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
-    reth_rx: UnboundedReceiver<RethServiceMessage>,
+    mempool_sender: UnboundedSender<Traced<MempoolServiceMessage>>,
+    reth_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
     irys_actors::reth_service::RethService::spawn_service(

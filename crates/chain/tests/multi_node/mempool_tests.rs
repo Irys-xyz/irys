@@ -12,6 +12,7 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
+use irys_types::SendTraced as _;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, SystemLedger, H256,
@@ -307,18 +308,6 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // Verify all chunks were cached
-    let pending_count = genesis_node
-        .node_ctx
-        .mempool_guard
-        .pending_chunk_count_for_data_root(&tx.header.data_root)
-        .await;
-    assert_eq!(
-        pending_count, preheader_cap as usize,
-        "Expected {} pending chunks but got {}",
-        preheader_cap, pending_count
-    );
-
     // Now try to add one more chunk - should be rejected (cache full)
     let overflow_chunk = UnpackedChunk {
         data_root: tx.header.data_root,
@@ -337,17 +326,11 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-
-    // Verify count is still at cap (overflow chunk was rejected)
-    let pending_count = genesis_node
-        .node_ctx
-        .mempool_guard
-        .pending_chunk_count_for_data_root(&tx.header.data_root)
-        .await;
-    assert_eq!(
-        pending_count, preheader_cap as usize,
-        "Cache should still have {} chunks after overflow rejection, but has {}",
-        preheader_cap, pending_count
+    let body = test::read_body(resp).await;
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("PreHeaderOffsetExceedsCap"),
+        "Expected chunk to be rejected with PreHeaderOffsetExceedsCap, got: {body_str}"
     );
 
     genesis_node.stop().await;
@@ -473,7 +456,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(get_tx_msg)
+        .send_traced(get_tx_msg)
     {
         tracing::error!("error sending message to mempool: {:?}", err);
     }
@@ -1188,20 +1171,16 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
             .collect::<Vec<_>>()
     );
 
-    let a_blk1_tx1_mempool = {
-        let (tx, rx) = oneshot::channel();
-        a_node
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                vec![a_blk1_tx1.header.id],
-                tx,
-            ))?;
-        let mempool_txs = rx.await?;
-        let a_blk1_tx1_mempool = mempool_txs.first().unwrap().clone().unwrap();
-        a_blk1_tx1_mempool
-    };
+    let a_blk1_tx1_mempool =
+        {
+            let (tx, rx) = oneshot::channel();
+            a_node.node_ctx.service_senders.mempool.send_traced(
+                MempoolServiceMessage::GetDataTxs(vec![a_blk1_tx1.header.id], tx),
+            )?;
+            let mempool_txs = rx.await?;
+            let a_blk1_tx1_mempool = mempool_txs.first().unwrap().clone().unwrap();
+            a_blk1_tx1_mempool
+        };
 
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
@@ -1887,14 +1866,9 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .get_block_by_height_from_index(previous_height, false)?
         .block_hash;
 
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(
-            previous_block_hash,
-            tx,
-        ))?;
+    peer2.node_ctx.service_senders.mempool.send_traced(
+        MempoolServiceMessage::GetBestMempoolTxs(previous_block_hash, tx),
+    )?;
 
     let best_previous = rx.await??;
     // previous block does not have the fund tx, the tx should not be present

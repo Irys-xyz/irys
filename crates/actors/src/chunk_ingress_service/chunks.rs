@@ -1,9 +1,9 @@
-use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
-use crate::mempool_service::metrics::{
+use super::ingress_proofs::generate_and_store_ingress_proof;
+use super::metrics::{
     record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
     record_validation_duration,
 };
-use crate::mempool_service::Inner;
+use super::ChunkIngressServiceInner;
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,
@@ -16,8 +16,9 @@ use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, H256,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, H256,
 };
+use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
@@ -71,14 +72,13 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
-impl Inner {
+impl ChunkIngressServiceInner {
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
-    pub async fn handle_chunk_ingress_message(
+    pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
         let chunk = Arc::new(chunk);
-        let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
@@ -93,9 +93,11 @@ impl Inner {
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
 
-        if mempool_state
-            .is_a_recent_valid_chunk(&chunk_path_hash)
+        if self
+            .recent_valid_chunks
+            .read()
             .await
+            .contains(&chunk_path_hash)
         {
             debug!(
                 "Chunk {} already processed recently, skipping re-gossip",
@@ -225,10 +227,15 @@ impl Inner {
 
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                let current_chunk_count = self
-                    .mempool_state
-                    .pending_chunk_count_for_data_root(&chunk.data_root)
-                    .await;
+
+                // Acquire a single write lock so the count check and the insert are
+                // atomic with respect to concurrent ingress calls, eliminating the
+                // TOCTOU race that could allow the per-item cap to be exceeded.
+                let mut pending_chunks_guard = self.pending_chunks.write().await;
+                let current_chunk_count = pending_chunks_guard
+                    .get(&chunk.data_root)
+                    .map(lru::LruCache::len)
+                    .unwrap_or(0);
                 if current_chunk_count >= preheader_chunks_per_item {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
@@ -240,9 +247,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state
-                    .put_chunk(Arc::unwrap_or_clone(chunk))
-                    .await;
+                pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
                 return Ok(());
             }
         };
@@ -265,9 +270,10 @@ impl Inner {
                     "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
                     chunk.data_size, data_size, chunk.data_root
                 );
-                self.mempool_state
-                    .put_chunk(Arc::unwrap_or_clone(chunk))
-                    .await;
+                self.pending_chunks
+                    .write()
+                    .await
+                    .put(Arc::unwrap_or_clone(chunk));
                 return Ok(());
             }
         }
@@ -396,14 +402,11 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        // Record validation duration
-        record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
+        record_validation_duration(validation_start.elapsed_ms());
 
         drop(_proof_span);
 
-        // Queue the chunk for async batched write to CachedChunks via the
-        // write-behind writer, avoiding a synchronous MDBX transaction on the
-        // hot ingress path.
+        // Write-behind: defers MDBX write for throughput
         let storage_start = Instant::now();
         match self
             .chunk_data_writer
@@ -426,12 +429,13 @@ impl Inner {
                 .into());
             }
         }
-        record_enqueue_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
+        record_enqueue_duration(storage_start.elapsed_ms());
 
         // Add to recent valid chunks cache to prevent re-processing
-        mempool_state
-            .record_recent_valid_chunk(chunk_path_hash)
-            .await;
+        self.recent_valid_chunks
+            .write()
+            .await
+            .put(chunk_path_hash, ());
 
         record_chunk_ingested(chunk_len);
 
@@ -473,7 +477,7 @@ impl Inner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!(
                 "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
@@ -483,10 +487,7 @@ impl Inner {
             );
         }
 
-        // ==== INGRESS PROOFS ====
-        // Flush the write-behind writer so that the chunk we just queued (and
-        // any others in the buffer) are committed to MDBX before we count
-        // chunks for ingress proof generation.
+        // Flush to ensure chunks are committed before ingress proof check.
         if let Err(e) = self.chunk_data_writer.flush().await {
             error!(
                 "Failed to flush chunk data writer before ingress proof check: {:?}",

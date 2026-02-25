@@ -12,6 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
+use irys_types::SendTraced as _;
 use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -21,7 +22,7 @@ async fn gossip_commitment_to_node(
     commitment: &CommitmentTransaction,
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx.service_senders.mempool.send(
+    node.node_ctx.service_senders.mempool.send_traced(
         MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
     )?;
 

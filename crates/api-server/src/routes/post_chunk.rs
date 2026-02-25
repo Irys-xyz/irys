@@ -9,14 +9,15 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::{ChunkIngressError, MempoolServiceMessage};
-use irys_types::UnpackedChunk;
+use irys_actors::{chunk_ingress_service::ChunkIngressMessage, ChunkIngressError};
+use irys_types::{SendTraced as _, UnpackedChunk};
+use irys_utils::ElapsedMs as _;
 use std::time::Instant;
 use tracing::{info, instrument, warn};
 
-/// Handles the HTTP POST request for adding a chunk to the mempool.
+/// Handles the HTTP POST request for adding a chunk to the chunk ingress service.
 /// This function takes in a JSON payload of a `Chunk` type, encapsulates it
-/// into a `ChunkIngressMessage` for further processing by the mempool actor,
+/// into a `ChunkIngressMessage` for further processing by the chunk ingress service,
 /// and manages error handling based on the results of message delivery and validation.
 #[instrument(level = "info", skip_all)]
 pub async fn post_chunk(
@@ -36,14 +37,14 @@ pub async fn post_chunk(
 
     // Create a message and send it
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestChunk(chunk, oneshot_tx);
+    let tx_ingress_msg = ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx));
 
     // Handle failure to deliver the message (e.g., channel closed)
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!("Failed to send to mempool channel: {:?}", err);
+    if let Err(err) = state.chunk_ingress.send_traced(tx_ingress_msg) {
+        tracing::error!("Failed to send to chunk ingress channel: {:?}", err);
         record_chunk_error("channel_error", false);
         return Err((
-            format!("Failed to send to mempool channel: {err:?}"),
+            format!("Failed to send to chunk ingress channel: {err:?}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         )
             .into());
@@ -52,7 +53,10 @@ pub async fn post_chunk(
     // Handle errors in reading the oneshot response
     let msg_result = match oneshot_rx.await {
         Err(err) => {
-            tracing::error!("API: Errors reading the mempool oneshot response {:?}", err);
+            tracing::error!(
+                "API: Errors reading the chunk ingress oneshot response {:?}",
+                err
+            );
             record_chunk_error("channel_error", false);
             return Err((
                 format!("Internal error: {err:?}"),
@@ -90,7 +94,7 @@ pub async fn post_chunk(
     }
 
     // Record processing duration on success
-    record_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
+    record_chunk_processing_duration(start.elapsed_ms());
 
     // If everything succeeded, return an HTTP 200 OK response
     Ok(HttpResponse::Ok()

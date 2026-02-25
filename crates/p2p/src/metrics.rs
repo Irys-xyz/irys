@@ -24,7 +24,7 @@ pub(crate) fn record_gossip_inbound_error(error_type: &'static str, is_advisory:
         1,
         &[
             KeyValue::new("error_type", error_type),
-            KeyValue::new("advisory", if is_advisory { "true" } else { "false" }),
+            KeyValue::new("advisory", is_advisory),
         ],
     );
 }

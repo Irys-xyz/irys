@@ -30,7 +30,7 @@ services:
     ports:
       - "${OTEL_GRPC_PORT:-4317}:4317"
       - "${OTEL_HTTP_PORT:-4318}:4318"
-      - "8888:8888"  # OTEL collector telemetry metrics
+      # Port 8888 (collector self-telemetry) not exposed to host to avoid conflicts
     volumes:
       - ./configs/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
     command:
@@ -51,9 +51,13 @@ services:
 
   # Tempo - Spans/tracing
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.7.2
     container_name: obs-tempo
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     networks:
       observation_network:
         ipv4_address: 172.23.0.101
@@ -148,7 +152,7 @@ services:
 
   # Grafana Image Renderer - server-side PNG/PDF export
   grafana-image-renderer:
-    image: grafana/grafana-image-renderer:5.5.1
+    image: grafana/grafana-image-renderer:v5.5.1
     container_name: obs-grafana-image-renderer
     restart: unless-stopped
     networks:
@@ -159,11 +163,30 @@ services:
     environment:
       - ENABLE_METRICS=true
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/healthz"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8081'"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Grafana correlation setup - links ES trace.id → Tempo traces
+  grafana-init:
+    image: curlimages/curl:latest
+    container_name: obs-grafana-init
+    networks:
+      observation_network:
+        ipv4_address: 172.23.0.108
+    volumes:
+      - ./scripts/setup_grafana_correlations.sh:/setup_grafana_correlations.sh:ro
+    environment:
+      - GRAFANA_URL=http://grafana:3000
+      - GRAFANA_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GRAFANA_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    entrypoint: ["/bin/sh", "/setup_grafana_correlations.sh"]
+    depends_on:
+      grafana:
+        condition: service_healthy
+    restart: "no"
 
   # Grafana - Visualization (Tempo, Prometheus, Elasticsearch)
   grafana:

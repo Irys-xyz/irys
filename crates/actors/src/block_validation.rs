@@ -29,7 +29,8 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SealedBlock, SendTraced as _, SystemLedger, UnixTimestamp, H256,
+    U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
@@ -1551,7 +1552,7 @@ async fn generate_expected_shadow_transactions(
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
         service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(
+            .send_traced(MempoolServiceMessage::GetBlockHeader(
                 block.previous_block_hash,
                 false,
                 tx_prev,
@@ -2375,7 +2376,7 @@ pub async fn data_txs_are_valid(
                     let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
                     let _ = service_senders
                         .data_sync
-                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+                        .send_traced(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
 
                     match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
                         Ok(Ok(active_peers)) => {
@@ -2457,11 +2458,16 @@ pub async fn data_txs_are_valid(
                                 continue;
                             }
 
-                            // Ingest via mempool to persist and validate
+                            // Ingest via chunk ingress service to persist and validate
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
-                                .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .chunk_ingress
+                                .send_traced(
+                                    crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
+                                        unpacked,
+                                        Some(ing_tx),
+                                    ),
+                                )
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
@@ -2717,7 +2723,7 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+        .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
@@ -2828,7 +2834,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .send_traced(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }
