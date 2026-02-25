@@ -186,6 +186,7 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    max_concurrent_tasks: u32,
     /// Shared state handle for reading chunk ingress pending count
     pub chunk_ingress_state: ChunkIngressState,
 }
@@ -3018,6 +3019,8 @@ impl MempoolService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        max_concurrent_tasks: u32::try_from(max_concurrent_mempool_tasks)
+                            .expect("max_concurrent_mempool_tasks fits in u32"),
                         chunk_ingress_state,
                     }),
                 };
@@ -3136,10 +3139,28 @@ impl MempoolService {
         async {
             // Process remaining messages with timeout
             let process_remaining = async {
+                // Acquire all permits so in-flight spawned handlers finish first
+                let _all_permits = self
+                    .inner
+                    .message_handler_semaphore
+                    .acquire_many(self.inner.max_concurrent_tasks)
+                    .await
+                    .expect("semaphore should not be closed");
                 while let Ok(traced) = self.msg_rx.try_recv() {
                     let (msg, parent_span) = traced.into_parts();
-                    let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg.variant_name());
-                    self.inner.handle_message(msg).instrument(span).await?;
+                    let msg_type = msg.variant_name();
+                    let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
+                    let task_info = format!("shutdown drain: {}", msg_type);
+                    if let Err(e) = wait_with_progress(
+                        self.inner.handle_message(msg),
+                        20,
+                        &task_info,
+                    )
+                    .instrument(span)
+                    .await
+                    {
+                        tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                    }
                 }
                 Ok::<(), eyre::Error>(())
             };
