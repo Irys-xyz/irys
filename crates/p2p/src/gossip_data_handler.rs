@@ -604,9 +604,8 @@ where
         let block_header = match maybe_header {
             Some(header) => header,
             None => {
-                // We use `is_syncing_from_a_trusted_peer()` here as an approximation for
-                // `should_skip_block_validation` because the block height is unknown until we
-                // fetch the header, so `should_skip_block_validation` cannot be evaluated yet.
+                // When syncing from a trusted peer, we MUST only fetch from trusted peers —
+                // this is a hard security invariant.
                 self.fetch_header_with_retries(
                     block_hash,
                     self.sync_state.is_syncing_from_a_trusted_peer(),
@@ -649,10 +648,6 @@ where
             data_source_ip.ip(),
         );
 
-        // Record block in cache
-        self.cache
-            .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
-
         let sealed_block =
             SealedBlock::new(Arc::clone(&block_header), block_body).map_err(|e| {
                 self.peer_list.decrease_peer_score_by_peer_id(
@@ -664,6 +659,11 @@ where
                     e
                 )))
             })?;
+
+        // Record block in cache only after header/body validation succeeds,
+        // so invalid bodies don't poison the duplicate gate.
+        self.cache
+            .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
         self.block_pool
             .process_block(Arc::new(sealed_block), skip_block_validation)
