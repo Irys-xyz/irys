@@ -5,7 +5,9 @@ use crate::{
     services::ServiceSenders,
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
-use irys_types::{IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
+use irys_types::{
+    IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
+};
 use std::{
     collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
@@ -415,7 +417,7 @@ impl ChunkOrchestrator {
                 // Send the message to the DataSyncService so it can update the PeerBandwidthManagers and
                 // then call back into the orchestrator using `on_chunk_completed(...)` to mark the request as
                 // completed
-                let _ = tx.send(message);
+                let _ = tx.send_traced(message);
             }
             .instrument(tracing::Span::current()),
         );

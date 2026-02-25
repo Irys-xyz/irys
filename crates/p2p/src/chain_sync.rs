@@ -6,6 +6,7 @@ use irys_actors::reth_service::RethServiceMessage;
 use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
+use irys_types::Traced;
 use irys_types::{
     BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
@@ -110,7 +111,7 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     ///  much behind the network we are, if at all.
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B>>,
-    reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
+    reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
     /// An atomic bool to enable or disable VDF mining when sync is in progress
     is_vdf_mining_enabled: Arc<AtomicBool>,
     is_update_whitelist_task_running: Arc<AtomicBool>,
@@ -158,7 +159,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
-        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
+        reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {

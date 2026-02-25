@@ -12,7 +12,8 @@ use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId, U256,
+    DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
+    SendTraced as _, U256,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth_db::Database as _;
@@ -91,7 +92,7 @@ impl Inner {
         if let Err(e) = self
             .service_senders
             .chunk_ingress
-            .send(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
         {
             tracing::warn!(
                 "Failed to send ProcessPendingChunks for data_root {:?}: {:?}",
@@ -455,7 +456,7 @@ impl Inner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!("Failed to send gossip data for tx {}: {:?}", tx.id, error);
         }

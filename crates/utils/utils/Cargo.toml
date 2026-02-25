@@ -21,8 +21,11 @@ opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry-semantic-conventions = { workspace = true, optional = true }
 opentelemetry-appender-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
-tracing-error = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+# Unconditional: make_fmt_layer() is a public API that must be available
+# independent of the telemetry feature to support IRYS_LOG_FORMAT=json.
+tracing-subscriber.workspace = true
+tracing-error.workspace = true
 
 [dev-dependencies]
 proptest = "1.6"
@@ -38,8 +41,7 @@ telemetry = [
   "tracing-opentelemetry",
   "opentelemetry-semantic-conventions",
   "opentelemetry-appender-tracing",
-  "tracing-subscriber",
-  "tracing-error",
+  "rand",
 ]
 
 

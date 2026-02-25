@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 
 # --- Builder stage: compile the Rust binary for the container's platform ---
-FROM --platform=$BUILDPLATFORM rust:1.86-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-slim AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM

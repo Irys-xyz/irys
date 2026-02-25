@@ -5,7 +5,7 @@ use irys_utils::shutdown::spawn_shutdown_watchdog;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
+    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
 };
 
 #[cfg(feature = "telemetry")]
@@ -82,29 +82,15 @@ async fn main() -> eyre::Result<()> {
 }
 
 fn init_tracing() -> eyre::Result<()> {
-    let subscriber = Registry::default();
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env()?;
 
-    let output_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(true)
-        .with_file(true)
-        .with_writer(std::io::stdout);
-
-    // use json logging for release builds
-    let subscriber = subscriber.with(filter).with(ErrorLayer::default());
-    // TODO: re-enable with config options
-
-    // let subscriber = if cfg!(debug_assertions) {
-    //     subscriber.with(output_layer.boxed())
-    // } else {
-    //     subscriber.with(output_layer.json().with_current_span(true).boxed())
-    // };
-    let subscriber = subscriber.with(output_layer.boxed());
-
-    subscriber.init();
+    Registry::default()
+        .with(filter)
+        .with(ErrorLayer::default())
+        .with(irys_utils::make_fmt_layer())
+        .init();
 
     Ok(())
 }

@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 use thiserror::Error;
 
-
 pub mod bounded_fee;
 pub mod fee_distribution;
 

@@ -28,7 +28,7 @@ use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SystemLedger, U256, UnixTimestamp,
+    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -1580,7 +1580,7 @@ async fn generate_expected_shadow_transactions(
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
         service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(
+            .send_traced(MempoolServiceMessage::GetBlockHeader(
                 block.previous_block_hash,
                 false,
                 tx_prev,
@@ -2414,7 +2414,7 @@ pub async fn data_txs_are_valid(
                     let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
                     let _ = service_senders
                         .data_sync
-                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+                        .send_traced(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
 
                     match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
                         Ok(Ok(active_peers)) => {
@@ -2500,7 +2500,7 @@ pub async fn data_txs_are_valid(
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
                                 .chunk_ingress
-                                .send(
+                                .send_traced(
                                     crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                                         unpacked,
                                         Some(ing_tx),
@@ -2761,7 +2761,7 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+        .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
@@ -2872,7 +2872,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .send_traced(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }

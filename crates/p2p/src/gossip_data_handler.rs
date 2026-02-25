@@ -28,6 +28,7 @@ use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
+use irys_utils::ElapsedMs as _;
 use reth::builder::Block as _;
 use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
@@ -107,7 +108,7 @@ where
         match self.chunk_ingress.handle_chunk_ingress(chunk).await {
             Ok(()) => {
                 // Record processing duration on success
-                record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
+                record_gossip_chunk_processing_duration(start.elapsed_ms());
 
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
@@ -377,7 +378,8 @@ where
             GossipRequestV2 {
                 peer_id: source_peer_id,
                 miner_address,
-                data: (*irys_block).clone(),
+
+                data: Arc::unwrap_or_clone(irys_block),
             },
             peer_info.address.gossip,
         )
@@ -423,7 +425,8 @@ where
             GossipRequestV2 {
                 peer_id: source_peer_id,
                 miner_address,
-                data: (*irys_block).clone(),
+
+                data: Arc::unwrap_or_clone(irys_block),
             },
             peer_info.address.gossip,
         )

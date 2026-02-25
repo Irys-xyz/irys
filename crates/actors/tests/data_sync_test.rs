@@ -144,7 +144,7 @@ fn format_intervals(intervals: &[Interval<PartitionChunkOffset>]) -> String {
 //==============================================================================
 struct DataSyncServiceTestHarness {
     inner: DataSyncServiceInner,
-    msg_rx: UnboundedReceiver<DataSyncServiceMessage>,
+    msg_rx: UnboundedReceiver<irys_types::Traced<DataSyncServiceMessage>>,
 }
 
 impl DataSyncServiceTestHarness {
@@ -154,7 +154,7 @@ impl DataSyncServiceTestHarness {
         peer_list: PeerList,
         chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: ServiceSenders,
-        rx: UnboundedReceiver<DataSyncServiceMessage>,
+        rx: UnboundedReceiver<irys_types::Traced<DataSyncServiceMessage>>,
         config: Config,
     ) -> Self {
         let inner = DataSyncServiceInner::new(
@@ -172,8 +172,8 @@ impl DataSyncServiceTestHarness {
     /// Process all pending messages in the queue
     fn process_pending_messages(&mut self) -> eyre::Result<usize> {
         let mut count = 0;
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg)?;
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            self.inner.handle_message(traced.inner)?;
             self.inner.storage_modules.read().unwrap()[0]
                 .sync_pending_chunks()
                 .expect("sync pending chunks to disk");
@@ -198,8 +198,8 @@ impl DataSyncServiceTestHarness {
             )
             .await
             {
-                Ok(Some(msg)) => {
-                    self.inner.handle_message(msg)?;
+                Ok(Some(traced)) => {
+                    self.inner.handle_message(traced.inner)?;
                     self.inner.storage_modules.read().unwrap()[0]
                         .sync_pending_chunks()
                         .expect("sync pending chunks to disk");

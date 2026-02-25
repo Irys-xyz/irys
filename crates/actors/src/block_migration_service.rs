@@ -3,8 +3,8 @@ use eyre::{OptionExt as _, ensure};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
 use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
 use irys_types::{
-    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SystemLedger,
-    app_state::DatabaseProvider,
+    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
+    Traced, app_state::DatabaseProvider,
 };
 use std::{
     collections::HashMap,
@@ -21,7 +21,7 @@ pub struct BlockMigrationService {
     supply_state: Option<Arc<SupplyState>>,
     chunk_size: u64,
     cache: Arc<RwLock<BlockTree>>,
-    chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
+    chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
 }
 
 impl BlockMigrationService {
@@ -31,7 +31,7 @@ impl BlockMigrationService {
         supply_state: Option<Arc<SupplyState>>,
         chunk_size: u64,
         cache: Arc<RwLock<BlockTree>>,
-        chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
+        chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     ) -> Self {
         Self {
             db,
@@ -314,7 +314,7 @@ impl BlockMigrationService {
         );
 
         self.chunk_migration_sender
-            .send(ChunkMigrationServiceMessage::BlockMigrated(
+            .send_traced(ChunkMigrationServiceMessage::BlockMigrated(
                 Arc::clone(header),
                 Arc::new(all_txs_map),
             ))
