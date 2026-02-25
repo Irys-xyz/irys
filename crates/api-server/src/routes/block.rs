@@ -36,7 +36,6 @@ pub async fn get_block(
         err: String::from("Invalid block tag"),
     })?;
 
-    // all roads lead to block hash
     let block_hash: H256 = match tag_param {
         BlockParam::Latest => state.block_tree.read().tip,
         BlockParam::BlockHeight(height) => 'outer: {

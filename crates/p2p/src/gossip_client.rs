@@ -13,9 +13,10 @@ use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
     HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
     IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
+    PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
+use opentelemetry::propagation::Injector;
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
@@ -23,7 +24,7 @@ use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument, warn, Instrument as _};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
@@ -37,6 +38,31 @@ fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
     }
 }
 
+struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&value) {
+                self.0.insert(name, val);
+            }
+        }
+    }
+}
+
+fn inject_trace_context(headers: &mut reqwest::header::HeaderMap) {
+    let cx = tracing_opentelemetry::OpenTelemetrySpanExt::context(&tracing::Span::current());
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(headers));
+    });
+}
+
+fn traced_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    inject_trace_context(&mut headers);
+    headers
+}
+
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -45,6 +71,14 @@ const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// Timeout to wait for handshake completion before retrying
 const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Control flow outcome for `handle_peer_pull_response`.
+#[derive(Debug)]
+enum PeerPullOutcome<T> {
+    Ok((IrysPeerId, T)),
+    Err(PeerNetworkError),
+    RetryAfterHandshake,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
@@ -282,6 +316,7 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
+        self.check_circuit_breaker(&peer.0)?;
         let start_time = std::time::Instant::now();
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
@@ -366,7 +401,13 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::Info
         );
-        let response = self.internal_client().get(&url).send().await;
+        let headers = traced_headers();
+        let response = self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await;
 
         let gossip_result = match response {
             Ok(resp) => {
@@ -407,9 +448,11 @@ impl GossipClient {
             gossip_base_url(&peer, ProtocolVersion::V1),
             GossipRoutes::PeerList
         );
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
@@ -447,9 +490,11 @@ impl GossipClient {
             GossipRoutes::Version
         );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
+            .headers(headers)
             .json(&version)
             .send()
             .await
@@ -515,9 +560,11 @@ impl GossipClient {
             GossipRoutes::Handshake
         );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
+            .headers(headers)
             .json(&version)
             .send()
             .await
@@ -572,7 +619,14 @@ impl GossipClient {
             gossip_base_url(&peer.gossip, ProtocolVersion::V1),
             GossipRoutes::BlockIndex
         );
-        let response = self.internal_client().get(&url).query(&query).send().await;
+        let headers = traced_headers();
+        let response = self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .query(&query)
+            .send()
+            .await;
 
         let gossip_result = match response {
             Ok(resp) => {
@@ -613,9 +667,11 @@ impl GossipClient {
             peer.gossip,
             GossipRoutes::ProtocolVersion
         );
+        let headers = traced_headers();
         let response = self
             .internal_client()
             .get(&url)
+            .headers(headers)
             .send()
             .await
             .map_err(|error| {
@@ -677,7 +733,14 @@ impl GossipClient {
         );
         let peer_addr_str = peer.gossip.to_string();
 
-        let response = match self.internal_client().get(&url).send().await {
+        let headers = traced_headers();
+        let response = match self
+            .internal_client()
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(error) => {
                 tracing::debug!(
@@ -816,10 +879,16 @@ impl GossipClient {
 
         debug!("Sending pre-serialized data to {}", url);
 
+        let mut headers = traced_headers();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+
         let response = self
             .client
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .headers(headers)
             .body(body)
             .send()
             .await
@@ -874,28 +943,32 @@ impl GossipClient {
         let peer_list = peer_list.clone();
         let peer_id = *peer.0;
         let peer = peer.1.clone();
+        let span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            if let Err(e) = client.check_circuit_breaker(&peer_id) {
-                record_gossip_outbound_error(gossip_error_type(&e));
-                return;
-            }
-            let result = client
-                .send_preserialized(&peer.address.gossip, route, body)
-                .await;
-            Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
-            match result {
-                Ok(_) => {
-                    if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
-                        error!("Error recording seen data in cache: {:?}", err);
+        tokio::spawn(
+            async move {
+                if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                    record_gossip_outbound_error(gossip_error_type(&e));
+                    return;
+                }
+                let result = client
+                    .send_preserialized(&peer.address.gossip, route, body)
+                    .await;
+                Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
+                match result {
+                    Ok(_) => {
+                        if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
+                            error!("Error recording seen data in cache: {:?}", err);
+                        }
+                    }
+                    Err(e) => {
+                        record_gossip_outbound_error(gossip_error_type(&e));
+                        error!("Error sending pre-serialized data to peer: {:?}", e);
                     }
                 }
-                Err(e) => {
-                    record_gossip_outbound_error(gossip_error_type(&e));
-                    error!("Error sending pre-serialized data to peer: {:?}", e);
-                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Send data to a peer
@@ -1090,14 +1163,26 @@ impl GossipClient {
 
         debug!("Sending data to {} using {:?}", url, protocol_version);
 
+        let headers = traced_headers();
+
         let response = match protocol_version {
             ProtocolVersion::V1 => {
                 let req = self.create_request_v1(data.clone());
-                self.client.post(&url).json(&req).send().await
+                self.client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&req)
+                    .send()
+                    .await
             }
             ProtocolVersion::V2 => {
                 let req = self.create_request_v2(data.clone());
-                self.client.post(&url).json(&req).send().await
+                self.client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&req)
+                    .send()
+                    .await
             }
         };
 
@@ -1317,7 +1402,7 @@ impl GossipClient {
         header: Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
         self.pull_data_from_network(
             data_request,
@@ -1325,7 +1410,11 @@ impl GossipClient {
             use_trusted_peers_only,
             peer_list,
             |gossip_data| match gossip_data {
-                GossipDataV2::BlockBody(body) => Ok(body),
+                GossipDataV2::BlockBody(body) => {
+                    SealedBlock::new(Arc::clone(&header), Arc::unwrap_or_clone(body)).map_err(|e| {
+                        PeerNetworkError::UnexpectedData(format!("Invalid block body: {e:?}"))
+                    })
+                }
                 _ => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
@@ -1341,75 +1430,25 @@ impl GossipClient {
         header: &IrysBlockHeader,
         peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
-        for attempt in 0..2 {
-            match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), Some(header), peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(Some(data)) => match data {
-                        GossipDataV2::BlockBody(body) => return Ok((peer.0, body)),
-                        _ => {
-                            return Err(PeerNetworkError::UnexpectedData(format!(
-                                "Expected BlockBody, got {:?}",
-                                data.data_type_and_id()
-                            )))
-                        }
-                    },
-                    GossipResponse::Accepted(None) => {
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {} did not have the requested block body",
-                            peer.0
-                        )))
-                    }
-                    GossipResponse::Rejected(reason) => {
-                        warn!(
-                            "Peer {:?} rejected block body request: {:?}",
-                            peer.0, reason
-                        );
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Block body request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!(
-                                    "Peer {:?} rejected block body request with {:?}",
-                                    peer.0, reason
-                                );
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected block body request: {:?}",
-                            peer.0, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
+        let (peer_id, body) = self
+            .pull_data_from_peer_with_retry(
+                data_request,
+                Some(header),
+                peer,
+                peer_list,
+                Self::block_body,
+            )
+            .await?;
+
+        let sealed = SealedBlock::new(header.clone(), Arc::unwrap_or_clone(body)).map_err(|e| {
+            PeerNetworkError::InvalidBlockBody {
+                peer_id,
+                reason: format!("{e:?}"),
             }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull block body from peer after handshake retry".to_string(),
-        ))
+        })?;
+        Ok((peer_id, sealed))
     }
 
     pub async fn pull_payload_from_network(
@@ -1454,63 +1493,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        for attempt in 0..2 {
-            match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), None, peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(maybe_data) => match maybe_data {
-                        Some(data) => {
-                            let header = Self::block(data)?;
-                            return Ok((peer.0, header));
-                        }
-                        None => {
-                            return Err(PeerNetworkError::FailedToRequestData(
-                                "Peer did not have the requested block".to_string(),
-                            ))
-                        }
-                    },
-                    GossipResponse::Rejected(reason) => {
-                        warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Block request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!("Peer {:?} rejected block request with {:?}", peer.0, reason);
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected the block {:?} request: {:?}",
-                            peer.0, block_hash, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
-            }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull block from peer after handshake retry".to_string(),
-        ))
+        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block)
+            .await
     }
 
     pub async fn pull_transaction_from_peer(
@@ -1520,66 +1504,15 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, IrysTransactionResponse), PeerNetworkError> {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
-        for attempt in 0..2 {
-            match self
-                .pull_primitive_data_and_update_the_score(peer, data_request.clone(), peer_list)
-                .await
-            {
-                Ok(response) => match response {
-                    GossipResponse::Accepted(maybe_data) => match maybe_data {
-                        Some(data) => {
-                            let tx = Self::transaction(data)?;
-                            return Ok((peer.0, tx));
-                        }
-                        None => {
-                            return Err(PeerNetworkError::FailedToRequestData(
-                                "Peer did not have the requested transaction".to_string(),
-                            ))
-                        }
-                    },
-                    GossipResponse::Rejected(reason) => {
-                        warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
-                        match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
-                                warn!("Transaction request requires handshake: {:?}", reason);
-                                peer_list.initiate_handshake(
-                                    peer.1.address.api,
-                                    peer.1.address.gossip,
-                                    true,
-                                );
-                                if attempt == 0 {
-                                    debug!("Waiting for handshake to complete...");
-                                    tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
-                                    continue;
-                                }
-                            }
-                            RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
-                            }
-                            RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
-                                warn!(
-                                    "Peer {:?} rejected transaction request with {:?}",
-                                    peer.0, reason
-                                );
-                            }
-                            _ => {}
-                        }
-                        return Err(PeerNetworkError::FailedToRequestData(format!(
-                            "Peer {:?} rejected the transaction {:?} request: {:?}",
-                            peer.0, tx_id, reason
-                        )));
-                    }
-                },
-                Err(err) => match err {
-                    GossipError::PeerNetwork(e) => return Err(e),
-                    other => return Err(PeerNetworkError::FailedToRequestData(other.to_string())),
-                },
-            }
-        }
-        Err(PeerNetworkError::FailedToRequestData(
-            "Failed to pull transaction from peer after handshake retry".to_string(),
-        ))
+        // Use primitive fetch to avoid recursion: pull_data_and_update_the_score
+        // can call pull_block_body_from_v1_peer which calls pull_transaction_from_peer.
+        self.pull_primitive_data_from_peer_with_retry(
+            data_request,
+            peer,
+            peer_list,
+            Self::transaction,
+        )
+        .await
     }
 
     fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
@@ -1613,13 +1546,169 @@ impl GossipClient {
         }
     }
 
+    fn block_body(gossip_data: GossipDataV2) -> Result<Arc<BlockBody>, PeerNetworkError> {
+        match gossip_data {
+            GossipDataV2::BlockBody(body) => Ok(body),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected BlockBody, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    /// Pull data from a specific peer with a single handshake retry.
+    ///
+    /// Runs the provided `fetch` closure up to twice. On the first attempt,
+    /// if the peer responds with `HandshakeRequired`, a handshake is initiated
+    /// and the request is retried once.
+    async fn pull_with_handshake_retry<T, F, Fut>(
+        &self,
+        data_request: GossipDataRequestV2,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        fetch: F,
+    ) -> Result<(IrysPeerId, T), PeerNetworkError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = GossipResult<GossipResponse<Option<GossipDataV2>>>>,
+    {
+        for attempt in 0..2 {
+            let result = fetch().await;
+            match Self::handle_peer_pull_response(
+                result,
+                &data_request,
+                peer,
+                peer_list,
+                map_data,
+                attempt,
+            )
+            .await
+            {
+                PeerPullOutcome::Ok(val) => return Ok(val),
+                PeerPullOutcome::Err(e) => return Err(e),
+                PeerPullOutcome::RetryAfterHandshake => continue,
+            }
+        }
+        unreachable!("loop always returns: attempt 1 never yields RetryAfterHandshake")
+    }
+
+    /// Pull data using `pull_data_and_update_the_score` with handshake retry.
+    ///
+    /// Includes circuit breaker checks and V1 BlockBody compatibility handling.
+    /// Used by `pull_block_body_from_peer` and `pull_block_header_from_peer`.
+    async fn pull_data_from_peer_with_retry<T>(
+        &self,
+        data_request: GossipDataRequestV2,
+        fallback_header: Option<&IrysBlockHeader>,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+    ) -> Result<(IrysPeerId, T), PeerNetworkError> {
+        self.pull_with_handshake_retry(data_request.clone(), peer, peer_list, map_data, || {
+            self.pull_data_and_update_the_score(
+                peer,
+                data_request.clone(),
+                fallback_header,
+                peer_list,
+            )
+        })
+        .await
+    }
+
+    /// Like `pull_data_from_peer_with_retry` but uses
+    /// `pull_primitive_data_and_update_the_score` to avoid the recursive cycle
+    /// through `pull_block_body_from_v1_peer` → `pull_transaction_from_peer`.
+    /// Used by `pull_transaction_from_peer`.
+    async fn pull_primitive_data_from_peer_with_retry<T>(
+        &self,
+        data_request: GossipDataRequestV2,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+    ) -> Result<(IrysPeerId, T), PeerNetworkError> {
+        self.pull_with_handshake_retry(data_request.clone(), peer, peer_list, map_data, || {
+            self.pull_primitive_data_and_update_the_score(peer, data_request.clone(), peer_list)
+        })
+        .await
+    }
+
+    /// Shared response handling for single-peer pull retries.
+    async fn handle_peer_pull_response<T>(
+        result: GossipResult<GossipResponse<Option<GossipDataV2>>>,
+        data_request: &GossipDataRequestV2,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        attempt: u32,
+    ) -> PeerPullOutcome<T> {
+        match result {
+            Ok(response) => match response {
+                GossipResponse::Accepted(Some(data)) => match map_data(data) {
+                    Ok(mapped) => PeerPullOutcome::Ok((peer.0, mapped)),
+                    Err(e) => PeerPullOutcome::Err(e),
+                },
+                GossipResponse::Accepted(None) => {
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {} did not have the requested {:?}",
+                        peer.0, data_request
+                    )))
+                }
+                GossipResponse::Rejected(reason) => {
+                    debug!(
+                        "Peer {:?} rejected {:?} request: {:?}",
+                        peer.0, data_request, reason
+                    );
+                    match reason {
+                        RejectionReason::HandshakeRequired(handshake_reason) => {
+                            warn!(
+                                "Request {:?} requires handshake: {:?}",
+                                data_request, handshake_reason
+                            );
+                            peer_list.initiate_handshake(
+                                peer.1.address.api,
+                                peer.1.address.gossip,
+                                true,
+                            );
+                            if attempt == 0 {
+                                debug!("Waiting for handshake to complete...");
+                                tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
+                                return PeerPullOutcome::RetryAfterHandshake;
+                            }
+                        }
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online_by_peer_id(&peer.0, false);
+                        }
+                        RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                            warn!(
+                                "Peer {:?} rejected {:?} with {:?}",
+                                peer.0, data_request, reason
+                            );
+                        }
+                        _ => {}
+                    }
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {:?} rejected {:?} request: {:?}",
+                        peer.0, data_request, reason
+                    )))
+                }
+            },
+            Err(err) => match err {
+                GossipError::PeerNetwork(e) => PeerPullOutcome::Err(e),
+                other => {
+                    PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(other.to_string()))
+                }
+            },
+        }
+    }
+
     pub async fn pull_data_from_network<T>(
         &self,
         data_request: GossipDataRequestV2,
         fallback_header: Option<&IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        map_data: impl Fn(GossipDataV2) -> Result<T, PeerNetworkError>,
     ) -> Result<(IrysPeerId, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()
@@ -1688,6 +1777,11 @@ impl GossipClient {
                                 }
                                 Err(err) => {
                                     warn!("Failed to map data from peer {}: {}", peer_id, err);
+                                    peer_list.decrease_peer_score_by_peer_id(
+                                        &peer_id,
+                                        ScoreDecreaseReason::BogusData(format!("{err}")),
+                                    );
+                                    last_error = Some(GossipError::from(err));
                                     // Not retriable: don't include this peer for future rounds
                                     all_failures_were_handshake = false;
                                 }
@@ -1842,12 +1936,25 @@ impl GossipClient {
 
             while let Some((peer_id, result)) = retry_futs.next().await {
                 if let Ok(GossipResponse::Accepted(Some(data))) = result {
-                    if let Ok(data) = map_data(data) {
-                        debug!(
-                            "Successfully retrieved {:?} from peer {} after handshake wait",
-                            data_request, peer_id
-                        );
-                        return Ok((peer_id, data));
+                    match map_data(data) {
+                        Ok(data) => {
+                            debug!(
+                                "Successfully retrieved {:?} from peer {} after handshake wait",
+                                data_request, peer_id
+                            );
+                            return Ok((peer_id, data));
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to map data from peer {} after handshake wait: {}",
+                                peer_id, err
+                            );
+                            peer_list.decrease_peer_score_by_peer_id(
+                                &peer_id,
+                                ScoreDecreaseReason::BogusData(format!("{err}")),
+                            );
+                            last_error = Some(GossipError::from(err));
+                        }
                     }
                 }
             }
@@ -1919,9 +2026,11 @@ impl GossipClient {
                     GossipRoutes::StakeAndPledgeWhitelist
                 );
 
+                let headers = traced_headers();
                 let response = self
                     .client
                     .get(&url)
+                    .headers(headers)
                     .send()
                     .await
                     .map_err(|response_error| {
@@ -2842,6 +2951,316 @@ mod tests {
                 .await
                 .expect("to get versions");
             assert_eq!(versions, vec![1, 2]);
+        }
+    }
+
+    mod handle_peer_pull_response_tests {
+        use super::*;
+        use crate::types::HandshakeRequirementReason;
+        use irys_types::PeerScore;
+
+        fn test_peer() -> (IrysPeerId, PeerListItem) {
+            let peer_id = IrysPeerId::from([2_u8; 20]);
+            let item = PeerListItem {
+                peer_id,
+                mining_address: IrysAddress::from([2_u8; 20]),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                address: create_peer_address("127.0.0.1", 9999),
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::V2,
+            };
+            (peer_id, item)
+        }
+
+        fn identity_block(data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+            match data {
+                GossipDataV2::BlockHeader(h) => Ok(h),
+                _ => Err(PeerNetworkError::UnexpectedData(
+                    "expected block header".into(),
+                )),
+            }
+        }
+
+        #[tokio::test]
+        async fn accepted_some_returns_ok() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let header = Arc::new(IrysBlockHeader::default());
+            let result: GossipResult<GossipResponse<Option<GossipDataV2>>> = Ok(
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(header.clone()))),
+            );
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                0,
+            )
+            .await;
+
+            match outcome {
+                PeerPullOutcome::Ok((id, _block)) => assert_eq!(id, peer.0),
+                other => panic!("expected Ok, got {:?}", other),
+            }
+        }
+
+        #[tokio::test]
+        async fn accepted_none_returns_err() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let result = Ok(GossipResponse::Accepted(None));
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                0,
+            )
+            .await;
+
+            assert!(matches!(outcome, PeerPullOutcome::Err(_)));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn handshake_required_on_first_attempt_returns_retry() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let result = Ok(GossipResponse::Rejected(
+                RejectionReason::HandshakeRequired(Some(
+                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                )),
+            ));
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                0,
+            )
+            .await;
+
+            assert!(matches!(outcome, PeerPullOutcome::RetryAfterHandshake));
+        }
+
+        #[tokio::test]
+        async fn handshake_required_on_second_attempt_returns_err() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let result = Ok(GossipResponse::Rejected(
+                RejectionReason::HandshakeRequired(Some(
+                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                )),
+            ));
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                1,
+            )
+            .await;
+
+            assert!(matches!(outcome, PeerPullOutcome::Err(_)));
+        }
+
+        #[tokio::test]
+        async fn gossip_disabled_sets_peer_offline() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            // Add the peer so set_is_online_by_peer_id can find it
+            peer_list.add_or_update_peer(peer.1.clone(), true);
+            let result = Ok(GossipResponse::Rejected(RejectionReason::GossipDisabled));
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                0,
+            )
+            .await;
+
+            assert!(matches!(outcome, PeerPullOutcome::Err(_)));
+            // Verify the peer was marked offline
+            if let Some(item) = peer_list.peer_by_id(&peer.0) {
+                assert!(!item.is_online);
+            }
+        }
+
+        #[tokio::test]
+        async fn gossip_error_returns_err() {
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let result = Err(GossipError::Network("connection reset".into()));
+
+            let outcome = GossipClient::handle_peer_pull_response(
+                result,
+                &GossipDataRequestV2::BlockHeader(H256::zero()),
+                &peer,
+                &peer_list,
+                identity_block,
+                0,
+            )
+            .await;
+
+            assert!(matches!(outcome, PeerPullOutcome::Err(_)));
+        }
+    }
+
+    mod pull_with_handshake_retry_tests {
+        use super::*;
+        use crate::types::HandshakeRequirementReason;
+        use irys_types::PeerScore;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        fn test_peer() -> (IrysPeerId, PeerListItem) {
+            let peer_id = IrysPeerId::from([3_u8; 20]);
+            let item = PeerListItem {
+                peer_id,
+                mining_address: IrysAddress::from([3_u8; 20]),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                address: create_peer_address("127.0.0.1", 9998),
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::V2,
+            };
+            (peer_id, item)
+        }
+
+        fn identity_block(data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+            match data {
+                GossipDataV2::BlockHeader(h) => Ok(h),
+                _ => Err(PeerNetworkError::UnexpectedData(
+                    "expected block header".into(),
+                )),
+            }
+        }
+
+        #[tokio::test]
+        async fn immediate_success() {
+            let fixture = TestFixture::new();
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let header = Arc::new(IrysBlockHeader::default());
+            let header_clone = header.clone();
+
+            let result =
+                fixture
+                    .client
+                    .pull_with_handshake_retry(
+                        GossipDataRequestV2::BlockHeader(H256::zero()),
+                        &peer,
+                        &peer_list,
+                        identity_block,
+                        || {
+                            let h = header_clone.clone();
+                            async move {
+                                Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(h))))
+                            }
+                        },
+                    )
+                    .await;
+
+            assert!(result.is_ok());
+            let (peer_id, _block) = result.unwrap();
+            assert_eq!(peer_id, peer.0);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn handshake_required_then_success_on_retry() {
+            let fixture = TestFixture::new();
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+            let header = Arc::new(IrysBlockHeader::default());
+            let header_clone = header.clone();
+            let call_count = Arc::new(AtomicU32::new(0));
+            let call_count_clone = call_count.clone();
+
+            let result = fixture
+                .client
+                .pull_with_handshake_retry(
+                    GossipDataRequestV2::BlockHeader(H256::zero()),
+                    &peer,
+                    &peer_list,
+                    identity_block,
+                    move || {
+                        let attempt = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                        let h = header_clone.clone();
+                        async move {
+                            if attempt == 0 {
+                                Ok(GossipResponse::Rejected(
+                                    RejectionReason::HandshakeRequired(Some(
+                                        HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                                    )),
+                                ))
+                            } else {
+                                Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(h))))
+                            }
+                        }
+                    },
+                )
+                .await;
+
+            assert!(result.is_ok());
+            assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn handshake_required_both_attempts_returns_err() {
+            let fixture = TestFixture::new();
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+
+            let result = fixture
+                .client
+                .pull_with_handshake_retry(
+                    GossipDataRequestV2::BlockHeader(H256::zero()),
+                    &peer,
+                    &peer_list,
+                    identity_block,
+                    || async {
+                        Ok(GossipResponse::Rejected(
+                            RejectionReason::HandshakeRequired(Some(
+                                HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                            )),
+                        ))
+                    },
+                )
+                .await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn persistent_error_returns_err() {
+            let fixture = TestFixture::new();
+            let peer = test_peer();
+            let peer_list = PeerList::test_mock().unwrap();
+
+            let result = fixture
+                .client
+                .pull_with_handshake_retry(
+                    GossipDataRequestV2::BlockHeader(H256::zero()),
+                    &peer,
+                    &peer_list,
+                    identity_block,
+                    || async { Err(GossipError::Network("connection refused".into())) },
+                )
+                .await;
+
+            assert!(result.is_err());
         }
     }
 }

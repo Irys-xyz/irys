@@ -10,7 +10,8 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::{chunk_ingress_service::ChunkIngressMessage, ChunkIngressError};
-use irys_types::UnpackedChunk;
+use irys_types::{SendTraced as _, UnpackedChunk};
+use irys_utils::ElapsedMs as _;
 use std::time::Instant;
 use tracing::{info, instrument, warn};
 
@@ -39,7 +40,7 @@ pub async fn post_chunk(
     let tx_ingress_msg = ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx));
 
     // Handle failure to deliver the message (e.g., channel closed)
-    if let Err(err) = state.chunk_ingress.send(tx_ingress_msg) {
+    if let Err(err) = state.chunk_ingress.send_traced(tx_ingress_msg) {
         tracing::error!("Failed to send to chunk ingress channel: {:?}", err);
         record_chunk_error("channel_error", false);
         return Err((
@@ -93,7 +94,7 @@ pub async fn post_chunk(
     }
 
     // Record processing duration on success
-    record_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
+    record_chunk_processing_duration(start.elapsed_ms());
 
     // If everything succeeded, return an HTTP 200 OK response
     Ok(HttpResponse::Ok()

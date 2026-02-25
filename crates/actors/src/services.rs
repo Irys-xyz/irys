@@ -15,7 +15,7 @@ use crate::{
 use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage};
+use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage, Traced};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
@@ -87,77 +87,80 @@ impl ServiceSenders {
 
 #[derive(Debug)]
 pub struct ServiceReceivers {
-    pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
-    pub chunk_ingress: UnboundedReceiver<ChunkIngressMessage>,
-    pub chunk_migration: UnboundedReceiver<ChunkMigrationServiceMessage>,
-    pub mempool: UnboundedReceiver<MempoolServiceMessage>,
-    pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
-    pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
-    pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV2>,
-    pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
-    pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
-    pub block_producer: UnboundedReceiver<BlockProducerCommand>,
-    pub reth_service: UnboundedReceiver<RethServiceMessage>,
+    pub chunk_cache: UnboundedReceiver<Traced<CacheServiceAction>>,
+    pub chunk_ingress: UnboundedReceiver<Traced<ChunkIngressMessage>>,
+    pub chunk_migration: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
+    pub mempool: UnboundedReceiver<Traced<MempoolServiceMessage>>,
+    pub vdf_fast_forward: UnboundedReceiver<Traced<VdfStep>>,
+    pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
+    pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
+    pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+    pub block_tree: UnboundedReceiver<Traced<BlockTreeServiceMessage>>,
+    pub validation_service: UnboundedReceiver<Traced<ValidationServiceMessage>>,
+    pub block_producer: UnboundedReceiver<Traced<BlockProducerCommand>>,
+    pub reth_service: UnboundedReceiver<Traced<RethServiceMessage>>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
     pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
-    pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
+    pub block_discovery: UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
     pub packing: tokio::sync::mpsc::Receiver<PackingRequest>,
 }
 
 #[derive(Debug)]
 pub struct ServiceSendersInner {
-    pub chunk_cache: UnboundedSender<CacheServiceAction>,
-    pub chunk_ingress: UnboundedSender<ChunkIngressMessage>,
-    pub chunk_migration: UnboundedSender<ChunkMigrationServiceMessage>,
-    pub mempool: UnboundedSender<MempoolServiceMessage>,
-    pub vdf_fast_forward: UnboundedSender<VdfStep>,
-    pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
-    pub data_sync: UnboundedSender<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
-    pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
-    pub validation_service: UnboundedSender<ValidationServiceMessage>,
-    pub block_producer: UnboundedSender<BlockProducerCommand>,
-    pub reth_service: UnboundedSender<RethServiceMessage>,
+    pub chunk_cache: UnboundedSender<Traced<CacheServiceAction>>,
+    pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
+    pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
+    pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
+    pub vdf_fast_forward: UnboundedSender<Traced<VdfStep>>,
+    pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
+    pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
+    pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    pub block_tree: UnboundedSender<Traced<BlockTreeServiceMessage>>,
+    pub validation_service: UnboundedSender<Traced<ValidationServiceMessage>>,
+    pub block_producer: UnboundedSender<Traced<BlockProducerCommand>>,
+    pub reth_service: UnboundedSender<Traced<RethServiceMessage>>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
-    pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub block_discovery: UnboundedSender<Traced<BlockDiscoveryMessage>>,
     pub mining_bus: MiningBus,
     pub packing_sender: PackingSender,
 }
 
 impl ServiceSendersInner {
     pub fn init() -> (Self, ServiceReceivers) {
-        let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
+        let (chunk_cache_sender, chunk_cache_receiver) =
+            unbounded_channel::<Traced<CacheServiceAction>>();
         let (chunk_ingress_sender, chunk_ingress_receiver) =
-            unbounded_channel::<ChunkIngressMessage>();
+            unbounded_channel::<Traced<ChunkIngressMessage>>();
         let (chunk_migration_sender, chunk_migration_receiver) =
-            unbounded_channel::<ChunkMigrationServiceMessage>();
-        let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
-        let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
-        let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
+            unbounded_channel::<Traced<ChunkMigrationServiceMessage>>();
+        let (mempool_sender, mempool_receiver) =
+            unbounded_channel::<Traced<MempoolServiceMessage>>();
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
+            unbounded_channel::<Traced<VdfStep>>();
+        let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
+        let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
-            unbounded_channel::<GossipBroadcastMessageV2>();
+            unbounded_channel::<Traced<GossipBroadcastMessageV2>>();
         let (block_tree_sender, block_tree_receiver) =
-            unbounded_channel::<BlockTreeServiceMessage>();
+            unbounded_channel::<Traced<BlockTreeServiceMessage>>();
         let (validation_sender, validation_receiver) =
-            unbounded_channel::<ValidationServiceMessage>();
+            unbounded_channel::<Traced<ValidationServiceMessage>>();
         let (block_producer_sender, block_producer_receiver) =
-            unbounded_channel::<BlockProducerCommand>();
+            unbounded_channel::<Traced<BlockProducerCommand>>();
         let (reth_service_sender, reth_service_receiver) =
-            unbounded_channel::<RethServiceMessage>();
+            unbounded_channel::<Traced<RethServiceMessage>>();
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
         let (peer_events_sender, peer_events_receiver) = broadcast::channel::<PeerEvent>(100);
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
-            unbounded_channel::<BlockDiscoveryMessage>();
+            unbounded_channel::<Traced<BlockDiscoveryMessage>>();
         let (packing_sender, packing_receiver) = PackingService::channel(5_000);
 
         let mining_bus = MiningBus::new();

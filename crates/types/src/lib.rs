@@ -41,6 +41,7 @@ pub mod version;
 pub mod versioning;
 
 pub mod canonical;
+pub mod traced;
 
 pub mod block_provider;
 pub mod h256;
@@ -86,6 +87,7 @@ pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use rlp::*;
 pub use simple_rng::*;
+pub use traced::*;
 pub use tx_known_status::*;
 pub use version::*;
 pub use versioning::*;

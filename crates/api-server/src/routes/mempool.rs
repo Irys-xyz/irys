@@ -2,7 +2,6 @@ use crate::ApiState;
 use actix_web::{web, HttpResponse, Result};
 
 /// GET /v1/mempool/status
-/// Returns overall mempool status
 pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpResponse> {
     let status = state
         .mempool_guard

@@ -9,7 +9,9 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, H256};
+use irys_types::{
+    BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, Traced, H256,
+};
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, warn};
 
@@ -107,7 +109,7 @@ impl ChunkIngressServiceInner {
         let data_root = ingress_proof.data_root;
         let gossip_broadcast_message = GossipBroadcastMessageV2::from(ingress_proof);
 
-        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+        if let Err(error) = gossip_sender.send_traced(gossip_broadcast_message) {
             tracing::error!(
                 "Failed to send gossip data for ingress proof data_root {:?}: {:?}",
                 data_root,
@@ -315,7 +317,7 @@ pub fn generate_and_store_ingress_proof(
     config: &Config,
     data_root: DataRoot,
     anchor_hint: Option<H256>,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     cache_sender: &CacheServiceSender,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     let signer: IrysSigner = config.irys_signer();
@@ -341,7 +343,7 @@ pub fn generate_and_store_ingress_proof(
     let is_already_generating = {
         let (response_sender, response_receiver) = std::sync::mpsc::channel();
         if let Err(err) =
-            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+            cache_sender.send_traced(CacheServiceAction::RequestIngressProofGenerationState {
                 data_root,
                 response_sender,
             })
@@ -362,9 +364,10 @@ pub fn generate_and_store_ingress_proof(
         return Err(IngressProofGenerationError::AlreadyGenerating);
     }
 
-    // Generate + persist
     // Notify start of proof generation
-    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root)) {
+    if let Err(e) =
+        cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationStarted(data_root))
+    {
         warn!(
             ?data_root,
             "Failed to notify cache of proof generation start: {e}"
@@ -384,10 +387,9 @@ pub fn generate_and_store_ingress_proof(
     let proof = match proof_res {
         Ok(p) => p,
         Err(e) => {
-            // Notify completion on error
-            if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-                data_root,
-            )) {
+            if let Err(e) = cache_sender.send_traced(
+                CacheServiceAction::NotifyProofGenerationCompleted(data_root),
+            ) {
                 warn!(
                     ?data_root,
                     "Failed to notify cache of proof generation completion: {e}"
@@ -399,8 +401,7 @@ pub fn generate_and_store_ingress_proof(
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    // Notify completion after stored & gossiped
-    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationCompleted(
         data_root,
     )) {
         warn!(
@@ -417,7 +418,7 @@ pub fn reanchor_and_store_ingress_proof(
     config: &Config,
     signer: &IrysSigner,
     proof: &IngressProof,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     cache_sender: &CacheServiceSender,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     // Only staked nodes should reanchor ingress proofs
@@ -429,7 +430,7 @@ pub fn reanchor_and_store_ingress_proof(
     let is_already_generating = {
         let (response_sender, response_receiver) = std::sync::mpsc::channel();
         if let Err(err) =
-            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+            cache_sender.send_traced(CacheServiceAction::RequestIngressProofGenerationState {
                 data_root: proof.data_root,
                 response_sender,
             })
@@ -450,8 +451,7 @@ pub fn reanchor_and_store_ingress_proof(
         return Err(IngressProofGenerationError::AlreadyGenerating);
     }
 
-    // Notify start of reanchoring
-    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
+    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationStarted(
         proof.data_root,
     )) {
         warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation start: {e}");
@@ -460,9 +460,9 @@ pub fn reanchor_and_store_ingress_proof(
     if let Err(e) =
         calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
     {
-        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            proof.data_root,
-        )) {
+        if let Err(e) = cache_sender.send_traced(
+            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
+        ) {
             warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
         }
         return Err(e);
@@ -477,18 +477,18 @@ pub fn reanchor_and_store_ingress_proof(
     // Re-anchor and re-sign
     proof.anchor = latest_anchor;
     if let Err(e) = signer.sign_ingress_proof(&mut proof) {
-        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            proof.data_root,
-        )) {
+        if let Err(e) = cache_sender.send_traced(
+            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
+        ) {
             warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
         }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
     }
 
     if let Err(e) = store_ingress_proof(db, &proof, signer) {
-        if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            proof.data_root,
-        )) {
+        if let Err(e) = cache_sender.send_traced(
+            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
+        ) {
             warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
         }
         return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
@@ -496,7 +496,7 @@ pub fn reanchor_and_store_ingress_proof(
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    if let Err(e) = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationCompleted(
         proof.data_root,
     )) {
         warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
@@ -505,7 +505,7 @@ pub fn reanchor_and_store_ingress_proof(
 }
 
 pub fn gossip_ingress_proof(
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     ingress_proof: &IngressProof,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -520,7 +520,7 @@ pub fn gossip_ingress_proof(
     ) {
         Ok(()) => {
             let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
-            if let Err(e) = gossip_sender.send(msg) {
+            if let Err(e) = gossip_sender.send_traced(msg) {
                 tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
             }
         }

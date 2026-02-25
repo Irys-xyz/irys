@@ -45,6 +45,7 @@ use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::SendTraced as _;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
@@ -1205,7 +1206,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(
+            .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(
                 num_blocks as u64,
             )))
             .unwrap();
@@ -1222,7 +1223,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
+            .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
         stop_mining_result
     }
@@ -1239,7 +1240,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))
+            .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))
             .unwrap();
 
         let poa_solution = solution_context(&self.node_ctx).await?;
@@ -1247,7 +1248,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SolutionFound {
+            .send_traced(BlockProducerCommand::SolutionFound {
                 solution: poa_solution,
                 response: response_tx,
             })
@@ -1258,7 +1259,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
+            .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
         let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
         Ok((
@@ -1519,7 +1520,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))?;
+            mempool_service.send_traced(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))?;
 
             //if transaction exists
             if oneshot_rx
@@ -1697,14 +1698,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let response =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromApi(
-                    tx.header.clone(),
-                    oneshot_tx,
-                ));
+        let response = self.node_ctx.service_senders.mempool.send_traced(
+            MempoolServiceMessage::IngestDataTxFromApi(tx.header.clone(), oneshot_tx),
+        );
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -1863,7 +1859,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV2::from(Arc::clone(block_header)))?;
+            .send_traced(GossipBroadcastMessageV2::from(Arc::clone(block_header)))?;
 
         Ok(())
     }
@@ -1875,7 +1871,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV2::from((block).clone()))?;
+            .send_traced(GossipBroadcastMessageV2::from((block).clone()))?;
 
         Ok(())
     }
@@ -1989,7 +1985,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 peer.node_ctx
                     .service_senders
                     .mempool
-                    .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                    .send_traced(MempoolServiceMessage::IngestDataTxFromGossip(
                         tx_header.clone(),
                         tx,
                     ))
@@ -2040,7 +2036,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 peer.node_ctx
                                     .service_senders
                                     .chunk_ingress
-                                    .send(irys_actors::ChunkIngressMessage::IngestChunk(
+                                    .send_traced(irys_actors::ChunkIngressMessage::IngestChunk(
                                         unpacked,
                                         Some(ctx),
                                     ))
@@ -2087,7 +2083,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                .send_traced(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                     commitment_tx.clone(),
                     tx,
                 ))
@@ -2552,7 +2548,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_ingress_proof(&self, ingress_proof: IngressProof) -> eyre::Result<()> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        self.node_ctx.service_senders.chunk_ingress.send(
+        self.node_ctx.service_senders.chunk_ingress.send_traced(
             irys_actors::ChunkIngressMessage::IngestIngressProof(ingress_proof, oneshot_tx),
         )?;
 
@@ -2570,13 +2566,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromApi(
-                    data_tx, oneshot_tx,
-                ));
+        let result = self.node_ctx.service_senders.mempool.send_traced(
+            MempoolServiceMessage::IngestDataTxFromApi(data_tx, oneshot_tx),
+        );
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2593,7 +2585,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self.node_ctx.service_senders.mempool.send(
+        let result = self.node_ctx.service_senders.mempool.send_traced(
             MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx),
         );
         if let Err(e) = result {
@@ -2984,7 +2976,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment: &CommitmentTransaction,
     ) -> eyre::Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.node_ctx.service_senders.mempool.send(
+        self.node_ctx.service_senders.mempool.send_traced(
             MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
         )?;
 
@@ -2994,7 +2986,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn gossip_data_tx_to_node(&self, tx: &DataTransactionHeader) -> eyre::Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.node_ctx.service_senders.mempool.send(
+        self.node_ctx.service_senders.mempool.send_traced(
             MempoolServiceMessage::IngestDataTxFromGossip(tx.clone(), resp_tx),
         )?;
 
@@ -3398,7 +3390,7 @@ pub async fn gossip_commitment_to_node(
     commitment: &CommitmentTransaction,
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx.service_senders.mempool.send(
+    node.node_ctx.service_senders.mempool.send_traced(
         MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
     )?;
 
@@ -3411,13 +3403,9 @@ pub async fn gossip_data_tx_to_node(
     tx: &DataTransactionHeader,
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(
-            tx.clone(),
-            resp_tx,
-        ))?;
+    node.node_ctx.service_senders.mempool.send_traced(
+        MempoolServiceMessage::IngestDataTxFromGossip(tx.clone(), resp_tx),
+    )?;
 
     resp_rx.await??;
     Ok(())

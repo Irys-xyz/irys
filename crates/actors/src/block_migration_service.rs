@@ -4,7 +4,7 @@ use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_he
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, BlockTree, SupplyState};
 use irys_types::{
     app_state::DatabaseProvider, DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock,
-    SystemLedger,
+    SendTraced as _, SystemLedger, Traced,
 };
 use std::{
     collections::HashMap,
@@ -21,7 +21,7 @@ pub struct BlockMigrationService {
     supply_state: Option<Arc<SupplyState>>,
     chunk_size: u64,
     cache: Arc<RwLock<BlockTree>>,
-    chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
+    chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
 }
 
 impl BlockMigrationService {
@@ -31,7 +31,7 @@ impl BlockMigrationService {
         supply_state: Option<Arc<SupplyState>>,
         chunk_size: u64,
         cache: Arc<RwLock<BlockTree>>,
-        chunk_migration_sender: UnboundedSender<ChunkMigrationServiceMessage>,
+        chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     ) -> Self {
         Self {
             db,
@@ -314,7 +314,7 @@ impl BlockMigrationService {
         );
 
         self.chunk_migration_sender
-            .send(ChunkMigrationServiceMessage::BlockMigrated(
+            .send_traced(ChunkMigrationServiceMessage::BlockMigrated(
                 Arc::clone(header),
                 Arc::new(all_txs_map),
             ))

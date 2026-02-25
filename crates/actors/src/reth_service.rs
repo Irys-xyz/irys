@@ -2,7 +2,7 @@ use crate::metrics::record_reth_fcu_head_height;
 use eyre::eyre;
 use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
+use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, Traced, H256};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
@@ -15,7 +15,7 @@ use tracing::{debug, error, info, Instrument as _};
 #[derive(Debug)]
 pub struct RethService {
     shutdown: Shutdown,
-    cmd_rx: UnboundedReceiver<RethServiceMessage>,
+    cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
     block_tree: BlockTreeReadGuard,
@@ -79,7 +79,7 @@ impl RethService {
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
         block_tree: BlockTreeReadGuard,
-        cmd_rx: UnboundedReceiver<RethServiceMessage>,
+        cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
@@ -126,7 +126,11 @@ impl RethService {
 
                 command = self.cmd_rx.recv() => {
                     match command {
-                        Some(command) => self.handle_command(command).await?,
+                        Some(traced) => {
+                            let (command, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "reth_handle_command");
+                            self.handle_command(command).instrument(span).await?;
+                        }
                         None => {
                             info!("Reth service command channel closed");
                             break;

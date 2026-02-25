@@ -17,6 +17,7 @@ actix-web = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry.workspace = true
 opentelemetry.workspace = true
 tracing-actix-web = { version = "0.7", features = ["opentelemetry_0_31"] }
 eyre.workspace = true
@@ -35,6 +36,7 @@ dashmap = "6.1.0"
 semver.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }

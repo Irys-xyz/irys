@@ -147,14 +147,11 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
         "safe" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Safe)),
         "finalized" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Finalized)),
         _ => {
-            // Try parsing as a block number
             if let Ok(num) = block.parse::<u64>() {
                 return Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(num)));
             }
 
-            // Try parsing as hex (with or without 0x prefix)
             if let Some(hex_str) = block.strip_prefix("0x") {
-                // If it's 64 hex chars, treat as Irys block hash
                 if hex_str.len() == 64 {
                     let hash_bytes =
                         hex::decode(hex_str).map_err(|_| ApiError::InvalidBlockParameter {
@@ -165,13 +162,11 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
                     return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
                 }
 
-                // Otherwise try as hex block number
                 if let Ok(num) = u64::from_str_radix(hex_str, 16) {
                     return Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(num)));
                 }
             }
 
-            // Try parsing as base58 (Irys block hash format)
             if let Ok(decoded) = base58::FromBase58::from_base58(block) {
                 if decoded.len() == 32 {
                     let irys_block_hash = BlockHash::from_slice(&decoded);
@@ -244,7 +239,6 @@ mod tests {
 
     #[test]
     fn test_parse_irys_block_hash_base58() {
-        // Create a test Irys block hash and encode it as base58
         let test_hash = BlockHash::from([42_u8; 32]);
         let base58_encoded = base58::ToBase58::to_base58(test_hash.as_bytes());
 

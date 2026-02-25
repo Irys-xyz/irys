@@ -3,7 +3,7 @@ use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadca
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::BlockProvider;
 use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
+    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, Traced, H256, U256,
 };
 use sha2::{Digest as _, Sha256};
 use std::sync::atomic::AtomicBool;
@@ -56,7 +56,7 @@ pub fn run_vdf<B: BlockProvider>(
     global_step_number: u64,
     current_vdf_hash: H256,
     initial_reset_seed: H256,
-    mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
+    mut fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
     is_mining_enabled: Arc<AtomicBool>,
     mut shutdown_listener: Receiver<irys_types::ShutdownReason>,
     broadcast_mining_service: impl MiningBroadcaster,
@@ -86,7 +86,8 @@ pub fn run_vdf<B: BlockProvider>(
         }
 
         // check for VDF fast forward step
-        while let Ok(proposed_ff_step) = fast_forward_receiver.try_recv() {
+        while let Ok(traced_ff_step) = fast_forward_receiver.try_recv() {
+            let (proposed_ff_step, _entered) = traced_ff_step.into_inner();
             // if the step number is ahead of local nodes vdf steps
             if global_step_number < proposed_ff_step.global_step_number {
                 debug!(
@@ -326,7 +327,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
+        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -449,7 +450,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
+        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 

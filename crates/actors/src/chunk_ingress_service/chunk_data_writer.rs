@@ -96,7 +96,6 @@ impl BackgroundWriter {
         let mut batch: Vec<Arc<UnpackedChunk>> = Vec::with_capacity(MAX_BATCH_SIZE);
 
         loop {
-            // Block until at least one command arrives.
             let cmd = match self.rx.recv().await {
                 Some(cmd) => cmd,
                 None => {
@@ -120,7 +119,6 @@ impl BackgroundWriter {
                 }
             }
 
-            // Drain up to MAX_BATCH_SIZE without blocking.
             while batch.len() < MAX_BATCH_SIZE {
                 match self.rx.try_recv() {
                     Ok(WriterCommand::WriteChunk(chunk)) => batch.push(chunk),
@@ -140,7 +138,6 @@ impl BackgroundWriter {
             }
         }
 
-        // Flush any remaining chunks.
         if !batch.is_empty() {
             let _ = self.write_batch(&batch);
         }
@@ -151,8 +148,6 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        // Precompute SHA-256 hashes once — avoids redundant hashing inside the
-        // MDBX closure (log lines) and during post-transaction cleanup.
         let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
         let result = self.db.update(|tx| {
@@ -180,7 +175,6 @@ impl BackgroundWriter {
             Ok::<usize, eyre::Report>(written)
         });
 
-        // Always clear pending hashes regardless of outcome.
         for hash in &hashes {
             self.pending_hashes.remove(hash);
         }

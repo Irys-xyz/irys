@@ -36,8 +36,8 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockBody,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
-    SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger, TokioServiceHandle,
-    UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    SealedBlock as IrysSealedBlock, SendTraced as _, Signature, SystemTransactionLedger,
+    TokioServiceHandle, Traced, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -140,7 +140,7 @@ pub struct BlockProducerService {
     /// Graceful shutdown handle
     shutdown: Shutdown,
     /// Command receiver
-    cmd_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
     /// Inner logic
     inner: Arc<BlockProducerInner>,
     /// Enforces block production limits during testing
@@ -256,7 +256,7 @@ impl BlockProducerService {
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
-        rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!(
@@ -305,8 +305,10 @@ impl BlockProducerService {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(cmd) => {
-                            if self.handle_command(cmd).await? {
+                        Some(traced) => {
+                            let (cmd, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "block_producer_handle_command");
+                            if self.handle_command(cmd).instrument(span).await? {
                                 break;
                             }
                         }
@@ -324,7 +326,6 @@ impl BlockProducerService {
     }
 
     /// Handles a single command. Returns `true` if the service should shut down.
-    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<bool> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
@@ -1250,7 +1251,7 @@ pub trait BlockProdStrategy {
             .inner()
             .service_senders
             .gossip_broadcast
-            .send(execution_payload_gossip_data)
+            .send_traced(execution_payload_gossip_data)
         {
             error!(
                 block.hash = ?block.header().block_hash,

@@ -33,7 +33,7 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger,
     H256,
 };
-use irys_types::{DataLedger, SystemLedger};
+use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(
@@ -43,14 +43,13 @@ pub async fn send_block_to_block_tree(
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-    node_ctx
-        .service_senders
-        .block_tree
-        .send(BlockTreeServiceMessage::BlockPreValidated {
+    node_ctx.service_senders.block_tree.send_traced(
+        BlockTreeServiceMessage::BlockPreValidated {
             block,
             skip_vdf_validation,
             response: response_tx,
-        })?;
+        },
+    )?;
 
     response_rx.await??;
     Ok(())
@@ -63,7 +62,7 @@ fn send_block_to_block_validation(
     node_ctx
         .service_senders
         .validation_service
-        .send(ValidationServiceMessage::ValidateBlock {
+        .send_traced(ValidationServiceMessage::ValidateBlock {
             block,
             skip_vdf_validation: false,
         })
@@ -1134,7 +1133,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
         commitment_transactions: txs.all_system_txs().cloned().collect(),
         data_transactions: txs.all_data_txs().cloned().collect(),
     };
-    let sealed_block = Arc::new(SealedBlock::new(header.as_ref().clone(), body)?);
+    let sealed_block = Arc::new(SealedBlock::new(Arc::clone(&header), body)?);
 
     // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
     // node will wait for this block to be validated for quite a while until it starts mining

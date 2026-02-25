@@ -4,7 +4,10 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
+use irys_types::{
+    DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
+    SendTraced as _,
+};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;
@@ -29,7 +32,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 
     // Service 1 receives a message through the message bus from a system's component
     gossip_service1_message_bus
-        .send(data)
+        .send_traced(data)
         .expect("Failed to send transaction through message bus");
 
     // Service 2 receives it over gossip
@@ -139,7 +142,7 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     // Send same data multiple times
     for _ in 0_i32..3_i32 {
         gossip_service1_message_bus
-            .send(data.clone())
+            .send_traced(data.clone()) // clone: test loop sends the same data multiple times
             .expect("Failed to send duplicate transaction");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -184,7 +187,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let data = GossipBroadcastMessageV2::from(chunks[0].clone());
 
     gossip_service1_message_bus
-        .send(data)
+        .send_traced(data)
         .expect("Failed to send chunk data");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -223,7 +226,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     // Should not panic when peer is offline
     gossip_service1_message_bus
-        .send(data)
+        .send_traced(data)
         .expect("Failed to send transaction to offline peer");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -273,7 +276,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block_header)))
+        .send_traced(GossipBroadcastMessageV2::from(Arc::new(block_header)))
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and fetch transactions
@@ -327,7 +330,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block)))
+        .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
@@ -429,7 +432,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
-        .send(GossipBroadcastMessageV2::from(Arc::new(block.clone())))
+        .send_traced(GossipBroadcastMessageV2::from(Arc::new(block.clone()))) // clone: block used later in assertion
         .expect("Failed to send block to service 2");
 
     // Wait for service 2 to process the block and receive the execution payload with a timeout of 10 seconds

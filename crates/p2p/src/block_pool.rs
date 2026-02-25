@@ -17,7 +17,8 @@ use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _, SystemLedger, Traced,
+    H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -424,7 +425,7 @@ where
     async fn validate_and_submit_reth_payload(
         &self,
         block_header: &IrysBlockHeader,
-        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
+        reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     ) -> Result<(), BlockPoolError> {
         // This function repairs missing execution payloads for already-validated blocks.
@@ -515,7 +516,7 @@ where
             let (tx, rx) = oneshot::channel();
 
             reth_service
-                .send(RethServiceMessage::ForkChoice {
+                .send_traced(RethServiceMessage::ForkChoice {
                     update: ForkChoiceUpdateMessage {
                         head_hash,
                         confirmed_hash,
@@ -550,7 +551,7 @@ where
     #[instrument(err, skip_all)]
     pub async fn repair_missing_payloads_if_any(
         &self,
-        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
+        reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     ) -> Result<(), BlockPoolError> {
         if reth_service.is_none() {
@@ -1056,7 +1057,7 @@ where
                         .map(GossipBroadcastMessageV2::from);
 
                     if let Some(payload) = gossip_payload {
-                        if let Err(err) = gossip_broadcast_sender.send(payload) {
+                        if let Err(err) = gossip_broadcast_sender.send_traced(payload) {
                             error!(
                                 "Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}",
                                 evm_block_hash, err

@@ -20,6 +20,7 @@ irys_utils::define_metrics! {
     counter NODE_SHUTDOWN("irys.node.shutdown_total", "Node shutdown events by reason");
     counter PLEDGE_TX_POSTED("irys.commitment.pledge_tx_posted_total", "Pledge transactions posted");
     counter PEER_FETCH_ERRORS("irys.peer.fetch_errors_total", "Peer fetch errors by type");
+    gauge RETH_FCU_HEAD_HEIGHT("irys.reth.fcu_head_height", "Reth fork choice update head block height");
 }
 
 // Not a metric instrument — tracks process start time for uptime calculation.
@@ -74,8 +75,8 @@ pub(crate) fn record_partitions_unassigned(count: u64) {
     PARTITIONS_UNASSIGNED.record(count, &[]);
 }
 
-pub(crate) fn record_node_shutdown(reason: &str) {
-    NODE_SHUTDOWN.add(1, &[KeyValue::new("reason", reason.to_owned())]);
+pub(crate) fn record_node_shutdown(reason: &'static str) {
+    NODE_SHUTDOWN.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_pledge_tx_posted() {

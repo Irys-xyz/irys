@@ -5,7 +5,8 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
     CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
-    IrysTransactionCommon as _, TxKnownStatus, UnixTimestamp, VersionDiscriminant as _, H256,
+    IrysTransactionCommon as _, SendTraced as _, TxKnownStatus, UnixTimestamp,
+    VersionDiscriminant as _, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
@@ -339,7 +340,7 @@ impl Inner {
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
         self.service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageV2::from(tx.clone()))
+            .send_traced(GossipBroadcastMessageV2::from(tx.clone()))
             .expect("Failed to send gossip data");
     }
 

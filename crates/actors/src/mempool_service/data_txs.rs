@@ -11,7 +11,8 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, IrysTransactionCommon as _, IrysTransactionId, H256, U256,
+    DataLedger, DataTransactionHeader, IrysTransactionCommon as _, IrysTransactionId,
+    SendTraced as _, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
 use std::collections::HashMap;
@@ -93,7 +94,7 @@ impl Inner {
         if let Err(e) = self
             .service_senders
             .chunk_ingress
-            .send(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
         {
             tracing::warn!(
                 "Failed to send ProcessPendingChunks for data_root {:?}: {:?}",
@@ -406,7 +407,7 @@ impl Inner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!("Failed to send gossip data for tx {}: {:?}", tx.id, error);
         }

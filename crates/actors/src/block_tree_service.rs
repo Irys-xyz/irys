@@ -18,7 +18,7 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SystemLedger, TokioServiceHandle, H256,
+    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -52,7 +52,7 @@ pub enum BlockTreeServiceMessage {
 #[derive(Debug)]
 pub struct BlockTreeService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<BlockTreeServiceMessage>,
+    msg_rx: UnboundedReceiver<Traced<BlockTreeServiceMessage>>,
     inner: BlockTreeServiceInner,
 }
 
@@ -99,7 +99,7 @@ impl BlockTreeService {
     /// Spawn a new BlockTree service
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_tree")]
     pub fn spawn_service(
-        rx: UnboundedReceiver<BlockTreeServiceMessage>,
+        rx: UnboundedReceiver<Traced<BlockTreeServiceMessage>>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
         config: &Config,
@@ -162,10 +162,11 @@ impl BlockTreeService {
                     break;
                 }
                 // Handle messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            self.inner.handle_message(msg).await?;
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
+                            self.inner.handle_message(msg, parent_span).await?;
                         }
                         None => {
                             warn!("Message channel closed unexpectedly");
@@ -177,8 +178,9 @@ impl BlockTreeService {
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, parent_span) = traced.into_parts();
+            self.inner.handle_message(msg, parent_span).await?;
         }
 
         tracing::info!("shutting down BlockTree service gracefully");
@@ -189,7 +191,11 @@ impl BlockTreeService {
 impl BlockTreeServiceInner {
     /// Dispatches received messages to appropriate handler methods and sends responses
     #[tracing::instrument(level = "trace", skip_all, err)]
-    async fn handle_message(&mut self, msg: BlockTreeServiceMessage) -> eyre::Result<()> {
+    async fn handle_message(
+        &mut self,
+        msg: BlockTreeServiceMessage,
+        parent_span: tracing::Span,
+    ) -> eyre::Result<()> {
         match msg {
             BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
@@ -204,6 +210,7 @@ impl BlockTreeServiceInner {
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
+                let _guard = tracing::info_span!(parent: &parent_span, "block_tree.pre_validate", block.hash = %block_hash, block.height = block_height).entered();
                 let result = self.on_block_prevalidated(block, skip_vdf);
                 if let Err(send_err) = response.send(result) {
                     tracing::warn!(
@@ -219,6 +226,7 @@ impl BlockTreeServiceInner {
                 validation_result,
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
+                    .instrument(tracing::info_span!(parent: &parent_span, "block_tree.validation_finished", block.hash = %block_hash))
                     .await?;
             }
         }
@@ -239,7 +247,7 @@ impl BlockTreeServiceInner {
 
         self.service_senders
             .reth_service
-            .send(RethServiceMessage::ForkChoice {
+            .send_traced(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: markers.head.block_hash,
                     confirmed_hash: markers.migration_block.block_hash,
@@ -359,7 +367,7 @@ impl BlockTreeServiceInner {
 
         self.service_senders
             .validation_service
-            .send(ValidationServiceMessage::ValidateBlock {
+            .send_traced(ValidationServiceMessage::ValidateBlock {
                 block: block.clone(),
                 skip_vdf_validation: skip_vdf,
             })
@@ -735,7 +743,7 @@ impl BlockTreeServiceInner {
             for sealed_block in &blocks_to_confirm {
                 self.service_senders
                     .mempool
-                    .send(MempoolServiceMessage::BlockConfirmed(Arc::clone(
+                    .send_traced(MempoolServiceMessage::BlockConfirmed(Arc::clone(
                         sealed_block,
                     )))
                     .expect("mempool service has unexpectedly become unreachable");
@@ -819,7 +827,7 @@ impl BlockTreeServiceInner {
                 )));
 
             // Let the cache service know some term ledger slots expired
-            if let Err(e) = self.service_senders.chunk_cache.send(
+            if let Err(e) = self.service_senders.chunk_cache.send_traced(
                 crate::cache_service::CacheServiceAction::OnEpochProcessed(
                     epoch_snapshot.clone(),
                     None,
@@ -831,7 +839,7 @@ impl BlockTreeServiceInner {
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-        self.service_senders.storage_modules.send(
+        self.service_senders.storage_modules.send_traced(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
                 update_height: epoch_block.height,

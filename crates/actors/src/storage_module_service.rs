@@ -25,7 +25,7 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, Config, DataLedger, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
-    TokioServiceHandle,
+    SendTraced as _, TokioServiceHandle, Traced,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -50,7 +50,7 @@ pub enum StorageModuleServiceMessage {
 #[derive(Debug)]
 pub struct StorageModuleService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<StorageModuleServiceMessage>,
+    msg_rx: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     inner: StorageModuleServiceInner,
 }
 
@@ -401,7 +401,7 @@ impl StorageModuleServiceInner {
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 // Handle send error
-                if let Err(e) = migration_service.send(
+                if let Err(e) = migration_service.send_traced(
                     ChunkMigrationServiceMessage::UpdateStorageModuleIndexes {
                         block_hash,
                         receiver: tx,
@@ -432,7 +432,7 @@ impl StorageModuleServiceInner {
         if let Err(e) = self
             .service_senders
             .data_sync
-            .send(DataSyncServiceMessage::SyncPartitions)
+            .send_traced(DataSyncServiceMessage::SyncPartitions)
         {
             error!(
                 "Failed to send SyncPartitions message to data_sync service: {}",
@@ -651,7 +651,7 @@ impl StorageModuleService {
     /// Spawn a new StorageModule service
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_storage_module")]
     pub fn spawn_service(
-        rx: UnboundedReceiver<StorageModuleServiceMessage>,
+        rx: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
@@ -712,8 +712,10 @@ impl StorageModuleService {
                 // Handle messages
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => {
-                            self.inner.handle_message(msg).await?;
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
+                            self.inner.handle_message(msg).instrument(span).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -729,8 +731,10 @@ impl StorageModuleService {
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, parent_span) = traced.into_parts();
+            let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
+            self.inner.handle_message(msg).instrument(span).await?
         }
 
         tracing::info!("shutting down StorageModule Service gracefully");

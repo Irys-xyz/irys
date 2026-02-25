@@ -349,7 +349,6 @@ impl ValidationCoordinator {
 
                     let abort_handle = self.concurrent_tasks.spawn(
                         async move {
-                            // Execute the validation and return the result
                             let validation_result = task.execute_concurrent().await;
 
                             ConcurrentValidationResult {

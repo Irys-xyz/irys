@@ -1,13 +1,4 @@
-/// Describes a single OpenTelemetry metric for registry/introspection purposes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MetricDescriptor {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub metric_type: &'static str,
-}
-
-/// Generates `LazyLock` statics for OpenTelemetry metric instruments and a
-/// `METRICS` descriptor array.
+/// Generates `LazyLock` statics for OpenTelemetry metric instruments.
 ///
 /// # Syntax
 ///
@@ -26,8 +17,7 @@ pub struct MetricDescriptor {
 /// boundaries.  When omitted the OTel SDK default boundaries are used.
 ///
 /// For each entry a `static` with [`std::sync::LazyLock`] is generated that
-/// auto-initialises the metric instrument on first access.  A `METRICS` const
-/// array of [`MetricDescriptor`] is also emitted for introspection/netwatch.
+/// auto-initialises the metric instrument on first access.
 #[macro_export]
 macro_rules! define_metrics {
     // Top-level: dispatch each metric line to its @single arm.
@@ -40,16 +30,6 @@ macro_rules! define_metrics {
         $(
             $crate::define_metrics!(@single $kind, $static_name, $meter_name, $metric_name, $desc $(, $bounds)?);
         )*
-
-        pub(crate) const METRICS: &[$crate::MetricDescriptor] = &[
-            $(
-                $crate::MetricDescriptor {
-                    name: $metric_name,
-                    description: $desc,
-                    metric_type: $crate::define_metrics!(@type_str $kind),
-                },
-            )*
-        ];
     };
 
     // -- Counter (always u64) --
@@ -96,9 +76,4 @@ macro_rules! define_metrics {
                     .build()
             });
     };
-
-    // -- Type string helpers for MetricDescriptor --
-    (@type_str counter) => { "counter" };
-    (@type_str gauge) => { "gauge" };
-    (@type_str histogram) => { "histogram" };
 }
