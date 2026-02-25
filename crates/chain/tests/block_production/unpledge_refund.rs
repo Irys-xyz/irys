@@ -895,7 +895,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         &genesis_node,
         seconds_to_wait,
         "genesis storage modules should be fully de-assigned after epoch refunds",
-        |hashes| hashes.is_empty(),
+        <[irys_types::H256]>::is_empty,
     )
     .await?;
     assert!(
