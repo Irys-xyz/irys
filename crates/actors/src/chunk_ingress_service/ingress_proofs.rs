@@ -9,7 +9,7 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, H256};
+use irys_types::{BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof};
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, warn};
 

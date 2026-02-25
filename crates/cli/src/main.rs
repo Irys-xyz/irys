@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, command};
+use clap::{Parser, Subcommand};
 use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};

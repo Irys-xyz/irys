@@ -4,7 +4,7 @@
 //! enabling Reth's internal metrics to be exported via OTLP alongside Irys metrics.
 
 use eyre::Result;
-use opentelemetry::{trace::TracerProvider as _, KeyValue};
+use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{
@@ -15,8 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    fmt::format::FmtSpan, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter,
-    Layer as _, Registry,
+    EnvFilter, Layer as _, Registry, fmt::format::FmtSpan, layer::SubscriberExt as _,
+    util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();

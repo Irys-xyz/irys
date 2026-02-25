@@ -9,10 +9,10 @@ use tempfile::TempDir;
 use tracing::debug;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
+    EnvFilter,
     fmt::{self, SubscriberBuilder},
     layer::SubscriberExt as _,
     util::SubscriberInitExt as _,
-    EnvFilter,
 };
 
 #[cfg(feature = "telemetry")]

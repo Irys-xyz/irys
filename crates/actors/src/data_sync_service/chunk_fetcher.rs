@@ -108,7 +108,7 @@ impl ChunkFetcher for HttpChunkFetcher {
             Ok(Err(e)) => {
                 return Err(ChunkFetchError::NetworkError {
                     message: e.to_string(),
-                })
+                });
             }
             Err(_) => return Err(ChunkFetchError::Timeout),
         };

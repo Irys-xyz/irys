@@ -17,14 +17,14 @@ use std::time::Duration;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, ChunkPathHash, Config, DataRoot,
-    TokioServiceHandle,
+    ChunkPathHash, Config, DataRoot, TokioServiceHandle, app_state::DatabaseProvider,
+    chunk::UnpackedChunk,
 };
 use lru::LruCache;
-use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
-use tracing::{error, info, warn, Instrument as _};
+use reth::tasks::shutdown::Shutdown;
+use tokio::sync::{RwLock, Semaphore, mpsc::UnboundedReceiver, oneshot};
+use tracing::{Instrument as _, error, info, warn};
 
 use crate::mempool_service::wait_with_progress;
 use crate::services::ServiceSenders;
@@ -92,16 +92,16 @@ impl ChunkIngressServiceInner {
         match msg {
             ChunkIngressMessage::IngestChunk(chunk, response) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
-                if let Err(ref e) = &result {
+                if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     if response.is_none() {
                         error!("handle_chunk_ingress_message error: {:?}", e);
                     }
                 }
-                if let Some(response) = response {
-                    if response.send(result).is_err() {
-                        warn!("IngestChunk response channel closed (caller dropped)");
-                    }
+                if let Some(response) = response
+                    && response.send(result).is_err()
+                {
+                    warn!("IngestChunk response channel closed (caller dropped)");
                 }
             }
             ChunkIngressMessage::IngestIngressProof(proof, response) => {
@@ -181,7 +181,7 @@ impl ChunkIngressService {
                 inner: Arc::new(ChunkIngressServiceInner {
                     block_tree_read_guard,
                     config,
-                    exec: TaskExecutor::current(),
+                    exec: TaskExecutor::test(),
                     irys_db,
                     message_handler_semaphore: Arc::new(Semaphore::new(
                         max_concurrent_chunk_ingress_tasks,

@@ -3,8 +3,8 @@ use std::fs::File;
 use clap::Parser;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    storage_pricing::{safe_add, Amount},
     U256,
+    storage_pricing::{Amount, safe_add},
 };
 
 /// Command‑line parameters for the simulation.

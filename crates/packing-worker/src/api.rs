@@ -1,12 +1,12 @@
 use actix_web::{
+    App, HttpResponse, HttpServer,
     dev::{HttpServiceFactory, Server},
     error::InternalError,
     middleware,
     web::{self, Data, Json, JsonConfig, Redirect},
-    App, HttpResponse, HttpServer,
 };
 use futures::StreamExt as _;
-use irys_packing::{PackingType, PACKING_TYPE};
+use irys_packing::{PACKING_TYPE, PackingType};
 use serde::{Deserialize, Serialize};
 
 use std::net::TcpListener;

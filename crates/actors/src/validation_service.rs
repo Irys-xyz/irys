@@ -12,33 +12,33 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::{is_seed_data_valid, ValidationError},
+    block_validation::{ValidationError, is_seed_data_valid},
     mempool_guard::MempoolReadGuard,
     metrics,
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
 use irys_domain::{
-    chain_sync_state::ChainSyncState, BlockIndexReadGuard, BlockTreeReadGuard,
-    ExecutionPayloadCache,
+    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache,
+    chain_sync_state::ChainSyncState,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, TokioServiceHandle,
+    Config, IrysBlockHeader, SealedBlock, TokioServiceHandle, app_state::DatabaseProvider,
 };
 use irys_vdf::rayon;
-use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
+use irys_vdf::state::{CancelEnum, VdfStateReadonly, vdf_steps_are_valid};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use tokio::{
-    sync::{broadcast, mpsc::UnboundedReceiver, Notify},
+    sync::{Notify, broadcast, mpsc::UnboundedReceiver},
     time::Duration,
 };
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 mod active_validations;
 mod block_validation_task;
@@ -302,8 +302,8 @@ impl ValidationService {
                                 custom.error = %e,
                                 message
                             );
-                            if let Some(hash) = block_hash {
-                                if let Err(send_err) = self.inner.service_senders.block_tree.send(
+                            if let Some(hash) = block_hash
+                                && let Err(send_err) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(
@@ -326,7 +326,6 @@ impl ValidationService {
                                         format!("block={} error=concurrent task panicked: {}", hash, e),
                                     );
                                 }
-                            }
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()

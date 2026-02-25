@@ -3,7 +3,7 @@ use std::ops::BitXor as _;
 pub use irys_c::{capacity, capacity_single};
 
 use irys_types::{
-    partition::PartitionHash, Base64, ChunkBytes, IrysAddress, PackedChunk, UnpackedChunk,
+    Base64, ChunkBytes, IrysAddress, PackedChunk, UnpackedChunk, partition::PartitionHash,
 };
 
 #[cfg(feature = "nvidia")]
@@ -349,7 +349,7 @@ mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
     use irys_c::capacity::DATA_CHUNK_SIZE;
-    use irys_types::{ConsensusConfig, PartitionChunkOffset, TxChunkOffset, H256};
+    use irys_types::{ConsensusConfig, H256, PartitionChunkOffset, TxChunkOffset};
     use rand::{Rng as _, RngCore as _};
     use std::time::*;
 

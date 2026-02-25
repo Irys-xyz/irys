@@ -4,10 +4,10 @@
 //!
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
-use eyre::{eyre, Result};
-use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
-use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
+use eyre::{Result, eyre};
 use irys_types::U256;
+use irys_types::storage_pricing::{Amount, LN2_FP18, exp_neg_fp18, phantoms::Irys};
+use irys_types::storage_pricing::{TOKEN_SCALE, mul_div, safe_div, safe_sub};
 
 /// Continuous halving emission curve
 ///
@@ -104,7 +104,7 @@ mod tests {
     ///
     /// S(t) = R_max * (1 − 2^{-t/T_half})
     fn circulating_supply(curve: &HalvingCurve, t_years: u128) -> Result<u128> {
-        use irys_types::storage_pricing::{mul_div, safe_sub, TOKEN_SCALE};
+        use irys_types::storage_pricing::{TOKEN_SCALE, mul_div, safe_sub};
 
         let elapsed_secs = t_years * SECS_PER_YEAR;
 

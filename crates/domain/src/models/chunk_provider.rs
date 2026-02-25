@@ -4,7 +4,7 @@ use irys_types::{
 };
 use tracing::debug;
 
-use crate::{checked_add_i32_u64, get_storage_module_at_offset, StorageModulesReadGuard};
+use crate::{StorageModulesReadGuard, checked_add_i32_u64, get_storage_module_at_offset};
 
 /// Provides chunks to `actix::web` front end (mostly)
 #[derive(Debug, Clone)]
@@ -136,9 +136,9 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataTransactionLedger,
-        LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
+        Base64, Config, ConsensusConfig, DataTransactionLedger, H256, LedgerChunkRange, NodeConfig,
+        PartitionChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use rand::Rng as _;

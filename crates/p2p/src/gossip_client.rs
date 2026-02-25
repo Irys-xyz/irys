@@ -18,8 +18,8 @@ use irys_types::{
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
-use reth::primitives::Block;
 use reth::revm::primitives::B256;
+use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;

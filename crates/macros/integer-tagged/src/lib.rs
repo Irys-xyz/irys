@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 /// Derive macro for integer-tagged enum serialization without using flatten.
 /// This avoids SequenceMustHaveLength errors with binary formats.

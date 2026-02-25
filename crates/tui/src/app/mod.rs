@@ -60,7 +60,9 @@ impl App<NotRecording> {
         }
 
         if all_nodes.is_empty() {
-            return Err(eyre::eyre!("No nodes configured. Please specify nodes via command line arguments or config file."));
+            return Err(eyre::eyre!(
+                "No nodes configured. Please specify nodes via command line arguments or config file."
+            ));
         }
 
         let primary_url = all_nodes

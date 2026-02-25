@@ -1,5 +1,5 @@
 use irys_types::CommitmentStatus;
-use irys_types::{IrysAddress, IrysTransactionId, H256, U256};
+use irys_types::{H256, IrysAddress, IrysTransactionId, U256};
 use std::collections::BTreeMap;
 
 /// Entry representing a stake commitment.

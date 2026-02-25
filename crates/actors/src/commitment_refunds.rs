@@ -1,4 +1,4 @@
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use irys_domain::CommitmentSnapshot;
 use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, ConsensusConfig};

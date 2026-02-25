@@ -3,7 +3,7 @@ use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use std::{net::TcpListener, sync::Arc};
 use tokio::{
     runtime::Handle,
-    sync::{mpsc::Receiver, Semaphore},
+    sync::{Semaphore, mpsc::Receiver},
 };
 use tracing::info;
 
@@ -56,9 +56,9 @@ pub async fn start_worker(
 mod tests {
     use irys_testing_utils::initialize_tracing;
     use irys_types::{
-        ii, partition_chunk_offset_ii,
+        H256, InclusiveInterval as _, IrysAddress, PartitionChunkOffset, PartitionChunkRange, ii,
+        partition_chunk_offset_ii,
         remote_packing::{PackingWorkerConfig, RemotePackingRequest},
-        InclusiveInterval as _, IrysAddress, PartitionChunkOffset, PartitionChunkRange, H256,
     };
     use irys_utils::listener::create_listener;
     use std::{net::SocketAddr, num::NonZero};

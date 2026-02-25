@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 // broadcast message types are defined locally in this module
-use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
+use irys_types::{H256List, IrysBlockHeader, block_production::Seed};
 use irys_vdf::MiningBroadcaster;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, info};
 
 /// Tokio-native broadcast envelope for mining events.

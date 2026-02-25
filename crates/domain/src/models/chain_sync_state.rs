@@ -342,10 +342,11 @@ impl ChainSyncState {
             self.highest_processed_block
                 .store(height, Ordering::Relaxed);
 
-            if let Some(switch_height) = *self.switch_to_full_validation_at_height.read().unwrap() {
-                if self.is_trusted_sync() && height >= switch_height {
-                    self.set_trusted_sync(false)
-                }
+            if let Some(switch_height) = *self.switch_to_full_validation_at_height.read().unwrap()
+                && self.is_trusted_sync()
+                && height >= switch_height
+            {
+                self.set_trusted_sync(false)
             }
         }
     }

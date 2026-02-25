@@ -29,7 +29,7 @@ use irys_types::{
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
-use reth::primitives::Block;
+use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;

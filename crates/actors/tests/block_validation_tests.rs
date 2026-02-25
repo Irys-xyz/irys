@@ -1,11 +1,12 @@
 use irys_actors::block_validation::{
-    poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid, PreValidationError,
+    PreValidationError, poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
 use irys_database::open_or_create_db;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
-    compute_solution_hash, partition::PartitionAssignment, Base64, BlockIndexItem, ConsensusConfig,
-    DataLedger, DatabaseProvider, IrysAddress, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
+    IrysBlockHeader, LedgerIndexItem, PoaData, compute_solution_hash,
+    partition::PartitionAssignment,
 };
 use std::sync::Arc;
 

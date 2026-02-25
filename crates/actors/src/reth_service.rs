@@ -3,7 +3,7 @@ use crate::metrics::record_reth_fcu_head_height;
 use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
+use irys_types::{BlockHash, DatabaseProvider, H256, RethPeerInfo, TokioServiceHandle};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
@@ -14,7 +14,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, error, info, Instrument as _};
+use tracing::{Instrument as _, debug, error, info};
 
 #[derive(Debug)]
 pub struct RethService {
