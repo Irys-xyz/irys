@@ -723,13 +723,13 @@ impl BlockTreeServiceInner {
         }
 
         // Broadcast reorg event if applicable
-        if let Some(reorg_event) = reorg_event {
-            if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
-                error!(
-                    "Failed to broadcast reorg event - mempool state may be stale: {:?}",
-                    e
-                );
-            }
+        if let Some(reorg_event) = reorg_event
+            && let Err(e) = self.service_senders.reorg_events.send(reorg_event)
+        {
+            error!(
+                "Failed to broadcast reorg event - mempool state may be stale: {:?}",
+                e
+            );
         }
 
         if let Some(markers) = &new_canonical_markers {

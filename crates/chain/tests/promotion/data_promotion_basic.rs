@@ -288,10 +288,13 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
 // This test simulates a case encountered on testnet, where a submit tx was not able to be included in a block, but it was a promotion candidate.
 #[actix_web::test]
 async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     initialize_tracing();
 
     let seconds_to_wait = 30;
@@ -404,10 +407,13 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     initialize_tracing();
 
     let seconds_to_wait = 30;
@@ -548,10 +554,13 @@ async fn test_ingress_proof_anchor_edge_case(
     anchor_height_offset: u64,
     should_promote: bool,
 ) -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     initialize_tracing();
 
     let seconds_to_wait = 30;

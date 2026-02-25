@@ -25,7 +25,8 @@ use crate::utils::IrysNodeTest;
 #[ignore]
 #[tokio::test]
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
 
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;

@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use clap::{Parser, Subcommand, command};
+use clap::{Parser, Subcommand};
 use eyre::Context as _;
 use irys_packing_worker::worker::start_worker;
 use irys_testing_utils::initialize_tracing;

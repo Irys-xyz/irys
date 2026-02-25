@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, command};
+use clap::{Parser, Subcommand};
 use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
@@ -148,11 +148,11 @@ async fn main() -> eyre::Result<()> {
                         // Search for the block hash in the index
                         let mut found_height = None;
                         for h in 0..num {
-                            if let Some(item) = block_index.get_item(h) {
-                                if item.block_hash == hash {
-                                    found_height = Some(h);
-                                    break;
-                                }
+                            if let Some(item) = block_index.get_item(h)
+                                && item.block_hash == hash
+                            {
+                                found_height = Some(h);
+                                break;
                             }
                         }
                         let height = found_height.ok_or_eyre(format!(

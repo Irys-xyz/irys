@@ -1364,28 +1364,28 @@ pub async fn shadow_transactions_are_valid(
 
     // Reject any block that carries blob sidecars (EIP-4844).
     // We keep Cancun active but disable blobs/sidecars entirely.
-    if let Some(versioned_hashes) = sidecar.versioned_hashes() {
-        if !versioned_hashes.is_empty() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                block.versioned_hashes_len = versioned_hashes.len(),
-                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
-            );
-            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
-        }
+    if let Some(versioned_hashes) = sidecar.versioned_hashes()
+        && !versioned_hashes.is_empty()
+    {
+        tracing::debug!(
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.versioned_hashes_len = versioned_hashes.len(),
+            "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+        );
+        eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
-    if let Some(requests) = sidecar.requests() {
-        if !requests.is_empty() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                block.versioned_hashes_len = requests.len(),
-                "Rejecting block: EIP-7685 requests which are disabled",
-            );
-            eyre::bail!("block contains EIP-7685 requests which are disabled");
-        }
+    if let Some(requests) = sidecar.requests()
+        && !requests.is_empty()
+    {
+        tracing::debug!(
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.versioned_hashes_len = requests.len(),
+            "Rejecting block: EIP-7685 requests which are disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests which are disabled");
     }
     // Note: `requests_hash` may be present even when the requests list is empty.
     // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
@@ -1720,15 +1720,14 @@ fn validate_shadow_transactions_match(
             packet: _,
             solution_hash,
         } = &actual
+            && *solution_hash != expected_hash
         {
-            if *solution_hash != expected_hash {
-                eyre::bail!(
-                    "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
-                    idx,
-                    H256::from(*expected_hash),
-                    H256::from(**solution_hash)
-                );
-            }
+            eyre::bail!(
+                "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
+                idx,
+                H256::from(*expected_hash),
+                H256::from(**solution_hash)
+            );
         }
 
         ensure!(
@@ -2315,10 +2314,11 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    if publish_txs.is_empty() && publish_ledger.proofs.is_some() {
-        let proof_count = publish_ledger.proofs.as_ref().unwrap().len();
+    if publish_txs.is_empty()
+        && let Some(proofs) = &publish_ledger.proofs
+    {
         return Err(PreValidationError::PublishLedgerProofCountMismatch {
-            proof_count,
+            proof_count: proofs.len(),
             tx_count: publish_txs.len(),
         });
     }

@@ -461,10 +461,10 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
-        if let Ok(mut peers) = self.active_sync_peers.write() {
-            if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                peer_manager.on_chunk_request_completed(completion_record.clone());
-            }
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(peer_manager) = peers.get_mut(&peer_addr)
+        {
+            peer_manager.on_chunk_request_completed(completion_record.clone());
         }
 
         Ok(completion_record)
@@ -511,10 +511,10 @@ impl ChunkOrchestrator {
             .get_or_insert_with(HashSet::new)
             .insert(expected_peer);
 
-        if let Ok(mut peers) = self.active_sync_peers.write() {
-            if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                peer_manager.on_chunk_request_failure();
-            }
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(peer_manager) = peers.get_mut(&peer_addr)
+        {
+            peer_manager.on_chunk_request_failure();
         }
 
         Ok(())
@@ -530,14 +530,14 @@ impl ChunkOrchestrator {
         self.current_peers.retain(|&addr| addr != peer_addr);
 
         for request in self.chunk_requests.values_mut() {
-            if let ChunkRequestState::Requested(addr, _) = request.request_state {
-                if addr == peer_addr {
-                    request.request_state = ChunkRequestState::Pending;
-                    request
-                        .excluded
-                        .get_or_insert_with(HashSet::new)
-                        .insert(addr);
-                }
+            if let ChunkRequestState::Requested(addr, _) = request.request_state
+                && addr == peer_addr
+            {
+                request.request_state = ChunkRequestState::Pending;
+                request
+                    .excluded
+                    .get_or_insert_with(HashSet::new)
+                    .insert(addr);
             }
         }
     }

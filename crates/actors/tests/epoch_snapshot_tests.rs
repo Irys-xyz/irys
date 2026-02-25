@@ -257,7 +257,8 @@ async fn add_slots_test() {
 
 #[tokio::test]
 async fn unique_addresses_per_slot_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
 
     let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -516,15 +517,13 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     let assign_submit_partition_hash = {
-        let partition_hash = epoch_snapshot
+        epoch_snapshot
             .partition_assignments
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
             .map(|(hash, _)| *hash)
-            .expect("There should be a partition assigned to submit ledger");
-
-        partition_hash
+            .expect("There should be a partition assigned to submit ledger")
     };
 
     let (publish_partition_hash, submit_partition_hash) = {
@@ -931,7 +930,8 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[tokio::test]
 async fn partitions_assignment_determinism_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;

@@ -424,10 +424,13 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     irys_testing_utils::initialize_tracing();
 
     struct EvilBlockProdStrategy {

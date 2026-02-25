@@ -509,12 +509,12 @@ impl InnerCacheTask {
             }
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
-                if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
-                    if tx_header.promoted_height().is_none() {
-                        any_unpromoted = true;
-                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
-                        break;
-                    }
+                if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                    && tx_header.promoted_height().is_none()
+                {
+                    any_unpromoted = true;
+                    debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                    break;
                 }
             }
 
@@ -644,10 +644,10 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender {
-                if let Err(error) = sender.send(res) {
-                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-                }
+            if let Some(sender) = response_sender
+                && let Err(error) = sender.send(res)
+            {
+                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
             }
             // Notify service that pruning finished (drive the queue)
             if let Err(e) = clone
@@ -671,10 +671,10 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender {
-                if let Err(e) = sender.send(res) {
-                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
-                }
+            if let Some(sender) = response_sender
+                && let Err(e) = sender.send(res)
+            {
+                warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
             }
             // Notify service that epoch processing finished (drive the queue)
             if let Err(e) = clone
@@ -824,21 +824,21 @@ impl ChunkCacheService {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
                 // Enqueue pruning; start if idle
                 self.pruning_queue.push_back((migration_height, sender));
-                if !self.pruning_running {
-                    if let Some((h, s)) = self.pruning_queue.pop_front() {
-                        self.pruning_running = true;
-                        self.cache_task.spawn_pruning_task(h, s);
-                    }
+                if !self.pruning_running
+                    && let Some((h, s)) = self.pruning_queue.pop_front()
+                {
+                    self.pruning_running = true;
+                    self.cache_task.spawn_pruning_task(h, s);
                 }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
                 // Enqueue epoch processing; start if idle
                 self.epoch_queue.push_back((epoch_snapshot, sender));
-                if !self.epoch_running {
-                    if let Some((e, s)) = self.epoch_queue.pop_front() {
-                        self.epoch_running = true;
-                        self.cache_task.spawn_epoch_processing(e, s);
-                    }
+                if !self.epoch_running
+                    && let Some((e, s)) = self.epoch_queue.pop_front()
+                {
+                    self.epoch_running = true;
+                    self.cache_task.spawn_epoch_processing(e, s);
                 }
             }
             CacheServiceAction::PruneCompleted(_res) => {

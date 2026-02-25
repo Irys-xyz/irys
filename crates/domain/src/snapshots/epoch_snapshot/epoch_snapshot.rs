@@ -944,10 +944,10 @@ impl EpochSnapshot {
             self.add_to_unassigned_if_absent(ph);
 
             // Remove pledge entry by targeted partition hash (best-effort)
-            if let Some(entries) = self.commitment_state.pledge_commitments.get_mut(&signer) {
-                if let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph)) {
-                    entries.remove(pos);
-                }
+            if let Some(entries) = self.commitment_state.pledge_commitments.get_mut(&signer)
+                && let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph))
+            {
+                entries.remove(pos);
             }
 
             debug!(

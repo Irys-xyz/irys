@@ -738,13 +738,13 @@ impl BlockTree {
             if child == *current {
                 continue;
             }
-            if let Some(entry) = self.blocks.get_mut(&child) {
-                if matches!(entry.chain_state, ChainState::Onchain) {
-                    entry.chain_state = ChainState::Validated(BlockState::ValidBlock);
-                    // Recursively mark children of this block
-                    let children = entry.children.clone();
-                    self.mark_off_chain(children, current);
-                }
+            if let Some(entry) = self.blocks.get_mut(&child)
+                && matches!(entry.chain_state, ChainState::Onchain)
+            {
+                entry.chain_state = ChainState::Validated(BlockState::ValidBlock);
+                // Recursively mark children of this block
+                let children = entry.children.clone();
+                self.mark_off_chain(children, current);
             }
         }
     }
@@ -1224,34 +1224,34 @@ impl BlockTree {
             let hashes: Vec<_> = hashes.iter().copied().collect();
 
             for hash in hashes {
-                if let Some(entry) = self.blocks.get(&hash) {
-                    if matches!(entry.chain_state, ChainState::Onchain) {
-                        // First remove all non-on-chain children
-                        let children = entry.children.clone();
-                        for child in children {
-                            if let Some(child_entry) = self.blocks.get(&child) {
-                                if !matches!(child_entry.chain_state, ChainState::Onchain) {
-                                    let child_state = child_entry.chain_state;
-                                    if let Err(err) = self.remove_block(&child) {
-                                        tracing::error!(
-                                            custom.error = ?err,
-                                            custom.child_hash = ?child,
-                                            custom.child_state = ?child_state,
-                                            "Failed to remove non-on-chain child block"
-                                        );
-                                    }
-                                }
+                if let Some(entry) = self.blocks.get(&hash)
+                    && matches!(entry.chain_state, ChainState::Onchain)
+                {
+                    // First remove all non-on-chain children
+                    let children = entry.children.clone();
+                    for child in children {
+                        if let Some(child_entry) = self.blocks.get(&child)
+                            && !matches!(child_entry.chain_state, ChainState::Onchain)
+                        {
+                            let child_state = child_entry.chain_state;
+                            if let Err(err) = self.remove_block(&child) {
+                                tracing::error!(
+                                    custom.error = ?err,
+                                    custom.child_hash = ?child,
+                                    custom.child_state = ?child_state,
+                                    "Failed to remove non-on-chain child block"
+                                );
                             }
                         }
+                    }
 
-                        // Now remove just this block
-                        if let Err(err) = self.delete_block(&hash) {
-                            tracing::error!(
-                                custom.error = ?err,
-                                block.hash = ?hash,
-                                "Failed to delete block"
-                            );
-                        }
+                    // Now remove just this block
+                    if let Err(err) = self.delete_block(&hash) {
+                        tracing::error!(
+                            custom.error = ?err,
+                            block.hash = ?hash,
+                            "Failed to delete block"
+                        );
                     }
                 }
             }

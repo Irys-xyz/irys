@@ -1131,16 +1131,16 @@ impl MainMenu {
                                         Span::raw(global_step.to_string()),
                                     ]));
                                 }
-                                if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty") {
-                                    if !vdf_diff.is_null() {
-                                        custom_lines.push(Line::from(vec![
-                                            Span::styled(
-                                                "VDF Difficulty: ",
-                                                Style::default().add_modifier(Modifier::BOLD),
-                                            ),
-                                            Span::raw(vdf_diff.to_string()),
-                                        ]));
-                                    }
+                                if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty")
+                                    && !vdf_diff.is_null()
+                                {
+                                    custom_lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "VDF Difficulty: ",
+                                            Style::default().add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::raw(vdf_diff.to_string()),
+                                    ]));
                                 }
                             }
 

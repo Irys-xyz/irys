@@ -631,10 +631,9 @@ impl ChunkIngressServiceInner {
                     .filter(|(dr, _)| *dr == data_root)?;
 
                 if let Ok(result) = validate_path(chunk_data_root.0, &data_path, target_byte_offset)
+                    && result.is_rightmost_chunk
                 {
-                    if result.is_rightmost_chunk {
-                        return Some(result.max_byte_range as u64);
-                    }
+                    return Some(result.max_byte_range as u64);
                 }
             }
             None

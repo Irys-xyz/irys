@@ -207,15 +207,15 @@ impl Inner {
                     .await
             };
 
-            if let Some(tx) = tx {
-                if self.should_prune_tx(current_height, &tx) {
-                    self.mempool_state
-                        .remove_valid_submit_ledger_tx(&tx_id)
-                        .await;
-                    self.mempool_state
-                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
-                        .await;
-                }
+            if let Some(tx) = tx
+                && self.should_prune_tx(current_height, &tx)
+            {
+                self.mempool_state
+                    .remove_valid_submit_ledger_tx(&tx_id)
+                    .await;
+                self.mempool_state
+                    .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
+                    .await;
             }
         }
 

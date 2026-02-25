@@ -1458,10 +1458,8 @@ impl Inner {
         let guard = self.block_tree_read_guard.read();
         let mut block = guard.get_block(&block_hash).cloned();
 
-        if !include_chunk {
-            if let Some(ref mut b) = block {
-                b.poa.chunk = None
-            }
+        if !include_chunk && let Some(ref mut b) = block {
+            b.poa.chunk = None
         }
         block
     }
@@ -2781,10 +2779,10 @@ impl MempoolState {
         let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
-        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx_id) {
-                return Ok(()); // Duplicate, already have this commitment
-            }
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address)
+            && existing_txs.iter().any(|t| t.id() == tx_id)
+        {
+            return Ok(()); // Duplicate, already have this commitment
         }
 
         // Check if we need to create a new address entry

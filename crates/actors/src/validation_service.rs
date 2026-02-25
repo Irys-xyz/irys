@@ -305,8 +305,8 @@ impl ValidationService {
                                 custom.error = %e,
                                 message
                             );
-                            if let Some(hash) = removed {
-                                if let Err(send_err) = self.inner.service_senders.block_tree.send_traced(
+                            if let Some(hash) = removed
+                                && let Err(send_err) = self.inner.service_senders.block_tree.send_traced(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(
@@ -329,7 +329,6 @@ impl ValidationService {
                                         format!("block={} error=concurrent task panicked: {}", hash, e),
                                     );
                                 }
-                            }
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()

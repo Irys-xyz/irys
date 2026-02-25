@@ -31,7 +31,7 @@ use tokio::sync::{
     mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
 };
-use tracing::{Instrument as _, debug, error, info, trace, warn};
+use tracing::{Instrument as _, debug, info, trace, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -270,16 +270,16 @@ impl BlockDiscoveryService {
                 if let Err(ref e) = result {
                     metrics::record_block_discovery_error(e.metric_label());
                 }
-                if let Some(sender) = response {
-                    if let Err(e) = sender.send(result) {
-                        tracing::error!(
-                            "Block discovery sender error for block {} (height {}): {:?}",
-                            block_hash,
-                            block_height,
-                            e
-                        );
-                    };
-                }
+                if let Some(sender) = response
+                    && let Err(e) = sender.send(result)
+                {
+                    tracing::error!(
+                        "Block discovery sender error for block {} (height {}): {:?}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
+                };
             }
         };
 

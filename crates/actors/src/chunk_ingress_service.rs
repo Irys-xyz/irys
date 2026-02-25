@@ -92,16 +92,16 @@ impl ChunkIngressServiceInner {
         match msg {
             ChunkIngressMessage::IngestChunk(chunk, response) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
-                if let Err(ref e) = &result {
+                if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     if response.is_none() {
                         error!("handle_chunk_ingress_message error: {:?}", e);
                     }
                 }
-                if let Some(response) = response {
-                    if response.send(result).is_err() {
-                        warn!("IngestChunk response channel closed (caller dropped)");
-                    }
+                if let Some(response) = response
+                    && response.send(result).is_err()
+                {
+                    warn!("IngestChunk response channel closed (caller dropped)");
                 }
             }
             ChunkIngressMessage::IngestIngressProof(proof, response) => {

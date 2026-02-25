@@ -111,13 +111,13 @@ impl StorageModuleServiceInner {
         }; // <- Don't hold the read guard across an async boundary
 
         for sm in storage_modules.iter() {
-            if sm.last_pending_write().elapsed() > Duration::from_secs(5) {
-                if let Err(e) = sm.force_sync_pending_chunks() {
-                    error!(
-                        "Couldn't flush pending chunks for storage_module {}: {}",
-                        sm.id, e
-                    );
-                }
+            if sm.last_pending_write().elapsed() > Duration::from_secs(5)
+                && let Err(e) = sm.force_sync_pending_chunks()
+            {
+                error!(
+                    "Couldn't flush pending chunks for storage_module {}: {}",
+                    sm.id, e
+                );
             }
         }
     }
@@ -196,8 +196,10 @@ impl StorageModuleServiceInner {
                 .ok_or_eyre("StorageModuleInfo must reference an existing storage module id")?;
 
             // Did this storage module from our state get assigned a new partition_hash ?
-            if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
-                existing.assign_partition(sm_info.partition_assignment.unwrap(), update_height);
+            if existing.partition_assignment().is_none()
+                && let Some(assignment) = sm_info.partition_assignment
+            {
+                existing.assign_partition(assignment, update_height);
 
                 // Record this storage module as needing packing, the protocol will always assign a new partition_hash
                 // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing

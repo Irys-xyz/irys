@@ -96,10 +96,10 @@ impl ApiClient {
     where
         T: DeserializeOwned,
     {
-        if let Ok(parsed_url) = url::Url::parse(url) {
-            if !matches!(parsed_url.scheme(), "http" | "https") {
-                return Err(eyre!("Invalid URL scheme: only http/https allowed"));
-            }
+        if let Ok(parsed_url) = url::Url::parse(url)
+            && !matches!(parsed_url.scheme(), "http" | "https")
+        {
+            return Err(eyre!("Invalid URL scheme: only http/https allowed"));
         }
 
         let full_url = if use_version {
@@ -257,19 +257,18 @@ impl ApiClient {
                 if let (Some(ledger_id), Some(total_chunks_str)) = (
                     ledger.get("ledgerId").and_then(serde_json::Value::as_u64),
                     ledger.get("totalChunks").and_then(|v| v.as_str()),
-                ) {
-                    if let Ok(total_chunks) = total_chunks_str.parse::<u64>() {
-                        let max_offset = if total_chunks > 0 {
-                            Some(total_chunks - 1)
-                        } else {
-                            None
-                        };
+                ) && let Ok(total_chunks) = total_chunks_str.parse::<u64>()
+                {
+                    let max_offset = if total_chunks > 0 {
+                        Some(total_chunks - 1)
+                    } else {
+                        None
+                    };
 
-                        match ledger_id {
-                            0 => total_offsets.publish = max_offset,
-                            1 => total_offsets.submit = max_offset,
-                            _ => {}
-                        }
+                    match ledger_id {
+                        0 => total_offsets.publish = max_offset,
+                        1 => total_offsets.submit = max_offset,
+                        _ => {}
                     }
                 }
             }

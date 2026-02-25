@@ -31,7 +31,8 @@ use tracing::{debug, error};
 #[ignore = "flaky, non critical function test"]
 #[tokio::test]
 async fn slow_heavy_test_data_sync_with_different_peer_performance() {
-    std::env::set_var("RUST_LOG", "debug,storage=off");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug,storage=off") };
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
     let setup = TestSetup::new(100, Duration::from_secs(5), &tmp_dir);
@@ -190,7 +191,7 @@ impl DataSyncServiceTestHarness {
         let mut count = 0;
 
         while start.elapsed() < duration {
-            let remaining = duration - start.elapsed();
+            let remaining = duration.checked_sub(start.elapsed()).unwrap();
             match tokio::time::timeout(
                 remaining.min(Duration::from_millis(100)),
                 self.msg_rx.recv(),
@@ -878,11 +879,11 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
             .await;
 
         // Simulate a timeout when there is one
-        if let Err(err) = result.clone() {
-            if err == ChunkFetchError::Timeout {
-                tokio::time::sleep(timeout - delay * 2).await;
-                debug!("Timing out request: {ledger_chunk_offset} {api_addr} ");
-            }
+        if let Err(err) = result.clone()
+            && err == ChunkFetchError::Timeout
+        {
+            tokio::time::sleep(timeout.checked_sub(delay * 2).unwrap()).await;
+            debug!("Timing out request: {ledger_chunk_offset} {api_addr} ");
         }
 
         result

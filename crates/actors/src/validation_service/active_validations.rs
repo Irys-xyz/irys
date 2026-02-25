@@ -163,10 +163,10 @@ impl VdfScheduler {
         }
 
         // Check if current task exists
-        if let Some(current) = &self.current {
-            if current.hash == hash {
-                return;
-            }
+        if let Some(current) = &self.current
+            && current.hash == hash
+        {
+            return;
         }
 
         self.pending.push(task, priority);
