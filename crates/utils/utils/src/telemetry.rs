@@ -375,28 +375,28 @@ pub fn init_telemetry() -> Result<()> {
 pub fn flush_telemetry() -> Result<()> {
     let mut errors = Vec::new();
 
-    if let Some(logger) = LOGGER_PROVIDER.get() {
-        if let Err(e) = logger.force_flush() {
-            let err_msg = format!("Logger provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(logger) = LOGGER_PROVIDER.get()
+        && let Err(e) = logger.force_flush()
+    {
+        let err_msg = format!("Logger provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(tracer) = TRACER_PROVIDER.get() {
-        if let Err(e) = tracer.force_flush() {
-            let err_msg = format!("Tracer provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(tracer) = TRACER_PROVIDER.get()
+        && let Err(e) = tracer.force_flush()
+    {
+        let err_msg = format!("Tracer provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(meter) = METER_PROVIDER.get() {
-        if let Err(e) = meter.force_flush() {
-            let err_msg = format!("Meter provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(meter) = METER_PROVIDER.get()
+        && let Err(e) = meter.force_flush()
+    {
+        let err_msg = format!("Meter provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
     if errors.is_empty() {
