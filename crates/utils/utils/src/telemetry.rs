@@ -416,8 +416,8 @@ mod tests {
 
     #[test]
     fn uuid_v7_trace_id_has_correct_version_and_variant() {
-        let gen = UuidV7IdGenerator;
-        let trace_id = gen.new_trace_id();
+        let id_gen = UuidV7IdGenerator;
+        let trace_id = id_gen.new_trace_id();
         let bytes = trace_id.to_bytes();
 
         assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
@@ -426,10 +426,10 @@ mod tests {
 
     #[test]
     fn uuid_v7_trace_ids_are_time_ordered() {
-        let gen = UuidV7IdGenerator;
-        let id1 = gen.new_trace_id();
+        let id_gen = UuidV7IdGenerator;
+        let id1 = id_gen.new_trace_id();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let id2 = gen.new_trace_id();
+        let id2 = id_gen.new_trace_id();
 
         assert!(
             id1.to_bytes() < id2.to_bytes(),
@@ -439,8 +439,8 @@ mod tests {
 
     #[test]
     fn uuid_v7_span_id_is_nonzero() {
-        let gen = UuidV7IdGenerator;
-        let span_id = gen.new_span_id();
+        let id_gen = UuidV7IdGenerator;
+        let span_id = id_gen.new_span_id();
         assert_ne!(
             span_id.to_bytes(),
             [0_u8; 8],

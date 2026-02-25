@@ -1,6 +1,6 @@
 [package]
 build = "build/main.rs"
-edition.workspace = true
+edition = "2021"
 name = "irys-c"
 rust-version.workspace = true
 version = "0.1.0"

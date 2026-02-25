@@ -17,7 +17,8 @@ fn main() {
     let (lib_dir, include_dir) = build_openssl();
     let pkgconfig_dir = lib_dir.join("pkgconfig");
     // tell pkgconfig to discover our vendored openssl build
-    env::set_var("PKG_CONFIG_PATH", pkgconfig_dir);
+    // SAFETY: build scripts are single-threaded; no other threads observe this env var.
+    unsafe { env::set_var("PKG_CONFIG_PATH", pkgconfig_dir) };
 
     capacity::build_capacity(&c_src, &include_dir);
     capacity::bind_capacity(&c_src);
