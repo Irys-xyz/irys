@@ -1953,6 +1953,7 @@ impl GossipClient {
                                 &peer_id,
                                 ScoreDecreaseReason::BogusData(format!("{err}")),
                             );
+                            last_error = Some(GossipError::from(err));
                         }
                     }
                 }
