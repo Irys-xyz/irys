@@ -55,6 +55,21 @@ pub async fn send_block_to_block_tree(
     Ok(())
 }
 
+/// Subscribes to block state updates, sends the block to the block tree for validation,
+/// and waits for the validation outcome.
+///
+/// This avoids a race condition where the block could be validated and discarded before
+/// the event subscription is created, causing the discard event to be missed.
+pub async fn send_block_and_read_state(
+    node_ctx: &IrysNodeCtx,
+    block: Arc<SealedBlock>,
+    skip_vdf_validation: bool,
+) -> eyre::Result<BlockValidationOutcome> {
+    let event_rx = node_ctx.service_senders.subscribe_block_state_updates();
+    send_block_to_block_tree(node_ctx, block.clone(), skip_vdf_validation).await?;
+    Ok(read_block_from_state(node_ctx, &block.header().block_hash, event_rx).await)
+}
+
 fn send_block_to_block_validation(
     node_ctx: &IrysNodeCtx,
     block: Arc<SealedBlock>,
@@ -156,9 +171,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     // Send block directly to block tree service for validation
     // Note: We do NOT gossip the invalid commitment to mempool because mempool validation
     // would reject it. We're testing block validation, not mempool validation.
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
@@ -257,9 +270,8 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     // Send block directly to block tree service for validation
     // Note: We do NOT gossip the invalid commitment to mempool because mempool validation
     // would reject it. We're testing block validation, not mempool validation.
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
@@ -375,9 +387,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     gossip_commitment_to_node(&genesis_node, &stake).await?;
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::CommitmentWrongOrder { .. }),
@@ -537,9 +547,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     gossip_commitment_to_node(&genesis_node, &unstake_high_fee).await?;
 
     // Validate the malicious block on genesis node
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::CommitmentWrongOrder { .. }),
@@ -780,8 +788,16 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         "Must be first block after an epoch boundary"
     );
 
-    let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &valid_block_after_epoch.block_hash).await;
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    let outcome = read_block_from_state(
+        &genesis_node.node_ctx,
+        &valid_block_after_epoch.block_hash,
+        event_rx,
+    )
+    .await;
     assert!(matches!(outcome, BlockValidationOutcome::StoredOnNode(_)));
 
     genesis_node.stop().await;
@@ -1126,7 +1142,11 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     peer_node.gossip_disable();
     let (header, _payload, txs) = peer_node.mine_block_without_gossip().await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &header.block_hash);
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &header.block_hash, event_rx);
 
     let body = BlockBody {
         block_hash: header.block_hash,

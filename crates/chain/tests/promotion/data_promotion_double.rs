@@ -1,5 +1,5 @@
 use crate::utils::post_chunk;
-use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
+use crate::utils::{verify_published_chunk, IrysNodeTest};
 use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
@@ -162,20 +162,21 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     assert!(result.is_ok());
     node.mine_block().await?;
 
-    // wait for the first set of chunks to appear in the publish ledger
-    // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
-    //        assert commented out to mimic prior (passing test) behaviour
-    let _result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
-    //assert!(result.is_ok());
+    // Promotion and storage migration are asynchronous; CI can need extra blocks
+    // before publish chunks and parent headers become visible.
+    node.future_or_mine_on_timeout(
+        node.wait_for_chunk(&app, DataLedger::Publish, 0, 60),
+        Duration::from_secs(5),
+    )
+    .await??;
 
-    // wait for the second set of chunks to appear in the publish ledger
-    // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
-    //        assert commented out to mimic prior (passing test) behaviour
-    let _result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
-    //assert!(result.is_ok());
-
-    let db = &node.node_ctx.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
+    let db = node.node_ctx.db.clone();
+    let block_tx1 = node
+        .future_or_mine_on_timeout(
+            node.wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60),
+            Duration::from_secs(5),
+        )
+        .await??;
 
     let first_tx_id_in_block = block_tx1.data_ledgers[DataLedger::Publish]
         .tx_ids
@@ -332,9 +333,10 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
     assert!(result.is_ok());
 
-    let db = &node.node_ctx.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
-    // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
+    let block_tx1 = node
+        .wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60)
+        .await?;
+    // let block_tx2 = get_block_containing_tx(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];

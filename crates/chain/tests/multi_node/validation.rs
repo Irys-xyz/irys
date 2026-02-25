@@ -110,11 +110,16 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     )?;
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -183,11 +188,16 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(&irys_block)?;
     peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
     peer_node.gossip_eth_block_to_peers(eth_payload_other.block())?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -282,11 +292,16 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -302,8 +317,9 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
+// "heavy3_" prefix: requires 3 CI threads (see .config/nextest.toml)
 #[test_log::test(tokio::test)]
-async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
+async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -384,11 +400,16 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     )?;
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),

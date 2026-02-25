@@ -371,6 +371,11 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&pledge_tx).await?;
     genesis_node.post_commitment_tx(&stake_tx).await?;
 
+    // Wait for both transactions to be processed into the mempool
+    genesis_node
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id(), pledge_tx.id()], 10)
+        .await?;
+
     // Mine a block to confirm the commitments
     genesis_node.mine_block().await.unwrap();
 
@@ -856,7 +861,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn slow_heavy_mempool_publish_fork_recovery_test(
+async fn slow_heavy3_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     std::env::set_var(
@@ -973,10 +978,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     network_height = a_node.get_canonical_chain_height().await;
 
     b_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     c_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
 
     // disable P2P/gossip
@@ -1071,7 +1076,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     );
 
     b_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     b_node
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
@@ -1098,7 +1103,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         // wait for a reorg event
         let _a1_b2_reorg = a1_b2_reorg_fut.await?;
         a_node
-            .wait_until_height(network_height, seconds_to_wait)
+            .wait_for_block_at_height(network_height, seconds_to_wait)
             .await?;
         assert_eq!(
             a_node.get_block_by_height(network_height).await?,
@@ -1227,7 +1232,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
     // wait for height and index on node a
     a_node
-        .wait_until_height(network_height, seconds_to_wait)
+        .wait_for_block_at_height(network_height, seconds_to_wait)
         .await?;
     a_node
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
@@ -1904,7 +1909,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
+async fn slow_heavy3_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -2011,8 +2016,8 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     genesis.mine_block().await.unwrap();
 
     // Wait for peers to sync and start packing
-    let _block_hash = peer1.wait_until_height(2, seconds_to_wait).await?;
-    let _block_hash = peer2.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer1.wait_for_block_at_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_for_block_at_height(2, seconds_to_wait).await?;
     peer1.wait_for_packing(seconds_to_wait).await;
     peer2.wait_for_packing(seconds_to_wait).await;
 
@@ -2237,7 +2242,7 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 /// expect valid tx to ingress successfully
-async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2310,7 +2315,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     },
 )]
 #[test_log::test(tokio::test)]
-async fn stake_tx_fee_and_value_validation_test(
+async fn heavy_stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -2381,7 +2386,7 @@ async fn stake_tx_fee_and_value_validation_test(
     },
 )]
 #[test_log::test(tokio::test)]
-async fn pledge_tx_fee_validation_test(
+async fn heavy_pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
@@ -2504,7 +2509,7 @@ async fn commitment_tx_valid_higher_fee_test(
 /// see what txs get included (assert its count is equal to `initial_commitments` + 1)
 /// transfer the user enough funds to afford the remaining commitments
 /// produce another block, make sure it includes the rest
-async fn commitment_tx_cumulative_fee_validation_test(
+async fn slow_commitment_tx_cumulative_fee_validation_test(
     #[case] starting_balance: irys_types::U256,
     #[case] initial_commitments: u64,
     #[case] total_pledge_count: u64,

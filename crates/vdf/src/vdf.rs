@@ -9,7 +9,8 @@ use sha2::{Digest as _, Sha256};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub fn run_vdf_for_genesis_block(
@@ -58,12 +59,12 @@ pub fn run_vdf<B: BlockProvider>(
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
     is_mining_enabled: Arc<AtomicBool>,
-    mut shutdown_listener: Receiver<irys_types::ShutdownReason>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
     chain_sync_state: ChainSyncState,
+    shutdown_token: CancellationToken,
 ) {
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
@@ -80,8 +81,8 @@ pub fn run_vdf<B: BlockProvider>(
     let vdf_reset_frequency = config.reset_frequency as u64;
 
     loop {
-        if let Ok(reason) = shutdown_listener.try_recv() {
-            tracing::info!("VDF loop shutdown signal received: {}", reason);
+        if shutdown_token.is_cancelled() {
+            tracing::info!("VDF loop: shutdown token cancelled, exiting");
             break;
         }
 
@@ -245,6 +246,7 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt as _};
 
@@ -334,8 +336,6 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
-
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
         let mut mock_header = IrysBlockHeader::new_mock_header();
@@ -344,8 +344,10 @@ mod tests {
 
         let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
+        let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
+            let shutdown_token = shutdown_token.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -354,12 +356,12 @@ mod tests {
                     reset_seed,
                     ff_step_receiver,
                     mining_state,
-                    shutdown_rx,
                     broadcast_mining_service,
                     vdf_state.clone(),
                     atomic_global_step_number,
                     MockBlockProvider(mock_header),
                     chain_sync_state,
+                    shutdown_token,
                 )
             }
         });
@@ -428,10 +430,7 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx
-            .send(irys_types::ShutdownReason::TestComplete)
-            .await
-            .unwrap();
+        shutdown_token.cancel();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
@@ -457,14 +456,14 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
-
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
         let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
+        let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
+            let shutdown_token = shutdown_token.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -473,12 +472,12 @@ mod tests {
                     reset_seed,
                     ff_step_receiver,
                     mining_state,
-                    shutdown_rx,
                     broadcast_mining_service,
                     vdf_state.clone(),
                     atomic_global_step_number,
                     MockBlockProvider::new(),
                     chain_sync_state,
+                    shutdown_token,
                 )
             }
         });
@@ -543,10 +542,7 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx
-            .send(irys_types::ShutdownReason::TestComplete)
-            .await
-            .unwrap();
+        shutdown_token.cancel();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();

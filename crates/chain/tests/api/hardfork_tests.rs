@@ -149,23 +149,24 @@ async fn find_tx_in_blocks(
     tx_id: &IrysTransactionId,
     max_height: u64,
 ) -> Option<u64> {
+    let mut scanned = 0_u64;
+    let mut skipped = 0_u64;
     for height in 1..=max_height {
         if let Ok(block) = node.get_block_by_height(height).await {
+            scanned += 1;
             if block.commitment_tx_ids().contains(tx_id) {
                 return Some(height);
             }
         } else {
-            tracing::debug!(
-                "Block at height {} not yet available, stopping search",
-                height
-            );
-            break;
+            skipped += 1;
         }
     }
     tracing::debug!(
-        "Transaction {} not found in blocks 1..={}",
-        tx_id,
-        max_height
+        ?tx_id,
+        scanned,
+        skipped,
+        max_height,
+        "tx not found in {scanned} blocks ({skipped} heights failed to load)"
     );
     None
 }
@@ -991,7 +992,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height, pre_activation_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Pre-Aurora blocks migrated to height {}",
@@ -1100,7 +1101,7 @@ mod peer_sync_recovery {
             post_aurora_migrated_height, final_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Post-Aurora blocks migrated to height {}",
@@ -1174,7 +1175,7 @@ mod peer_sync_recovery {
 
         // Step 7: Wait for Peer Block Migration and Validate
         peer_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_in_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!(
             "Peer block index migrated to height {}",
@@ -1251,14 +1252,7 @@ mod peer_sync_recovery {
         let stopped_peer = peer_node.stop().await;
         info!("Peer stopped for additional restart test");
 
-        let peer_node = IrysNodeTest {
-            node_ctx: (),
-            cfg: stopped_peer.cfg.clone(),
-            temp_dir: stopped_peer.temp_dir,
-            name: stopped_peer.name,
-        }
-        .start()
-        .await;
+        let peer_node = stopped_peer.start().await;
         info!("Peer restarted after sync");
 
         // Wait for peer to reach the same height after restart
