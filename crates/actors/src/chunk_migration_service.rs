@@ -497,13 +497,11 @@ impl ChunkMigrationService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all, err)]
+    #[tracing::instrument(name = "chunk_migration_service_start", level = "info", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
-        let service_span = tracing::info_span!("chunk_migration_service");
         tracing::info!("starting DataSync Service");
 
         loop {
-            let _guard = service_span.enter();
             tokio::select! {
                 biased;
 

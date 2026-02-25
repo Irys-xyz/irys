@@ -166,38 +166,41 @@ impl ChunkIngressService {
             pending_chunks: pending_chunks.clone(),
         };
 
-        let handle = runtime_handle.spawn(async move {
-            let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
-                NonZeroUsize::new(max_valid_chunks).unwrap(),
-            ));
-            let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
-                irys_db.clone(),
-                chunk_writer_buffer_size,
-            );
+        let handle = runtime_handle.spawn(
+            async move {
+                let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
+                    NonZeroUsize::new(max_valid_chunks).unwrap(),
+                ));
+                let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
+                    irys_db.clone(),
+                    chunk_writer_buffer_size,
+                );
 
-            let service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                inner: Arc::new(ChunkIngressServiceInner {
-                    block_tree_read_guard,
-                    config,
-                    exec: TaskExecutor::current(),
-                    irys_db,
-                    message_handler_semaphore: Arc::new(Semaphore::new(
-                        max_concurrent_chunk_ingress_tasks,
-                    )),
-                    service_senders,
-                    storage_modules_guard,
-                    recent_valid_chunks,
-                    pending_chunks,
-                    chunk_data_writer,
-                }),
-            };
-            service
-                .start(tokio::runtime::Handle::current())
-                .await
-                .expect("ChunkIngressService encountered an irrecoverable error")
-        });
+                let service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner: Arc::new(ChunkIngressServiceInner {
+                        block_tree_read_guard,
+                        config,
+                        exec: TaskExecutor::current(),
+                        irys_db,
+                        message_handler_semaphore: Arc::new(Semaphore::new(
+                            max_concurrent_chunk_ingress_tasks,
+                        )),
+                        service_senders,
+                        storage_modules_guard,
+                        recent_valid_chunks,
+                        pending_chunks,
+                        chunk_data_writer,
+                    }),
+                };
+                service
+                    .start(tokio::runtime::Handle::current())
+                    .await
+                    .expect("ChunkIngressService encountered an irrecoverable error")
+            }
+            .instrument(tracing::info_span!("chunk_ingress_service")),
+        );
 
         let handle = TokioServiceHandle {
             name: "chunk_ingress_service".to_string(),

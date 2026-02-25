@@ -133,13 +133,17 @@ impl BackgroundWriter {
             }
 
             if !batch.is_empty() {
-                let _ = self.write_batch(&batch);
+                if let Err(e) = self.write_batch(&batch) {
+                    error!("ChunkDataWriter auto-drain write failed: {:?}", e);
+                }
                 batch.clear();
             }
         }
 
         if !batch.is_empty() {
-            let _ = self.write_batch(&batch);
+            if let Err(e) = self.write_batch(&batch) {
+                error!("ChunkDataWriter shutdown-drain write failed: {:?}", e);
+            }
         }
     }
 
