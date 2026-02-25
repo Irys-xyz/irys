@@ -760,7 +760,7 @@ mod borealis_hardfork {
 
     /// Test that UpdateRewardAddress is accepted and mined after Borealis activation.
     #[test_log::test(tokio::test)]
-    async fn heavy3_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
+    async fn heavy_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
     {
         let mut config = borealis_config_past();
         let signer = create_funded_signer(&mut config);

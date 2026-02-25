@@ -207,7 +207,7 @@ impl IrysNodeCtx {
 
         // Send shutdown reason to reth thread (carries the ShutdownReason for logging/metrics)
         if let Err(e) = self.reth_shutdown_sender.send(reason).await {
-            error!("Failed to send shutdown signal to reth thread: {}", e);
+            debug!("reth shutdown channel already closed: {}", e);
         }
 
         // Await reth thread completion (async, with timeout)
