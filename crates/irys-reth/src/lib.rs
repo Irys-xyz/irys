@@ -3369,11 +3369,14 @@ pub mod test_utils {
         let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
 
         for (idx, producer) in num_nodes.iter().enumerate() {
-            let node_config = NodeConfig::new(chain_spec.clone())
+            let mut node_config = NodeConfig::new(chain_spec.clone())
                 .with_network(network_config.clone())
                 .with_unused_ports()
                 .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
                 .set_dev(is_dev);
+            // Use legacy (parallel) state root computation to avoid a bug in the
+            // StateRootTask strategy where proof workers on rayon threads panic.
+            node_config.engine.legacy_state_root_task_enabled = true;
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();

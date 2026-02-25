@@ -136,6 +136,10 @@ pub async fn run_node(
     reth_config.rpc.http_corsdomain = Some("*".to_string());
     reth_config.engine.persistence_threshold = 0;
     reth_config.engine.memory_block_buffer_target = 0;
+    // Use legacy (parallel) state root computation to avoid a bug in the StateRootTask
+    // strategy where proof workers on rayon threads call wait_cloned() on DeferredTrieData,
+    // which panics due to a debug_assert forbidding rayon context.
+    reth_config.engine.legacy_state_root_task_enabled = true;
 
     let subpool_max_tx_count = 1_000_000;
     let subpool_max_size_mb = 1000;
