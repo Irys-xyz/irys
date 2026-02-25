@@ -502,6 +502,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
     }
 
+    pub async fn sync_state_snapshot(&self) -> String {
+        self.diag_wait_state().await
+    }
+
     /// Returns true if the next block height is in the last quarter of the pricing interval.
     pub fn ema_next_block_in_last_quarter(
         next_block_height: u64,
