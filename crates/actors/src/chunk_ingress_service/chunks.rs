@@ -16,8 +16,9 @@ use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, H256,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, H256,
 };
+use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
@@ -401,14 +402,11 @@ impl ChunkIngressServiceInner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        // Record validation duration
-        record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
+        record_validation_duration(validation_start.elapsed_ms());
 
         drop(_proof_span);
 
-        // Queue the chunk for async batched write to CachedChunks via the
-        // write-behind writer, avoiding a synchronous MDBX transaction on the
-        // hot ingress path.
+        // Write-behind: defers MDBX write for throughput
         let storage_start = Instant::now();
         match self
             .chunk_data_writer
@@ -431,7 +429,7 @@ impl ChunkIngressServiceInner {
                 .into());
             }
         }
-        record_enqueue_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
+        record_enqueue_duration(storage_start.elapsed_ms());
 
         // Add to recent valid chunks cache to prevent re-processing
         self.recent_valid_chunks
@@ -479,7 +477,7 @@ impl ChunkIngressServiceInner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!(
                 "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
@@ -489,10 +487,7 @@ impl ChunkIngressServiceInner {
             );
         }
 
-        // ==== INGRESS PROOFS ====
-        // Flush the write-behind writer so that the chunk we just queued (and
-        // any others in the buffer) are committed to MDBX before we count
-        // chunks for ingress proof generation.
+        // Flush to ensure chunks are committed before ingress proof check.
         if let Err(e) = self.chunk_data_writer.flush().await {
             error!(
                 "Failed to flush chunk data writer before ingress proof check: {:?}",

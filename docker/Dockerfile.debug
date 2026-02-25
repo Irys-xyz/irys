@@ -6,7 +6,7 @@
 # For reproducible builds, use Dockerfile.release.
 
 # --- Builder stage: compile the Rust binary ---
-FROM rust:1.86-slim AS builder
+FROM rust:1.91-slim-bookworm AS builder
 
 WORKDIR /workspace
 

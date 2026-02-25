@@ -2,15 +2,15 @@ use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::{web, HttpResponse, Result};
 use irys_actors::mempool_service::{MempoolServiceMessage, TxReadError};
+use irys_types::SendTraced as _;
 
 /// GET /v1/mempool/status
-/// Returns overall mempool status
 pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpResponse> {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     state
         .mempool_service
-        .send(MempoolServiceMessage::GetMempoolStatus(tx))
+        .send_traced(MempoolServiceMessage::GetMempoolStatus(tx))
         .map_err(|_| ApiError::Internal {
             err: "Mempool service unavailable".into(),
         })?;

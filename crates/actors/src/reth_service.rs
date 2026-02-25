@@ -3,7 +3,9 @@ use crate::metrics::record_reth_fcu_head_height;
 use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
+use irys_types::{
+    BlockHash, DatabaseProvider, RethPeerInfo, SendTraced as _, TokioServiceHandle, Traced, H256,
+};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
@@ -19,10 +21,10 @@ use tracing::{debug, error, info, Instrument as _};
 #[derive(Debug)]
 pub struct RethService {
     shutdown: Shutdown,
-    cmd_rx: UnboundedReceiver<RethServiceMessage>,
+    cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
-    mempool: UnboundedSender<MempoolServiceMessage>,
+    mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +62,7 @@ pub struct ForkChoiceUpdate {
 
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn evm_block_hash_from_block_hash(
-    mempool_service: &UnboundedSender<MempoolServiceMessage>,
+    mempool_service: &UnboundedSender<Traced<MempoolServiceMessage>>,
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
@@ -69,7 +71,7 @@ async fn evm_block_hash_from_block_hash(
     let irys_header = {
         let (tx, rx) = oneshot::channel();
         mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx))
+            .send_traced(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx))
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await?;
         match mempool_response {
@@ -101,8 +103,8 @@ impl RethService {
     pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
-        mempool: UnboundedSender<MempoolServiceMessage>,
-        cmd_rx: UnboundedReceiver<RethServiceMessage>,
+        mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
+        cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
@@ -149,7 +151,11 @@ impl RethService {
 
                 command = self.cmd_rx.recv() => {
                     match command {
-                        Some(command) => self.handle_command(command).await?,
+                        Some(traced) => {
+                            let (command, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "reth_handle_command");
+                            self.handle_command(command).instrument(span).await?;
+                        }
                         None => {
                             info!("Reth service command channel closed");
                             break;

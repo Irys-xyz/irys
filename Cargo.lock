@@ -5445,6 +5445,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -5730,6 +5731,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "proptest",
+ "rand 0.8.5",
  "serial_test",
  "socket2 0.5.10",
  "tokio",

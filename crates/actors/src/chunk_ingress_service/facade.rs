@@ -2,16 +2,16 @@ use crate::chunk_ingress_service::{
     ChunkIngressError, ChunkIngressMessage, CriticalChunkIngressError, IngressProofError,
 };
 use crate::services::ServiceSenders;
-use irys_types::{chunk::UnpackedChunk, IngressProof};
+use irys_types::{chunk::UnpackedChunk, IngressProof, SendTraced as _, Traced};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Debug)]
 pub struct ChunkIngressFacadeImpl {
-    service: UnboundedSender<ChunkIngressMessage>,
+    service: UnboundedSender<Traced<ChunkIngressMessage>>,
 }
 
 impl ChunkIngressFacadeImpl {
-    pub fn new(service: UnboundedSender<ChunkIngressMessage>) -> Self {
+    pub fn new(service: UnboundedSender<Traced<ChunkIngressMessage>>) -> Self {
         Self { service }
     }
 
@@ -23,7 +23,7 @@ impl ChunkIngressFacadeImpl {
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
         self.service
-            .send(ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx)))
+            .send_traced(ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx)))
             .map_err(|_| {
                 CriticalChunkIngressError::Other(format!(
                     "Error sending ChunkIngressMessage for chunk data_root {:?} tx_offset {}",
@@ -45,7 +45,7 @@ impl ChunkIngressFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let data_root = ingress_proof.data_root;
         self.service
-            .send(ChunkIngressMessage::IngestIngressProof(
+            .send_traced(ChunkIngressMessage::IngestIngressProof(
                 ingress_proof,
                 oneshot_tx,
             ))

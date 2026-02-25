@@ -18,7 +18,7 @@ use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, ChunkPathHash, Config, DataRoot,
-    TokioServiceHandle,
+    TokioServiceHandle, Traced,
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
@@ -83,7 +83,7 @@ pub(crate) struct ChunkIngressServiceInner {
 
 pub struct ChunkIngressService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<ChunkIngressMessage>,
+    msg_rx: UnboundedReceiver<Traced<ChunkIngressMessage>>,
     inner: Arc<ChunkIngressServiceInner>,
 }
 
@@ -139,7 +139,7 @@ impl ChunkIngressService {
         irys_db: DatabaseProvider,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<ChunkIngressMessage>,
+        rx: UnboundedReceiver<Traced<ChunkIngressMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -220,9 +220,10 @@ impl ChunkIngressService {
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg_type);
+                            let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
@@ -289,8 +290,9 @@ impl ChunkIngressService {
 
         // Process remaining messages with timeout
         let process_remaining = async {
-            while let Ok(msg) = self.msg_rx.try_recv() {
-                let span = tracing::info_span!("chunk_ingress_handle_message", msg_type = %msg.variant_name());
+            while let Ok(traced) = self.msg_rx.try_recv() {
+                let (msg, parent_span) = traced.into_parts();
+                let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg.variant_name());
                 self.inner.handle_message(msg).instrument(span).await;
             }
         };
