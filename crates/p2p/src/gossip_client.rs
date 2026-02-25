@@ -1404,29 +1404,24 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
-        let (peer_id, body) = self
-            .pull_data_from_network(
-                data_request,
-                Some(&header),
-                use_trusted_peers_only,
-                peer_list,
-                |gossip_data| match gossip_data {
-                    GossipDataV2::BlockBody(body) => Ok(Arc::unwrap_or_clone(body)),
-                    _ => Err(PeerNetworkError::UnexpectedData(format!(
-                        "Expected BlockBody, got {:?}",
-                        gossip_data.data_type_and_id()
-                    ))),
-                },
-            )
-            .await?;
-
-        let sealed = SealedBlock::new(Arc::clone(&header), body).map_err(|e| {
-            PeerNetworkError::InvalidBlockBody {
-                peer_id,
-                reason: format!("{e:?}"),
-            }
-        })?;
-        Ok((peer_id, sealed))
+        self.pull_data_from_network(
+            data_request,
+            Some(&header),
+            use_trusted_peers_only,
+            peer_list,
+            |gossip_data| match gossip_data {
+                GossipDataV2::BlockBody(body) => {
+                    SealedBlock::new(Arc::clone(&header), Arc::unwrap_or_clone(body)).map_err(|e| {
+                        PeerNetworkError::UnexpectedData(format!("Invalid block body: {e:?}"))
+                    })
+                }
+                _ => Err(PeerNetworkError::UnexpectedData(format!(
+                    "Expected BlockBody, got {:?}",
+                    gossip_data.data_type_and_id()
+                ))),
+            },
+        )
+        .await
     }
 
     /// Pull a block body from a specific peer, updating its score accordingly.
@@ -1713,7 +1708,7 @@ impl GossipClient {
         fallback_header: Option<&IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        map_data: impl Fn(GossipDataV2) -> Result<T, PeerNetworkError>,
     ) -> Result<(IrysPeerId, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()
@@ -1782,6 +1777,11 @@ impl GossipClient {
                                 }
                                 Err(err) => {
                                     warn!("Failed to map data from peer {}: {}", peer_id, err);
+                                    peer_list.decrease_peer_score_by_peer_id(
+                                        &peer_id,
+                                        ScoreDecreaseReason::BogusData(format!("{err}")),
+                                    );
+                                    last_error = Some(GossipError::from(err));
                                     // Not retriable: don't include this peer for future rounds
                                     all_failures_were_handshake = false;
                                 }
@@ -1936,12 +1936,24 @@ impl GossipClient {
 
             while let Some((peer_id, result)) = retry_futs.next().await {
                 if let Ok(GossipResponse::Accepted(Some(data))) = result {
-                    if let Ok(data) = map_data(data) {
-                        debug!(
-                            "Successfully retrieved {:?} from peer {} after handshake wait",
-                            data_request, peer_id
-                        );
-                        return Ok((peer_id, data));
+                    match map_data(data) {
+                        Ok(data) => {
+                            debug!(
+                                "Successfully retrieved {:?} from peer {} after handshake wait",
+                                data_request, peer_id
+                            );
+                            return Ok((peer_id, data));
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to map data from peer {} after handshake wait: {}",
+                                peer_id, err
+                            );
+                            peer_list.decrease_peer_score_by_peer_id(
+                                &peer_id,
+                                ScoreDecreaseReason::BogusData(format!("{err}")),
+                            );
+                        }
                     }
                 }
             }
