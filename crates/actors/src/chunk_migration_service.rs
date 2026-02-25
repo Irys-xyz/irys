@@ -497,7 +497,7 @@ impl ChunkMigrationService {
         }
     }
 
-    #[tracing::instrument(name = "chunk_migration_service_start", level = "info", skip_all, err)]
+    #[tracing::instrument(name = "chunk_migration_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 

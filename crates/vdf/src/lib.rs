@@ -88,7 +88,6 @@ pub fn vdf_sha_verification(
     checkpoints
 }
 
-#[tracing::instrument(level = "error", skip_all)]
 pub fn warn_mismatches(a: &H256List, b: &H256List) {
     let mismatches: Vec<(usize, (&H256, &H256))> =
         a.0.iter()
