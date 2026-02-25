@@ -1,4 +1,4 @@
-use irys_types::{partition::PartitionHash, ConsensusConfig, DataLedger, H256};
+use irys_types::{ConsensusConfig, DataLedger, H256, partition::PartitionHash};
 use serde::Serialize;
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
