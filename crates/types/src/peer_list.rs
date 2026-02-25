@@ -514,10 +514,7 @@ pub enum PeerNetworkError {
     #[error("Unexpected data received: {0}")]
     UnexpectedData(String),
     #[error("Invalid block body from peer {peer_id}: {reason}")]
-    InvalidBlockBody {
-        peer_id: IrysPeerId,
-        reason: String,
-    },
+    InvalidBlockBody { peer_id: IrysPeerId, reason: String },
 }
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {

@@ -1420,13 +1420,12 @@ impl GossipClient {
             )
             .await?;
 
-        let sealed =
-            SealedBlock::new(Arc::clone(&header), body).map_err(|e| {
-                PeerNetworkError::InvalidBlockBody {
-                    peer_id,
-                    reason: format!("{e:?}"),
-                }
-            })?;
+        let sealed = SealedBlock::new(Arc::clone(&header), body).map_err(|e| {
+            PeerNetworkError::InvalidBlockBody {
+                peer_id,
+                reason: format!("{e:?}"),
+            }
+        })?;
         Ok((peer_id, sealed))
     }
 
@@ -1448,13 +1447,12 @@ impl GossipClient {
             )
             .await?;
 
-        let sealed =
-            SealedBlock::new(header.clone(), Arc::unwrap_or_clone(body)).map_err(|e| {
-                PeerNetworkError::InvalidBlockBody {
-                    peer_id,
-                    reason: format!("{e:?}"),
-                }
-            })?;
+        let sealed = SealedBlock::new(header.clone(), Arc::unwrap_or_clone(body)).map_err(|e| {
+            PeerNetworkError::InvalidBlockBody {
+                peer_id,
+                reason: format!("{e:?}"),
+            }
+        })?;
         Ok((peer_id, sealed))
     }
 
