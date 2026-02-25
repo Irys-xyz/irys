@@ -3146,15 +3146,25 @@ impl MempoolService {
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
         async {
-            // Process remaining messages with timeout
-            let process_remaining = async {
-                // Acquire all permits so in-flight spawned handlers finish first
-                let _all_permits = self
-                    .inner
-                    .message_handler_semaphore
-                    .acquire_many(self.inner.max_concurrent_tasks)
-                    .await
-                    .expect("semaphore should not be closed");
+            // Phase 1: wait for in-flight spawned handlers to finish
+            let acquire_fut = self
+                .inner
+                .message_handler_semaphore
+                .acquire_many(self.inner.max_concurrent_tasks);
+            let _all_permits = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+                Ok(Ok(p)) => Some(p),
+                Ok(Err(_)) => {
+                    tracing::error!("Semaphore closed during mempool shutdown drain");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!("Timed out waiting for in-flight mempool handlers; proceeding without full drain");
+                    None
+                }
+            };
+
+            // Phase 2: drain queued messages with its own budget
+            let drain_fut = async {
                 while let Ok(traced) = self.msg_rx.try_recv() {
                     let (msg, parent_span) = traced.into_parts();
                     let msg_type = msg.variant_name();
@@ -3171,13 +3181,10 @@ impl MempoolService {
                         tracing::error!("Error handling message during shutdown drain: {:?}", e);
                     }
                 }
-                Ok::<(), eyre::Error>(())
             };
-
-            match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
-                Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
-                Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
-                Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
+            match tokio::time::timeout(Duration::from_secs(10), drain_fut).await {
+                Ok(()) => tracing::debug!("Processed remaining messages successfully"),
+                Err(_) => tracing::warn!("Timeout draining remaining messages, continuing shutdown"),
             }
 
             // Persist to disk with timeout

@@ -176,6 +176,7 @@ impl ChunkIngressService {
             pending_chunks: pending_chunks.clone(),
         };
 
+        let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
@@ -207,7 +208,7 @@ impl ChunkIngressService {
                     }),
                 };
                 service
-                    .start(tokio::runtime::Handle::current())
+                    .start(handle_for_inner)
                     .await
                     .expect("ChunkIngressService encountered an irrecoverable error")
             }
@@ -303,15 +304,25 @@ impl ChunkIngressService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
-        // Process remaining messages with timeout
-        let process_remaining = async {
-            // Acquire all permits so in-flight spawned handlers finish first
-            let _all_permits = self
-                .inner
-                .message_handler_semaphore
-                .acquire_many(self.inner.max_concurrent_tasks)
-                .await
-                .expect("semaphore should not be closed");
+        // Phase 1: wait for in-flight spawned handlers to finish
+        let acquire_fut = self
+            .inner
+            .message_handler_semaphore
+            .acquire_many(self.inner.max_concurrent_tasks);
+        let _all_permits = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+            Ok(Ok(p)) => Some(p),
+            Ok(Err(_)) => {
+                error!("Semaphore closed during chunk ingress shutdown drain");
+                None
+            }
+            Err(_) => {
+                warn!("Timed out waiting for in-flight chunk ingress handlers; proceeding without full drain");
+                None
+            }
+        };
+
+        // Phase 2: drain queued messages with its own budget
+        let drain_fut = async {
             while let Ok(traced) = self.msg_rx.try_recv() {
                 let (msg, parent_span) = traced.into_parts();
                 let msg_type = msg.variant_name();
@@ -322,12 +333,11 @@ impl ChunkIngressService {
                     .await;
             }
         };
-
-        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
+        match tokio::time::timeout(Duration::from_secs(10), drain_fut).await {
             Ok(()) => tracing::debug!("Processed remaining chunk ingress messages successfully"),
-            Err(_) => tracing::warn!(
-                "Timeout processing remaining chunk ingress messages, continuing shutdown"
-            ),
+            Err(_) => {
+                warn!("Timeout draining remaining chunk ingress messages, continuing shutdown")
+            }
         }
 
         if let Err(e) = self.inner.chunk_data_writer.flush().await {
