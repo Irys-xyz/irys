@@ -2,17 +2,20 @@ use alloy_consensus::Transaction as _;
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::HashOrNumber;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
-    shadow_tx_topics, ShadowTransaction, TransactionPacket,
+    ShadowTransaction, TransactionPacket, shadow_tx_topics,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    partition::PartitionAssignment, CommitmentTransaction, PledgeDataProvider as _, U256,
+    CommitmentTransaction, PledgeDataProvider as _, U256, partition::PartitionAssignment,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
+use reth::rpc::types::BlockNumberOrTag;
+use tokio::time::{Duration, sleep};
 
 use crate::block_production::unpledge_refund::{
     assert_single_log_for, send_unpledge_all, setup_env, setup_env_with_block_migration_depth,
 };
+use crate::utils::IrysNodeTest;
 
 /// Two-node scenario exercising the full unstake flow:
 /// 1. unpledge all partitions from a signer and process epoch refunds.
@@ -92,11 +95,14 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .await?;
 
     // Epoch block must emit refunds for each unpledge.
-    let epoch_receipts = reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(post_unpledge_epoch_block.evm_block_hash))?
-        .expect("epoch receipts available");
+    let epoch_receipts = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        post_unpledge_epoch_block.height,
+        post_unpledge_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let mut refund_logs = 0_usize;
     for receipt in &epoch_receipts {
         refund_logs += receipt
@@ -171,7 +177,14 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Unstake commitment must appear in the inclusion ledger",
     );
 
-    let receipts_inclusion = get_block_receipts(&reth_ctx, unstake_block.evm_block_hash)?;
+    let receipts_inclusion = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        unstake_block.height,
+        unstake_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let debit_receipt_idx = assert_single_log_for(
         &receipts_inclusion,
         &shadow_tx_topics::UNSTAKE_DEBIT,
@@ -226,7 +239,14 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(epoch_height_after_unstake)
         .await?;
 
-    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
+    let receipts_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        epoch_block.height,
+        epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let refund_receipt_idx = assert_single_log_for(
         &receipts_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -362,7 +382,14 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     );
 
     // Assert no UNSTAKE_DEBIT shadow tx in block
-    let receipts_first_block = get_block_receipts(&reth_ctx, first_block.evm_block_hash)?;
+    let receipts_first_block = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        first_block.height,
+        first_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_first_block,
         &shadow_tx_topics::UNSTAKE_DEBIT,
@@ -406,7 +433,14 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     let first_epoch_block = genesis_node.get_block_by_height(first_epoch_height).await?;
 
     // Assert no UNSTAKE refund shadow tx at epoch
-    let receipts_first_epoch = get_block_receipts(&reth_ctx, first_epoch_block.evm_block_hash)?;
+    let receipts_first_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        first_epoch_block.height,
+        first_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_first_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -488,7 +522,14 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         .await?;
 
     // Verify no UNSTAKE refund at this epoch either
-    let receipts_second_epoch = get_block_receipts(&reth_ctx, second_epoch_block.evm_block_hash)?;
+    let receipts_second_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        second_epoch_block.height,
+        second_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_second_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -690,7 +731,14 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     );
 
     // Verify shadow transactions
-    let receipts = get_block_receipts(&reth_ctx, block_header.evm_block_hash)?;
+    let receipts = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        block_header.height,
+        block_header.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
 
     // Verify PLEDGE shadow transaction exists
     let pledge_receipt_idx = assert_single_log_for(
@@ -821,15 +869,45 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 }
 
 /// Get receipts for a block
-fn get_block_receipts(
+async fn get_block_receipts(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     reth_ctx: &irys_reth_node_bridge::IrysRethNodeAdapter,
+    block_height: u64,
     block_hash: FixedBytes<32>,
+    seconds_to_wait: usize,
 ) -> eyre::Result<Vec<reth::primitives::Receipt>> {
-    reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(block_hash))?
-        .ok_or_else(|| eyre::eyre!("Receipts not found for block {:?}", block_hash))
+    node.wait_for_reth_marker(
+        BlockNumberOrTag::Number(block_height),
+        block_hash,
+        seconds_to_wait as u64,
+    )
+    .await?;
+
+    let poll_interval = Duration::from_millis(200);
+    let max_retries = ((seconds_to_wait * 1000) / poll_interval.as_millis() as usize).max(1);
+
+    for retry in 0..=max_retries {
+        if let Some(receipts) = reth_ctx
+            .inner
+            .provider
+            .receipts_by_block(HashOrNumber::Hash(block_hash))?
+        {
+            return Ok(receipts);
+        }
+
+        if retry == max_retries {
+            break;
+        }
+        sleep(poll_interval).await;
+    }
+
+    Err(eyre::eyre!(
+        "Receipts not found for block {:?} at height {} after {} retries ({}s)",
+        block_hash,
+        block_height,
+        max_retries,
+        seconds_to_wait
+    ))
 }
 
 /// Assert that a specific shadow tx log is NOT present in receipts
@@ -1119,7 +1197,14 @@ async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<(
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
 
     // Assert epoch block contains UNPLEDGE_REFUND logs
-    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
+    let receipts_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        epoch_block.height,
+        epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let mut unpledge_refund_logs = 0_usize;
     let mut unstake_refund_logs = 0_usize;
 
