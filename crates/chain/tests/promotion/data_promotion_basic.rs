@@ -1,4 +1,4 @@
-use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
+use crate::utils::{post_chunk, verify_published_chunk};
 use crate::utils::{AddTxError, IrysNodeTest};
 use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
@@ -160,15 +160,30 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
-    let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
-    assert!(result.is_ok());
+    node.future_or_mine_on_timeout(
+        node.wait_for_chunk(&app, DataLedger::Publish, 0, 60),
+        Duration::from_secs(5),
+    )
+    .await??;
     // wait for the second set of chunks to appear in the publish ledger
-    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
-    assert!(result.is_ok());
+    node.future_or_mine_on_timeout(
+        node.wait_for_chunk(&app, DataLedger::Publish, 3, 60),
+        Duration::from_secs(5),
+    )
+    .await??;
 
-    let db = &node.node_ctx.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
-    let block_tx2 = get_block_parent(txs[2].header.id, DataLedger::Publish, db).unwrap();
+    let block_tx1 = node
+        .future_or_mine_on_timeout(
+            node.wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60),
+            Duration::from_secs(5),
+        )
+        .await??;
+    let block_tx2 = node
+        .future_or_mine_on_timeout(
+            node.wait_for_block_containing_tx(txs[2].header.id, DataLedger::Publish, 60),
+            Duration::from_secs(5),
+        )
+        .await??;
 
     let first_tx_index: usize;
     let next_tx_index: usize;

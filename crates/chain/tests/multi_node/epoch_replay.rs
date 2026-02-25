@@ -83,7 +83,12 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
 
         // 3. Mine an epoch so the peer is assigned capacity
         info!("Mining first epoch to assign peer capacity...");
-        genesis_node.mine_until_next_epoch().await?;
+        let (_, epoch_height) = genesis_node.mine_until_next_epoch().await?;
+
+        // Wait for peer to sync the epoch blocks via gossip
+        peer1_node
+            .wait_for_block_at_height(epoch_height, seconds_to_wait)
+            .await?;
 
         // Verify commitments in blocks
         let block_1 = genesis_node.get_block_by_height(1).await.unwrap();

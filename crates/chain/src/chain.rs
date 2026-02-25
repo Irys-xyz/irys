@@ -58,11 +58,11 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CloneableJoinHandle,
-    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
-    UnixTimestampMs, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CommitmentTransaction,
+    Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange,
+    PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _,
+    ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp, UnixTimestampMs, H256,
+    U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -82,7 +82,7 @@ use std::time::{Duration, Instant};
 use std::{
     net::TcpListener,
     sync::{Arc, RwLock},
-    thread::{self, JoinHandle},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -92,7 +92,6 @@ use tokio::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
-    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
@@ -118,8 +117,10 @@ pub struct IrysNodeCtx {
     pub packing_waiter: irys_actors::packing_service::PackingIdleWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
-    // Thread handles spawned by the start function
-    pub reth_thread_handle: Option<CloneableJoinHandle<ShutdownReason>>,
+    // Completion receiver for the reth thread (async alternative to blocking JoinHandle)
+    pub reth_done_rx: Arc<std::sync::Mutex<Option<oneshot::Receiver<ShutdownReason>>>>,
+    // Top-level cancellation token for coordinated shutdown
+    shutdown_token: CancellationToken,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
     pub peer_list: PeerList,
@@ -135,7 +136,6 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
-    backfill_cancel: CancellationToken,
     backfill_complete: Arc<tokio::sync::Notify>,
 }
 
@@ -179,8 +179,12 @@ impl IrysNodeCtx {
         info!("stop function called, shutting down due to: {}", reason);
         metrics::record_node_shutdown(reason.as_label());
 
-        // Cancel the backfill task for graceful shutdown
-        self.backfill_cancel.cancel();
+        // Clone the inner DB Arc so we can wait for all references to drain
+        // after dropping self.
+        let db_inner = Arc::clone(&self.db.0);
+
+        // Cancel all subsystems via token (VDF, actor, backfill all observe this)
+        self.shutdown_token.cancel();
 
         // Wait for backfill task to complete (with timeout)
         match tokio::time::timeout(
@@ -200,34 +204,29 @@ impl IrysNodeCtx {
         if let Err(e) = self.stop_mining() {
             error!("Failed to stop mining during shutdown: {:#}", e);
         }
-        debug!(
-            "Sending shutdown signal to reth thread (reason: {})",
-            reason
-        );
-        // Shutting down reth node will propagate to the main actor thread eventually
+
+        // Send shutdown reason to reth thread (carries the ShutdownReason for logging/metrics)
         if let Err(e) = self.reth_shutdown_sender.send(reason).await {
-            error!("Failed to send shutdown signal to reth thread: {}", e);
+            debug!("reth shutdown channel already closed: {}", e);
         }
-        match self.reth_thread_handle {
-            Some(handle) => match handle.join() {
-                Ok(reason) => {
-                    info!("Reth thread stopped with reason: {}", reason);
+
+        // Await reth thread completion (async, with timeout)
+        let rx = self.reth_done_rx.lock().unwrap().take();
+        match rx {
+            Some(rx) => match tokio::time::timeout(RETH_THREAD_STOP_TIMEOUT, rx).await {
+                Ok(Ok(reason)) => info!("Reth thread stopped: {}", reason),
+                Ok(Err(_)) => {
+                    error!("Reth completion sender dropped (thread may have panicked)")
                 }
-                Err(e) => {
-                    error!("Reth thread panicked or failed: {:?}", e);
-                }
+                Err(_) => error!("Reth thread did not stop within {RETH_THREAD_STOP_TIMEOUT:?}"),
             },
-            None => {
-                error!("Reth thread handle was None during shutdown");
-            }
+            None => debug!("Reth completion receiver already consumed"),
         }
         debug!("Main actor thread and reth thread stopped");
 
         // Flush telemetry before marking as stopped to ensure all logs are exported
         #[cfg(feature = "telemetry")]
         {
-            use std::time::Duration;
-
             match tokio::time::timeout(
                 Duration::from_secs(15),
                 tokio::task::spawn_blocking(irys_utils::flush_telemetry),
@@ -250,6 +249,25 @@ impl IrysNodeCtx {
         }
 
         self.stop_guard.mark_stopped();
+
+        // Drop self to release our references to all shared state (services,
+        // block pool, gossip handler, etc. — all hold DatabaseProvider clones).
+        drop(self);
+
+        // Wait for all DatabaseProvider clones to be released so the MDBX
+        // file lock is freed before the caller tries to re-open the DB.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&db_inner) > 1 {
+            if Instant::now() > deadline {
+                warn!(
+                    refs = Arc::strong_count(&db_inner),
+                    "DB still has outstanding references after 5s, proceeding"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // db_inner dropped here -> DatabaseEnv dropped -> MDBX lock released
     }
 
     pub fn get_http_port(&self) -> u16 {
@@ -369,10 +387,29 @@ pub struct IrysNode {
     pub irys_db: DatabaseProvider,
 }
 
+/// Timeout for stopping the API server during graceful shutdown.
+const API_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for stopping the gossip service during graceful shutdown.
+const GOSSIP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for the VDF thread to finish during graceful shutdown.
+const VDF_THREAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for sending the shutdown signal to the actor thread.
+const ACTOR_SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for the actor thread to finish (API 5s + gossip 5s + VDF 10s + jitter).
+const ACTOR_THREAD_TIMEOUT: Duration = Duration::from_secs(25);
+/// Timeout for the TaskManager graceful shutdown.
+const TASK_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the reth thread to complete its full shutdown sequence.
+/// Budget: send(5s) + actor(25s) + service_set(~10 services × 10s) + task_manager(10s).
+/// Using 60s to cover typical case with margin; worst-case depends on service count.
+const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl IrysNode {
-    /// Creates a new node builder instance.
-    pub fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
-        // we create the listener here so we know the port before we start passing around `config`
+    /// Binds HTTP and gossip TCP listeners, updates config with assigned ports.
+    /// Call once, then pass results to [`new_with_listeners()`].
+    pub fn bind_listeners(
+        mut node_config: NodeConfig,
+    ) -> eyre::Result<(NodeConfig, TcpListener, TcpListener)> {
         let http_listener = create_listener(
             format!(
                 "{}:{}",
@@ -389,7 +426,7 @@ impl IrysNode {
                 node_config.gossip.bind_port
             )
             .parse()
-            .expect("A valid HTTP IP & port"),
+            .expect("A valid gossip IP & port"),
         )?;
         let local_addr = http_listener
             .local_addr()
@@ -417,12 +454,18 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        // Get or create peer_id from file
+        Ok((node_config, http_listener, gossip_listener))
+    }
+
+    /// Creates an IrysNode with pre-bound listeners.
+    /// Performs peer_id creation, DB initialization, and config validation.
+    pub fn new_with_listeners(
+        node_config: NodeConfig,
+        http_listener: TcpListener,
+        gossip_listener: TcpListener,
+    ) -> eyre::Result<Self> {
         let peer_id = get_or_create_peer_id(&node_config)?;
-
-        // Initialize database
         let irys_db = init_irys_db(&node_config)?;
-
         let config = Config::new(node_config, peer_id);
         config.validate()?;
 
@@ -803,26 +846,24 @@ impl IrysNode {
             tokio::sync::mpsc::channel::<ShutdownReason>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<ShutdownReason>(1);
-        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel::<ShutdownReason>(1);
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
 
         let irys_provider = reth_provider::create_provider();
+        let shutdown_token = CancellationToken::new();
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = task_manager.executor();
         // vdf gets started here...
         // init the services
-        let actor_main_thread_handle = Self::init_services_thread(
+        let actor_done_rx = Self::init_services_thread(
             self.config.clone(),
             Arc::clone(&latest_block),
             genesis_hash,
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
-            vdf_shutdown_sender,
-            vdf_shutdown_receiver,
             reth_handle_receiver,
             service_set_tx,
             irys_node_ctx_tx,
@@ -833,16 +874,17 @@ impl IrysNode {
             block_index,
             self.gossip_listener,
             tokio_runtime.handle().clone(),
+            shutdown_token.clone(),
         )?;
 
         let handle = tokio_runtime.handle().clone();
         // start reth
-        let reth_thread = Self::init_reth_thread(
+        let reth_done_rx = Self::init_reth_thread(
             self.config.clone(),
             reth_shutdown_receiver,
             main_actor_thread_shutdown_tx,
             reth_handle_sender,
-            actor_main_thread_handle,
+            actor_done_rx,
             irys_provider.clone(),
             reth_chainspec.clone(),
             latest_block_height,
@@ -852,7 +894,7 @@ impl IrysNode {
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
-        ctx.reth_thread_handle = Some(reth_thread.into());
+        ctx.reth_done_rx = Arc::new(std::sync::Mutex::new(Some(reth_done_rx)));
         let node_config = &ctx.config.node_config;
 
         // Log startup information
@@ -871,6 +913,15 @@ impl IrysNode {
 
         );
 
+        // Subscribe before initial_sync so the receiver captures all block
+        // events produced during (and after) sync — prevents a race where
+        // events fire before we start listening.
+        let block_state_rx = ctx
+            .config
+            .node_config
+            .stake_pledge_drives
+            .then(|| ctx.service_senders.subscribe_block_state_updates());
+
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
         ctx.sync_service_facade.initial_sync().await?;
@@ -883,10 +934,23 @@ impl IrysNode {
             let storage_modules = ctx.storage_modules_guard.clone();
             let mempool_pledge_provider = ctx.mempool_pledge_provider.clone();
             let latest_block = Arc::clone(&latest_block);
-            // this is a task as we don't want to block startup, & it lets us gosip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
-            handle.spawn(async {
-                // sleep for a bit so that peers have a chance to gossip us blocks
-                sleep(Duration::from_secs(2)).await;
+            let sync_state = ctx.sync_state.clone();
+            // this is a task as we don't want to block startup, & it lets us gossip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
+            handle.spawn(async move {
+                // wait for sync to complete so gossiped blocks are pre-validated
+                let _ = sync_state.wait_for_sync().await;
+                // Wait until block events quiesce (no events for 500 ms, max 10 s).
+                // The receiver was subscribed before initial_sync so no events
+                // were missed.
+                if let Some(mut rx) = block_state_rx {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    irys_actors::services::wait_until_broadcast_idle(
+                        &mut rx,
+                        Duration::from_millis(500),
+                        deadline,
+                    )
+                    .await;
+                }
                 let config = config;
                 let latest_block = latest_block;
                 let mut validation_tracker =
@@ -1007,8 +1071,6 @@ impl IrysNode {
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<ShutdownReason>,
-        vdf_shutdown_sender: mpsc::Sender<ShutdownReason>,
-        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         service_set_sender: oneshot::Sender<ServiceSet>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
@@ -1019,9 +1081,11 @@ impl IrysNode {
         block_index: BlockIndex,
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
-    ) -> Result<JoinHandle<()>, eyre::Error> {
+        shutdown_token: CancellationToken,
+    ) -> Result<oneshot::Receiver<()>, eyre::Error> {
         let span = tracing::Span::current();
-        let actor_main_thread_handle = std::thread::Builder::new()
+        let (actor_done_tx, actor_done_rx) = oneshot::channel::<()>();
+        std::thread::Builder::new()
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
@@ -1034,14 +1098,13 @@ impl IrysNode {
                             let (
                                 irys_node,
                                 actix_server,
-                                vdf_thread,
+                                vdf_done_rx,
                                 gossip_service_handle,
                                 service_set,
                             ) = Self::init_services(
                                 &config,
                                 genesis_hash,
                                 reth_shutdown_sender,
-                                vdf_shutdown_receiver,
                                 reth_handle_receiver,
                                 block_index,
                                 latest_block,
@@ -1051,6 +1114,7 @@ impl IrysNode {
                                 irys_db,
                                 gossip_listener,
                                 runtime_handle,
+                                shutdown_token.clone(),
                             )
                             .instrument(tracing::Span::current())
                             .await
@@ -1066,44 +1130,46 @@ impl IrysNode {
                             let server_handle = actix_server.handle();
 
                             let server_stop_handle = tokio::spawn(async move {
-                                let shutdown_reason = main_actor_thread_shutdown_rx.recv().await;
+                                let shutdown_reason = tokio::select! {
+                                    reason = main_actor_thread_shutdown_rx.recv() => reason,
+                                    _ = shutdown_token.cancelled() => {
+                                        Some(ShutdownReason::Signal("cancellation_token".to_string()))
+                                    }
+                                };
                                 if let Some(reason) = &shutdown_reason {
                                     info!("Main actor thread received shutdown signal: {}", reason);
                                 }
 
                                 debug!("Stopping API server");
-                                server_handle.stop(true).await;
-                                info!("API server stopped");
+                                match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, server_handle.stop(true)).await {
+                                    Ok(()) => debug!("API server stopped"),
+                                    Err(_) => error!("API server stop timed out after {API_SERVER_STOP_TIMEOUT:?}"),
+                                }
 
-                                shutdown_reason
                             });
 
                             actix_server.await.unwrap();
-                            let shutdown_reason = server_stop_handle.await.unwrap();
+                            server_stop_handle.await.unwrap();
 
-                            match gossip_service_handle.stop().await {
-                                Ok(()) => info!("Gossip service stopped"),
-                                Err(e) => warn!("Gossip service is already stopped: {:?}", e),
-                            }
-
-                            // Send shutdown signal - propagate the original cause
-                            if let Some(reason) = shutdown_reason {
-                                vdf_shutdown_sender.send(reason).await.unwrap();
-                            } else {
-                                warn!("No shutdown reason received, VDF will be stopped without reason");
+                            match tokio::time::timeout(GOSSIP_STOP_TIMEOUT, gossip_service_handle.stop()).await {
+                                Ok(Ok(())) => info!("Gossip service stopped"),
+                                Ok(Err(e)) => warn!("Gossip service already stopped: {:?}", e),
+                                Err(_) => error!("Gossip service stop timed out after {GOSSIP_STOP_TIMEOUT:?}"),
                             }
 
                             debug!("Waiting for VDF thread to finish");
-                            // Wait for vdf thread to finish & save steps
-                            vdf_thread.join().unwrap();
-
-                            debug!("VDF thread finished");
+                            match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_done_rx).await {
+                                Ok(Ok(())) => debug!("VDF thread finished"),
+                                Ok(Err(_)) => error!("VDF thread likely panicked (completion channel dropped)"),
+                                Err(_) => error!("VDF thread did not finish within {VDF_THREAD_TIMEOUT:?}"),
+                            }
                         }
                         .instrument(span.clone()),
-                    )
+                    );
+                    let _ = actor_done_tx.send(());
                 }
             })?;
-        Ok(actor_main_thread_handle)
+        Ok(actor_done_rx)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(block.height = latest_block_height))]
@@ -1112,18 +1178,19 @@ impl IrysNode {
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<ShutdownReason>,
         reth_handle_sender: oneshot::Sender<RethNode>,
-        actor_main_thread_handle: JoinHandle<()>,
+        actor_done_rx: oneshot::Receiver<()>,
         irys_provider: IrysRethProvider,
         reth_chainspec: Arc<ChainSpec>,
         latest_block_height: u64,
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
-    ) -> eyre::Result<JoinHandle<ShutdownReason>> {
+    ) -> eyre::Result<oneshot::Receiver<ShutdownReason>> {
         let span = tracing::Span::current();
         let span2 = span.clone();
+        let (reth_done_tx, reth_done_rx) = oneshot::channel::<ShutdownReason>();
 
-        let reth_thread_handler = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("reth-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
@@ -1158,7 +1225,13 @@ impl IrysNode {
                         Ok(())
                     };
 
-                    let shutdown_reason = match run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver, "reth").await {
+                    let shutdown_reason = match run_until_ctrl_c_or_channel_message(
+                        future,
+                        reth_shutdown_receiver,
+                        "reth",
+                    )
+                    .await
+                    {
                         Ok(reason) => reason,
                         Err(e) => {
                             error!("Reth thread error: {:?}", e);
@@ -1166,27 +1239,43 @@ impl IrysNode {
                         }
                     };
 
-                    debug!("Sending shutdown signal to the main actor thread: {}", shutdown_reason);
-                    match main_actor_thread_shutdown_tx.try_send(shutdown_reason.clone()) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            warn!("Failed to send shutdown signal to main actor thread: channel full");
+                    debug!(
+                        "Sending shutdown signal to the main actor thread: {}",
+                        shutdown_reason
+                    );
+                    match tokio::time::timeout(
+                        ACTOR_SHUTDOWN_SEND_TIMEOUT,
+                        main_actor_thread_shutdown_tx.send(shutdown_reason.clone()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            debug!("Shutdown signal send failed (receiver likely dropped): {}", e)
                         }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            error!("Failed to send shutdown signal to main actor thread: channel closed");
-                        }
+                        Err(_) => error!("Timed out sending shutdown signal to actor thread"),
                     }
 
+                    // Actor internal shutdown budget: API + gossip + VDF timeouts.
+                    // ACTOR_THREAD_TIMEOUT accommodates scheduling jitter.
                     debug!("Waiting for the main actor thread to finish");
+                    match tokio::time::timeout(ACTOR_THREAD_TIMEOUT, actor_done_rx).await {
+                        Ok(Ok(())) => debug!("Actor main thread finished"),
+                        Ok(Err(_)) => {
+                            error!("Actor thread likely panicked (completion channel dropped)")
+                        }
+                        Err(_) => error!("Actor main thread did not finish within {ACTOR_THREAD_TIMEOUT:?}"),
+                    }
 
-                    actor_main_thread_handle
-                        .join()
-                        .expect("to successfully join the actor thread handle");
+                    // Each service has an individual 10s shutdown timeout (see ServiceSet::initiate_shutdown),
+                    // so this is bounded by ~10s × service_count, not unbounded.
                     service_set.graceful_shutdown().await;
                     debug!(
                         "Shutting down the rest of the reth jobs in case there are unfinished ones"
                     );
-                    task_manager.graceful_shutdown();
+                    if !task_manager.graceful_shutdown_with_timeout(TASK_MANAGER_TIMEOUT) {
+                        warn!("TaskManager graceful shutdown timed out after {TASK_MANAGER_TIMEOUT:?}");
+                    }
                     (node_handle.node, shutdown_reason)
                 };
 
@@ -1197,12 +1286,10 @@ impl IrysNode {
                 reth_provider::cleanup_provider(&irys_provider);
 
                 info!("Reth thread finished with reason: {}", shutdown_reason);
-                // Telemetry flush is now handled in main.rs after handle.stop()
-                // to ensure all logs are captured before tokio runtime drops
-                shutdown_reason
+                let _ = reth_done_tx.send(shutdown_reason);
             })?;
 
-        Ok(reth_thread_handler)
+        Ok(reth_done_rx)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
@@ -1210,7 +1297,6 @@ impl IrysNode {
         config: &Config,
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
-        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: BlockIndex,
         latest_block: Arc<IrysBlockHeader>,
@@ -1220,10 +1306,11 @@ impl IrysNode {
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
+        shutdown_token: CancellationToken,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
-        JoinHandle<()>,
+        oneshot::Receiver<()>,
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1284,8 +1371,8 @@ impl IrysNode {
 
         let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
 
-        // Create cancellation token for graceful shutdown of backfill task
-        let backfill_cancel = CancellationToken::new();
+        // Create cancellation token as child of the top-level shutdown token
+        let backfill_cancel = shutdown_token.child_token();
 
         // Notify to signal backfill completion for clean shutdown
         let backfill_complete = Arc::new(tokio::sync::Notify::new());
@@ -1617,9 +1704,8 @@ impl IrysNode {
         );
 
         // set up the vdf thread
-        let vdf_thread_handler = Self::init_vdf_thread(
+        let vdf_done_rx = Self::init_vdf_thread(
             &config,
-            vdf_shutdown_receiver,
             receivers.vdf_fast_forward,
             Arc::clone(&is_vdf_mining_enabled),
             latest_block,
@@ -1630,6 +1716,7 @@ impl IrysNode {
             atomic_global_step_number,
             block_status_provider,
             sync_state.clone(),
+            shutdown_token.clone(),
         );
 
         // set up chunk provider
@@ -1699,7 +1786,8 @@ impl IrysNode {
             partition_controllers,
             packing_waiter: packing_handle.waiter(),
             reth_shutdown_sender,
-            reth_thread_handle: None,
+            reth_done_rx: Arc::new(std::sync::Mutex::new(None)),
+            shutdown_token: shutdown_token.clone(),
             block_tree_guard: block_tree_guard.clone(),
             config: config.clone(),
             stop_guard: StopGuard::new(),
@@ -1717,7 +1805,6 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
-            backfill_cancel,
             backfill_complete,
         };
 
@@ -1832,7 +1919,7 @@ impl IrysNode {
         Ok((
             irys_node_ctx,
             server,
-            vdf_thread_handler,
+            vdf_done_rx,
             p2p_service_handle,
             ServiceSet::new(services),
         ))
@@ -1851,7 +1938,6 @@ impl IrysNode {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
@@ -1862,7 +1948,8 @@ impl IrysNode {
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
         chain_sync_state: ChainSyncState,
-    ) -> JoinHandle<()> {
+        shutdown_token: CancellationToken,
+    ) -> oneshot::Receiver<()> {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
@@ -1876,8 +1963,9 @@ impl IrysNode {
             panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
         }
         let span = tracing::Span::current();
+        let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
 
-        let vdf_thread_handler = std::thread::spawn({
+        std::thread::spawn({
             let vdf_config = config.vdf.clone();
             move || {
                 let _span = span.enter();
@@ -1904,16 +1992,17 @@ impl IrysNode {
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
                     is_vdf_mining_enabled,
-                    vdf_shutdown_receiver,
                     MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
                     chain_sync_state,
-                )
+                    shutdown_token,
+                );
+                let _ = vdf_done_tx.send(());
             }
         });
-        vdf_thread_handler
+        vdf_done_rx
     }
 
     fn init_partition_mining_services(

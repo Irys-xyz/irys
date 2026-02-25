@@ -16,14 +16,14 @@ use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFaca
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
     block_producer::BlockProducerCommand,
-    block_tree_service::ReorgEvent,
+    block_tree_service::{BlockStateUpdated, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
+use irys_api_server::routes;
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
-use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
@@ -36,6 +36,7 @@ use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
+use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -74,7 +75,6 @@ use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{
     future::Future,
@@ -82,7 +82,7 @@ use std::{
 };
 use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, error, error_span, info, instrument};
+use tracing::{debug, error, error_span, info, instrument, warn};
 
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
@@ -270,16 +270,6 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub fn random_port() -> eyre::Result<u16> {
-    let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
-    //the assigned port will be random (decided by the OS)
-    let port = listener
-        .local_addr()
-        .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-        .port();
-    Ok(port)
-}
-
 // Reasons tx could fail to be added to mempool
 #[derive(Debug, thiserror::Error)]
 pub enum AddTxError {
@@ -297,6 +287,10 @@ pub struct IrysNodeTest<T = ()> {
     pub cfg: NodeConfig,
     pub temp_dir: TempDir,
     pub name: Option<String>,
+    // Preserve caller intent for port allocation across restarts.
+    restart_http_ports: bool,
+    restart_gossip_ports: bool,
+    restart_reth_ports: bool,
 }
 
 impl IrysNodeTest<()> {
@@ -321,25 +315,69 @@ impl IrysNodeTest<()> {
     fn new_inner(mut config: NodeConfig) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
+        let restart_http_ports = config.http.bind_port == 0;
+        let restart_gossip_ports = config.gossip.bind_port == 0;
+        let restart_reth_ports =
+            config.reth.network.use_random_ports || config.reth.network.bind_port == 0;
         Self {
             cfg: config,
             temp_dir,
             node_ctx: (),
             name: None,
+            restart_http_ports,
+            restart_gossip_ports,
+            restart_reth_ports,
         }
     }
 
+    #[diag_slow(state = "start".to_string())]
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
+        let cfg_for_start = self.cfg.clone();
+        let (cfg, http_listener, gossip_listener) =
+            match IrysNode::bind_listeners(cfg_for_start.clone()) {
+                Ok(bound) => bound,
+                Err(err) => {
+                    let addr_in_use = err.to_string().contains("Address already in use");
+                    if !(addr_in_use && (self.restart_http_ports || self.restart_gossip_ports)) {
+                        panic!("Failed to bind TCP listeners: {err:?}");
+                    }
 
-        let node = IrysNode::new(self.cfg).unwrap();
+                    warn!(
+                        error = ?err,
+                        "Bind failed with address-in-use; retrying with fresh local ports"
+                    );
+                    let mut retry_cfg = cfg_for_start;
+                    if self.restart_http_ports {
+                        retry_cfg.http.bind_port = 0;
+                        retry_cfg.http.public_port = 0;
+                    }
+                    if self.restart_gossip_ports {
+                        retry_cfg.gossip.bind_port = 0;
+                        retry_cfg.gossip.public_port = 0;
+                    }
+                    if self.restart_reth_ports {
+                        retry_cfg.reth.network.bind_port = 0;
+                        retry_cfg.reth.network.public_port = 0;
+                        retry_cfg.reth.network.use_random_ports = true;
+                    }
+                    IrysNode::bind_listeners(retry_cfg).expect("Failed to bind TCP listeners")
+                }
+            };
+
+        let node = IrysNode::new_with_listeners(cfg, http_listener, gossip_listener)
+            .expect("Failed to create IrysNode");
+
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),
             node_ctx,
             temp_dir: self.temp_dir,
             name: self.name,
+            restart_http_ports: self.restart_http_ports,
+            restart_gossip_ports: self.restart_gossip_ports,
+            restart_reth_ports: self.restart_reth_ports,
         }
     }
 
@@ -359,6 +397,7 @@ impl IrysNodeTest<()> {
         self.with_name(log_name).start().await
     }
 
+    #[diag_slow(state = "start_and_wait_for_packing".to_string())]
     pub async fn start_and_wait_for_packing(
         self,
         log_name: &str,
@@ -373,6 +412,142 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    fn ensure_vdf_running_for_sync(&self, context: &str) {
+        if !self
+            .node_ctx
+            .is_vdf_mining_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.node_ctx.start_vdf();
+            info!("Auto-started VDF for sync context={}", context);
+        }
+    }
+
+    async fn diag_wait_state(&self) -> String {
+        let (
+            canonical_tip_height,
+            canonical_tip_hash,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+        ) = {
+            let tree = self.node_ctx.block_tree_guard.read();
+            let (canonical_chain, not_onchain_count) = tree.get_canonical_chain();
+            let canonical_tip = canonical_chain
+                .last()
+                .map(|entry| (entry.height(), entry.block_hash()));
+            let (max_diff_height, max_diff_hash) = tree.get_max_cumulative_difficulty_block();
+
+            (
+                canonical_tip.map(|(height, _)| height),
+                canonical_tip.map(|(_, block_hash)| block_hash),
+                canonical_chain.len(),
+                not_onchain_count,
+                max_diff_height,
+                max_diff_hash,
+            )
+        };
+
+        let (
+            block_index_height,
+            block_index_hash,
+            block_index_submit_total_chunks,
+            block_index_publish_total_chunks,
+        ) = {
+            let block_index = self.node_ctx.block_index_guard.read();
+            let latest = block_index.get_latest_item();
+
+            let (submit_total_chunks, publish_total_chunks) = latest
+                .as_ref()
+                .map(|item| {
+                    let submit_total = item
+                        .ledgers
+                        .iter()
+                        .find(|ledger| ledger.ledger == DataLedger::Submit)
+                        .map(|ledger| ledger.total_chunks)
+                        .unwrap_or(0);
+                    let publish_total = item
+                        .ledgers
+                        .iter()
+                        .find(|ledger| ledger.ledger == DataLedger::Publish)
+                        .map(|ledger| ledger.total_chunks)
+                        .unwrap_or(0);
+                    (submit_total, publish_total)
+                })
+                .unwrap_or((0, 0));
+
+            (
+                latest.as_ref().map(|_| block_index.latest_height()),
+                latest.as_ref().map(|item| item.block_hash),
+                submit_total_chunks,
+                publish_total_chunks,
+            )
+        };
+
+        let known_peers = self.node_ctx.peer_list.all_peers().iter().count();
+        let gossip_broadcast = self.node_ctx.sync_state.is_gossip_broadcast_enabled();
+        let gossip_reception = self.node_ctx.sync_state.is_gossip_reception_enabled();
+
+        let reth_peer_count = match self
+            .node_ctx
+            .reth_node_adapter
+            .inner
+            .network
+            .get_all_peers()
+            .await
+        {
+            Ok(peers) => peers.len().to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let reth_tip = match self
+            .node_ctx
+            .reth_node_adapter
+            .reth_node
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Latest, false)
+            .await
+        {
+            Ok(Some(block)) => format!("{}@{}", block.header.number, block.header.hash),
+            Ok(None) => "none".to_string(),
+            Err(err) => format!("error({err:#})"),
+        };
+
+        let canonical_tip = canonical_tip_height
+            .zip(canonical_tip_hash)
+            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
+            .unwrap_or_else(|| "none".to_string());
+
+        let block_index_tip = block_index_height
+            .zip(block_index_hash)
+            .map(|(height, block_hash)| format!("{}@{}", height, block_hash))
+            .unwrap_or_else(|| "none".to_string());
+
+        format!(
+            "node={:?} canonical_tip={} canonical_len={} not_onchain={} max_diff={}@{} index_tip={} index_submit_chunks={} index_publish_chunks={} peer_list={} reth_peers={} reth_tip={} gossip_tx={} gossip_rx={}",
+            self.name,
+            canonical_tip,
+            canonical_chain_len,
+            not_onchain_count,
+            max_diff_height,
+            max_diff_hash,
+            block_index_tip,
+            block_index_submit_total_chunks,
+            block_index_publish_total_chunks,
+            known_peers,
+            reth_peer_count,
+            reth_tip,
+            gossip_broadcast,
+            gossip_reception,
+        )
+    }
+
+    pub async fn sync_state_snapshot(&self) -> String {
+        self.diag_wait_state().await
+    }
+
     /// Returns true if the next block height is in the last quarter of the pricing interval.
     pub fn ema_next_block_in_last_quarter(
         next_block_height: u64,
@@ -424,16 +599,18 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
     /// mines a single block on this node and waits again.
     /// Designed for use with calls that expect to be able to send and confirm a tx in a single future.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn future_or_mine_on_timeout<F, T>(
         &self,
-        mut future: F,
+        future: F,
         timeout_duration: Duration,
     ) -> eyre::Result<T>
     where
-        F: Future<Output = T> + Unpin,
+        F: Future<Output = T>,
     {
+        tokio::pin!(future);
         loop {
-            let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
+            let race = select(future.as_mut(), Box::pin(sleep(timeout_duration))).await;
             match race {
                 // provided future finished
                 futures::future::Either::Left((res, _)) => return Ok(res),
@@ -506,6 +683,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Create a new peer config with partition assignments
     /// This will start the peer node and wait for the peer to sync the commitment block
     /// It will mine all the blocks necessary to reach the next epoch round.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn testing_peer_with_assignments(
         &self,
         peer_signer: &IrysSigner,
@@ -517,6 +695,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn testing_peer_with_assignments_and_name(
         &self,
         config: NodeConfig,
@@ -550,7 +729,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Wait for peer to sync the commitment block
         peer_node
-            .wait_until_height(height_before_commitment + 1, seconds_to_wait)
+            .wait_for_block_at_height(height_before_commitment + 1, seconds_to_wait)
             .await
             .expect("peer to sync commitment block");
 
@@ -572,7 +751,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Wait for peer to sync after each block to prevent race conditions
             peer_node
-                .wait_until_height(height_before_mining + 1, seconds_to_wait)
+                .wait_for_block_at_height(height_before_mining + 1, seconds_to_wait)
                 .await
                 .expect("peer to sync to current height");
         }
@@ -581,10 +760,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Wait for the peer to receive & process the epoch block
         peer_node
-            .wait_until_height(final_height, seconds_to_wait)
+            .wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .expect("peer to sync to epoch height");
-        self.wait_until_height(final_height, seconds_to_wait)
+        self.wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .unwrap();
 
@@ -604,11 +783,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_until_block_index_height");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
         while self.node_ctx.block_index_guard.read().latest_height() < target_height
@@ -632,7 +813,131 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// Polls block-index block-bounds lookup until the requested chunk offset
+    /// is resolvable for the given ledger, or times out.
+    #[diag_slow(state = format!(
+        "ledger={:?} chunk_offset={} {}",
+        ledger,
+        u64::from(chunk_offset),
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_until_block_bounds_available(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_until_block_bounds_available");
+        let chunk_offset_u64: u64 = chunk_offset.into();
+        let mut last_error = "none".to_string();
+
+        for attempt in 1..=max_seconds {
+            let lookup = self
+                .node_ctx
+                .block_index_guard
+                .read()
+                .get_block_bounds(ledger, LedgerChunkOffset::from(chunk_offset_u64));
+
+            match lookup {
+                Ok(bounds) => {
+                    info!(
+                        "block bounds available for {:?} offset {} after {} attempt(s): [{}, {}) at height {}",
+                        ledger,
+                        chunk_offset_u64,
+                        attempt,
+                        bounds.start_chunk_offset,
+                        bounds.end_chunk_offset,
+                        bounds.height
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    last_error = format!("{err:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        let state = self.diag_wait_state().await;
+        Err(eyre::eyre!(
+            "Failed waiting for block bounds for ledger {:?} offset {} after {} seconds; last_error={}; state: {}",
+            ledger,
+            chunk_offset_u64,
+            max_seconds,
+            last_error,
+            state
+        ))
+    }
+
+    /// Polls `get_block_by_height_from_index` (which checks BOTH the index
+    /// entry AND the DB header) until it succeeds or the timeout expires.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn wait_for_block_in_index(
+        &self,
+        height: u64,
+        include_chunk: bool,
+        max_seconds: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block_in_index");
+        for _attempt in 1..=max_seconds {
+            if let Ok(block) = self.get_block_by_height_from_index(height, include_chunk) {
+                return Ok(block);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(eyre::eyre!(
+            "block at height {} not found in index after {}s",
+            height,
+            max_seconds
+        ))
+    }
+
+    /// Like [`wait_for_block_in_index`] but only waits for the block to
+    /// appear — does not fetch the chunk or return the header.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn wait_for_block_in_index_height(
+        &self,
+        height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_block_in_index(height, false, max_seconds)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns a future that resolves once no [`BlockStateUpdated`] events
+    /// arrive for `idle` duration, bounded by `deadline`.
+    ///
+    /// **Call this before the action that produces events** so the
+    /// subscription captures everything. Perform the action, then `.await`
+    /// the returned future.
+    ///
+    /// ```ignore
+    /// let idle = node.wait_until_block_events_idle(
+    ///     Duration::from_millis(500),
+    ///     Duration::from_secs(10),
+    /// );
+    /// genesis.gossip_block_to_peers(&block)?;
+    /// idle.await;
+    /// ```
+    pub fn wait_until_block_events_idle(
+        &self,
+        idle: Duration,
+        deadline: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let mut rx = self
+            .node_ctx
+            .service_senders
+            .subscribe_block_state_updates();
+        Box::pin(async move {
+            let deadline = tokio::time::Instant::now() + deadline;
+            irys_actors::services::wait_until_broadcast_idle(&mut rx, idle, deadline).await;
+        })
+    }
+
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
+        self.ensure_vdf_running_for_sync("wait_for_packing");
         self.node_ctx
             .packing_waiter
             .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
@@ -685,11 +990,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_until_height");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
 
@@ -731,14 +1038,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    /// Wait for a specific block at the given height using event subscription
-    /// This eliminates polling and race conditions by listening to BlockStateUpdated events
+    /// Wait for a canonical block at `target_height` using a hybrid strategy:
+    /// short-interval canonical polling plus BlockStateUpdated subscription.
     #[tracing::instrument(level = "trace", skip_all)]
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_for_block_at_height");
         // Subscribe to block state updates
         let mut block_state_rx = self
             .node_ctx
@@ -749,89 +1058,100 @@ impl IrysNodeTest<IrysNodeCtx> {
         let timeout = Duration::from_secs(max_seconds as u64);
         let deadline = Instant::now() + timeout;
 
-        // First check if we already have the block
-        let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-
-        // Look for the exact block at target height
-        if let Some(block) = canonical_chain
-            .0
-            .iter()
-            .find(|b| b.height() == target_height)
-        {
-            // Check if it's part of canonical chain (not discarded)
-            let tree = self.node_ctx.block_tree_guard.read();
-            let (canonical_entries, _) = tree.get_canonical_chain();
-            if canonical_entries
+        // Hybrid wait strategy: poll canonical chain plus event stream.
+        // Relying only on events is brittle because a target-height event can arrive
+        // before the block becomes canonical, and no later event may be emitted.
+        loop {
+            let canonical_chain =
+                get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+            if let Some(block) = canonical_chain
+                .0
                 .iter()
-                .any(|b| b.block_hash() == block.block_hash())
+                .find(|b| b.height() == target_height)
             {
-                info!("Block at height {} already available", target_height);
+                info!("Canonical block at height {} is available", target_height);
                 return Ok(block.block_hash());
             }
-        }
 
-        // Wait for events
-        loop {
             // Check timeout
             if Instant::now() > deadline {
+                let state = self.diag_wait_state().await;
                 return Err(eyre::eyre!(
-                    "Timeout waiting for block at height {} after {} seconds",
+                    "Timeout waiting for block at height {} after {} seconds; state: {}",
                     target_height,
-                    max_seconds
+                    max_seconds,
+                    state
                 ));
             }
 
-            // Wait for next block state update with timeout
-            match tokio::time::timeout_at(deadline.into(), block_state_rx.recv()).await {
+            // Wait briefly for block-state updates so we can re-check canonical
+            // state even if no further events arrive.
+            let now = Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            let wait_slice = remaining.min(Duration::from_secs(1));
+
+            match tokio::time::timeout(wait_slice, block_state_rx.recv()).await {
                 Ok(Ok(event)) => {
-                    // Check if this is the block we're waiting for
-                    if event.height == target_height && !event.discarded {
-                        // Verify it's canonical
-                        let tree = self.node_ctx.block_tree_guard.read();
-                        let (canonical_entries, _) = tree.get_canonical_chain();
-                        if canonical_entries
-                            .iter()
-                            .any(|b| b.block_hash() == event.block_hash)
-                        {
-                            info!("Received block at height {} via event", target_height);
-                            return Ok(event.block_hash);
-                        }
-                    }
-                    // Also check after reorgs if our target block is now canonical
-                    if event.height > target_height {
-                        let canonical_chain =
-                            get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-                        if let Some(block) = canonical_chain
-                            .0
-                            .iter()
-                            .find(|b| b.height() == target_height)
-                        {
-                            info!(
-                                "Block at height {} became canonical after reorg",
-                                target_height
-                            );
-                            return Ok(block.block_hash());
-                        }
+                    if event.height >= target_height && !event.discarded {
+                        info!(
+                            "Observed block_state update at/above target height: event_height={} target_height={} block_hash={}",
+                            event.height, target_height, event.block_hash
+                        );
                     }
                 }
-                Ok(Err(_)) => {
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                    warn!("block_state receiver lagged; skipped {skipped} events, re-polling");
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                     return Err(eyre::eyre!("Block state channel closed"));
                 }
-                Err(_) => {
-                    return Err(eyre::eyre!(
-                        "Timeout waiting for block at height {}",
-                        target_height
-                    ));
-                }
+                // No event in this short slice, loop and poll canonical state again.
+                Err(_) => {}
             }
         }
     }
 
+    #[diag_slow(state = format!(
+        "target_step={} {}",
+        target_step,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_vdf_step(
+        &self,
+        target_step: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_for_vdf_step");
+        let deadline = Instant::now() + Duration::from_secs(max_seconds as u64);
+        loop {
+            let current_step = self.node_ctx.vdf_steps_guard.read().global_step;
+            if current_step >= target_step {
+                info!("VDF step {} reached target {}", current_step, target_step);
+                return Ok(());
+            }
+
+            if Instant::now() > deadline {
+                let state = self.diag_wait_state().await;
+                return Err(eyre::eyre!(
+                    "Timeout waiting for vdf step >= {} after {} seconds (current_step={}); state: {}",
+                    target_step,
+                    max_seconds,
+                    current_step,
+                    state
+                ));
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_height_confirmed(
         &self,
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_until_height_confirmed");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
 
@@ -865,6 +1185,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_chunk<T, B>(
         &self,
         app: &T,
@@ -877,7 +1198,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         B: MessageBody,
     {
         let delay = Duration::from_secs(1);
-        for attempt in 1..seconds {
+        for attempt in 1..=seconds {
             if let Some(_packed_chunk) =
                 get_chunk(&app, ledger, LedgerChunkOffset::from(offset)).await
             {
@@ -913,6 +1234,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// check number of chunks in the CachedChunks table
     /// return Ok(()) once it matches the expected value
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
@@ -946,6 +1268,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// mine blocks until the txs are found in the block index, i.e. mdbx
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
         &self,
         mut unconfirmed_txs: Vec<DataTransactionHeader>,
@@ -1002,6 +1325,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for data tx to be in mempool and it's IngressProofs to be in database
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_ingress_proofs(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1012,6 +1336,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for data tx to be in mempool and its IngressProofs to be in database. does this without mining new blocks.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1021,6 +1346,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_multiple_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1150,6 +1476,46 @@ impl IrysNodeTest<IrysNodeCtx> {
             .clone()
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
+    async fn wait_for_reorg_subscribed(
+        &self,
+        mut reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
+        seconds_to_wait: usize,
+        start_tip: H256,
+    ) -> eyre::Result<ReorgEvent> {
+        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
+        match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
+            Ok(Ok(reorg_event)) => {
+                info!(
+                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
+                    reorg_event.old_fork.len(),
+                    reorg_event.new_fork.len(),
+                    reorg_event.fork_parent.height,
+                    reorg_event.new_tip
+                );
+                Ok(reorg_event)
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => Err(eyre::eyre!(
+                "Reorg broadcast receiver lagged and skipped {} events",
+                skipped
+            )),
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                Err(eyre::eyre!("Reorg broadcast channel closed"))
+            }
+            Err(_) => {
+                let current_tip = self.get_max_difficulty_block().block_hash;
+                let state = self.diag_wait_state().await;
+                Err(eyre::eyre!(
+                    "Timeout: No reorg event received within {} seconds (start_tip={}, current_tip={}). State: {}",
+                    seconds_to_wait,
+                    start_tip,
+                    current_tip,
+                    state
+                ))
+            }
+        }
+    }
+
     /// Returns a future that resolves when a reorg is detected.
     ///
     /// Subscribes to the reorg broadcast channel and waits up to `seconds_to_wait` for the ReorgEvent.
@@ -1165,44 +1531,27 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// peer.mine_competing_block().await?;
     /// let reorg = reorg_future.await?;
     /// ```
-    #[instrument(skip_all, err)]
+    #[instrument(skip_all)]
     pub fn wait_for_reorg(
         &self,
         seconds_to_wait: usize,
-    ) -> impl Future<Output = eyre::Result<ReorgEvent>> {
-        // Subscribe to reorg events
-        let mut reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
-        let timeout_duration = Duration::from_secs(seconds_to_wait as u64);
-
-        // Return the future without awaiting it
-        async move {
-            match tokio::time::timeout(timeout_duration, reorg_rx.recv()).await {
-                Ok(Ok(reorg_event)) => {
-                    info!(
-                    "Reorg detected: {} blocks in old fork, {} in new fork, fork at height {}, new tip: {}",
-                    reorg_event.old_fork.len(),
-                    reorg_event.new_fork.len(),
-                    reorg_event.fork_parent.height,
-                    reorg_event.new_tip
-                );
-                    Ok(reorg_event)
-                }
-                Ok(Err(err)) => Err(eyre::eyre!("Reorg broadcast channel closed: {}", err)),
-                Err(_) => Err(eyre::eyre!(
-                    "Timeout: No reorg event received within {} seconds",
-                    seconds_to_wait
-                )),
-            }
-        }
+    ) -> impl Future<Output = eyre::Result<ReorgEvent>> + '_ {
+        self.ensure_vdf_running_for_sync("wait_for_reorg");
+        // Subscribe immediately so callers can safely await later without missing events.
+        let reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
+        let start_tip = self.get_max_difficulty_block().block_hash;
+        self.wait_for_reorg_subscribed(reorg_rx, seconds_to_wait, start_tip)
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
         let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
-        let hash = self.wait_until_height(height + 1, 10).await?;
+        let hash = self.wait_for_block_at_height(height + 1, 10).await?;
         self.get_block_by_hash(&hash)
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
@@ -1214,7 +1563,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let height = self.get_max_difficulty_block().height;
         self.node_ctx.start_mining()?;
         let _block_hash = self
-            .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
+            .wait_for_block_at_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
         // stop mining immediately after reaching the correct height
         let stop_mining_result = self.node_ctx.stop_mining();
@@ -1270,6 +1619,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
@@ -1285,14 +1635,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         BlockTransactions,
         BlockValidationOutcome,
     )> {
+        let event_rx = self
+            .node_ctx
+            .service_senders
+            .subscribe_block_state_updates();
         let (block, reth_payload, block_transactions) = self.mine_block_with_payload().await?;
         let block_hash = &block.block_hash;
-        let res = read_block_from_state(&self.node_ctx, block_hash).await;
+        let res = read_block_from_state(&self.node_ctx, block_hash, event_rx).await;
         Ok((block, reth_payload, block_transactions, res))
     }
 
     /// Mine blocks until the next epoch boundary is reached.
     /// Returns the number of blocks mined and the final height.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
         let current_height = self.get_canonical_chain_height().await;
@@ -1336,11 +1691,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// wait for specific block to be available via block tree guard
     ///   i.e. in the case of a fork, check a specific block has been gossiped between peers,
     ///        even though it may not become part of the canonical chain.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_block(
         &self,
         hash: &H256,
         seconds_to_wait: usize,
     ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block");
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         let mut retries = 0;
@@ -1358,6 +1715,47 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!(
             "Failed to locate block in block tree after {} retries",
             retries
+        ))
+    }
+
+    #[diag_slow(state = format!(
+        "txid={} ledger={:?} {}",
+        txid,
+        ledger,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_block_containing_tx(
+        &self,
+        txid: H256,
+        ledger: DataLedger,
+        max_seconds: usize,
+    ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block_containing_tx");
+        for attempt in 1..=max_seconds {
+            let canonical_chain =
+                get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+            for entry in canonical_chain.0.iter().rev() {
+                let block_hash = entry.block_hash();
+                if let Ok(block) = self.get_block_by_hash(&block_hash) {
+                    if block.data_ledgers[ledger].tx_ids.0.contains(&txid) {
+                        tracing::info!(
+                            "found block containing tx {} on {} after {} attempt(s)",
+                            txid,
+                            self.name.clone().unwrap_or_else(|| "genesis".to_string()),
+                            attempt
+                        );
+                        return Ok(block);
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        Err(eyre::eyre!(
+            "block containing tx {} not found on {} after {} seconds",
+            txid,
+            self.name.clone().unwrap_or_else(|| "genesis".to_string()),
+            max_seconds
         ))
     }
 
@@ -1393,11 +1791,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         .ok_or_eyre("Got None")
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_evm_block(
         &self,
         hash: alloy_core::primitives::BlockHash,
         seconds_to_wait: usize,
     ) -> eyre::Result<reth::primitives::Block> {
+        self.ensure_vdf_running_for_sync("wait_for_evm_block");
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         for retry in 0..max_retries {
@@ -1418,11 +1818,42 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn assert_evm_block_absent(
+        &self,
+        hash: alloy_core::primitives::BlockHash,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for retry in 0..max_retries {
+            if self.get_evm_block_by_hash(hash).is_ok() {
+                let state = self.diag_wait_state().await;
+                return Err(eyre::eyre!(
+                    "Block {} unexpectedly appeared in {:?} reth after {} retries. State: {}",
+                    hash,
+                    &self.name,
+                    retry,
+                    state
+                ));
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+        Ok(())
+    }
+
+    async fn evm_tx_wait_diag_state(&self, hash: &alloy_core::primitives::B256) -> String {
+        let state = self.diag_wait_state().await;
+        format!("tx={} {}", hash, state)
+    }
+
+    #[diag_slow(interval = 2, state = self.evm_tx_wait_diag_state(hash).await)]
     pub async fn wait_for_evm_tx(
         &self,
         hash: &alloy_core::primitives::B256,
         seconds_to_wait: usize,
     ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
+        self.ensure_vdf_running_for_sync("wait_for_evm_tx");
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         let retries_per_second = 50;
@@ -1434,9 +1865,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .rpc_client()
             .ok_or_eyre("Unable to get RPC client")?;
+        let mut last_rpc_error: Option<String> = None;
 
         for retry in 0..max_retries {
-            if let Some(tx) = reth::rpc::api::EthApiClient::<
+            match reth::rpc::api::EthApiClient::<
                 TransactionRequest,
                 Transaction,
                 Block,
@@ -1444,31 +1876,52 @@ impl IrysNodeTest<IrysNodeCtx> {
                 Header,
                 Bytes,
             >::transaction_by_hash(&rpc, *hash)
-            .await?
+            .await
             {
-                info!(
-                    "tx {} found in {:?} reth after {} retries",
-                    &hash, &self.name, &retry
-                );
-                return Ok(tx);
+                Ok(Some(tx)) => {
+                    info!(
+                        "tx {} found in {:?} reth after {} retries",
+                        &hash, &self.name, &retry
+                    );
+                    return Ok(tx);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let err_msg = format!("{err:#}");
+                    if retry % retries_per_second == 0 {
+                        tracing::warn!(
+                            "failed to query tx {} in {:?} reth at retry {}: {}",
+                            hash,
+                            self.name,
+                            retry,
+                            err_msg
+                        );
+                    }
+                    last_rpc_error = Some(err_msg);
+                }
             }
             sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
         }
 
+        let final_state = self.evm_tx_wait_diag_state(hash).await;
         Err(eyre::eyre!(
-            "Failed to locate tx {} in {:?} reth after {} retries",
+            "Failed to locate tx {} in {:?} reth after {} retries. Last RPC error: {}. Final state: {}",
             &hash,
             &self.name,
-            max_retries
+            max_retries,
+            last_rpc_error.unwrap_or_else(|| "none".to_string()),
+            final_state
         ))
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_reth_marker(
         &self,
         tag: BlockNumberOrTag,
         expected_hash: EvmBlockHash,
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
+        self.ensure_vdf_running_for_sync("wait_for_reth_marker");
         let deadline = Instant::now() + Duration::from_secs(seconds_to_wait);
         let mut attempt: u32 = 0;
 
@@ -1509,6 +1962,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[diag_slow(state = self.diag_wait_state().await)]
     #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
@@ -1549,6 +2003,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_mempool_commitment_txs(
         &self,
         tx_ids: Vec<H256>,
@@ -1587,6 +2042,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // waits until mempool
     // all filters are AND conditions (e.g., submit_txs=1, publish_txs=1 requires both).
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_mempool_best_txs_shape(
         &self,
         submit_txs: usize,
@@ -1633,11 +2089,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             retries += 1;
         }
         Err(eyre::eyre!(
-                "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
-                retries,
-                &prev,
-                &expected
-            ))
+            "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
+            retries,
+            &prev,
+            &expected
+        ))
     }
 
     // Get the best txs from the mempool, based off the account state at the parent Irys block
@@ -1682,6 +2138,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_publish_data_tx(
         &self,
         account: &IrysSigner,
@@ -1823,6 +2280,31 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
+    /// Polls the mempool until the transaction's `included_height` is set.
+    /// The mempool updates `included_height` asynchronously after `BlockConfirmed`.
+    pub async fn wait_for_tx_included(
+        &self,
+        tx_id: &H256,
+        max_seconds: usize,
+    ) -> eyre::Result<DataTransactionHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_tx_included");
+        for _ in 0..(max_seconds * 10) {
+            match self.get_storage_tx_header_from_mempool(tx_id).await {
+                Ok(header) if header.metadata().included_height.is_some() => {
+                    return Ok(header);
+                }
+                Ok(_) => {}  // included_height not set yet, keep polling
+                Err(_) => {} // tx not yet visible in mempool, keep polling
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "included_height not set for tx {} after {} seconds",
+            tx_id,
+            max_seconds
+        ))
+    }
+
     /// read commitment tx from mempool
     pub async fn get_commitment_tx_from_mempool(
         &self,
@@ -1950,7 +2432,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    #[diag_slow(state = "stop".to_string())]
     pub async fn stop(self) -> IrysNodeTest<()> {
+        let pre_stop_state = self.diag_wait_state().await;
+        info!("Stopping node with state: {}", pre_stop_state);
+        // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
             .await;
@@ -1960,6 +2446,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             cfg,
             temp_dir: self.temp_dir,
             name: self.name,
+            restart_http_ports: self.restart_http_ports,
+            restart_gossip_ports: self.restart_gossip_ports,
+            restart_reth_ports: self.restart_reth_ports,
         }
     }
 
@@ -2019,6 +2508,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// This method is useful in tests where gossip is disabled. It delivers all
     /// transaction headers contained in the block as well as the block header and execution payload
     /// itself directly to the peer's actors/services.
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn send_full_block(
         &self,
         peer: &Self,
@@ -2469,6 +2959,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // Wait until this node's peer list includes the target peer address
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_sees_peer(
         &self,
         target: &PeerAddress,
@@ -2501,6 +2992,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         client.upload_chunks(self.get_peer_addr(), tx).await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_commitment_tx(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -2612,6 +3104,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result = self.node_ctx.service_senders.mempool.send_traced(
@@ -2628,6 +3121,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn ingest_commitment_tx(
         &self,
         commitment_tx: CommitmentTransaction,
@@ -2647,6 +3141,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_pledge_commitment(
         &self,
         anchor: Option<H256>,
@@ -2712,10 +3207,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn get_anchor(&self) -> eyre::Result<H256> {
         self.get_api_client().get_anchor(self.get_peer_addr()).await
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn post_stake_commitment(
         &self,
         anchor: Option<H256>,
@@ -2869,6 +3366,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // enable node to gossip until disabled
     pub fn gossip_enable(&self) {
+        self.ensure_vdf_running_for_sync("gossip_enable");
         self.node_ctx.sync_state.set_gossip_reception_enabled(true);
         self.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
     }
@@ -3054,69 +3552,82 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
-    // Ensure the VDF has at least two steps materialized (N-1, N)
-    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf();
-    let start = std::time::Instant::now();
-    let max_wait = std::time::Duration::from_secs(5);
-    let (step, steps) = loop {
-        if start.elapsed() > max_wait {
-            node_ctx.stop_vdf();
-            return Err(eyre::eyre!(
-                "VDF steps unavailable: timed out waiting for (prev,current) pair"
-            ));
-        }
-        let s = vdf_steps_guard.read().global_step;
-        if s >= 1 {
-            if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
-                if steps.len() >= 2 {
-                    break (s, steps);
+    let was_vdf_enabled = node_ctx
+        .is_vdf_mining_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !was_vdf_enabled {
+        node_ctx.start_vdf();
+    }
+
+    let result = async {
+        // Ensure the VDF has at least two steps materialized (N-1, N)
+        let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(5);
+        let (step, steps) = loop {
+            if start.elapsed() > max_wait {
+                return Err(eyre::eyre!(
+                    "VDF steps unavailable: timed out waiting for (prev,current) pair"
+                ));
+            }
+            let s = vdf_steps_guard.read().global_step;
+            if s >= 1 {
+                if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
+                    if steps.len() >= 2 {
+                        break (s, steps);
+                    }
                 }
             }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    };
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
 
-    // Compute checkpoints for (step-1)
-    let mut hasher = Sha256::new();
-    let mut salt =
-        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
-    let mut seed = steps[0];
-    let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
-    vdf_sha(
-        &mut hasher,
-        &mut salt,
-        &mut seed,
-        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
-        node_ctx.config.vdf.num_iterations_per_checkpoint(),
-        &mut checkpoints,
-    );
+        // Compute checkpoints for (step-1)
+        let mut hasher = Sha256::new();
+        let mut salt =
+            irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
+        let mut seed = steps[0];
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+            node_ctx.config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
 
-    // For deterministic linkage without recall-range dependency, use offset 0
-    let partition_hash = H256::zero();
-    let partition_chunk_offset: u32 = 0;
+        // For deterministic linkage without recall-range dependency, use offset 0
+        let partition_hash = H256::zero();
+        let partition_chunk_offset: u32 = 0;
 
-    // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-    let mut hasher_sol = Sha256::new();
-    hasher_sol.update(&poa_chunk);
-    hasher_sol.update(partition_chunk_offset.to_le_bytes());
-    hasher_sol.update(steps[1].as_bytes());
-    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+        // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+        let mut hasher_sol = Sha256::new();
+        hasher_sol.update(&poa_chunk);
+        hasher_sol.update(partition_chunk_offset.to_le_bytes());
+        hasher_sol.update(steps[1].as_bytes());
+        let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
-    node_ctx.stop_vdf();
-    Ok(SolutionContext {
-        partition_hash,
-        chunk_offset: partition_chunk_offset,
-        mining_address: node_ctx.config.node_config.miner_address(),
-        tx_path: None,
-        data_path: None,
-        chunk: poa_chunk,
-        vdf_step: step,
-        checkpoints: H256List(checkpoints),
-        seed: Seed(steps[1]),
-        solution_hash,
-    })
+        Ok(SolutionContext {
+            partition_hash,
+            chunk_offset: partition_chunk_offset,
+            mining_address: node_ctx.config.node_config.miner_address(),
+            tx_path: None,
+            data_path: None,
+            chunk: poa_chunk,
+            vdf_step: step,
+            checkpoints: H256List(checkpoints),
+            seed: Seed(steps[1]),
+            solution_hash,
+        })
+    }
+    .await;
+
+    if !was_vdf_enabled {
+        node_ctx.stop_vdf();
+    }
+
+    result
 }
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
@@ -3131,7 +3642,12 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     };
 
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf();
+    let was_vdf_enabled = node_ctx
+        .is_vdf_mining_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !was_vdf_enabled {
+        node_ctx.start_vdf();
+    }
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
@@ -3139,7 +3655,9 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         prev_block.diff,
     )
     .await;
-    node_ctx.stop_vdf();
+    if !was_vdf_enabled {
+        node_ctx.stop_vdf();
+    }
     Ok(poa_solution)
 }
 
@@ -3163,12 +3681,13 @@ pub fn assert_validation_error(
     }
 }
 
+#[diag_slow(state = format!("block_hash={}", block_hash))]
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,
     block_hash: &H256,
+    mut event_receiver: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
-    let mut event_receiver = node_ctx.service_senders.subscribe_block_state_updates();
 
     // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
@@ -3218,6 +3737,40 @@ pub async fn read_block_from_state(
     BlockValidationOutcome::Discarded(irys_actors::block_validation::ValidationError::Other(
         "Timeout waiting for block validation".to_string(),
     ))
+}
+
+/// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.
+///
+/// Consumes events from the broadcast receiver until one matches or the deadline
+/// is reached.  Reuses the *same* receiver across calls so callers that iterate
+/// over multiple blocks can share one subscription.
+#[diag_slow(state = format!("timeout_secs={}", timeout_secs))]
+pub async fn wait_for_block_event(
+    rx: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+    timeout_secs: u64,
+    predicate: impl Fn(&BlockStateUpdated) -> bool,
+) -> eyre::Result<BlockStateUpdated> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(event)) if predicate(&event) => return Ok(event),
+            Ok(Ok(_)) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                tracing::warn!("block_event receiver lagged; skipped {skipped} events, continuing");
+                continue;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return Err(eyre!(
+                    "broadcast channel closed while waiting for block event"
+                ));
+            }
+            Err(_) => {
+                return Err(eyre!(
+                    "timed out after {timeout_secs}s waiting for block event"
+                ));
+            }
+        }
+    }
 }
 
 /// Helper function for testing chunk uploads. Posts a single chunk of transaction data
@@ -3353,10 +3906,10 @@ where
     }
 }
 
-/// Finds and returns the parent block header containing a given transaction ID.
+/// Finds and returns the block header containing a given transaction ID.
 /// Takes a transaction ID, ledger type, and database connection.
 /// Returns None if the transaction isn't found in any block.
-pub fn get_block_parent(
+pub fn get_block_containing_tx(
     txid: H256,
     ledger: DataLedger,
     db: &DatabaseProvider,
@@ -3397,6 +3950,34 @@ pub fn get_block_parent(
     }
 
     None
+}
+
+/// Polls `get_block_containing_tx` until the block header appears in `IrysBlockHeaders`.
+/// The table is populated asynchronously after block migration, so a direct read
+/// may return `None` even though the block has already been mined.
+#[diag_slow(state = format!("txid={} ledger={:?}", txid, ledger))]
+pub async fn wait_for_block_containing_tx(
+    txid: H256,
+    ledger: DataLedger,
+    db: &DatabaseProvider,
+    max_seconds: usize,
+) -> eyre::Result<IrysBlockHeader> {
+    for attempt in 1..=max_seconds {
+        if let Some(block) = get_block_containing_tx(txid, ledger, db) {
+            tracing::info!(
+                "found block containing tx {} after {} attempt(s)",
+                txid,
+                attempt
+            );
+            return Ok(block);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(eyre::eyre!(
+        "block containing tx {} not found in IrysBlockHeaders after {} seconds",
+        txid,
+        max_seconds
+    ))
 }
 
 /// Verifies that a published chunk matches its expected content.

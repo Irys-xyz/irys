@@ -4,13 +4,12 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::Address;
+use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     fee_distribution::TermFeeCharges, irys::IrysSigner, ConsensusConfig, DataLedger,
     DataTransaction, IrysAddress, IrysBlockHeader, NodeConfig, U256,
 };
-use reth::providers::TransactionsProvider as _;
-use reth::rpc::types::TransactionTrait as _;
 use std::ops::{Deref, DerefMut};
 use tracing::info;
 
@@ -91,7 +90,7 @@ async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
 //         Slot 1 remains active
 //
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
+async fn slow_heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
     info!("Testing ledger expiry with multiple transactions per block");
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,
@@ -457,7 +456,8 @@ impl LedgerExpiryTestContext {
             self.blocks_mined.push(block);
         }
 
-        self.wait_until_height(expiry_block_height, 30).await?;
+        self.wait_for_block_at_height(expiry_block_height, 30)
+            .await?;
 
         let expiry_block = &self.blocks_mined.last().unwrap();
         info!("Reached expiry block at height {}", expiry_block_height);
@@ -548,12 +548,16 @@ impl LedgerExpiryTestContext {
     }
 
     /// Get current balance for miner
-    async fn get_miner_balance(&self, block_hash: B256) -> U256 {
-        U256::from_be_bytes(
+    async fn get_miner_balance(&self, block_hash: B256) -> eyre::Result<U256> {
+        // Canonical Irys height can advance before the corresponding EVM header
+        // is queryable via reth RPC under CI load.
+        self.wait_for_evm_block(block_hash, 30).await?;
+
+        Ok(U256::from_be_bytes(
             self.get_balance(self.miner_address, block_hash)
                 .await
                 .to_be_bytes(),
-        )
+        ))
     }
 
     /// Verify balance after initial blocks
@@ -564,7 +568,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.total_block_rewards)
             .saturating_add(self.immediate_term_rewards);
 
-        let actual = self.get_miner_balance(last_block.evm_block_hash).await;
+        let actual = self.get_miner_balance(last_block.evm_block_hash).await?;
 
         assert_eq!(
             actual, expected,
@@ -577,9 +581,6 @@ impl LedgerExpiryTestContext {
 
     /// Verify final balance matches all expected fees
     async fn verify_final_balance(&self) -> eyre::Result<()> {
-        // Get the reth context to examine shadow transactions
-        let reth_context = self.node.node_ctx.reth_node_adapter.clone();
-
         // Look for expired ledger fee shadow transactions in ALL blocks we mined
         let mut actual_expiry_fees = U256::from(0);
 
@@ -587,12 +588,8 @@ impl LedgerExpiryTestContext {
 
         // Check each block for TermFeeReward shadow transactions
         for block in &self.blocks_mined {
-            // Get all transactions from this block
-            let block_txs = reth_context
-                .inner
-                .provider
-                .transactions_by_block(alloy_eips::HashOrNumber::Hash(block.evm_block_hash))?
-                .unwrap_or_default();
+            let evm_block = self.wait_for_evm_block(block.evm_block_hash, 30).await?;
+            let block_txs = evm_block.body.transactions;
 
             info!(
                 "Block {} has {} transactions",
@@ -602,9 +599,10 @@ impl LedgerExpiryTestContext {
 
             for tx in &block_txs {
                 // Decode the shadow transaction
+                let mut input = tx.input().as_ref();
                 if let Ok(shadow_tx) =
                     irys_reth_node_bridge::irys_reth::shadow_tx::ShadowTransaction::decode(
-                        &mut tx.input().as_ref(),
+                        &mut input,
                     )
                 {
                     if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
@@ -639,7 +637,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.expected_expiry_fees);
 
         let final_block = self.blocks_mined.last().expect("Should have final block");
-        let actual = self.get_miner_balance(final_block.evm_block_hash).await;
+        let actual = self.get_miner_balance(final_block.evm_block_hash).await?;
 
         info!("Balance breakdown:");
         info!("  Initial balance:           {}", self.initial_balance);
