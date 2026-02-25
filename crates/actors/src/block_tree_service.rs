@@ -148,7 +148,7 @@ impl BlockTreeService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "block_tree_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 

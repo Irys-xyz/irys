@@ -283,7 +283,7 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all, ret, err)]
+    #[tracing::instrument(name = "block_producer_start", level = "trace", skip_all, ret, err)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(

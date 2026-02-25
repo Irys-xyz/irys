@@ -176,7 +176,7 @@ impl ValidationService {
     }
 
     /// Main service loop
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "validation_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
