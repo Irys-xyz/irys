@@ -60,6 +60,7 @@ async-trait.workspace = true
 irys-macros-integer-tagged.workspace = true
 proptest.workspace = true
 chrono.workspace = true
+clap.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true

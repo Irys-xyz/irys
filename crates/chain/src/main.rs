@@ -1,4 +1,4 @@
-use clap::Parser as _;
+use clap::{CommandFactory as _, FromArgMatches as _};
 use irys_chain::{
     cli::{merge::apply_cli_overrides, Commands, IrysCli, NodeCommand},
     utils::{load_config, load_config_from_path},
@@ -56,11 +56,18 @@ async fn main() -> eyre::Result<()> {
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
 
-    // Parse CLI
-    let cli = IrysCli::parse();
+    // Parse CLI — get both typed struct and raw ArgMatches for value_source() checks
+    let matches = IrysCli::command().get_matches();
+    let cli = IrysCli::from_arg_matches(&matches)?;
 
     let config = match cli.command {
-        Some(Commands::Node(cmd)) => run_node_config(*cmd)?,
+        Some(Commands::Node(cmd)) => {
+            // Extract the "node" subcommand matches for value_source() checks
+            let node_matches = matches
+                .subcommand_matches("node")
+                .expect("Node subcommand must have matches");
+            run_node_config(*cmd, node_matches)?
+        }
         None => load_config()?,
     };
 
@@ -68,7 +75,7 @@ async fn main() -> eyre::Result<()> {
 }
 
 /// Resolve config for the `irys node` subcommand: load TOML then apply CLI overrides.
-fn run_node_config(cmd: NodeCommand) -> eyre::Result<NodeConfig> {
+fn run_node_config(cmd: NodeCommand, matches: &clap::ArgMatches) -> eyre::Result<NodeConfig> {
     let config_path = cmd
         .config
         .clone()
@@ -81,7 +88,7 @@ fn run_node_config(cmd: NodeCommand) -> eyre::Result<NodeConfig> {
     }
 
     let config = load_config_from_path(&config_path, false)?;
-    apply_cli_overrides(config, &cmd)
+    apply_cli_overrides(config, &cmd, matches)
 }
 
 /// Start the node with a fully resolved config.

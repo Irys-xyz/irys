@@ -543,13 +543,21 @@ pub struct PackingConfig {
     pub remote: Vec<RemotePackingConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
+    #[arg(
+        long = "packing.cpu-concurrency",
+        default_value_t = Self::default().cpu_packing_concurrency
+    )]
     pub cpu_packing_concurrency: u16,
 
     /// Batch size for GPU-accelerated packing operations
+    #[arg(
+        long = "packing.gpu-batch-size",
+        default_value_t = Self::default().gpu_packing_batch_size
+    )]
     pub gpu_packing_batch_size: u32,
 }
 
@@ -574,31 +582,30 @@ pub struct RemotePackingConfig {
 /// # Cache Configuration
 ///
 /// Settings for in-memory caching to improve performance.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::Args)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
     /// Higher values keep more data in cache but use more memory
+    #[arg(long = "cache.clean-lag", default_value_t = Self::default().cache_clean_lag)]
     pub cache_clean_lag: u8,
 
+    #[arg(long = "cache.max-size-bytes", default_value_t = Self::default().max_cache_size_bytes)]
     pub max_cache_size_bytes: u64,
 
     /// Target capacity for chunk cache as a percentage of it's total capacity (0 -> 100%)
     /// Don't set this too low, or you won't be able to promote transactions
+    #[arg(long = "cache.prune-at-percent", default_value_t = Self::default().prune_at_capacity_percent)]
     pub prune_at_capacity_percent: f64,
 }
-
-/// Default maximum cache size: 10 GiB
-pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
-
-pub const DEFAULT_PRUNE_AT_CAPACITY_PERCENT: f64 = 80_f64;
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             cache_clean_lag: 0,
-            max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-            prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
+            max_cache_size_bytes: 10_737_418_240,
+            prune_at_capacity_percent: 80_f64,
         }
     }
 }
@@ -624,15 +631,40 @@ pub struct HttpConfig {
 impl_network_config_with_defaults!(HttpConfig);
 
 /// P2P handshake configuration with sensible defaults
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct P2PHandshakeConfig {
+    #[arg(
+        long = "p2p.max-concurrent-handshakes",
+        default_value_t = Self::default().max_concurrent_handshakes
+    )]
     pub max_concurrent_handshakes: usize,
+    #[arg(
+        long = "p2p.max-peers-per-response",
+        default_value_t = Self::default().max_peers_per_response
+    )]
     pub max_peers_per_response: usize,
+    #[arg(long = "p2p.max-retries", default_value_t = Self::default().max_retries)]
     pub max_retries: u32,
+    #[arg(
+        long = "p2p.backoff-base-secs",
+        default_value_t = Self::default().backoff_base_secs
+    )]
     pub backoff_base_secs: u64,
+    #[arg(
+        long = "p2p.backoff-cap-secs",
+        default_value_t = Self::default().backoff_cap_secs
+    )]
     pub backoff_cap_secs: u64,
+    #[arg(
+        long = "p2p.blocklist-ttl-secs",
+        default_value_t = Self::default().blocklist_ttl_secs
+    )]
     pub blocklist_ttl_secs: u64,
+    #[arg(
+        long = "p2p.server-peer-list-cap",
+        default_value_t = Self::default().server_peer_list_cap
+    )]
     pub server_peer_list_cap: usize,
 }
 
@@ -651,18 +683,31 @@ impl Default for P2PHandshakeConfig {
 }
 
 /// P2P gossip/broadcast configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct P2PGossipConfig {
     /// Maximum peers to target per broadcast step
+    #[arg(
+        long = "p2p.broadcast-batch-size",
+        default_value_t = Self::default().broadcast_batch_size
+    )]
     pub broadcast_batch_size: usize,
     /// Interval between broadcast steps in milliseconds
+    #[arg(
+        long = "p2p.broadcast-throttle-interval",
+        default_value_t = Self::default().broadcast_batch_throttle_interval
+    )]
     pub broadcast_batch_throttle_interval: u64,
     /// Enable scoring of peers based on their behavior. Disabling this might help with reducing
     /// noise during debug, otherwise it's recommended to keep it enabled.
+    #[arg(long = "p2p.enable-scoring", default_value_t = Self::default().enable_scoring, action = clap::ArgAction::Set)]
     pub enable_scoring: bool,
     /// Maximum concurrent chunk handler tasks on the gossip receiver.
     /// Limits memory and CPU pressure from inbound chunk processing.
+    #[arg(
+        long = "p2p.max-concurrent-gossip-chunks",
+        default_value_t = Self::default().max_concurrent_gossip_chunks
+    )]
     pub max_concurrent_gossip_chunks: usize,
 }
 
@@ -678,14 +723,23 @@ impl Default for P2PGossipConfig {
 }
 
 /// P2P pull/request configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct P2PPullConfig {
     /// How many top active peers to consider before random sampling
+    #[arg(
+        long = "p2p.top-active-window",
+        default_value_t = Self::default().top_active_window
+    )]
     pub top_active_window: usize,
     /// Number of peers to randomly sample (truncate) per pull attempt batch
+    #[arg(long = "p2p.sample-size", default_value_t = Self::default().sample_size)]
     pub sample_size: usize,
     /// Maximum number of attempts to iterate over the sampled set
+    #[arg(
+        long = "p2p.max-attempts",
+        default_value_t = Self::default().max_attempts
+    )]
     pub max_attempts: u32,
 }
 
@@ -699,20 +753,41 @@ impl Default for P2PPullConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct SyncConfig {
     /// How many blocks to fetch in parallel per batch during the sync
+    #[arg(
+        long = "sync.block-batch-size",
+        default_value_t = Self::default().block_batch_size
+    )]
     pub block_batch_size: usize,
     /// How often to check if we're behind and need to sync
+    #[arg(
+        long = "sync.check-interval",
+        default_value_t = Self::default().periodic_sync_check_interval_secs
+    )]
     pub periodic_sync_check_interval_secs: u64,
     /// Timeout for retry block pull/process
+    #[arg(
+        long = "sync.retry-timeout",
+        default_value_t = Self::default().retry_block_request_timeout_secs
+    )]
     pub retry_block_request_timeout_secs: u64,
     /// Whether to enable periodic sync checks
+    #[arg(long = "sync.enable-periodic-check", default_value_t = Self::default().enable_periodic_sync_check, action = clap::ArgAction::Set)]
     pub enable_periodic_sync_check: bool,
     /// Timeout per attempt when waiting for a queue slot
+    #[arg(
+        long = "sync.queue-slot-timeout",
+        default_value_t = Self::default().wait_queue_slot_timeout_secs
+    )]
     pub wait_queue_slot_timeout_secs: u64,
     /// Maximum consecutive timeout attempts when waiting for a queue slot with no active validations
+    #[arg(
+        long = "sync.queue-slot-max-attempts",
+        default_value_t = Self::default().wait_queue_slot_max_attempts
+    )]
     pub wait_queue_slot_max_attempts: usize,
 }
 
@@ -720,7 +795,6 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             block_batch_size: 50,
-            // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
             enable_periodic_sync_check: true,
@@ -753,10 +827,15 @@ fn default_network_defaults() -> NetworkDefaults {
 /// # VDF (Verifiable Delay Function) Configuration
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields)]
 pub struct VdfNodeConfig {
     /// Maximum number of threads to use for parallel VDF verification
+    #[arg(
+        long = "vdf.parallel-threads",
+        default_value_t = Self::default().parallel_verification_thread_limit
+    )]
     pub parallel_verification_thread_limit: usize,
 }
 
@@ -772,65 +851,122 @@ impl Default for VdfNodeConfig {
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields, default)]
 pub struct MempoolNodeConfig {
     /// Maximum number of addresses in the LRU cache for out-of-order stakes and pledges
     /// Controls memory usage for tracking transactions that arrive before their dependencies
+    #[arg(
+        long = "mempool.max-pending-pledge-items",
+        default_value_t = Self::default().max_pending_pledge_items
+    )]
     pub max_pending_pledge_items: usize,
 
     /// Maximum number of pending pledge transactions allowed per address
     /// Limits the resources that can be consumed by a single address
+    #[arg(
+        long = "mempool.max-pledges-per-item",
+        default_value_t = Self::default().max_pledges_per_item
+    )]
     pub max_pledges_per_item: usize,
 
     /// Maximum number of transaction data roots to keep in the pending cache
     /// For transactions whose chunks arrive before the transaction header
+    #[arg(
+        long = "mempool.max-pending-chunk-items",
+        default_value_t = Self::default().max_pending_chunk_items
+    )]
     pub max_pending_chunk_items: usize,
 
     /// Maximum number of chunks that can be cached per data root
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
+    #[arg(
+        long = "mempool.max-chunks-per-item",
+        default_value_t = Self::default().max_chunks_per_item
+    )]
     pub max_chunks_per_item: usize,
 
     /// Maximum number of pre-header chunks to keep per data root before the header arrives
     /// Limits speculative storage window for out-of-order chunks
+    #[arg(
+        long = "mempool.max-preheader-chunks-per-item",
+        default_value_t = Self::default().max_preheader_chunks_per_item
+    )]
     pub max_preheader_chunks_per_item: usize,
 
     /// Maximum allowed pre-header data_path bytes for chunk proofs
     /// Mitigates DoS on speculative chunk storage before header arrival
+    #[arg(
+        long = "mempool.max-preheader-data-path-bytes",
+        default_value_t = Self::default().max_preheader_data_path_bytes
+    )]
     pub max_preheader_data_path_bytes: usize,
 
     /// Maximum number of valid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
+    #[arg(
+        long = "mempool.max-valid-items",
+        default_value_t = Self::default().max_valid_items
+    )]
     pub max_valid_items: usize,
 
     /// Maximum number of invalid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
+    #[arg(
+        long = "mempool.max-invalid-items",
+        default_value_t = Self::default().max_invalid_items
+    )]
     pub max_invalid_items: usize,
 
     /// Maximum number of valid chunk hashes to keep track of
     /// Prevents re-processing and re-gossipping of recently seen chunks
+    #[arg(
+        long = "mempool.max-valid-chunks",
+        default_value_t = Self::default().max_valid_chunks
+    )]
     pub max_valid_chunks: usize,
 
     /// Maximum number of data transactions to hold in mempool
     /// Prevents unbounded growth. Conservative: max_data_txs_per_block * block_migration_depth * 3
+    #[arg(
+        long = "mempool.max-valid-submit-txs",
+        default_value_t = Self::default().max_valid_submit_txs
+    )]
     pub max_valid_submit_txs: usize,
 
     /// Maximum number of addresses with pending commitment transactions
     /// Prevents unbounded growth. Conservative: num_staked_miners * 3
+    #[arg(
+        long = "mempool.max-valid-commitment-addresses",
+        default_value_t = Self::default().max_valid_commitment_addresses
+    )]
     pub max_valid_commitment_addresses: usize,
 
     /// Maximum commitment transactions per address
     /// Limits the resources that can be consumed by a single address
+    #[arg(
+        long = "mempool.max-commitments-per-address",
+        default_value_t = Self::default().max_commitments_per_address
+    )]
     pub max_commitments_per_address: usize,
 
     /// Maximum number of concurrent handlers for the mempool messages
+    #[arg(
+        long = "mempool.max-concurrent-tasks",
+        default_value_t = Self::default().max_concurrent_mempool_tasks
+    )]
     pub max_concurrent_mempool_tasks: usize,
 
     /// Maximum number of concurrent handlers for chunk ingress messages
+    #[arg(skip)]
     pub max_concurrent_chunk_ingress_tasks: usize,
 
     /// Backpressure channel capacity for the async chunk write-behind buffer.
     /// Controls how many chunk writes can be queued before the sender blocks.
+    #[arg(
+        long = "mempool.chunk-writer-buffer-size",
+        default_value_t = Self::default().chunk_writer_buffer_size
+    )]
     pub chunk_writer_buffer_size: usize,
 }
 
@@ -1004,8 +1140,8 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
+                max_cache_size_bytes: CacheConfig::default().max_cache_size_bytes,
+                prune_at_capacity_percent: CacheConfig::default().prune_at_capacity_percent,
             },
             http: HttpConfig {
                 public_ip: None,
@@ -1154,8 +1290,8 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
+                max_cache_size_bytes: CacheConfig::default().max_cache_size_bytes,
+                prune_at_capacity_percent: CacheConfig::default().prune_at_capacity_percent,
             },
             http: HttpConfig {
                 public_ip: None,

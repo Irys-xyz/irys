@@ -1,33 +1,25 @@
-mod cache_args;
 mod gossip_args;
 mod http_args;
-mod mempool_args;
 pub mod merge;
 mod network_args;
 mod node_args;
-mod p2p_args;
-mod packing_args;
 mod peer_args;
 mod reth_args;
 mod storage_args;
-mod sync_args;
-mod vdf_args;
 
-pub use cache_args::CacheArgs;
 pub use gossip_args::GossipArgs;
 pub use http_args::HttpArgs;
-pub use mempool_args::MempoolArgs;
 pub use network_args::NetworkArgs;
 pub use node_args::NodeArgs;
-pub use p2p_args::P2pArgs;
-pub use packing_args::PackingArgs;
 pub use peer_args::PeerArgs;
 pub use reth_args::RethArgs;
 pub use storage_args::StorageArgs;
-pub use sync_args::SyncArgs;
-pub use vdf_args::VdfArgs;
 
 use clap::{Parser, Subcommand};
+use irys_types::{
+    CacheConfig, LocalPackingConfig, MempoolNodeConfig, P2PGossipConfig, P2PHandshakeConfig,
+    P2PPullConfig, SyncConfig, VdfNodeConfig,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -79,22 +71,28 @@ pub struct NodeCommand {
     pub storage: StorageArgs,
 
     #[command(flatten)]
-    pub packing: PackingArgs,
+    pub packing: LocalPackingConfig,
 
     #[command(flatten)]
-    pub cache: CacheArgs,
+    pub cache: CacheConfig,
 
     #[command(flatten)]
-    pub vdf: VdfArgs,
+    pub vdf: VdfNodeConfig,
 
     #[command(flatten)]
-    pub mempool: MempoolArgs,
+    pub mempool: MempoolNodeConfig,
 
     #[command(flatten)]
-    pub p2p: P2pArgs,
+    pub p2p_handshake: P2PHandshakeConfig,
 
     #[command(flatten)]
-    pub sync: SyncArgs,
+    pub p2p_gossip: P2PGossipConfig,
+
+    #[command(flatten)]
+    pub p2p_pull: P2PPullConfig,
+
+    #[command(flatten)]
+    pub sync: SyncConfig,
 }
 
 #[cfg(test)]
@@ -238,10 +236,10 @@ mod tests {
         .unwrap();
         match cli.command {
             Some(Commands::Node(cmd)) => {
-                assert_eq!(cmd.p2p.max_concurrent_handshakes, Some(64));
-                assert_eq!(cmd.p2p.broadcast_batch_size, Some(100));
-                assert_eq!(cmd.p2p.enable_scoring, Some(false));
-                assert_eq!(cmd.p2p.sample_size, Some(10));
+                assert_eq!(cmd.p2p_handshake.max_concurrent_handshakes, 64);
+                assert_eq!(cmd.p2p_gossip.broadcast_batch_size, 100);
+                assert!(!cmd.p2p_gossip.enable_scoring);
+                assert_eq!(cmd.p2p_pull.sample_size, 10);
             }
             _ => panic!("expected Node command"),
         }
@@ -262,9 +260,9 @@ mod tests {
         .unwrap();
         match cli.command {
             Some(Commands::Node(cmd)) => {
-                assert_eq!(cmd.sync.block_batch_size, Some(100));
-                assert_eq!(cmd.sync.enable_periodic_sync_check, Some(false));
-                assert_eq!(cmd.sync.retry_block_request_timeout_secs, Some(60));
+                assert_eq!(cmd.sync.block_batch_size, 100);
+                assert!(!cmd.sync.enable_periodic_sync_check);
+                assert_eq!(cmd.sync.retry_block_request_timeout_secs, 60);
             }
             _ => panic!("expected Node command"),
         }
