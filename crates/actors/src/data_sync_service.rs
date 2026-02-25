@@ -618,6 +618,7 @@ impl DataSyncService {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
+        let service_span = tracing::info_span!("data_sync_service");
         tracing::info!("starting DataSync Service");
 
         let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -627,6 +628,7 @@ impl DataSyncService {
         let mut peer_events_rx = self.inner.peer_list.subscribe_to_peer_events();
 
         loop {
+            let _guard = service_span.enter();
             tokio::select! {
                 biased;
 

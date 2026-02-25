@@ -143,6 +143,7 @@ impl BackgroundWriter {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(batch_size = batch.len()))]
     fn write_batch(&self, batch: &[Arc<UnpackedChunk>]) -> Result<(), QueueError> {
         if batch.is_empty() {
             return Ok(());

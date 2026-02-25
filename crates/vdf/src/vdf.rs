@@ -65,6 +65,7 @@ pub fn run_vdf<B: BlockProvider>(
     block_provider: B,
     chain_sync_state: ChainSyncState,
 ) {
+    let _span = tracing::info_span!("vdf_loop").entered();
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
 

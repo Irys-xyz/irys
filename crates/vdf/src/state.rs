@@ -260,6 +260,7 @@ pub fn create_state(
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
 /// num_recall_ranges_in_partition() ensures the capacity of VecDeqeue is large enough for the partition.
 /// max_allowed_vdf_fork_steps of 60k allows for forks. VDF capacity limits the depth at which a fork can happen. If the fork happens out of the VDF range, the node cannot validate it.
+#[tracing::instrument(level = "trace", skip_all)]
 fn calc_capacity(config: &Config) -> usize {
     let capacity_from_config: u64 = num_recall_ranges_in_partition(&config.consensus);
 

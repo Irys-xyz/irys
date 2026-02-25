@@ -22,7 +22,7 @@ use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 /// Commands that control the partition mining service
 #[derive(Debug)]
@@ -397,6 +397,7 @@ impl PartitionMiningService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
+        let storage_module_id = inner.storage_module.id;
         let svc = Self {
             shutdown: shutdown_rx,
             state: inner,
@@ -404,9 +405,12 @@ impl PartitionMiningService {
             broadcast_rx,
         };
 
-        let handle = runtime_handle.spawn(async move {
-            svc.start().await;
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                svc.start().await;
+            }
+            .instrument(tracing::info_span!("partition_mining_service", %storage_module_id)),
+        );
 
         let controller = PartitionMiningController { cmd_tx };
 

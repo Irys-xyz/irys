@@ -57,7 +57,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 8G
     networks:
       observation_network:
         ipv4_address: 172.23.0.101
@@ -114,7 +114,7 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.enrollment.enabled=false
-      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}"
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms2g -Xmx2g}"
       - cluster.name=${ES_CLUSTER_NAME:-observation-cluster}
       - bootstrap.memory_lock=true
     ulimits:

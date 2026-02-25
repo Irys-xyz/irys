@@ -3131,6 +3131,9 @@ impl MempoolService {
             }
         }
 
+        let shutdown_span = tracing::info_span!("mempool_shutdown");
+        let _shutdown_guard = shutdown_span.enter();
+
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
         // Process remaining messages with timeout
@@ -3166,6 +3169,7 @@ impl MempoolService {
     }
 }
 
+#[tracing::instrument(level = "trace", skip(result))]
 pub fn handle_broadcast_recv<T>(
     result: Result<T, broadcast::error::RecvError>,
     channel_name: &str,

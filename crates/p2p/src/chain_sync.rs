@@ -344,17 +344,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
         }
         let handler = self.gossip_data_handler.clone();
-        tokio::spawn(async move {
-            match handler.pull_and_process_stake_and_pledge_whitelist().await {
-                Ok(()) => {
-                    info!("Successfully updated stake and pledge whitelist",);
+        tokio::spawn(
+            async move {
+                match handler.pull_and_process_stake_and_pledge_whitelist().await {
+                    Ok(()) => {
+                        info!("Successfully updated stake and pledge whitelist",);
+                    }
+                    Err(e) => {
+                        error!("Failed to update stake and pledge whitelist: {:?}", e);
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to update stake and pledge whitelist: {:?}", e);
-                }
+                stake_and_pledge_whitelist_running_flag.store(false, Ordering::Relaxed);
             }
-            stake_and_pledge_whitelist_running_flag.store(false, Ordering::Relaxed);
-        });
+            .instrument(tracing::info_span!("stake_and_pledge_whitelist_update")),
+        );
     }
 
     /// Request parent block from network - moved from OrphanBlockProcessingService
@@ -382,6 +385,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
     }
 
     /// Request block from network - moved from OrphanBlockProcessingService
+    #[instrument(level = "trace", skip_all, fields(block_hash = %block_hash))]
     async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
@@ -530,14 +534,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 let inner = self.inner.clone();
                 // Check for whitelist updates after every block validation
                 self.inner.spawn_stake_and_pledge_update_task();
-                tokio::spawn(async move {
-                    let result = inner.process_orphaned_ancestors(block_hash).await;
-                    if let Some(sender) = response {
-                        if let Err(e) = sender.send(result) {
-                            tracing::error!("Failed to send response: {:?}", e);
+                tokio::spawn(
+                    async move {
+                        let result = inner.process_orphaned_ancestors(block_hash).await;
+                        if let Some(sender) = response {
+                            if let Err(e) = sender.send(result) {
+                                tracing::error!("Failed to send response: {:?}", e);
+                            }
                         }
                     }
-                });
+                    .instrument(tracing::info_span!("process_orphaned_ancestors")),
+                );
             }
             SyncChainServiceMessage::RequestBlockFromTheNetwork {
                 block_hash: parent_block_hash,
@@ -548,14 +555,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     parent_block_hash
                 );
                 let inner = self.inner.clone();
-                tokio::spawn(async move {
-                    let result = inner.request_parent_block(parent_block_hash).await;
-                    if let Some(sender) = response {
-                        if let Err(e) = sender.send(result) {
-                            tracing::error!("Failed to send response: {:?}", e);
+                tokio::spawn(
+                    async move {
+                        let result = inner.request_parent_block(parent_block_hash).await;
+                        if let Some(sender) = response {
+                            if let Err(e) = sender.send(result) {
+                                tracing::error!("Failed to send response: {:?}", e);
+                            }
                         }
                     }
-                });
+                    .instrument(tracing::info_span!("request_parent_block")),
+                );
             }
             SyncChainServiceMessage::PullPayloadFromTheNetwork {
                 evm_block_hash,
@@ -567,18 +577,21 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     evm_block_hash
                 );
                 let inner = self.inner.clone();
-                tokio::spawn(async move {
-                    let result = inner
-                        .gossip_data_handler
-                        .pull_and_add_execution_payload_to_cache(
-                            evm_block_hash,
-                            use_trusted_peers_only,
-                        )
-                        .await;
-                    if let Err(e) = response.send(result) {
-                        tracing::error!("Failed to send response: {:?}", e);
+                tokio::spawn(
+                    async move {
+                        let result = inner
+                            .gossip_data_handler
+                            .pull_and_add_execution_payload_to_cache(
+                                evm_block_hash,
+                                use_trusted_peers_only,
+                            )
+                            .await;
+                        if let Err(e) = response.send(result) {
+                            tracing::error!("Failed to send response: {:?}", e);
+                        }
                     }
-                });
+                    .instrument(tracing::info_span!("pull_execution_payload")),
+                );
             }
             SyncChainServiceMessage::AttemptReprocessingBlock(block_hash) => {
                 debug!(
@@ -612,6 +625,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
         Ok(())
     }
 
+    #[instrument(level = "trace", skip_all)]
     async fn handle_periodic_sync_check(&self) {
         self.inner
             .gossip_data_handler
