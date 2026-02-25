@@ -10,7 +10,7 @@ use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
     NodeMode, SyncMode,
 };
-use reth::rpc::eth::EthApiServer as _;
+use reth::rpc::types::BlockNumberOrTag;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
@@ -73,17 +73,11 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
 
     // sleep(Duration::from_millis(2_000)).await;
 
-    let a2 = p1ctx
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_hash(block_hash, false)
+    let a2 = peer1
+        .wait_for_reth_marker(BlockNumberOrTag::Number(block_number), block_hash, 10)
         .await?;
 
-    assert!(
-        a2.is_some_and(|b| b.header.hash == block_hash),
-        "Retrieved blocks hash is correct"
-    );
+    assert_eq!(a2, block_hash, "Retrieved block hash should match expected");
 
     peer1.stop().await;
     peer2.stop().await;
@@ -147,17 +141,11 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
         .assert_new_block_irys(block_hash, block_number)
         .await?;
 
-    let a2 = p1ctx
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_hash(block_hash, false)
+    let a2 = peer1
+        .wait_for_reth_marker(BlockNumberOrTag::Number(block_number), block_hash, 10)
         .await?;
 
-    assert!(
-        a2.is_some_and(|b| b.header.hash == block_hash),
-        "Retrieved blocks hash is correct"
-    );
+    assert_eq!(a2, block_hash, "Retrieved block hash should match expected");
 
     peer1.stop().await;
     peer2.stop().await;

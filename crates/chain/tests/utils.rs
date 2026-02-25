@@ -1765,6 +1765,30 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn assert_evm_block_absent(
+        &self,
+        hash: alloy_core::primitives::BlockHash,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<()> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for retry in 0..max_retries {
+            if self.get_evm_block_by_hash(hash).is_ok() {
+                let state = self.diag_wait_state().await;
+                return Err(eyre::eyre!(
+                    "Block {} unexpectedly appeared in {:?} reth after {} retries. State: {}",
+                    hash,
+                    &self.name,
+                    retry,
+                    state
+                ));
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+        Ok(())
+    }
+
     async fn evm_tx_wait_diag_state(&self, hash: &alloy_core::primitives::B256) -> String {
         let state = self.diag_wait_state().await;
         format!("tx={} {}", hash, state)

@@ -131,11 +131,9 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
     // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
-    let reth_block_result = peer_node.get_evm_block_by_hash(block.header().evm_block_hash);
-    assert!(
-        reth_block_result.is_err(),
-        "Block should not exist in peer's reth - shadow validation should have prevented submission"
-    );
+    peer_node
+        .assert_evm_block_absent(block.header().evm_block_hash, 2)
+        .await?;
 
     // Clean up both nodes
     peer_node.stop().await;
@@ -240,11 +238,9 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
     // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
-    let reth_block_result = peer_node.get_evm_block_by_hash(block.header().evm_block_hash);
-    assert!(
-        reth_block_result.is_err(),
-        "Block should not exist in peer's reth - shadow validation should have prevented submission"
-    );
+    peer_node
+        .assert_evm_block_absent(block.header().evm_block_hash, 2)
+        .await?;
 
     // Clean up both nodes
     peer_node.stop().await;

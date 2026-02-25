@@ -22,6 +22,7 @@ use irys_types::{
     UnixTimestampMs, H256,
 };
 use reth::payload::EthBuiltPayload;
+use reth::rpc::types::BlockNumberOrTag;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
@@ -185,7 +186,6 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     // Collect block hashes as we mine
     let mut block_hashes = Vec::new();
@@ -202,19 +202,18 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         let block_hash = node.wait_until_height(i, 10).await?;
         let block = node.get_block_by_hash(&block_hash)?;
 
-        //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
-            .unwrap()
-            .unwrap();
-        assert_eq!(i, reth_block.header.number);
-        assert_eq!(reth_block.number, block.height);
+        // Wait until reth has indexed this block number with the expected EVM hash.
+        // This avoids a race where Irys canonical height is visible before reth
+        // provider lookup by hash is populated.
+        let reth_hash = node
+            .wait_for_reth_marker(BlockNumberOrTag::Number(i), block.evm_block_hash, 10)
+            .await?;
+        assert_eq!(reth_hash, block.evm_block_hash);
+        assert_eq!(i, block.height);
 
         // check irys DB for built block
         let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
-        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+        assert_eq!(db_irys_block.evm_block_hash, reth_hash);
 
         // Collect block hash for later verification
         block_hashes.push(block.block_hash);
@@ -302,14 +301,8 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
     );
 
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
-
-    //check reth for built block
-    let reth_block = reth_context
-        .inner
-        .provider
-        .block_by_hash(block.evm_block_hash)?
-        .unwrap();
+    // Wait until reth indexes the block by hash.
+    let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
 
     // height is hardcoded at 42 right now
     assert_eq!(reth_block.number, block.height);
@@ -495,13 +488,8 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         // mine a single block
         let block = node.mine_block().await?;
 
-        // obtain the EVM timestamp for this block from Reth
-        let reth_block = reth_context
-            .inner
-            .provider
-            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
-            .unwrap()
-            .unwrap();
+        // obtain the EVM timestamp for this block from Reth once indexed
+        let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
         let new_ts = reth_block.header.timestamp as u128;
 
         // update baseline timestamp and ensure the next block gets a later one
