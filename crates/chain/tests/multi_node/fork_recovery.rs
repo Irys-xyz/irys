@@ -1057,6 +1057,13 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
         a_block1.data_ledgers[DataLedger::Submit].tx_ids
     );
 
+    // wait for EVM blocks to be queryable on each node before checking balances
+    tokio::try_join!(
+        node_a.wait_for_evm_block(a_block1.evm_block_hash, seconds_to_wait),
+        node_b.wait_for_evm_block(b_block1.evm_block_hash, seconds_to_wait),
+        node_c.wait_for_evm_block(c_block1.evm_block_hash, seconds_to_wait),
+    )?;
+
     // check balances in block 1 are unchanged from genesis
     assert_eq!(
         node_a
@@ -1205,6 +1212,13 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
         "No txs should have been gossiped back to peer A! {:?}",
         a_block2.data_ledgers[DataLedger::Publish].tx_ids
     );
+
+    // wait for EVM blocks to be queryable before checking balances
+    tokio::try_join!(
+        node_a.wait_for_evm_block(a_block2.evm_block_hash, seconds_to_wait),
+        node_b.wait_for_evm_block(b_block2.evm_block_hash, seconds_to_wait),
+        node_b.wait_for_evm_block(b_block3.evm_block_hash, seconds_to_wait),
+    )?;
 
     // check balances in block a2
     assert_eq!(
@@ -1564,6 +1578,12 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
                 peer_c_submit_txs
             );
         }
+
+        // wait for EVM blocks to be queryable on node_a after reorg
+        tokio::try_join!(
+            node_a.wait_for_evm_block(c_block1.evm_block_hash, seconds_to_wait),
+            node_a.wait_for_evm_block(c_block4.evm_block_hash, seconds_to_wait),
+        )?;
 
         // re-assert start balances
         assert_eq!(
