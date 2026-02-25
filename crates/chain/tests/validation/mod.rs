@@ -1133,7 +1133,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
         commitment_transactions: txs.all_system_txs().cloned().collect(),
         data_transactions: txs.all_data_txs().cloned().collect(),
     };
-    let sealed_block = Arc::new(SealedBlock::new(header.as_ref().clone(), body)?);
+    let sealed_block = Arc::new(SealedBlock::new(Arc::clone(&header), body)?);
 
     // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
     // node will wait for this block to be validated for quite a while until it starts mining

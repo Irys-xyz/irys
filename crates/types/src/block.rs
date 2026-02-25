@@ -1190,7 +1190,8 @@ pub struct SealedBlock {
 }
 
 impl SealedBlock {
-    pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+    pub fn new(header: impl Into<Arc<IrysBlockHeader>>, body: BlockBody) -> eyre::Result<Self> {
+        let header: Arc<IrysBlockHeader> = header.into();
         eyre::ensure!(
             header.is_signature_valid(),
             "Invalid block signature for block hash {:?}",
@@ -1216,7 +1217,7 @@ impl SealedBlock {
         )?;
 
         Ok(Self {
-            header: Arc::new(header),
+            header,
             transactions: Arc::new(transactions),
         })
     }
