@@ -1252,14 +1252,7 @@ mod peer_sync_recovery {
         let stopped_peer = peer_node.stop().await;
         info!("Peer stopped for additional restart test");
 
-        let peer_node = IrysNodeTest {
-            node_ctx: (),
-            cfg: stopped_peer.cfg.clone(),
-            temp_dir: stopped_peer.temp_dir,
-            name: stopped_peer.name,
-        }
-        .start()
-        .await;
+        let peer_node = stopped_peer.start().await;
         info!("Peer restarted after sync");
 
         // Wait for peer to reach the same height after restart

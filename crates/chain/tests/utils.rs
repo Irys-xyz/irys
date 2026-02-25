@@ -287,6 +287,10 @@ pub struct IrysNodeTest<T = ()> {
     pub cfg: NodeConfig,
     pub temp_dir: TempDir,
     pub name: Option<String>,
+    // Preserve caller intent for port allocation across restarts.
+    restart_http_ports: bool,
+    restart_gossip_ports: bool,
+    restart_reth_ports: bool,
 }
 
 impl IrysNodeTest<()> {
@@ -311,11 +315,18 @@ impl IrysNodeTest<()> {
     fn new_inner(mut config: NodeConfig) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
+        let restart_http_ports = config.http.bind_port == 0;
+        let restart_gossip_ports = config.gossip.bind_port == 0;
+        let restart_reth_ports =
+            config.reth.network.use_random_ports || config.reth.network.bind_port == 0;
         Self {
             cfg: config,
             temp_dir,
             node_ctx: (),
             name: None,
+            restart_http_ports,
+            restart_gossip_ports,
+            restart_reth_ports,
         }
     }
 
@@ -323,9 +334,37 @@ impl IrysNodeTest<()> {
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
-
+        let cfg_for_start = self.cfg.clone();
         let (cfg, http_listener, gossip_listener) =
-            IrysNode::bind_listeners(self.cfg.clone()).expect("Failed to bind TCP listeners");
+            match IrysNode::bind_listeners(cfg_for_start.clone()) {
+                Ok(bound) => bound,
+                Err(err) => {
+                    let addr_in_use = err.to_string().contains("Address already in use");
+                    if !(addr_in_use && (self.restart_http_ports || self.restart_gossip_ports)) {
+                        panic!("Failed to bind TCP listeners: {err:?}");
+                    }
+
+                    warn!(
+                        error = ?err,
+                        "Bind failed with address-in-use; retrying with fresh local ports"
+                    );
+                    let mut retry_cfg = cfg_for_start;
+                    if self.restart_http_ports {
+                        retry_cfg.http.bind_port = 0;
+                        retry_cfg.http.public_port = 0;
+                    }
+                    if self.restart_gossip_ports {
+                        retry_cfg.gossip.bind_port = 0;
+                        retry_cfg.gossip.public_port = 0;
+                    }
+                    if self.restart_reth_ports {
+                        retry_cfg.reth.network.bind_port = 0;
+                        retry_cfg.reth.network.public_port = 0;
+                        retry_cfg.reth.network.use_random_ports = true;
+                    }
+                    IrysNode::bind_listeners(retry_cfg).expect("Failed to bind TCP listeners")
+                }
+            };
 
         let node = IrysNode::new_with_listeners(cfg, http_listener, gossip_listener)
             .expect("Failed to create IrysNode");
@@ -336,6 +375,9 @@ impl IrysNodeTest<()> {
             node_ctx,
             temp_dir: self.temp_dir,
             name: self.name,
+            restart_http_ports: self.restart_http_ports,
+            restart_gossip_ports: self.restart_gossip_ports,
+            restart_reth_ports: self.restart_reth_ports,
         }
     }
 
@@ -1053,9 +1095,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     if event.height >= target_height && !event.discarded {
                         info!(
                             "Observed block_state update at/above target height: event_height={} target_height={} block_hash={}",
-                            event.height,
-                            target_height,
-                            event.block_hash
+                            event.height, target_height, event.block_hash
                         );
                     }
                 }
@@ -2049,11 +2089,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             retries += 1;
         }
         Err(eyre::eyre!(
-                "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
-                retries,
-                &prev,
-                &expected
-            ))
+            "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
+            retries,
+            &prev,
+            &expected
+        ))
     }
 
     // Get the best txs from the mempool, based off the account state at the parent Irys block
@@ -2406,6 +2446,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             cfg,
             temp_dir: self.temp_dir,
             name: self.name,
+            restart_http_ports: self.restart_http_ports,
+            restart_gossip_ports: self.restart_gossip_ports,
+            restart_reth_ports: self.restart_reth_ports,
         }
     }
 
