@@ -29,7 +29,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
-use reth_tasks::{TaskExecutor, TaskManager};
+use reth_tasks::TaskExecutor;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Instant;
@@ -55,7 +55,7 @@ impl ServiceHandleWithShutdownSignal {
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = channel(1);
-        let handle = task_executor.spawn(task(shutdown_rx));
+        let handle = task_executor.spawn_task(task(shutdown_rx));
         Self {
             handle,
             shutdown_tx,
@@ -393,14 +393,15 @@ pub fn spawn_p2p_server_watcher_task(
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
+    let task_executor_clone = task_executor.clone();
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
         move |mut task_shutdown_signal| async move {
             debug!("Starting gossip service watch thread");
 
-            let tasks_shutdown_handle = TaskManager::current()
-                .executor()
-                .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
+            let tasks_shutdown_handle = task_executor_clone.spawn_critical_with_shutdown_signal(
+                "server shutdown task",
+                |_| async move {
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
                             debug!("Gossip service shutdown signal received");
@@ -437,7 +438,8 @@ pub fn spawn_p2p_server_watcher_task(
                             warn!("Error: {}", error);
                         }
                     };
-                });
+                },
+            );
 
             match server.await {
                 Ok(()) => {

@@ -810,7 +810,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 fn get_block_receipts(
     reth_ctx: &irys_reth_node_bridge::IrysRethNodeAdapter,
     block_hash: FixedBytes<32>,
-) -> eyre::Result<Vec<reth::primitives::Receipt>> {
+) -> eyre::Result<Vec<reth_ethereum_primitives::Receipt>> {
     reth_ctx
         .inner
         .provider
@@ -820,7 +820,7 @@ fn get_block_receipts(
 
 /// Assert that a specific shadow tx log is NOT present in receipts
 fn assert_no_shadow_tx_log(
-    receipts: &[reth::primitives::Receipt],
+    receipts: &[reth_ethereum_primitives::Receipt],
     topic: &[u8; 32],
     address: irys_types::IrysAddress,
     context: &str,

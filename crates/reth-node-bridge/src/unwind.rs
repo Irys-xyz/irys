@@ -31,7 +31,9 @@ pub async fn unwind_to(
         )
     };
 
-    cmd.execute::<EthereumNode, _, _>(components).await?;
+    let runtime = reth::tasks::Runtime::test();
+    cmd.execute::<EthereumNode, _, _>(components, runtime)
+        .await?;
 
     Ok(())
 }

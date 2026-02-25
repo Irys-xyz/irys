@@ -48,7 +48,8 @@ pub async fn init_state(
     cmd.env.chain = Arc::new(chainspec);
 
     // this initializes the genesis block & the state from the state dump
-    cmd.execute::<IrysEthereumNode>().await?;
+    let runtime = reth::tasks::Runtime::test();
+    cmd.execute::<IrysEthereumNode>(runtime).await?;
 
     Ok(())
 }

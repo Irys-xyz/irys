@@ -58,6 +58,7 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 reth-db.workspace = true
 reth.workspace = true
+reth-ethereum-primitives.workspace = true
 alloy-core.workspace = true
 alloy-genesis.workspace = true
 alloy-eips.workspace = true

@@ -27,5 +27,6 @@ irys-domain.workspace = true
 irys-tui.workspace = true
 reth-provider.workspace = true
 reth-node-types.workspace = true
+reth-tasks.workspace = true
 [lints]
 workspace = true

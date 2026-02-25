@@ -14,16 +14,16 @@ use reth_payload_builder::EthBuiltPayload;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
-    error::InvalidPoolTransactionError,
-    identifier::{SenderId, TransactionId},
     BestTransactions, BestTransactionsAttributes, EthPooledTransaction, TransactionOrigin,
     TransactionPool, ValidPoolTransaction,
+    error::InvalidPoolTransactionError,
+    identifier::{SenderId, TransactionId},
 };
 use revm_primitives::FixedBytes;
 use std::collections::HashSet;
 use std::{collections::VecDeque, sync::Arc, time::Instant};
 
-use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderConfig};
+use reth_ethereum_payload_builder::{EthereumBuilderConfig, default_ethereum_payload};
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
@@ -97,7 +97,7 @@ impl Iterator for CombinedTransactionIterator {
 }
 
 impl BestTransactions for CombinedTransactionIterator {
-    fn mark_invalid(&mut self, transaction: &Self::Item, kind: InvalidPoolTransactionError) {
+    fn mark_invalid(&mut self, transaction: &Self::Item, kind: &InvalidPoolTransactionError) {
         if self.shadow_tx_hashes.contains(transaction.hash()) {
             // Shadow txs are already removed from the queue, so we don't need to do anything
             // NOTE FOR READER: if you refactor the code here, ensure that we *never*

@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
-use reth_primitives::Block;
+use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -14,7 +14,7 @@ pub mod v1 {
         IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
-    use reth_primitives::Block;
+    use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
     use std::fmt::Debug;
@@ -164,7 +164,7 @@ pub mod v2 {
         GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
-    use reth_primitives::Block;
+    use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
     use std::fmt::Debug;
