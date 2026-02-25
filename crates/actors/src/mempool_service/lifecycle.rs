@@ -4,8 +4,8 @@ use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
-    get_ingress_proofs, CommitmentTransaction, DataLedger, IrysTransactionCommon,
-    IrysTransactionId, SealedBlock, SystemLedger, H256,
+    CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
+    SystemLedger, get_ingress_proofs,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

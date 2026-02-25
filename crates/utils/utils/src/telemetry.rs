@@ -5,8 +5,8 @@
 
 use eyre::Result;
 use opentelemetry::{
-    trace::{SpanId, TraceId, TracerProvider as _},
     KeyValue,
+    trace::{SpanId, TraceId, TracerProvider as _},
 };
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
+    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -155,8 +155,8 @@ impl IdGenerator for UuidV7IdGenerator {
 
         ID_RNG.with(|rng| {
             let mut rng = rng.borrow_mut();
-            let r0: u64 = rng.gen();
-            let r1: u64 = rng.gen();
+            let r0: u64 = rng.r#gen();
+            let r1: u64 = rng.r#gen();
 
             // High u64: 48-bit timestamp | version 7 nibble | 12 random bits
             let hi = (ts_ms << 16) | 0x7000 | (r0 & 0x0FFF);
@@ -176,7 +176,7 @@ impl IdGenerator for UuidV7IdGenerator {
         ID_RNG.with(|rng| {
             let mut rng = rng.borrow_mut();
             loop {
-                let v: u64 = rng.gen();
+                let v: u64 = rng.r#gen();
                 // zero span ID = no span (spec requirement)
                 if v != 0 {
                     return SpanId::from_bytes(v.to_be_bytes());

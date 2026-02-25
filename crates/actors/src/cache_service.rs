@@ -1,7 +1,7 @@
-use crate::chunk_ingress_service::ingress_proofs::{
-    generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
-};
 use crate::chunk_ingress_service::ChunkIngressServiceInner;
+use crate::chunk_ingress_service::ingress_proofs::{
+    RegenAction, generate_and_store_ingress_proof, reanchor_and_store_ingress_proof,
+};
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
@@ -15,8 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, IngressProof, LedgerChunkOffset,
-    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, IngressProof, LedgerChunkOffset,
+    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -30,7 +30,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, error, info, trace, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, trace, warn};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -408,9 +408,7 @@ impl InnerCacheTask {
 
             trace!(
                 "Processing data root {} max height: {}, prune height: {}",
-                &data_root,
-                &max_height,
-                &prune_height
+                &data_root, &max_height, &prune_height
             );
 
             if max_height < prune_height {
@@ -537,7 +535,10 @@ impl InnerCacheTask {
                         debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
                     }
                     RegenAction::DoNotRegenerate => {
-                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
+                        error!(
+                            "We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.",
+                            &data_root
+                        );
                     }
                 }
             } else {
@@ -892,9 +893,9 @@ mod tests {
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
     use irys_types::{
-        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
-        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        NodeConfig, TxChunkOffset, UnpackedChunk,
+        Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, NodeConfig, TxChunkOffset,
+        UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};

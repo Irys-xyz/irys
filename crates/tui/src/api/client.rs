@@ -1,6 +1,6 @@
 use crate::{api::models::*, types::NodeUrl};
 use backon::{ExponentialBuilder, Retryable as _};
-use eyre::{eyre, Context as _, Result};
+use eyre::{Context as _, Result, eyre};
 use reqwest::{Client, ClientBuilder};
 use serde::de::DeserializeOwned;
 use std::time::Duration;

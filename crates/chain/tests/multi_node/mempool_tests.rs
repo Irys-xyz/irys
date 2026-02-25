@@ -589,13 +589,13 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
     let mut rng = rand::thread_rng();
-    let chunks1: [[u8; 32]; 3] = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks1: [[u8; 32]; 3] = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data1: Vec<u8> = chunks1.concat();
 
-    let chunks2 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks2 = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data2: Vec<u8> = chunks2.concat();
 
-    let chunks3 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks3 = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data3: Vec<u8> = chunks3.concat();
 
     // Post a transaction that should be gossiped to all peers

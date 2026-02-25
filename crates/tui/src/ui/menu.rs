@@ -1,5 +1,6 @@
 use crate::app::state::{AppState, MenuSelection};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -7,7 +8,6 @@ use ratatui::{
         Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState,
     },
-    Frame,
 };
 
 /// Fixed height ensures consistent grid layout across different terminal sizes.

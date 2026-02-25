@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use irys_types::{
-    partition::{PartitionAssignment, PartitionHash},
     DataLedger, H256,
+    partition::{PartitionAssignment, PartitionHash},
 };
 use tracing::debug;
 

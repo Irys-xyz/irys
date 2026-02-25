@@ -409,7 +409,7 @@ mod tests {
     use super::super::epoch_snapshot::commitment_state::{PledgeEntry, StakeEntry};
     use super::*;
     use irys_types::CommitmentStatus;
-    use irys_types::{partition::PartitionAssignment, IrysSignature, H256, U256};
+    use irys_types::{H256, IrysSignature, U256, partition::PartitionAssignment};
 
     fn create_test_commitment(
         signer: IrysAddress,

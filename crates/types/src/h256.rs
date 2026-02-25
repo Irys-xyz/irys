@@ -454,7 +454,7 @@ impl fixed_hash::rand::distributions::Distribution<H256>
     fn sample<R: fixed_hash::rand::Rng + ?Sized>(&self, rng: &mut R) -> H256 {
         let mut ret = H256::zero();
         for byte in ret.as_bytes_mut().iter_mut() {
-            *byte = rng.gen();
+            *byte = rng.r#gen();
         }
         ret
     }

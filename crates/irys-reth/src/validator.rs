@@ -12,16 +12,17 @@ use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
 use reth_ethereum_primitives::Block;
 use reth_node_api::{
+    EngineApiValidator, NewPayloadError, PayloadValidator,
     node::AddOnsContext,
     payload::{EngineApiMessageVersion, EngineObjectValidationError, PayloadOrAttributes},
-    validate_version_specific_fields, EngineApiValidator, NewPayloadError, PayloadValidator,
+    validate_version_specific_fields,
 };
 use reth_node_builder::rpc::PayloadValidatorBuilder;
 use reth_node_ethereum::EthEngineTypes;
 use reth_primitives_traits::RecoveredBlock;
 
-use crate::engine::{IrysPayloadAttributes, IrysPayloadTypes};
 use crate::IrysEthereumNode;
+use crate::engine::{IrysPayloadAttributes, IrysPayloadTypes};
 
 /// Custom engine validator for Irys that wraps the Ethereum execution payload validator.
 #[derive(Debug, Clone)]

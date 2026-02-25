@@ -1,19 +1,19 @@
 use crate::{
+    DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher},
     data_sync_service::peer_bandwidth_manager::PeerBandwidthManager,
     services::ServiceSenders,
-    DataSyncServiceMessage,
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{
     IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
 };
 use std::{
-    collections::{hash_map, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{debug, Instrument as _};
+use tracing::{Instrument as _, debug};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -439,7 +439,7 @@ impl ChunkOrchestrator {
                     "Invalid state for chunk request completion at offset {}: expected Requested, got {:?}",
                     chunk_offset,
                     invalid_state
-                ))
+                ));
             }
         };
 
@@ -490,7 +490,7 @@ impl ChunkOrchestrator {
                 return Err(eyre::eyre!(
                     "Invalid request state for chunk failure: {:?}",
                     chunk_offset
-                ))
+                ));
             }
         };
 

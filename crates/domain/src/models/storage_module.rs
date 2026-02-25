@@ -38,7 +38,7 @@
 
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
+use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
@@ -51,15 +51,16 @@ use irys_database::{
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
+    Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
+    DataTransactionHeader, H256, IrysAddress, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
+    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset,
+    TxChunkOffset, TxPath, UnpackedChunk,
     app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
-    partition_chunk_offset_ii, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    DataLedger, DataRoot, DataTransactionHeader, IrysAddress, LedgerChunkOffset, LedgerChunkRange,
-    PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _,
-    RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk, H256,
+    partition_chunk_offset_ii,
 };
-use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
+use nodit::{InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii};
 use openssl::sha;
 use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
@@ -1506,10 +1507,10 @@ impl StorageModule {
                     Err(write_err) => {
                         // Log the failure but don't return early - we still need to propagate the original error
                         error!(
-                    "CRITICAL: Failed to acquire write lock to reset interval to Uninitialized: {}. \
+                            "CRITICAL: Failed to acquire write lock to reset interval to Uninitialized: {}. \
                      The interval state may be inconsistent!",
-                    write_err
-                );
+                            write_err
+                        );
                     }
                 }
 
@@ -1892,8 +1893,8 @@ mod tests {
     use super::*;
     use irys_testing_utils::{chunk_bytes_gen, utils::setup_tracing_and_temp_dir};
     use irys_types::{
-        irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig,
-        DataTransactionHeaderV1, NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, H256,
+        ConsensusConfig, DataTransactionHeaderV1, H256, NodeConfig, SimpleRNG, StorageSyncConfig,
+        TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use irys_domain::StorageModule;
-use irys_types::{partition::PartitionHash, IrysAddress, PartitionChunkRange};
+use irys_types::{IrysAddress, PartitionChunkRange, partition::PartitionHash};
 
 /// Trait for different packing strategies
 #[async_trait]

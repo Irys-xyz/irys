@@ -2,7 +2,7 @@ use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid};
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig,
-    DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, SealedBlock, H256, U256,
+    DataLedger, DataTransactionHeader, DatabaseProvider, H256, IrysBlockHeader, SealedBlock, U256,
 };
 use reth_db::Database as _;
 use std::{
@@ -13,8 +13,8 @@ use std::{
 use tracing::debug;
 
 use crate::{
-    create_ema_snapshot_from_chain_history, BlockIndexReadGuard, BlockTreeReadGuard,
-    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
+    BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochReplayData,
+    EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
 #[derive(Debug)]
@@ -475,7 +475,12 @@ impl BlockTree {
 
         debug!(
             "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}, ema_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0, block.header().cumulative_diff, block.header().block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
+            self.max_cumulative_difficulty.0,
+            block.header().cumulative_diff,
+            block.header().block_hash,
+            &commitment_snapshot.get_hash(),
+            &epoch_snapshot.get_hash(),
+            &ema_snapshot.get_hash()
         );
 
         if block.header().cumulative_diff > self.max_cumulative_difficulty.0 {
@@ -1102,7 +1107,9 @@ impl BlockTree {
 
         debug!(
             "get_earliest_not_onchain_in_longest_chain() with max_diff_hash: {} height: {} state: {:?}",
-            max_diff_hash, entry.block.header().height, entry.chain_state
+            max_diff_hash,
+            entry.block.header().height,
+            entry.chain_state
         );
 
         // Check if it's part of a fork and get the start of the fork
@@ -1530,7 +1537,7 @@ pub fn make_block_tree_entry(block: Arc<SealedBlock>) -> BlockTreeEntry {
 #[cfg(test)]
 mod tests {
 
-    use crate::{dummy_epoch_snapshot, EmaSnapshot};
+    use crate::{EmaSnapshot, dummy_epoch_snapshot};
 
     use super::*;
     use assert_matches::assert_matches;

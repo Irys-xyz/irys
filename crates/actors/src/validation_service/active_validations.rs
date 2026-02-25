@@ -17,17 +17,17 @@ use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::{
     sync::Notify,
     task::{JoinHandle, JoinSet},
 };
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
-use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::VdfValidationResult;
+use crate::validation_service::block_validation_task::BlockValidationTask;
 
 /// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -468,11 +468,11 @@ impl ValidationCoordinator {
 mod tests {
     use super::*;
     use irys_domain::{
-        dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
-        ChainState, CommitmentSnapshot,
+        BlockState, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
+        dummy_ema_snapshot, dummy_epoch_snapshot,
     };
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
-    use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader};
+    use irys_types::{BlockBody, BlockHash, IrysBlockHeader, serialization::H256List};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 

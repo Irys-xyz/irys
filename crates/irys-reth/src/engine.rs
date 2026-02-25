@@ -5,7 +5,7 @@
 
 use std::convert::Infallible;
 
-use alloy_eips::{eip4895::Withdrawal, Encodable2718 as _};
+use alloy_eips::{Encodable2718 as _, eip4895::Withdrawal};
 use alloy_primitives::B256;
 use alloy_rpc_types::Withdrawals;
 use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload};

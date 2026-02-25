@@ -48,10 +48,10 @@
 //! - **Block 30-39**: Uses E19 for fees
 //! - **Block 40-49**: Uses E29 for fees
 
-use eyre::{ensure, Result};
+use eyre::{Result, ensure};
 use irys_types::{
-    storage_pricing::{phantoms::Percentage, Amount},
     ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
+    storage_pricing::{Amount, phantoms::Percentage},
 };
 use std::sync::Arc;
 

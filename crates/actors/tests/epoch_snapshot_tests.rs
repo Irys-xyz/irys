@@ -11,16 +11,16 @@ use irys_database::{
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
+use irys_types::irys::IrysSigner;
 use irys_types::{
-    partition::PartitionAssignment, BlockTransactions, DataLedger, IrysBlockHeader, SealedBlock,
-    H256,
-};
-use irys_types::{
-    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
+    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
+use irys_types::{
+    ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset, partition_chunk_offset_ie,
+};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
@@ -628,7 +628,11 @@ async fn partition_expiration_and_repacking_test() {
         );
         debug!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 
-        assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
+        assert_eq!(
+            sub_slots.len(),
+            3,
+            "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!"
+        );
         assert!(
             sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"

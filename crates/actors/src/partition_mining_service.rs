@@ -10,18 +10,18 @@ use crate::{
 };
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
-use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
+use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_storage::ii;
 use irys_types::{
+    AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
+    PartitionChunkRange, SendTraced as _, TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext},
-    partition_chunk_offset_ie, u256_from_le_bytes, AtomicVdfStepNumber, Config, H256List,
-    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, SendTraced as _,
-    TokioServiceHandle, U256,
+    partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
 /// Commands that control the partition mining service
@@ -243,10 +243,10 @@ impl PartitionMiningServiceInner {
                     .storage_module
                     .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
                 ChunkType::Uninitialized => {
-                    return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
+                    return Err(eyre::eyre!("Cannot mine uninitialized chunks"));
                 }
                 ChunkType::Interrupted => {
-                    return Err(eyre::eyre!("Cannot mine interrupted chunks"))
+                    return Err(eyre::eyre!("Cannot mine interrupted chunks"));
                 }
             };
 

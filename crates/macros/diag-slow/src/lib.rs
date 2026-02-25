@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
+    Expr, Ident, ItemFn, LitInt, Token,
     parse::{Parse, ParseStream},
-    parse_macro_input, Expr, Ident, ItemFn, LitInt, Token,
+    parse_macro_input,
 };
 
 struct DiagSlowArgs {

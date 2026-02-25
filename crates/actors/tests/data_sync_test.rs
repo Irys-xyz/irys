@@ -1,8 +1,8 @@
 use irys_actors::{
+    DataSyncServiceInner, DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher},
     peer_bandwidth_manager::PeerBandwidthManager,
     services::{ServiceReceivers, ServiceSenders},
-    DataSyncServiceInner, DataSyncServiceMessage,
 };
 use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
@@ -10,11 +10,11 @@ use irys_domain::{
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
-    partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig,
-    DataTransaction, IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange,
-    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore,
-    ProtocolVersion, StorageSyncConfig, TxChunkOffset, UnpackedChunk, H256,
+    Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256,
+    IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+    StorageSyncConfig, TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ie,
+    partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -284,7 +284,8 @@ impl DataSyncServiceTestHarness {
             let request_count = peer_fetcher.request_log.read().unwrap().len();
             total_requests += request_count;
 
-            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
+            println!(
+                "{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
                 peer_name,
                 peer_manager.health_score(),
                 request_count,

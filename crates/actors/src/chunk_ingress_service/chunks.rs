@@ -1,9 +1,9 @@
+use super::ChunkIngressServiceInner;
 use super::ingress_proofs::generate_and_store_ingress_proof;
 use super::metrics::{
     record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
     record_validation_duration,
 };
-use super::ChunkIngressServiceInner;
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,
@@ -13,19 +13,20 @@ use irys_database::{
 };
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    chunk::{max_chunk_offset, UnpackedChunk},
+    DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
+    chunk::{UnpackedChunk, max_chunk_offset},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, H256,
+    validate_path,
 };
 use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
+use reth_db::{Database as _, cursor::DbDupCursorRO as _, transaction::DbTx as _};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
-use tracing::{debug, error, info, info_span, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 /// Represents data_size information and if it comes from the publish ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]

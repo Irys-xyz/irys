@@ -10,7 +10,7 @@ use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, IngressProof, SendTraced as _, Traced, H256,
+    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
 };
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, warn};
