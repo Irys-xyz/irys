@@ -71,7 +71,7 @@ pub fn apply_cli_overrides(
         config.node_mode = NodeMode::Genesis;
     }
 
-    // -- MINING_KEY env var --
+    // -- MINING_KEY env var - we explicitly do not allow mining_key to be passed in as a CLI arg --
     if let Ok(key_hex) = std::env::var("MINING_KEY") {
         let key_bytes =
             hex::decode(key_hex.trim()).wrap_err("MINING_KEY env var is not valid hex")?;
