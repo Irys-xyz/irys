@@ -850,6 +850,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Like [`wait_for_block_in_index`] but only waits for the block to
+    /// appear — does not fetch the chunk or return the header.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn wait_for_block_in_index_height(
+        &self,
+        height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_block_in_index(height, false, max_seconds)
+            .await?;
+        Ok(())
+    }
+
     /// Returns a future that resolves once no [`BlockStateUpdated`] events
     /// arrive for `idle` duration, bounded by `deadline`.
     ///
@@ -858,14 +871,14 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// the returned future.
     ///
     /// ```ignore
-    /// let quiescent = node.block_quiescence(
+    /// let idle = node.wait_until_block_events_idle(
     ///     Duration::from_millis(500),
     ///     Duration::from_secs(10),
     /// );
     /// genesis.gossip_block_to_peers(&block)?;
-    /// quiescent.await;
+    /// idle.await;
     /// ```
-    pub fn block_quiescence(
+    pub fn wait_until_block_events_idle(
         &self,
         idle: Duration,
         deadline: Duration,
@@ -876,7 +889,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .subscribe_block_state_updates();
         Box::pin(async move {
             let deadline = tokio::time::Instant::now() + deadline;
-            irys_actors::services::wait_for_broadcast_quiescence(&mut rx, idle, deadline).await;
+            irys_actors::services::wait_until_broadcast_idle(&mut rx, idle, deadline).await;
         })
     }
 

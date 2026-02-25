@@ -944,7 +944,7 @@ impl IrysNode {
                 // were missed.
                 if let Some(mut rx) = block_state_rx {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                    irys_actors::services::wait_for_broadcast_quiescence(
+                    irys_actors::services::wait_until_broadcast_idle(
                         &mut rx,
                         Duration::from_millis(500),
                         deadline,

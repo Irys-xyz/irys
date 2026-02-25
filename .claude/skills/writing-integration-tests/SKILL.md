@@ -73,14 +73,14 @@ peer.wait_until_height(NUM_BLOCKS_IN_EPOCH as u64, 30).await?;
 peer.wait_for_packing(30).await;
 ```
 
-### Block Quiescence (Subscribe-Before-Act)
+### Block Events Idle (Subscribe-Before-Act)
 
 Subscribe to events *before* the action, then await after:
 
 ```rust
-let quiescent = peer.block_quiescence(Duration::from_millis(500), Duration::from_secs(10));
+let idle = peer.wait_until_block_events_idle(Duration::from_millis(500), Duration::from_secs(10));
 genesis.gossip_block_to_peers(&Arc::new(block))?;
-quiescent.await;
+idle.await;
 ```
 
 ## Example Tests by Pattern
@@ -109,5 +109,5 @@ All paths relative to `crates/chain/tests/`.
 - **Stop peers before genesis** — avoids connection errors in logs
 - **One signer per commitment type** — create arrays of signers for multi-commitment tests
 - **`post_data_tx` panics on failure** — use `post_publish_data_tx` for `Result`
-- **Subscribe to events before the action** — `block_quiescence` and `wait_for_reorg` must be called before the triggering action
+- **Subscribe to events before the action** — `wait_until_block_events_idle` and `wait_for_reorg` must be called before the triggering action
 - **Block index vs block tree** — `wait_until_block_index_height` only checks index height; `wait_for_block_in_index` checks both index and DB header

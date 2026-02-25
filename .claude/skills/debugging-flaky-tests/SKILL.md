@@ -107,9 +107,9 @@ Prefixes combine: `slow_heavy3_my_test` gets 180s timeout AND 3 threads.
 **Fix:** Subscribe BEFORE the action, then await:
 
 ```rust
-let quiescent = node.block_quiescence(Duration::from_millis(500), Duration::from_secs(10));
+let idle = node.wait_until_block_events_idle(Duration::from_millis(500), Duration::from_secs(10));
 node.gossip_block_to_peers(&block)?;
-quiescent.await;
+idle.await;
 ```
 
 ### Pattern 3: Block Tree Pruning
@@ -178,7 +178,7 @@ If `flaky` still shows failures, the fix is incomplete. Go back to Step 5.
 |--------|-----------|-------------|
 | `wait_for_block_at_height(h, secs)` | Event-driven (`BlockStateUpdated`) | **Preferred — use by default** |
 | `wait_until_height(h, secs)` | Polling (1s sleep) | Legacy — replace with above |
-| `block_quiescence(idle, deadline)` | Event-driven (idle gap) | After gossip, wait for processing |
+| `wait_until_block_events_idle(idle, deadline)` | Event-driven (idle gap) | After gossip, wait for processing |
 | `wait_for_block(hash, secs)` | Polling (20ms) | Waiting for a specific known hash |
 | `wait_until_block_index_height(h, secs)` | Polling block index (1s) | When assertions depend on block-index migration progress |
 | `wait_until_block_bounds_available(ledger, offset, secs)` | Polling block-index bounds (1s) | When PoA/chunk-offset validation depends on `get_block_bounds` |

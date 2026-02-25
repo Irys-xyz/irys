@@ -221,7 +221,7 @@ impl ServiceSendersInner {
 /// Waits until no events arrive on `rx` for `idle` duration, bounded by `deadline`.
 /// Treats `RecvError::Lagged` as activity (continues waiting).
 /// Returns when idle timeout elapses, deadline is reached, or channel closes.
-pub async fn wait_for_broadcast_quiescence<T: Clone>(
+pub async fn wait_until_broadcast_idle<T: Clone>(
     rx: &mut tokio::sync::broadcast::Receiver<T>,
     idle: std::time::Duration,
     deadline: tokio::time::Instant,

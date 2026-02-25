@@ -171,7 +171,8 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     );
 
     // Subscribe before gossip to avoid missing the reorg events (Pattern 2 prevention)
-    let quiescent = node_1.block_quiescence(Duration::from_millis(500), Duration::from_secs(30));
+    let idle =
+        node_1.wait_until_block_events_idle(Duration::from_millis(500), Duration::from_secs(30));
     node_2.gossip_block_to_peers(&Arc::new(tip_block.clone()))?;
 
     // Event-driven wait: reacts instantly to block state updates instead of polling
@@ -180,7 +181,7 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .await?;
 
     // Wait for all block processing to settle before checking convergence
-    quiescent.await;
+    idle.await;
 
     // Verify both nodes have converged to the same canonical chain
     let final_chain_node_1 = node_1.get_canonical_chain();
