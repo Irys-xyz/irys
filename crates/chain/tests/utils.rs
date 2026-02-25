@@ -369,6 +369,17 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    fn ensure_vdf_running_for_sync(&self, context: &str) {
+        if !self
+            .node_ctx
+            .is_vdf_mining_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.node_ctx.start_vdf();
+            info!("Auto-started VDF for sync context={}", context);
+        }
+    }
+
     async fn diag_wait_state(&self) -> String {
         let (
             canonical_tip_height,
@@ -731,6 +742,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_until_block_index_height");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
         while self.node_ctx.block_index_guard.read().latest_height() < target_height
@@ -768,6 +780,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunk_offset: LedgerChunkOffset,
         max_seconds: usize,
     ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_until_block_bounds_available");
         let chunk_offset_u64: u64 = chunk_offset.into();
         let mut last_error = "none".to_string();
 
@@ -818,6 +831,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         include_chunk: bool,
         max_seconds: usize,
     ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block_in_index");
         for _attempt in 1..=max_seconds {
             if let Ok(block) = self.get_block_by_height_from_index(height, include_chunk) {
                 return Ok(block);
@@ -863,6 +877,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
+        self.ensure_vdf_running_for_sync("wait_for_packing");
         self.node_ctx
             .packing_waiter
             .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
@@ -921,6 +936,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_until_height");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
 
@@ -971,6 +987,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_for_block_at_height");
         // Subscribe to block state updates
         let mut block_state_rx = self
             .node_ctx
@@ -1036,12 +1053,47 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[diag_slow(state = format!(
+        "target_step={} {}",
+        target_step,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_vdf_step(
+        &self,
+        target_step: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        self.ensure_vdf_running_for_sync("wait_for_vdf_step");
+        let deadline = Instant::now() + Duration::from_secs(max_seconds as u64);
+        loop {
+            let current_step = self.node_ctx.vdf_steps_guard.read().global_step;
+            if current_step >= target_step {
+                info!("VDF step {} reached target {}", current_step, target_step);
+                return Ok(());
+            }
+
+            if Instant::now() > deadline {
+                let state = self.diag_wait_state().await;
+                return Err(eyre::eyre!(
+                    "Timeout waiting for vdf step >= {} after {} seconds (current_step={}); state: {}",
+                    target_step,
+                    max_seconds,
+                    current_step,
+                    state
+                ));
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_until_height_confirmed(
         &self,
         target_height: u64,
         max_seconds: usize,
     ) -> eyre::Result<H256> {
+        self.ensure_vdf_running_for_sync("wait_until_height_confirmed");
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
 
@@ -1427,6 +1479,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         seconds_to_wait: usize,
     ) -> impl Future<Output = eyre::Result<ReorgEvent>> + '_ {
+        self.ensure_vdf_running_for_sync("wait_for_reorg");
         // Subscribe immediately so callers can safely await later without missing events.
         let reorg_rx = self.node_ctx.service_senders.subscribe_reorgs();
         let start_tip = self.get_max_difficulty_block().block_hash;
@@ -1587,6 +1640,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: &H256,
         seconds_to_wait: usize,
     ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block");
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         let mut retries = 0;
@@ -1619,6 +1673,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ledger: DataLedger,
         max_seconds: usize,
     ) -> eyre::Result<IrysBlockHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_block_containing_tx");
         for attempt in 1..=max_seconds {
             let canonical_chain =
                 get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
@@ -1685,6 +1740,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: alloy_core::primitives::BlockHash,
         seconds_to_wait: usize,
     ) -> eyre::Result<reth::primitives::Block> {
+        self.ensure_vdf_running_for_sync("wait_for_evm_block");
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         for retry in 0..max_retries {
@@ -1716,6 +1772,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: &alloy_core::primitives::B256,
         seconds_to_wait: usize,
     ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
+        self.ensure_vdf_running_for_sync("wait_for_evm_tx");
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         let retries_per_second = 50;
@@ -1783,6 +1840,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_hash: EvmBlockHash,
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
+        self.ensure_vdf_running_for_sync("wait_for_reth_marker");
         let deadline = Instant::now() + Duration::from_secs(seconds_to_wait);
         let mut attempt: u32 = 0;
 
@@ -2148,6 +2206,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_id: &H256,
         max_seconds: usize,
     ) -> eyre::Result<DataTransactionHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_tx_included");
         for _ in 0..(max_seconds * 10) {
             match self.get_storage_tx_header_from_mempool(tx_id).await {
                 Ok(header) if header.metadata().included_height.is_some() => {
@@ -3222,6 +3281,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     // enable node to gossip until disabled
     pub fn gossip_enable(&self) {
+        self.ensure_vdf_running_for_sync("gossip_enable");
         self.node_ctx.sync_state.set_gossip_reception_enabled(true);
         self.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
     }
@@ -3407,69 +3467,82 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
-    // Ensure the VDF has at least two steps materialized (N-1, N)
-    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf();
-    let start = std::time::Instant::now();
-    let max_wait = std::time::Duration::from_secs(5);
-    let (step, steps) = loop {
-        if start.elapsed() > max_wait {
-            node_ctx.stop_vdf();
-            return Err(eyre::eyre!(
-                "VDF steps unavailable: timed out waiting for (prev,current) pair"
-            ));
-        }
-        let s = vdf_steps_guard.read().global_step;
-        if s >= 1 {
-            if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
-                if steps.len() >= 2 {
-                    break (s, steps);
+    let was_vdf_enabled = node_ctx
+        .is_vdf_mining_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !was_vdf_enabled {
+        node_ctx.start_vdf();
+    }
+
+    let result = async {
+        // Ensure the VDF has at least two steps materialized (N-1, N)
+        let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(5);
+        let (step, steps) = loop {
+            if start.elapsed() > max_wait {
+                return Err(eyre::eyre!(
+                    "VDF steps unavailable: timed out waiting for (prev,current) pair"
+                ));
+            }
+            let s = vdf_steps_guard.read().global_step;
+            if s >= 1 {
+                if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
+                    if steps.len() >= 2 {
+                        break (s, steps);
+                    }
                 }
             }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    };
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
 
-    // Compute checkpoints for (step-1)
-    let mut hasher = Sha256::new();
-    let mut salt =
-        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
-    let mut seed = steps[0];
-    let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
-    vdf_sha(
-        &mut hasher,
-        &mut salt,
-        &mut seed,
-        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
-        node_ctx.config.vdf.num_iterations_per_checkpoint(),
-        &mut checkpoints,
-    );
+        // Compute checkpoints for (step-1)
+        let mut hasher = Sha256::new();
+        let mut salt =
+            irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
+        let mut seed = steps[0];
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+            node_ctx.config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
 
-    // For deterministic linkage without recall-range dependency, use offset 0
-    let partition_hash = H256::zero();
-    let partition_chunk_offset: u32 = 0;
+        // For deterministic linkage without recall-range dependency, use offset 0
+        let partition_hash = H256::zero();
+        let partition_chunk_offset: u32 = 0;
 
-    // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-    let mut hasher_sol = Sha256::new();
-    hasher_sol.update(&poa_chunk);
-    hasher_sol.update(partition_chunk_offset.to_le_bytes());
-    hasher_sol.update(steps[1].as_bytes());
-    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+        // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+        let mut hasher_sol = Sha256::new();
+        hasher_sol.update(&poa_chunk);
+        hasher_sol.update(partition_chunk_offset.to_le_bytes());
+        hasher_sol.update(steps[1].as_bytes());
+        let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
-    node_ctx.stop_vdf();
-    Ok(SolutionContext {
-        partition_hash,
-        chunk_offset: partition_chunk_offset,
-        mining_address: node_ctx.config.node_config.miner_address(),
-        tx_path: None,
-        data_path: None,
-        chunk: poa_chunk,
-        vdf_step: step,
-        checkpoints: H256List(checkpoints),
-        seed: Seed(steps[1]),
-        solution_hash,
-    })
+        Ok(SolutionContext {
+            partition_hash,
+            chunk_offset: partition_chunk_offset,
+            mining_address: node_ctx.config.node_config.miner_address(),
+            tx_path: None,
+            data_path: None,
+            chunk: poa_chunk,
+            vdf_step: step,
+            checkpoints: H256List(checkpoints),
+            seed: Seed(steps[1]),
+            solution_hash,
+        })
+    }
+    .await;
+
+    if !was_vdf_enabled {
+        node_ctx.stop_vdf();
+    }
+
+    result
 }
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
@@ -3484,7 +3557,12 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     };
 
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf();
+    let was_vdf_enabled = node_ctx
+        .is_vdf_mining_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !was_vdf_enabled {
+        node_ctx.start_vdf();
+    }
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
@@ -3492,7 +3570,9 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         prev_block.diff,
     )
     .await;
-    node_ctx.stop_vdf();
+    if !was_vdf_enabled {
+        node_ctx.stop_vdf();
+    }
     Ok(poa_solution)
 }
 

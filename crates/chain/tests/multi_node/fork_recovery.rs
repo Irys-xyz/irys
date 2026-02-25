@@ -1784,6 +1784,8 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     //
     // Stage 6: FINAL SYNC / RE-ORGs
     //
+    let reorg_future = node_a.wait_for_reorg(seconds_to_wait);
+
     {
         // Enable gossip
         node_a.gossip_enable();
@@ -1796,6 +1798,16 @@ async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
             node_a.gossip_block_to_peers(block)?;
         }
     }
+    let reorg_event = reorg_future.await?;
+    debug!("reorg result in migration-depth test: {:?}", reorg_event);
+
+    node_a
+        .wait_for_block(&b_last.block_hash, seconds_to_wait)
+        .await?;
+    node_b
+        .wait_for_block(&b_last.block_hash, seconds_to_wait)
+        .await?;
+
     //
     // Stage 7: FINAL STATE CHECKS
     //
