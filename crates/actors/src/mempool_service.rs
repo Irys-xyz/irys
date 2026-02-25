@@ -2986,7 +2986,16 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.mempool;
-        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let raw_max_concurrent = mempool_config.max_concurrent_mempool_tasks;
+        const MAX_PERMITS: usize = u32::MAX as usize;
+        let max_concurrent_mempool_tasks = raw_max_concurrent.clamp(1, MAX_PERMITS);
+        if max_concurrent_mempool_tasks != raw_max_concurrent {
+            warn!(
+                configured = raw_max_concurrent,
+                effective = max_concurrent_mempool_tasks,
+                "Adjusted max_concurrent_mempool_tasks to supported range 1..=u32::MAX"
+            );
+        }
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
@@ -3020,7 +3029,7 @@ impl MempoolService {
                             max_concurrent_mempool_tasks,
                         )),
                         max_concurrent_tasks: u32::try_from(max_concurrent_mempool_tasks)
-                            .expect("max_concurrent_mempool_tasks fits in u32"),
+                            .expect("clamped to u32::MAX above"),
                         chunk_ingress_state,
                     }),
                 };
