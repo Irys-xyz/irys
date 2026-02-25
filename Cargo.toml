@@ -90,7 +90,7 @@ bytemuck = "1"
 test-log = { version = "0.2", features = ["trace"] }
 pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
-modular-bitfield = "0.13"
+modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
 proptest = "1.6"
 rust_decimal = "1"
