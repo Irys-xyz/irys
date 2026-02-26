@@ -120,7 +120,12 @@ async fn main() -> eyre::Result<()> {
                 &config.consensus.hardforks,
                 timestamp_secs,
             )?;
-            init_state(node_config, chain_spec, state_path).await
+            let runtime =
+                reth_tasks::RuntimeBuilder::new(reth_tasks::RuntimeConfig::default().with_tokio(
+                    reth_tasks::TokioConfig::existing_handle(tokio::runtime::Handle::current()),
+                ))
+                .build()?;
+            init_state(node_config, chain_spec, state_path, runtime).await
         }
         Commands::RollbackBlocks { mode } => {
             let node_config: NodeConfig = load_config()?;
@@ -319,7 +324,24 @@ pub fn cli_init_reth_provider() -> eyre::Result<(
     let static_file_provider = StaticFileProvider::read_only(static_files_path, false)?;
 
     // Create provider factory
-    let provider_factory = ProviderFactory::new(reth_db.clone(), chain_spec, static_file_provider)?;
+    // No-op stub — we don't enable the `rocksdb` feature, so this compiles to a unit struct
+    // that ignores the path entirely (no filesystem access). Required by ProviderFactory::new.
+    const _: () = assert!(
+        size_of::<reth_provider::providers::RocksDBProvider>() == 0,
+        "RocksDBProvider must be the zero-sized stub (rocksdb feature must be disabled)"
+    );
+    let rocksdb_provider = reth_provider::providers::RocksDBProvider::new(&db_path)?;
+    let runtime = reth_tasks::RuntimeBuilder::new(reth_tasks::RuntimeConfig::default().with_tokio(
+        reth_tasks::TokioConfig::existing_handle(tokio::runtime::Handle::current()),
+    ))
+    .build()?;
+    let provider_factory = ProviderFactory::new(
+        reth_db.clone(),
+        chain_spec,
+        static_file_provider,
+        rocksdb_provider,
+        runtime,
+    )?;
 
     Ok((reth_db, provider_factory))
 }

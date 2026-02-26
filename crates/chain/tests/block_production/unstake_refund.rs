@@ -875,7 +875,7 @@ async fn get_block_receipts(
     block_height: u64,
     block_hash: FixedBytes<32>,
     seconds_to_wait: usize,
-) -> eyre::Result<Vec<reth::primitives::Receipt>> {
+) -> eyre::Result<Vec<reth_ethereum_primitives::Receipt>> {
     node.wait_for_reth_marker(
         BlockNumberOrTag::Number(block_height),
         block_hash,
@@ -912,7 +912,7 @@ async fn get_block_receipts(
 
 /// Assert that a specific shadow tx log is NOT present in receipts
 fn assert_no_shadow_tx_log(
-    receipts: &[reth::primitives::Receipt],
+    receipts: &[reth_ethereum_primitives::Receipt],
     topic: &[u8; 32],
     address: irys_types::IrysAddress,
     context: &str,

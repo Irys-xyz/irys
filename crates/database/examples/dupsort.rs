@@ -16,6 +16,7 @@ use reth_db::{Database as _, tables};
 use reth_db::{DatabaseError, table::DupSort};
 use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
+use reth_primitives_traits::ValueWithSubKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -35,6 +36,13 @@ tables! {
 pub struct CachedChunk2 {
     pub key: u128,
     pub chunk: CachedChunk,
+}
+
+impl ValueWithSubKey for CachedChunk2 {
+    type SubKey = u128;
+    fn get_subkey(&self) -> Self::SubKey {
+        self.key
+    }
 }
 
 // NOTE: Removing reth_codec and manually encode subkey and compress second part of the value.

@@ -30,7 +30,7 @@ use irys_types::{
 };
 use irys_utils::ElapsedMs as _;
 use reth::builder::Block as _;
-use reth::primitives::Block;
+use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
