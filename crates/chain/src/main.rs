@@ -60,23 +60,21 @@ async fn main() -> eyre::Result<()> {
         .await?;
     handle.start_mining()?;
 
-    // Await reth thread completion asynchronously
-    // Brief non-contended lock to extract the oneshot receiver.
+    // Await lifecycle task completion asynchronously
+    // Brief non-contended lock to extract the JoinHandle.
     // std::sync::Mutex is intentional: held only for .take(), no contention.
-    let reth_done_rx = handle.reth_done_rx.lock().unwrap().take();
-    let shutdown_reason = match reth_done_rx {
-        Some(rx) => match rx.await {
+    let lifecycle_handle = handle.lifecycle_handle.lock().unwrap().take();
+    let shutdown_reason = match lifecycle_handle {
+        Some(jh) => match jh.await {
             Ok(reason) => reason,
-            Err(_) => {
-                error!("Reth completion sender dropped without sending (thread may have panicked)");
-                ShutdownReason::FatalError(
-                    "Reth completion sender dropped without sending".to_string(),
-                )
+            Err(e) => {
+                error!("Lifecycle task panicked: {:?}", e);
+                ShutdownReason::FatalError("Lifecycle task panicked".to_string())
             }
         },
         None => {
-            error!("Reth completion receiver was None");
-            ShutdownReason::FatalError("Reth completion receiver was None".to_string())
+            error!("Lifecycle handle was None");
+            ShutdownReason::FatalError("Lifecycle handle was None".to_string())
         }
     };
 
