@@ -1,13 +1,13 @@
 use crate::state::AtomicVdfState;
-use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
+use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::BlockProvider;
 use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, Traced, H256, U256,
+    AtomicVdfStepNumber, H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed,
 };
 use sha2::{Digest as _, Sha256};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
@@ -129,7 +129,10 @@ pub fn run_vdf<B: BlockProvider>(
             canonical_global_step_number = canonical_vdf_info.global_step_number;
             debug!(
                 "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, global_step: {:?}",
-                canonical_global_step_number, next_reset_seed, canonical_vdf_info.prev_output, global_step_number
+                canonical_global_step_number,
+                next_reset_seed,
+                canonical_vdf_info.prev_output,
+                global_step_number
             );
         }
 
@@ -236,13 +239,13 @@ fn store_step(
 mod tests {
     use super::*;
     use crate::state::test_helpers::mocked_vdf_service;
-    use crate::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
+    use crate::state::{CancelEnum, VdfStateReadonly, vdf_steps_are_valid};
     use crate::vdf_sha_verification;
     use irys_types::*;
     use nodit::interval::ii;
     use std::sync::atomic::AtomicU8;
     use std::{
-        sync::{atomic::AtomicU64, Arc},
+        sync::{Arc, atomic::AtomicU64},
         time::Duration,
     };
     use tokio::sync::mpsc;

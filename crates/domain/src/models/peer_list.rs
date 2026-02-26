@@ -1122,35 +1122,35 @@ impl PeerListDataInner {
         let in_purgatory = self.unstaked_peer_purgatory.contains(&lookup_peer_id);
 
         // If we found an existing peer with a different peer_id, we need to update the mapping
-        if let Some(old_peer_id) = existing_peer_id {
-            if old_peer_id != peer_id {
-                // Peer ID changed - need to migrate the entry
-                debug!(
-                    "Peer {:?} changed peer_id from {:?} to {:?}, migrating entry",
-                    mining_addr, old_peer_id, peer_id
-                );
+        if let Some(old_peer_id) = existing_peer_id
+            && old_peer_id != peer_id
+        {
+            // Peer ID changed - need to migrate the entry
+            debug!(
+                "Peer {:?} changed peer_id from {:?} to {:?}, migrating entry",
+                mining_addr, old_peer_id, peer_id
+            );
 
-                // Remove old entry and update with new peer_id
-                if let Some(old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
-                    self.persistent_peers_cache.insert(peer_id, old_peer);
-                } else if let Some(old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
-                    self.unstaked_peer_purgatory.put(peer_id, old_peer);
-                }
+            // Remove old entry and update with new peer_id
+            if let Some(old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
+                self.persistent_peers_cache.insert(peer_id, old_peer);
+            } else if let Some(old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
+                self.unstaked_peer_purgatory.put(peer_id, old_peer);
+            }
 
-                // Update all mappings to use new peer_id
-                self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
-                self.peer_id_to_miner_addr_map.remove(&old_peer_id);
-                self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
-                if let Some(peer_item) = self
-                    .persistent_peers_cache
-                    .get(&peer_id)
-                    .or_else(|| self.unstaked_peer_purgatory.peek(&peer_id))
-                {
-                    self.gossip_addr_to_peer_id_map
-                        .insert(peer_item.address.gossip.ip(), peer_id);
-                    self.api_addr_to_peer_id_map
-                        .insert(peer_item.address.api, peer_id);
-                }
+            // Update all mappings to use new peer_id
+            self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
+            self.peer_id_to_miner_addr_map.remove(&old_peer_id);
+            self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
+            if let Some(peer_item) = self
+                .persistent_peers_cache
+                .get(&peer_id)
+                .or_else(|| self.unstaked_peer_purgatory.peek(&peer_id))
+            {
+                self.gossip_addr_to_peer_id_map
+                    .insert(peer_item.address.gossip.ip(), peer_id);
+                self.api_addr_to_peer_id_map
+                    .insert(peer_item.address.api, peer_id);
             }
         }
 
@@ -1425,10 +1425,10 @@ mod tests {
             );
             let updated_peer = peer_list.get_peer(&peer_id);
 
-            if let Some(p) = updated_peer {
-                if !p.reputation_score.is_active() {
-                    assert!(!peer_list.all_known_peers().contains(&peer.address));
-                }
+            if let Some(p) = updated_peer
+                && !p.reputation_score.is_active()
+            {
+                assert!(!peer_list.all_known_peers().contains(&peer.address));
             }
         }
 

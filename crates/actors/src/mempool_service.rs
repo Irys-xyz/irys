@@ -17,37 +17,37 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus};
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
+use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
+use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{
-    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, Traced, UnixTimestamp, H256, U256,
+    BoundedFee, Config, H256, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    NodeConfig, SealedBlock, SystemLedger, Traced, U256, UnixTimestamp,
+    app_state::DatabaseProvider,
 };
 use irys_types::{
-    storage_pricing::{
-        calculate_term_fee,
-        phantoms::{Irys, NetworkFee},
-        Amount,
-    },
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
     MempoolConfig,
+    storage_pricing::{
+        Amount, calculate_term_fee,
+        phantoms::{Irys, NetworkFee},
+    },
 };
-use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
-use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
+use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::*;
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -60,9 +60,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc::UnboundedReceiver, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info, instrument, trace, warn};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
@@ -474,13 +474,19 @@ impl Inner {
         if old_enough && new_enough {
             Ok(true)
         } else if !old_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}"
+            );
             Ok(false)
         } else if !new_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}"
+            );
             Ok(false)
         } else {
-            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+            eyre::bail!(
+                "SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}"
+            );
         }
     }
 
@@ -506,7 +512,10 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
+        debug!(
+            "ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}",
+            &ingress_proof.id()
+        );
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -514,7 +523,10 @@ impl Inner {
             Ok(true)
         } else {
             // TODO: recover the signer's address here? (or compute an ID)
-            warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+            warn!(
+                "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
+                &ingress_proof.data_root, &ingress_proof.signature
+            );
             Ok(false)
         }
     }
@@ -555,7 +567,9 @@ impl Inner {
 
             eyre::ensure!(
                 // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-                canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
+                canonical
+                    .iter()
+                    .any(|entry| entry.block_hash() == parent_block_hash),
                 "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
                 canonical.last().map(BlockTreeEntry::block_hash)
@@ -1397,11 +1411,11 @@ impl Inner {
                 // Final check - do we have enough total proofs?
                 if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
-                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
-                            &tx_header.id,
-                            final_proofs.len(),
-                            number_of_ingress_proofs_total
-                        );
+                        "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                        &tx_header.id,
+                        final_proofs.len(),
+                        number_of_ingress_proofs_total
+                    );
                     continue;
                 }
 
@@ -1444,10 +1458,8 @@ impl Inner {
         let guard = self.block_tree_read_guard.read();
         let mut block = guard.get_block(&block_hash).cloned();
 
-        if !include_chunk {
-            if let Some(ref mut b) = block {
-                b.poa.chunk = None
-            }
+        if !include_chunk && let Some(ref mut b) = block {
+            b.poa.chunk = None
         }
         block
     }
@@ -2767,10 +2779,10 @@ impl MempoolState {
         let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
-        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx_id) {
-                return Ok(()); // Duplicate, already have this commitment
-            }
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address)
+            && existing_txs.iter().any(|t| t.id() == tx_id)
+        {
+            return Ok(()); // Duplicate, already have this commitment
         }
 
         // Check if we need to create a new address entry
@@ -2792,8 +2804,7 @@ impl MempoolState {
                     );
                     return Err(TxIngressError::MempoolFull(format!(
                         "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
-                        new_value,
-                        evict_total_value
+                        new_value, evict_total_value
                     )));
                 }
 
@@ -2887,9 +2898,7 @@ pub enum TxIngressError {
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
     /// The commitment transaction version is below minimum required after hardfork activation
-    #[error(
-        "Commitment transaction version {version} is below minimum required version {minimum}"
-    )]
+    #[error("Commitment transaction version {version} is below minimum required version {minimum}")]
     InvalidVersion { version: u8, minimum: u8 },
     /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
     #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]

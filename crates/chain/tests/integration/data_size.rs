@@ -8,7 +8,8 @@ use crate::utils::IrysNodeTest;
 
 #[tokio::test]
 async fn test_overlapping_data_sizes() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
 
     // Create a node

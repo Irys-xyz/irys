@@ -1,9 +1,9 @@
 use crate::{
+    MempoolServiceMessage,
     block_tree_service::BlockTreeServiceMessage,
-    block_validation::{prevalidate_block, PreValidationError},
+    block_validation::{PreValidationError, prevalidate_block},
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    MempoolServiceMessage,
 };
 
 use crate::metrics;
@@ -14,14 +14,14 @@ use irys_database::{
     db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
+    BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    get_ingress_proofs, BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, H256,
+    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced, get_ingress_proofs,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -31,7 +31,7 @@ use tokio::sync::{
     mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
 };
-use tracing::{debug, error, info, trace, warn, Instrument as _};
+use tracing::{Instrument as _, debug, info, trace, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -270,16 +270,16 @@ impl BlockDiscoveryService {
                 if let Err(ref e) = result {
                     metrics::record_block_discovery_error(e.metric_label());
                 }
-                if let Some(sender) = response {
-                    if let Err(e) = sender.send(result) {
-                        tracing::error!(
-                            "Block discovery sender error for block {} (height {}): {:?}",
-                            block_hash,
-                            block_height,
-                            e
-                        );
-                    };
-                }
+                if let Some(sender) = response
+                    && let Err(e) = sender.send(result)
+                {
+                    tracing::error!(
+                        "Block discovery sender error for block {} (height {}): {:?}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
+                };
             }
         };
 
@@ -509,7 +509,7 @@ impl BlockDiscoveryServiceInner {
                                 Err(e) => {
                                     return Err(BlockDiscoveryError::InternalError(
                                         BlockDiscoveryInternalError::DatabaseError(e),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -528,7 +528,12 @@ impl BlockDiscoveryServiceInner {
         {
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
-            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash);
+            debug!(
+                target = "preval-anchor",
+                "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}",
+                &new_block_header.height,
+                &new_block_header.block_hash
+            );
 
             // get from the block index
             let block_index = self.block_index_guard.read();
@@ -547,15 +552,20 @@ impl BlockDiscoveryServiceInner {
                     && block_index_item.block_hash != parent_block.previous_block_hash
                 {
                     // this indicates some sort of block index corruption
-                    panic!("Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
+                    panic!(
+                        "Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}",
+                        &parent_block.height - 1,
+                        &parent_block.previous_block_hash,
+                        &height,
+                        &block_index_item.block_hash
+                    )
                 }
                 valid_ingress_anchor_blocks.push(block_index_item.block_hash);
             }
         }
         trace!(
             "Valid ingress proof anchors for {}: {:?}",
-            &new_block_header.block_hash,
-            &valid_ingress_anchor_blocks
+            &new_block_header.block_hash, &valid_ingress_anchor_blocks
         );
 
         // validate anchors for submit, publish, commitments, and ingress proofs
@@ -685,11 +695,17 @@ impl BlockDiscoveryServiceInner {
                     let commitments_match = expected_commitment_tx.iter().eq(commitment_txs.iter());
                     if !commitments_match {
                         debug!(
-                                "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
-                                new_block_header.block_hash,
-                                expected_commitment_tx.iter().map(CommitmentTransaction::id).collect::<Vec<_>>(),
-                                commitment_txs.iter().map(CommitmentTransaction::id).collect::<Vec<_>>()
-                            );
+                            "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
+                            new_block_header.block_hash,
+                            expected_commitment_tx
+                                .iter()
+                                .map(CommitmentTransaction::id)
+                                .collect::<Vec<_>>(),
+                            commitment_txs
+                                .iter()
+                                .map(CommitmentTransaction::id)
+                                .collect::<Vec<_>>()
+                        );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
                         ));

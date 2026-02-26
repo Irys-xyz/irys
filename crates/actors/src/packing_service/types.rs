@@ -1,12 +1,12 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use irys_domain::StorageModule;
 use irys_types::PartitionChunkRange;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
-use super::{config::PackingConfig, PackingError, PackingResult};
+use super::{PackingError, PackingResult, config::PackingConfig};
 
 /// A validated packing request for a specific storage module and chunk range
 #[derive(Debug, Clone)]

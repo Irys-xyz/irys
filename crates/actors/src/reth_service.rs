@@ -4,7 +4,7 @@ use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    BlockHash, DatabaseProvider, RethPeerInfo, SendTraced as _, TokioServiceHandle, Traced, H256,
+    BlockHash, DatabaseProvider, H256, RethPeerInfo, SendTraced as _, TokioServiceHandle, Traced,
 };
 use reth::{
     network::{NetworkInfo as _, Peers as _},
@@ -16,7 +16,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, error, info, Instrument as _};
+use tracing::{Instrument as _, debug, error, info};
 
 #[derive(Debug)]
 pub struct RethService {

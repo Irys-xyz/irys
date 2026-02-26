@@ -1,6 +1,7 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
+    DataSyncServiceMessage, StorageModuleServiceMessage,
     block_discovery::BlockDiscoveryMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
@@ -10,7 +11,6 @@ use crate::{
     packing_service::{PackingRequest, PackingSender, PackingService},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
-    DataSyncServiceMessage, StorageModuleServiceMessage,
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
@@ -20,7 +20,7 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 
 #[derive(Debug, Clone)]

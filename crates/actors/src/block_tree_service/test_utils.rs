@@ -4,13 +4,13 @@ use std::{
 };
 
 use irys_domain::{
-    dummy_ema_snapshot, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
-    CommitmentSnapshot, EpochSnapshot,
+    BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,
+    dummy_ema_snapshot,
 };
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{
-    storage_pricing::TOKEN_SCALE, BlockBody, Config, IrysBlockHeader, IrysTokenPrice, SealedBlock,
-    H256,
+    BlockBody, Config, H256, IrysBlockHeader, IrysTokenPrice, SealedBlock,
+    storage_pricing::TOKEN_SCALE,
 };
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;

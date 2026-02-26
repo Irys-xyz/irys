@@ -14,8 +14,8 @@ use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
 
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
-use reth::revm::context::result::ExecutionResult;
 use reth::revm::context::TxEnv;
+use reth::revm::context::result::ExecutionResult;
 use reth::revm::primitives::hardfork::SpecId;
 use reth::revm::{Inspector, State};
 use reth_ethereum_primitives::Receipt;
@@ -78,9 +78,9 @@ impl<'db, DB, E> BlockExecutor for IrysBlockExecutor<'_, E>
 where
     DB: Database + 'db,
     E: Evm<
-        DB = &'db mut State<DB>,
-        Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-    >,
+            DB = &'db mut State<DB>,
+            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
+        >,
 {
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
@@ -173,10 +173,10 @@ impl<ChainSpec> IrysBlockAssembler<ChainSpec> {
 impl<F, ChainSpec> BlockAssembler<F> for IrysBlockAssembler<ChainSpec>
 where
     F: for<'a> BlockExecutorFactory<
-        ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
-        Transaction = TransactionSigned,
-        Receipt = Receipt,
-    >,
+            ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
+            Transaction = TransactionSigned,
+            Receipt = Receipt,
+        >,
     ChainSpec: EthChainSpec + EthereumHardforks,
 {
     type Block = Block<TransactionSigned>;
@@ -391,11 +391,11 @@ impl EvmFactory for IrysEvmFactory {
 }
 
 use revm::{
+    Context, ExecuteEvm as _, InspectEvm as _,
     context::Evm as RevmEvm,
     context_interface::result::ResultAndState,
-    handler::{instructions::EthInstructions, EthPrecompiles, PrecompileProvider},
-    interpreter::{interpreter::EthInterpreter, InterpreterResult},
-    Context, ExecuteEvm as _, InspectEvm as _,
+    handler::{EthPrecompiles, PrecompileProvider, instructions::EthInstructions},
+    interpreter::{InterpreterResult, interpreter::EthInterpreter},
 };
 
 use core::{
@@ -790,7 +790,10 @@ where
 
                 // ensure status changing logic as part of `commit_account_change` is sane
                 if state_acc.status != account.status {
-                    warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
+                    warn!(
+                        "Potentially invalid account status flags: from commit {:?}, from prev: {:?}",
+                        &state_acc.status, &account.status
+                    );
                 }
 
                 execution_result
@@ -1025,9 +1028,7 @@ where
             );
             return Err(Self::create_internal_error(format!(
                 "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
-                target,
-                fee,
-                account.info.balance
+                target, fee, account.info.balance
             )));
         }
 

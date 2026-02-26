@@ -14,16 +14,16 @@ use reth_payload_builder::EthBuiltPayload;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
-    error::InvalidPoolTransactionError,
-    identifier::{SenderId, TransactionId},
     BestTransactions, BestTransactionsAttributes, EthPooledTransaction, TransactionOrigin,
     TransactionPool, ValidPoolTransaction,
+    error::InvalidPoolTransactionError,
+    identifier::{SenderId, TransactionId},
 };
 use revm_primitives::FixedBytes;
 use std::collections::HashSet;
 use std::{collections::VecDeque, sync::Arc, time::Instant};
 
-use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderConfig};
+use reth_ethereum_payload_builder::{EthereumBuilderConfig, default_ethereum_payload};
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;

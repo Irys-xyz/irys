@@ -340,7 +340,8 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 #[tokio::test]
 async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
 
     // Configure a test network
@@ -485,10 +486,13 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 #[tokio::test]
 async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
     );
+    }
 
     initialize_tracing();
 
@@ -589,13 +593,13 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     peer2_node.wait_for_packing(seconds_to_wait).await;
 
     let mut rng = rand::thread_rng();
-    let chunks1: [[u8; 32]; 3] = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks1: [[u8; 32]; 3] = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data1: Vec<u8> = chunks1.concat();
 
-    let chunks2 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks2 = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data2: Vec<u8> = chunks2.concat();
 
-    let chunks3 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
+    let chunks3 = [[rng.r#gen(); 32], [rng.r#gen(); 32], [rng.r#gen(); 32]];
     let data3: Vec<u8> = chunks3.concat();
 
     // Post a transaction that should be gossiped to all peers
@@ -870,10 +874,13 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 async fn slow_heavy3_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
     );
+    }
     initialize_tracing();
 
     // config variables
@@ -1570,10 +1577,13 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 #[tokio::test]
 async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
-    );
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
+            "RUST_LOG",
+            "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
+        );
+    }
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -1924,7 +1934,8 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 #[tokio::test]
 async fn slow_heavy3_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
