@@ -338,10 +338,17 @@ impl Inner {
 
     /// Broadcasts the commitment transaction over gossip.
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
-        self.service_senders
+        if let Err(error) = self
+            .service_senders
             .gossip_broadcast
             .send_traced(GossipBroadcastMessageV2::from(tx.clone()))
-            .expect("Failed to send gossip data");
+        {
+            tracing::error!(
+                "Failed to send gossip data for commitment tx {}: {:?}",
+                tx.id(),
+                error
+            );
+        }
     }
 
     // checks recent_valid_tx, recent_invalid_tx, valid_commitment_tx, pending_pledges, and the database
