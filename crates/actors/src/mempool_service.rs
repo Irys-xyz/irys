@@ -3156,16 +3156,15 @@ impl MempoolService {
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
         async {
-            // Phase 1: drain queued messages concurrently using semaphore permits
+            // Phase 1: drain queued messages, spawning concurrently when permits are available
             while let Ok(traced) = self.msg_rx.try_recv() {
                 let (msg, parent_span) = traced.into_parts();
                 let msg_type = msg.variant_name();
                 let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
 
                 let inner = Arc::clone(&self.inner);
-                let semaphore = inner.message_handler_semaphore.clone();
-                match tokio::time::timeout(Duration::from_secs(10), semaphore.acquire_owned()).await {
-                    Ok(Ok(permit)) => {
+                match inner.message_handler_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => {
                         runtime_handle.spawn(async move {
                             let _permit = permit;
                             let task_info = format!("shutdown drain: {}", msg_type);
@@ -3178,13 +3177,22 @@ impl MempoolService {
                             }
                         }.instrument(span));
                     }
-                    Ok(Err(_)) => {
+                    Err(tokio::sync::TryAcquireError::Closed) => {
                         tracing::error!("Semaphore closed during shutdown drain");
                         break;
                     }
-                    Err(_) => {
-                        tracing::warn!("Timed out acquiring permit during shutdown drain, skipping remaining messages");
-                        break;
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        let task_info = format!("shutdown drain (inline): {}", msg_type);
+                        if let Err(e) = wait_with_progress(
+                            inner.handle_message(msg),
+                            20,
+                            &task_info,
+                        )
+                        .instrument(span)
+                        .await
+                        {
+                            tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                        }
                     }
                 }
             }

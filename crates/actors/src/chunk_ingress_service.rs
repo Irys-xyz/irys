@@ -306,45 +306,61 @@ impl ChunkIngressService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
-        // Phase 1: wait for in-flight spawned handlers to finish
+        // Phase 1: drain queued messages, spawning concurrently when permits are available
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, parent_span) = traced.into_parts();
+            let msg_type = msg.variant_name();
+            let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
+
+            let inner = Arc::clone(&self.inner);
+            match inner.message_handler_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    runtime_handle.spawn(
+                        async move {
+                            let _permit = permit;
+                            let task_info = format!("shutdown drain: {}", msg_type);
+                            wait_with_progress(inner.handle_message(msg), 20, &task_info).await;
+                        }
+                        .instrument(span),
+                    );
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    error!("Semaphore closed during chunk ingress shutdown drain");
+                    Self::send_timeout_errors(msg);
+                    break;
+                }
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    let task_info = format!("shutdown drain (inline): {}", msg_type);
+                    wait_with_progress(inner.handle_message(msg), 20, &task_info)
+                        .instrument(span)
+                        .await;
+                }
+            }
+        }
+
+        // Phase 2: acquire all permits to wait for in-flight + drain-spawned handlers
         let acquire_fut = self
             .inner
             .message_handler_semaphore
             .acquire_many(self.inner.max_concurrent_tasks);
-        let _all_permits = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
-            Ok(Ok(p)) => Some(p),
-            Ok(Err(_)) => {
-                error!("Semaphore closed during chunk ingress shutdown drain");
-                None
-            }
-            Err(_) => {
-                warn!(
-                    "Timed out waiting for in-flight chunk ingress handlers; proceeding without full drain"
-                );
-                None
-            }
-        };
+        let handlers_quiesced =
+            match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+                Ok(Ok(permits)) => {
+                    tracing::debug!("All chunk ingress handlers completed");
+                    let _all_permits = permits;
+                    true
+                }
+                Ok(Err(_)) => {
+                    error!("Semaphore closed during chunk ingress shutdown drain");
+                    false
+                }
+                Err(_) => {
+                    warn!("Timed out waiting for in-flight chunk ingress handlers; skipping flush");
+                    false
+                }
+            };
 
-        // Phase 2: drain queued messages with its own budget
-        let drain_fut = async {
-            while let Ok(traced) = self.msg_rx.try_recv() {
-                let (msg, parent_span) = traced.into_parts();
-                let msg_type = msg.variant_name();
-                let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
-                let task_info = format!("shutdown drain: {}", msg_type);
-                wait_with_progress(self.inner.handle_message(msg), 20, &task_info)
-                    .instrument(span)
-                    .await;
-            }
-        };
-        match tokio::time::timeout(Duration::from_secs(10), drain_fut).await {
-            Ok(()) => tracing::debug!("Processed remaining chunk ingress messages successfully"),
-            Err(_) => {
-                warn!("Timeout draining remaining chunk ingress messages, continuing shutdown")
-            }
-        }
-
-        if let Err(e) = self.inner.chunk_data_writer.flush().await {
+        if handlers_quiesced && let Err(e) = self.inner.chunk_data_writer.flush().await {
             warn!("Failed to flush chunk writer on shutdown: {:?}", e);
         }
 
