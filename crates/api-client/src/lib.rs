@@ -17,7 +17,6 @@ pub fn peer_base_url(peer: SocketAddr) -> String {
     format!("http://{}/v1", peer)
 }
 
-#[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
 pub enum Method {
     GET,
     POST,
@@ -102,7 +101,6 @@ pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 #[derive(Clone, Debug)]
 pub struct IrysApiClient {
     pub client: Client,
-
 }
 
 impl Default for IrysApiClient {
@@ -121,7 +119,6 @@ impl IrysApiClient {
                 .unwrap(),
         }
     }
-
 
     async fn make_request<RESBODY: DeserializeOwned, REQBODY: Serialize>(
         &self,
@@ -315,8 +312,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        self.get_transaction_url(&peer_base_url(peer), tx_id)
-            .await
+        self.get_transaction_url(&peer_base_url(peer), tx_id).await
     }
 
     async fn post_transaction(
