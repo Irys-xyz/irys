@@ -76,7 +76,7 @@ async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
     // init genesis with the saved state
     // this function has existing checks to make sure the state_root is correct
     // between the captured state and the actual computed state root
-    init_state(config, cs.clone(), dump_path).await?;
+    init_state(config, cs.clone(), dump_path, reth::tasks::Runtime::test()).await?;
 
     Ok(())
 }

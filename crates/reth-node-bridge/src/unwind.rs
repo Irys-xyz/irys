@@ -11,6 +11,7 @@ pub async fn unwind_to(
     config: &NodeConfig,
     chainspec: Arc<ChainSpec>,
     height: u64,
+    runtime: reth::tasks::Runtime,
 ) -> eyre::Result<()> {
     // hack to run unwind - uses standard EthereumNode since unwinding doesn't need Irys-specific logic
 
@@ -31,7 +32,6 @@ pub async fn unwind_to(
         )
     };
 
-    let runtime = reth::tasks::Runtime::test();
     cmd.execute::<EthereumNode, _, _>(components, runtime)
         .await?;
 

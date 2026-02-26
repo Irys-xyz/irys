@@ -1540,6 +1540,7 @@ impl IrysNode {
                 &config,
                 &service_senders,
                 runtime_handle.clone(),
+                task_exec.clone(),
             );
 
         // Spawn mempool service

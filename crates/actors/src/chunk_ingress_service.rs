@@ -143,6 +143,7 @@ impl ChunkIngressService {
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
+        task_executor: TaskExecutor,
     ) -> (TokioServiceHandle, ChunkIngressState) {
         info!("Spawning chunk ingress service");
 
@@ -181,7 +182,7 @@ impl ChunkIngressService {
                 inner: Arc::new(ChunkIngressServiceInner {
                     block_tree_read_guard,
                     config,
-                    exec: TaskExecutor::test(),
+                    exec: task_executor,
                     irys_db,
                     message_handler_semaphore: Arc::new(Semaphore::new(
                         max_concurrent_chunk_ingress_tasks,
