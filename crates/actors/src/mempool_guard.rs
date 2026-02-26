@@ -1,8 +1,8 @@
 use crate::mempool_service::AtomicMempoolState;
 use irys_database::{db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
-    app_state::DatabaseProvider, CommitmentTransaction, CommitmentTransactionMetadata,
-    DataTransactionHeader, DataTransactionMetadata, IrysTransactionId,
+    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
+    DataTransactionMetadata, IrysTransactionId, app_state::DatabaseProvider,
 };
 use std::collections::HashMap;
 

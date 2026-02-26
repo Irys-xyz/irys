@@ -2,7 +2,7 @@ use crate::mempool_service::TxIngressError;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeEntry, BlockTreeReadGuard};
 use irys_types::ingress::IngressProof;
-use irys_types::{app_state::DatabaseProvider, IrysTransactionCommon, H256};
+use irys_types::{H256, IrysTransactionCommon, app_state::DatabaseProvider};
 use tracing::{debug, warn};
 
 /// Resolves an anchor (block hash) to its height.
@@ -83,13 +83,19 @@ pub fn validate_anchor_for_inclusion(
     if old_enough && new_enough {
         Ok(true)
     } else if !old_enough {
-        warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+        warn!(
+            "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}"
+        );
         Ok(false)
     } else if !new_enough {
-        warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+        warn!(
+            "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}"
+        );
         Ok(false)
     } else {
-        eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+        eyre::bail!(
+            "SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}"
+        );
     }
 }
 
@@ -115,7 +121,10 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
 
     // these have to be inclusive so we handle txs near height 0 correctly
     let new_enough = anchor_height >= min_anchor_height;
-    debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
+    debug!(
+        "ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}",
+        &ingress_proof.id()
+    );
     // note: we don't need old_enough as we're part of the block header
     // so there's no need to go through the mempool
     // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -123,7 +132,10 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
         Ok(true)
     } else {
         // TODO: recover the signer's address here? (or compute an ID)
-        warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+        warn!(
+            "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
+            &ingress_proof.data_root, &ingress_proof.signature
+        );
         Ok(false)
     }
 }

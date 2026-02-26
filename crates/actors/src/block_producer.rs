@@ -27,8 +27,8 @@ use irys_reth::{
     IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
     compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
 };
-use irys_reth_node_bridge::node::NodeProvider;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::SystemLedger;
 use irys_types::{

@@ -1,6 +1,6 @@
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::BlockTreeReadGuard;
-use irys_types::{DatabaseProvider, IrysBlockHeader, H256};
+use irys_types::{DatabaseProvider, H256, IrysBlockHeader};
 
 /// Look up a block header from the in-memory block tree, falling back to the database.
 /// Set `include_chunk` to false to strip the PoA chunk field.

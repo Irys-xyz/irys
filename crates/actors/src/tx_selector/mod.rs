@@ -3,9 +3,9 @@ pub(crate) mod helpers;
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
-use crate::mempool_service::{validate_commitment_transaction, AtomicMempoolState, MempoolTxs};
+use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::CachedDataRoot;
@@ -14,19 +14,19 @@ use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
-    get_optimistic_chain, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
+    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_optimistic_chain,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
-use irys_types::{app_state::DatabaseProvider, Config, IrysTransactionCommon as _, H256, U256};
 use irys_types::{
     BlockHash, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
 };
+use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
 use reth::rpc::types::BlockId;
-use reth_db::cursor::*;
 use reth_db::Database as _;
+use reth_db::cursor::*;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, instrument, trace, warn};
 
@@ -69,57 +69,58 @@ pub async fn select_best_txs(
         epoch_snapshot,
         ema_snapshot,
         block_timestamp_secs,
-    ) =
-        {
-            let tree = ctx.block_tree.read();
+    ) = {
+        let tree = ctx.block_tree.read();
 
-            // Get the canonical chain for use in get_publish_txs_and_proofs
-            let (canonical, _) = tree.get_canonical_chain();
+        // Get the canonical chain for use in get_publish_txs_and_proofs
+        let (canonical, _) = tree.get_canonical_chain();
 
-            eyre::ensure!(
+        eyre::ensure!(
             // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-            canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
+            canonical
+                .iter()
+                .any(|entry| entry.block_hash() == parent_block_hash),
             "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
             parent_block_hash,
             canonical.last().map(BlockTreeEntry::block_hash)
         );
 
-            let block = tree
-                .get_block(&parent_block_hash)
-                .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
+        let block = tree
+            .get_block(&parent_block_hash)
+            .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
 
-            // Extract only the data we need before the tree guard is dropped
-            let block_height = block.height;
-            let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
-            // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
-            let block_timestamp_secs = block.timestamp_secs();
+        // Extract only the data we need before the tree guard is dropped
+        let block_height = block.height;
+        let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
+        // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
+        let block_timestamp_secs = block.timestamp_secs();
 
-            let ema_snapshot = tree
-                .get_ema_snapshot(&parent_block_hash)
-                .ok_or_else(|| eyre!("EMA snapshot not found for block {:?}", parent_block_hash))?;
-            let epoch_snapshot = tree.get_epoch_snapshot(&parent_block_hash).ok_or_else(|| {
-                eyre!("Epoch snapshot not found for block {:?}", parent_block_hash)
-            })?;
-            let commitment_snapshot =
-                tree.get_commitment_snapshot(&parent_block_hash)
-                    .map_err(|e| {
-                        eyre!(
-                            "Failed to get commitment snapshot for block {:?}: {}",
-                            parent_block_hash,
-                            e
-                        )
-                    })?;
+        let ema_snapshot = tree
+            .get_ema_snapshot(&parent_block_hash)
+            .ok_or_else(|| eyre!("EMA snapshot not found for block {:?}", parent_block_hash))?;
+        let epoch_snapshot = tree
+            .get_epoch_snapshot(&parent_block_hash)
+            .ok_or_else(|| eyre!("Epoch snapshot not found for block {:?}", parent_block_hash))?;
+        let commitment_snapshot =
+            tree.get_commitment_snapshot(&parent_block_hash)
+                .map_err(|e| {
+                    eyre!(
+                        "Failed to get commitment snapshot for block {:?}: {}",
+                        parent_block_hash,
+                        e
+                    )
+                })?;
 
-            (
-                canonical,
-                block_height,
-                evm_block_id,
-                commitment_snapshot,
-                epoch_snapshot,
-                ema_snapshot,
-                block_timestamp_secs,
-            )
-        };
+        (
+            canonical,
+            block_height,
+            evm_block_id,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+            block_timestamp_secs,
+        )
+    };
 
     let current_height = parent_block_height;
     let next_block_height = parent_block_height + 1;
@@ -931,11 +932,11 @@ async fn get_publish_txs_and_proofs(
             // Final check - do we have enough total proofs?
             if final_proofs.len() < number_of_ingress_proofs_total as usize {
                 info!(
-                        "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
-                        &tx_header.id,
-                        final_proofs.len(),
-                        number_of_ingress_proofs_total
-                    );
+                    "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                    &tx_header.id,
+                    final_proofs.len(),
+                    number_of_ingress_proofs_total
+                );
                 continue;
             }
 
