@@ -319,10 +319,7 @@ impl Inner {
             }
 
             MempoolServiceMessage::GetState(response) => {
-                if let Err(e) = response
-                    .send(self.mempool_state.clone())
-                    .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
-                {
+                if let Err(e) = response.send(self.mempool_state.clone()) {
                     tracing::error!("response.send() error: {:?}", e);
                 }
             }
@@ -420,8 +417,7 @@ impl Inner {
         let base_path = self.config.node_config.mempool_dir();
 
         let commitment_tx_path = base_path.join("commitment_tx");
-        fs::create_dir_all(commitment_tx_path.clone())
-            .expect("to create the mempool/commitment_tx dir");
+        fs::create_dir_all(commitment_tx_path.clone())?;
         let commitment_hash_map = self.mempool_state.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
@@ -433,17 +429,17 @@ impl Inner {
             }
 
             // If not, write it to  {mempool_dir}/commitment_tx/{txid}.json
-            let json = serde_json::to_string(tx).unwrap();
+            let json = serde_json::to_string(tx)?;
             debug!("{}", json);
-            debug!("{}", tx_path.to_str().unwrap());
+            debug!("{}", tx_path.display());
 
-            let mut file = get_atomic_file(tx_path).unwrap();
+            let mut file = get_atomic_file(tx_path)?;
             file.write_all(json.as_bytes())?;
             file.commit()?;
         }
 
         let storage_tx_path = base_path.join("storage_tx");
-        fs::create_dir_all(storage_tx_path.clone()).expect("to create the mempool/storage_tx dir");
+        fs::create_dir_all(storage_tx_path.clone())?;
         let storage_hash_map = self.get_all_storage_tx().await;
         for tx in storage_hash_map.values() {
             // Create a filepath for this transaction
@@ -455,9 +451,9 @@ impl Inner {
             }
 
             // If not, write it to  {mempool_dir}/storage_tx/{txid}.json
-            let json = serde_json::to_string(tx).unwrap();
+            let json = serde_json::to_string(tx)?;
 
-            let mut file = get_atomic_file(tx_path).unwrap();
+            let mut file = get_atomic_file(tx_path)?;
             file.write_all(json.as_bytes())?;
             file.commit()?;
         }
@@ -601,9 +597,14 @@ pub enum PromotionStatus {
 
 /// Mempool state. All methods on this structure are quick utility methods. No function acquires
 /// more than one lock, and no function makes a call to any other function of the
-/// AtomicMempoolState structure, eliminating the possibility of deadlocks. Although this structure
-/// has private read and write methods, these should not be used outside the AtomicMempoolState
-/// under any condition.
+/// AtomicMempoolState structure, eliminating the possibility of deadlocks.
+///
+/// **Exception**: `write_for_reorg()` returns a raw write guard for callers that need to hold
+/// the lock across multiple operations (e.g., reorg revalidation in `lifecycle.rs`). Callers
+/// holding this guard must NOT call any other `AtomicMempoolState` method.
+///
+/// Although this structure has private read and write methods, these should not be used outside
+/// the AtomicMempoolState under any condition.
 #[derive(Debug, Clone)]
 pub struct AtomicMempoolState(Arc<RwLock<MempoolState>>);
 
