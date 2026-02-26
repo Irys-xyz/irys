@@ -209,8 +209,9 @@ impl Inner {
         };
 
         // Uses a snapshot-evaluate-remove pattern. The TOCTOU window between
-        // snapshot and removal is benign: the mempool actor processes messages
-        // serially, so no concurrent mutations can occur between phases.
+        // snapshot and removal is benign: transactions added between snapshot
+        // and removal will be evaluated on the next prune cycle, and removing
+        // a transaction that was already removed is a no-op (HashMap::remove).
 
         // Phase 1: Snapshot all txs under a single read lock each
         let data_txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
@@ -587,9 +588,9 @@ impl Inner {
             .ok_or_else(|| eyre::eyre!("new fork tx block map missing Publish ledger"))?;
         for txid in published_in_both.iter() {
             if let Some(mut tx) = published_tx_from_blocks.remove(txid) {
-                let promoted_in_block = publish_tx_block_map
-                    .get(txid)
-                    .ok_or_else(|| eyre::eyre!("new fork publish_tx_block_map missing tx {}", txid))?;
+                let promoted_in_block = publish_tx_block_map.get(txid).ok_or_else(|| {
+                    eyre::eyre!("new fork publish_tx_block_map missing tx {}", txid)
+                })?;
 
                 let header = promoted_in_block.header();
                 let publish_ledger = &header.data_ledgers[DataLedger::Publish];
