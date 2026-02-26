@@ -31,7 +31,7 @@ use tracing::{debug, error};
 #[ignore = "flaky, non critical function test"]
 #[tokio::test]
 async fn slow_heavy_test_data_sync_with_different_peer_performance() {
-    // SAFETY: Test-only code, no concurrent env access.
+    // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug,storage=off") };
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 

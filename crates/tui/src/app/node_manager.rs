@@ -31,7 +31,7 @@ impl NodeManager {
             match api_client.get_node_info_url(&url, &cancel_token).await {
                 Ok(info) => {
                     if state.is_recording
-                        && let Some(db_writer) = &database_writer
+                        && let Some(db_writer) = database_writer
                     {
                         let raw_json = serde_json::to_string(&info).unwrap_or_default();
                         if let Err(e) = db_writer.record_node_info(

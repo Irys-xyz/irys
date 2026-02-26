@@ -82,7 +82,7 @@ impl RefreshManager {
 
             // Record to database if recording is enabled
             if state.is_recording
-                && let Some(db_writer) = &database_writer
+                && let Some(db_writer) = database_writer
             {
                 Self::record_node_data(&url, &node_data, db_writer, state);
             }
@@ -152,7 +152,7 @@ impl RefreshManager {
             {
                 // Record to database if recording is enabled
                 if state.is_recording
-                    && let Some(db_writer) = &database_writer
+                    && let Some(db_writer) = database_writer
                 {
                     let raw_json = serde_json::to_string(&mempool_status).unwrap_or_default();
                     if let Err(e) = db_writer.record_mempool_status(
@@ -192,7 +192,7 @@ impl RefreshManager {
             if let Ok(mining_info) = api_client.get_mining_info_url(&url, &cancel_token).await {
                 // Record to database if recording is enabled
                 if state.is_recording
-                    && let Some(db_writer) = &database_writer
+                    && let Some(db_writer) = database_writer
                 {
                     let raw_json = serde_json::to_string(&mining_info).unwrap_or_default();
                     if let Err(e) = db_writer.record_mining_info(
@@ -228,7 +228,7 @@ impl RefreshManager {
             {
                 // Record to database if recording is enabled
                 if state.is_recording
-                    && let Some(db_writer) = &database_writer
+                    && let Some(db_writer) = database_writer
                 {
                     let raw_json = serde_json::to_string(&fork_info).unwrap_or_default();
 

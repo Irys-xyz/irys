@@ -2317,9 +2317,8 @@ pub async fn data_txs_are_valid(
     if publish_txs.is_empty()
         && let Some(proofs) = &publish_ledger.proofs
     {
-        let proof_count = proofs.len();
         return Err(PreValidationError::PublishLedgerProofCountMismatch {
-            proof_count,
+            proof_count: proofs.len(),
             tx_count: publish_txs.len(),
         });
     }

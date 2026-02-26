@@ -15,7 +15,7 @@ use irys_types::{
     DataTransactionMetadata, IrysBlockHeader,
 };
 use reth_codecs::Compact;
-use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
+use reth_db::{DatabaseError, TableSet, table::DupSort, tables};
 use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};

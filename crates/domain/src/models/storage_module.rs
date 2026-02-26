@@ -2119,7 +2119,7 @@ mod tests {
             ],
         }];
 
-        // SAFETY: This is test-only code running in a single-threaded context.
+        // SAFETY: test is single-threaded; setting env var before any tracing init.
         unsafe { std::env::set_var("RUST_LOG", "debug") };
         let tmp_dir = setup_tracing_and_temp_dir(Some("pending_writes_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
@@ -2629,7 +2629,7 @@ mod tests {
     // note: this requires you to change the submodule database args to set the growth and shrink step to 1 and 2 respectively to produce accurate results
     // IT ALSO KEEPS THE TEST DIR
     fn mdbx_metadata_size_test() -> eyre::Result<()> {
-        // SAFETY: This is test-only code running in a single-threaded context.
+        // SAFETY: test is single-threaded; setting env var before any tracing init.
         unsafe { std::env::set_var("RUST_LOG", "info") };
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), true);
 

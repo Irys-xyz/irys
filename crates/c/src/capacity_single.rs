@@ -72,7 +72,7 @@ pub fn compute_entropy_chunk(
 #[cfg(test)]
 mod tests {
     use crate::{
-        capacity::{compute_entropy_chunk, compute_seed_hash, DATA_CHUNK_SIZE},
+        capacity::{DATA_CHUNK_SIZE, compute_entropy_chunk, compute_seed_hash},
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_types::ConsensusConfig;

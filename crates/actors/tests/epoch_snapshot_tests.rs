@@ -257,7 +257,7 @@ async fn add_slots_test() {
 
 #[tokio::test]
 async fn unique_addresses_per_slot_test() {
-    // SAFETY: Test-only code, no concurrent env access.
+    // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
 
     let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
@@ -930,7 +930,7 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[tokio::test]
 async fn partitions_assignment_determinism_test() {
-    // SAFETY: Test-only code, no concurrent env access.
+    // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
     let base_path = tmp_dir.path().to_path_buf();

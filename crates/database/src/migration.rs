@@ -1,9 +1,9 @@
 use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
 
 use crate::reth_db::{
+    Database as _, DatabaseEnv, DatabaseError,
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
-    Database as _, DatabaseEnv, DatabaseError,
 };
 
 use std::fmt::Debug;
@@ -15,7 +15,7 @@ const CURRENT_DB_VERSION: u32 = 2;
 // Old DataTransactionHeaderV1 structure used in migration modules
 // This is kept for historical migration purposes only
 mod old_structures {
-    use irys_types::{transaction::BoundedFee, Arbitrary, IrysAddress, IrysSignature, H256};
+    use irys_types::{Arbitrary, H256, IrysAddress, IrysSignature, transaction::BoundedFee};
     use reth_codecs::Compact;
     use serde::{Deserialize, Serialize};
 
@@ -198,8 +198,8 @@ mod v1_to_v2 {
     };
     use irys_types::{
         DataLedger, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, IrysBlockHeader,
-        SystemLedger, H256,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, IrysBlockHeader,
+        SystemLedger,
     };
     use reth_db::cursor::DbCursorRO as _;
 
@@ -255,7 +255,9 @@ mod v1_to_v2 {
     where
         TX: DbTxMut + DbTx + Debug,
     {
-        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata and filling metadata from block headers");
+        debug!(
+            "Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata and filling metadata from block headers"
+        );
 
         // Step 1: Migrate existing transaction headers (promoted_height from old format)
         let mut old_cursor = tx.cursor_read::<old_structures::IrysDataTxHeadersOld>()?;
@@ -404,16 +406,13 @@ mod v1_to_v2 {
 
         debug!(
             "Processed {} blocks, created {} data tx metadata entries, {} commitment tx metadata entries",
-            blocks_processed,
-            data_tx_metadata_updates,
-            commitment_tx_metadata_updates
+            blocks_processed, data_tx_metadata_updates, commitment_tx_metadata_updates
         );
 
         crate::set_database_schema_version(tx, 2)?;
         debug!(
             "Migration from v1 to v2 completed: migrated {} transaction headers, processed {} blocks",
-            total_migrated,
-            blocks_processed
+            total_migrated, blocks_processed
         );
         Ok(())
     }
@@ -446,7 +445,9 @@ pub fn check_db_version_and_run_migrations_if_needed(
             }
         }
     } else {
-        debug!("No DB schema version information found in the new database. Applying initial migration from v0 to v1.");
+        debug!(
+            "No DB schema version information found in the new database. Applying initial migration from v0 to v1."
+        );
         old_db.update_eyre(|tx_old| {
             new_db.update_eyre(|tx_new| {
                 v0_to_v1::migrate(tx_old, tx_new)?;
@@ -481,8 +482,8 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
-        Base64, ChunkPathHash, DataRoot, DataTransactionHeader, IrysAddress, IrysBlockHeader,
-        TxChunkOffset, UnixTimestamp, H256,
+        Base64, ChunkPathHash, DataRoot, DataTransactionHeader, H256, IrysAddress, IrysBlockHeader,
+        TxChunkOffset, UnixTimestamp,
     };
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::{Database as _, DatabaseError};

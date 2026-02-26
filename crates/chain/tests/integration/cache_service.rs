@@ -8,7 +8,6 @@ use irys_database::{
     tables::{CachedChunks, IngressProofs},
     walk_all,
 };
-use irys_testing_utils::initialize_tracing;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::transaction::DbTxMut as _;
@@ -16,11 +15,8 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
 
-#[tokio::test]
-async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
-    initialize_tracing();
-
+#[test_log::test(tokio::test)]
+async fn heavy3_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;

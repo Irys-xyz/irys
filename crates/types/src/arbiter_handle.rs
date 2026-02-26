@@ -1,8 +1,7 @@
 use futures::future::{BoxFuture, FutureExt as _};
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tokio::task::JoinHandle as TokioJoinHandle;
 
 enum ServiceSetState {
@@ -59,7 +58,9 @@ impl ServiceSet {
                 for service in services_to_shutdown {
                     let name = service.name().to_string();
                     tracing::info!("Shutting down service: {}", name);
-                    service.stop_and_join().await;
+                    service
+                        .stop_and_join_with_timeout(Duration::from_secs(10))
+                        .await;
                     tracing::info!("Service {} shut down", name);
                 }
             }
@@ -176,6 +177,23 @@ impl TokioServiceHandle {
             }
         }
     }
+
+    pub async fn stop_and_join_with_timeout(self, timeout: Duration) {
+        self.shutdown_signal.fire();
+        let abort_handle = self.handle.abort_handle();
+        match tokio::time::timeout(timeout, self.handle).await {
+            Ok(Ok(())) => tracing::debug!("Service '{}' shut down", self.name),
+            Ok(Err(e)) => tracing::error!("Service '{}' panicked: {}", self.name, e),
+            Err(_) => {
+                tracing::error!(
+                    "Service '{}' timed out after {:?}, aborting",
+                    self.name,
+                    timeout
+                );
+                abort_handle.abort();
+            }
+        }
+    }
 }
 
 impl Future for TokioServiceHandle {
@@ -196,46 +214,11 @@ impl Future for TokioServiceHandle {
     }
 }
 
-#[derive(Debug)]
-pub struct CloneableJoinHandle<T> {
-    inner: Arc<Mutex<Option<JoinHandle<T>>>>,
-}
-
-impl<T> Clone for CloneableJoinHandle<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl<T> CloneableJoinHandle<T> {
-    pub fn new(handle: JoinHandle<T>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(handle))),
-        }
-    }
-
-    pub fn join(&self) -> thread::Result<T> {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(handle) = guard.take() {
-            handle.join()
-        } else {
-            Err(Box::new("Thread handle already consumed!"))
-        }
-    }
-}
-
-impl<T> From<JoinHandle<T>> for CloneableJoinHandle<T> {
-    fn from(handle: JoinHandle<T>) -> Self {
-        Self::new(handle)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
 

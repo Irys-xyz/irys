@@ -55,7 +55,9 @@ fn link_cuda() {
         }
 
         if !found {
-            println!("cargo:warning=CUDA library path not found in standard locations. Set CUDA_PATH or add -L flag manually.");
+            println!(
+                "cargo:warning=CUDA library path not found in standard locations. Set CUDA_PATH or add -L flag manually."
+            );
         }
 
         println!("cargo:rustc-link-lib=cudart");

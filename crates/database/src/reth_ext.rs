@@ -1,7 +1,7 @@
 use reth_db::{
+    DatabaseEnv, TableSet,
     metrics::{DatabaseEnvMetrics, FxHashMap, Labels, Operation, OperationMetrics},
     table::TableInfo,
-    DatabaseEnv, TableSet,
 };
 use strum::{EnumCount as _, IntoEnumIterator as _};
 
