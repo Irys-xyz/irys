@@ -291,6 +291,11 @@ pub struct IrysNodeTest<T = ()> {
     restart_http_ports: bool,
     restart_gossip_ports: bool,
     restart_reth_ports: bool,
+    /// Dedicated multi-thread runtime for test isolation.
+    /// Created on start(), dropped on stop().
+    /// Held for its `Drop` impl — dropping the runtime shuts down all spawned tasks.
+    #[expect(dead_code, reason = "held for Drop: dropping shuts down spawned tasks")]
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl IrysNodeTest<()> {
@@ -327,6 +332,7 @@ impl IrysNodeTest<()> {
             restart_http_ports,
             restart_gossip_ports,
             restart_reth_ports,
+            runtime: None,
         }
     }
 
@@ -366,8 +372,14 @@ impl IrysNodeTest<()> {
                 }
             };
 
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build dedicated tokio runtime");
+
         let node = IrysNode::new_with_listeners(cfg, http_listener, gossip_listener)
-            .expect("Failed to create IrysNode");
+            .expect("Failed to create IrysNode")
+            .with_runtime_handle(runtime.handle().clone());
 
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
@@ -378,6 +390,7 @@ impl IrysNodeTest<()> {
             restart_http_ports: self.restart_http_ports,
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
+            runtime: Some(runtime),
         }
     }
 
@@ -2449,6 +2462,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             restart_http_ports: self.restart_http_ports,
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
+            runtime: None,
         }
     }
 

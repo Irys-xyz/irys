@@ -84,7 +84,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    runtime::{Handle, Runtime},
+    runtime::Handle,
     sync::{
         mpsc,
         mpsc::{UnboundedReceiver, UnboundedSender},
@@ -117,8 +117,6 @@ pub struct IrysNodeCtx {
     pub shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
     // JoinHandle for the lifecycle task (replaces reth_done_rx)
     pub lifecycle_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<ShutdownReason>>>>,
-    // Keeps the 2nd tokio runtime alive for the lifetime of the node
-    pub tokio_runtime: Option<Arc<Runtime>>,
     // Top-level cancellation token for coordinated shutdown
     shutdown_token: CancellationToken,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
@@ -378,6 +376,9 @@ pub struct IrysNode {
     pub http_listener: TcpListener,
     pub gossip_listener: TcpListener,
     pub irys_db: DatabaseProvider,
+    /// Tokio runtime handle for spawning async tasks.
+    /// Defaults to the caller's runtime; override with `with_runtime_handle()` for test isolation.
+    runtime_handle: Handle,
 }
 
 /// Timeout for stopping the API server during graceful shutdown.
@@ -461,7 +462,15 @@ impl IrysNode {
             http_listener,
             gossip_listener,
             irys_db,
+            runtime_handle: Handle::current(),
         })
+    }
+
+    /// Override the runtime handle used for spawning async tasks.
+    /// Use this in tests to pass a dedicated multi-thread runtime handle.
+    pub fn with_runtime_handle(mut self, handle: Handle) -> Self {
+        self.runtime_handle = handle;
+        self
     }
 
     async fn get_or_create_genesis_info(
@@ -821,13 +830,11 @@ impl IrysNode {
             );
         }
 
-        // all async tasks will be run on a new tokio runtime
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
+        let runtime_handle = self.runtime_handle.clone();
+
         let reth_runtime = RuntimeBuilder::new(
             RuntimeConfig::default()
-                .with_tokio(TokioConfig::existing_handle(tokio_runtime.handle().clone())),
+                .with_tokio(TokioConfig::existing_handle(runtime_handle.clone())),
         )
         .build()?;
 
@@ -840,7 +847,7 @@ impl IrysNode {
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = reth_runtime.clone();
 
-        let lifecycle_handle = tokio_runtime.spawn(
+        let lifecycle_handle = runtime_handle.spawn(
             Self::node_lifecycle(
                 self.config.clone(),
                 Arc::clone(&latest_block),
@@ -856,18 +863,16 @@ impl IrysNode {
                 irys_db,
                 block_index,
                 self.gossip_listener,
-                tokio_runtime.handle().clone(),
+                runtime_handle.clone(),
                 shutdown_token.clone(),
             )
             .in_current_span(),
         );
 
-        let handle = tokio_runtime.handle().clone();
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.lifecycle_handle = Arc::new(std::sync::Mutex::new(Some(lifecycle_handle)));
         ctx.shutdown_sender = shutdown_tx;
         ctx.shutdown_token = shutdown_token;
-        ctx.tokio_runtime = Some(Arc::new(tokio_runtime));
         let node_config = &ctx.config.node_config;
 
         // Log startup information
@@ -909,7 +914,7 @@ impl IrysNode {
             let latest_block = Arc::clone(&latest_block);
             let sync_state = ctx.sync_state.clone();
             // this is a task as we don't want to block startup, & it lets us gossip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
-            handle.spawn(async move {
+            runtime_handle.spawn(async move {
                 // wait for sync to complete so gossiped blocks are pre-validated
                 let _ = sync_state.wait_for_sync().await;
                 // Wait until block events quiesce (no events for 500 ms, max 10 s).
@@ -1664,7 +1669,6 @@ impl IrysNode {
             packing_waiter: packing_handle.waiter(),
             shutdown_sender: tokio::sync::mpsc::channel::<ShutdownReason>(1).0,
             lifecycle_handle: Arc::new(std::sync::Mutex::new(None)),
-            tokio_runtime: None,
             shutdown_token: shutdown_token.clone(),
             block_tree_guard: block_tree_guard.clone(),
             config: config.clone(),
