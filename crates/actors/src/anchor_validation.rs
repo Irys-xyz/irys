@@ -20,8 +20,6 @@ pub fn get_anchor_height(
 ) -> eyre::Result<Option<u64>> {
     // check the block tree, then DB
     if let Some(height) = {
-        // in a block so rust doesn't complain about it being held across an await point
-        // I suspect if let Some desugars to something that lint doesn't like
         let guard = block_tree.read();
         if canonical {
             guard
@@ -93,8 +91,8 @@ pub fn validate_anchor_for_inclusion(
         );
         Ok(false)
     } else {
-        eyre::bail!(
-            "SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}"
+        unreachable!(
+            "exhaustive boolean check: tx_id={tx_id} anchor={anchor} height={anchor_height} min={min_anchor_height} max={max_anchor_height}"
         );
     }
 }
