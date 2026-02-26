@@ -90,10 +90,17 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
 
 pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 
-/// Real implementation of the API client that makes actual HTTP requests
+/// Real implementation of the API client that makes actual HTTP requests.
+///
+/// By default, requests are sent as `http://{peer}/v1{path}`. Use
+/// [`IrysApiClient::with_base_url`] to override the base URL — this is
+/// necessary for HTTPS endpoints where the original hostname must be
+/// preserved
 #[derive(Clone, Debug)]
 pub struct IrysApiClient {
     pub client: Client,
+    /// When set, used as the URL prefix instead of `http://{peer}/v1`.
+    base_url: Option<String>,
 }
 
 impl Default for IrysApiClient {
@@ -110,6 +117,22 @@ impl IrysApiClient {
                 .read_timeout(CLIENT_TIMEOUT)
                 .build()
                 .unwrap(),
+            base_url: None,
+        }
+    }
+
+    /// Create a client that sends requests to the given base URL
+    /// (e.g. `https://testnet-rpc.irys.xyz/v1`) instead of deriving
+    /// it from the peer `SocketAddr`.
+    pub fn with_base_url(base_url: String) -> Self {
+        let base_url = base_url.strip_suffix('/').unwrap_or(&base_url).to_string();
+        Self {
+            client: Client::builder()
+                .timeout(CLIENT_TIMEOUT)
+                .read_timeout(CLIENT_TIMEOUT)
+                .build()
+                .unwrap(),
+            base_url: Some(base_url),
         }
     }
 
@@ -120,7 +143,10 @@ impl IrysApiClient {
         path: &str,
         body: Option<&REQBODY>,
     ) -> Result<Option<RESBODY>> {
-        let url = format!("http://{}/v1{}", peer, path);
+        let url = match &self.base_url {
+            Some(base) => format!("{}{}", base, path),
+            None => format!("http://{}/v1{}", peer, path),
+        };
 
         let mut request = match method {
             Method::GET => self.client.get(&url),
