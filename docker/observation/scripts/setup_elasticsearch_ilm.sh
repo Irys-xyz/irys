@@ -72,10 +72,10 @@ fi
 echo "Index template created successfully"
 echo ""
 
-# Create the initial irys-logs index
-echo "Creating initial 'irys-logs' index..."
+# Create the initial irys-logs-000001 index with write alias
+echo "Creating initial 'irys-logs-000001' index with 'irys-logs' write alias..."
 response=$(sed "s/__ES_REPLICAS__/$ES_REPLICAS/g" "$CONFIG_DIR/index-settings.json" | \
-  curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs" \
+  curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs-000001" \
     -H 'Content-Type: application/json' \
     -d @-)
 http_code=$(echo "$response" | tail -n1)

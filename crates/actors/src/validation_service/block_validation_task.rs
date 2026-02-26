@@ -319,31 +319,28 @@ impl BlockValidationTask {
             let block_index_guard = self.service_inner.block_index_guard.clone();
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
-            tokio::task::spawn_blocking(move || {
-                if skip_vdf_validation {
-                    debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
-                    return Ok(ValidationResult::Valid);
-                }
-                poa_is_valid(
-                    &poa,
-                    &block_index_guard,
-                    &parent_epoch_snapshot,
-                    &consensus_config,
-                    &miner_address,
-                )
-                .inspect_err(|err| tracing::error!(
+            {
+                let poa_span = tracing::info_span!(
+                    "poa_validation",
                     block.hash = %block_hash,
-                    block.height = %block_height,
-                    custom.error = ?err,
-                    "poa validation failed"
-                ))
-                .map(|()| ValidationResult::Valid)
-            })
-            .instrument(tracing::info_span!(
-                "poa_validation",
-                block.hash = %block_hash,
-                block.height = %block_height
-            ))
+                    block.height = %block_height
+                );
+                tokio::task::spawn_blocking(move || {
+                    let _guard = poa_span.enter();
+                    if skip_vdf_validation {
+                        debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
+                        return Ok(ValidationResult::Valid);
+                    }
+                    poa_is_valid(
+                        &poa,
+                        &block_index_guard,
+                        &parent_epoch_snapshot,
+                        &consensus_config,
+                        &miner_address,
+                    )
+                    .map(|()| ValidationResult::Valid)
+                })
+            }
         };
 
         let poa_task = async move {
@@ -438,6 +435,8 @@ impl BlockValidationTask {
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
+        let seeds_block_hash = self.sealed_block.header().block_hash;
+        let seeds_block_height = self.sealed_block.header().height;
         let seeds_validation_task = async move {
             let binding = self.block_tree_guard.read();
             let previous_block =
@@ -458,7 +457,12 @@ impl BlockValidationTask {
                 previous_block,
                 vdf_reset_frequency,
             )
-        };
+        }
+        .instrument(tracing::info_span!(
+            "seeds_validation",
+            block.hash = %seeds_block_hash,
+            block.height = %seeds_block_height
+        ));
 
         // Commitment transaction ordering validation
         let sealed_block_for_commitment = self.sealed_block.clone();

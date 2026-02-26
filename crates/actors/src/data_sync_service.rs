@@ -618,7 +618,7 @@ impl DataSyncService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "data_sync_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 

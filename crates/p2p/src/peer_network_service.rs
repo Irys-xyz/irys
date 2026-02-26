@@ -23,7 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -371,38 +371,43 @@ impl PeerNetworkService {
             let client = gossip_client.clone();
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
-            tokio::spawn(async move {
-                match client
-                    .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
-                    .await
-                {
-                    Ok(true) => {
-                        debug!("Peer {:?} is online", peer_id);
-                        inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
-                    }
-                    Ok(false) => {
-                        debug!("Peer {:?} is offline", peer_id);
-                        inner_clone.decrease_peer_score(
-                            &peer_id,
-                            ScoreDecreaseReason::Offline("Health check returned false".to_string()),
-                        );
-                    }
-                    Err(GossipClientError::HealthCheck(url, status)) => {
-                        let message = format!(
-                            "Peer {:?} ({}) health check failed with status {}",
-                            peer_id, url, status
-                        );
-                        debug!("{message}");
-                        inner_clone.decrease_peer_score(
-                            &peer_id,
-                            ScoreDecreaseReason::NetworkError(message),
-                        );
-                    }
-                    Err(err) => {
-                        error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
+            tokio::spawn(
+                async move {
+                    match client
+                        .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
+                        .await
+                    {
+                        Ok(true) => {
+                            debug!("Peer {:?} is online", peer_id);
+                            inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
+                        }
+                        Ok(false) => {
+                            debug!("Peer {:?} is offline", peer_id);
+                            inner_clone.decrease_peer_score(
+                                &peer_id,
+                                ScoreDecreaseReason::Offline(
+                                    "Health check returned false".to_string(),
+                                ),
+                            );
+                        }
+                        Err(GossipClientError::HealthCheck(url, status)) => {
+                            let message = format!(
+                                "Peer {:?} ({}) health check failed with status {}",
+                                peer_id, url, status
+                            );
+                            debug!("{message}");
+                            inner_clone.decrease_peer_score(
+                                &peer_id,
+                                ScoreDecreaseReason::NetworkError(message),
+                            );
+                        }
+                        Err(err) => {
+                            error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
+                        }
                     }
                 }
-            });
+                .instrument(tracing::info_span!("peer_health_check", %peer_id)),
+            );
         }
     }
 
@@ -867,6 +872,7 @@ impl PeerNetworkService {
             );
         }
     }
+    #[instrument(level = "info", skip_all, fields(%api_address, %gossip_address))]
     async fn announce_yourself_to_address_task(
         gossip_client: GossipClient,
         api_address: SocketAddr,
