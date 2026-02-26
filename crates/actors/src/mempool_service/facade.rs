@@ -86,7 +86,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
             })?;
 
-        oneshot_rx.await.expect("to process TxIngressMessage")
+        oneshot_rx.await.map_err(|_| {
+            TxIngressError::Other(
+                "Mempool service dropped the request (channel closed)".to_string(),
+            )
+        })?
     }
 
     async fn handle_data_transaction_ingress_gossip(
@@ -103,7 +107,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
             })?;
 
-        oneshot_rx.await.expect("to process TxIngressMessage")
+        oneshot_rx.await.map_err(|_| {
+            TxIngressError::Other(
+                "Mempool service dropped the request (channel closed)".to_string(),
+            )
+        })?
     }
 
     async fn handle_commitment_transaction_ingress_api(
@@ -124,9 +132,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 ))
             })?;
 
-        oneshot_rx
-            .await
-            .expect("to process CommitmentTxIngressMessage")
+        oneshot_rx.await.map_err(|_| {
+            TxIngressError::Other(
+                "Mempool service dropped the request (channel closed)".to_string(),
+            )
+        })?
     }
 
     async fn handle_commitment_transaction_ingress_gossip(
@@ -147,9 +157,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 ))
             })?;
 
-        oneshot_rx
-            .await
-            .expect("to process CommitmentTxIngressMessage")
+        oneshot_rx.await.map_err(|_| {
+            TxIngressError::Other(
+                "Mempool service dropped the request (channel closed)".to_string(),
+            )
+        })?
     }
 
     async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError> {
@@ -160,7 +172,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 TxReadError::Other(format!("Error sending TxExistenceQuery for tx {}", tx_id))
             })?;
 
-        oneshot_rx.await.expect("to process TxExistenceQuery")
+        oneshot_rx.await.map_err(|_| {
+            TxReadError::Other("Mempool service dropped the request (channel closed)".to_string())
+        })?
     }
 
     async fn is_known_commitment_transaction(
@@ -174,7 +188,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 TxReadError::Other(format!("Error sending TxExistenceQuery for tx {}", tx_id))
             })?;
 
-        oneshot_rx.await.expect("to process TxExistenceQuery")
+        oneshot_rx.await.map_err(|_| {
+            TxReadError::Other("Mempool service dropped the request (channel closed)".to_string())
+        })?
     }
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
@@ -217,6 +233,8 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .send_traced(MempoolServiceMessage::GetReadGuard(tx))
             .expect("to send GetInternalReadGuard message");
 
+        // Channel closure here indicates a fatal service failure; this lightweight message
+        // doesn't go through the semaphore so timeout is not expected.
         rx.await.expect("to process GetInternalReadGuard message")
     }
 }
