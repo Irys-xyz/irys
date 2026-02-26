@@ -293,11 +293,7 @@ pub async fn get_tx_promotion_status(
     let promotion_height = if let Some(metadata) = db_metadata {
         // DB metadata exists - use it unconditionally
         metadata.promoted_height
-    } else if let Some(mempool_meta) = state
-        .mempool_guard
-        .get_tx_metadata(&tx_id)
-        .await
-    {
+    } else if let Some(mempool_meta) = state.mempool_guard.get_tx_metadata(&tx_id).await {
         // Mempool metadata exists - use its promoted_height
         mempool_meta.promoted_height()
     } else {

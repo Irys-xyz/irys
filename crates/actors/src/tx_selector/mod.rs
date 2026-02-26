@@ -685,8 +685,10 @@ async fn get_publish_txs_and_proofs(
 
                 // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
                 for data_root in ingress_proofs.keys() {
-                    let cached_data_root = cached_data_root_by_data_root(tx, *data_root)
-                        .map_err(|e| eyre!("Failed to read cached data root for {}: {}", data_root, e))?;
+                    let cached_data_root =
+                        cached_data_root_by_data_root(tx, *data_root).map_err(|e| {
+                            eyre!("Failed to read cached data root for {}: {}", data_root, e)
+                        })?;
                     if let Some(cached_data_root) = cached_data_root {
                         let txids = cached_data_root.txid_set.clone();
                         trace!(tx.ids = ?txids, "Publish candidates");
@@ -988,7 +990,9 @@ async fn get_publish_txs_and_proofs(
 /// # Notes
 /// - Only considers Submit ledger transactions (filters out Publish, etc.)
 /// - Only examines blocks within the configured `anchor_expiry_depth`
-async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> eyre::Result<Vec<DataTransactionHeader>> {
+async fn get_pending_submit_ledger_txs(
+    ctx: &TxSelectionContext<'_>,
+) -> eyre::Result<Vec<DataTransactionHeader>> {
     // Get the current canonical chain head to establish our starting point for block traversal
     // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
     let optimistic = get_optimistic_chain(ctx.block_tree.clone()).await?;
@@ -1009,10 +1013,13 @@ async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> eyre::Re
     // be aware that genesis starts its life immediately in the database
     let mut block =
         crate::block_header_lookup::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
-            .ok_or_else(|| eyre::eyre!(
-                "No block header found for hash {} ({})",
-                block_hash, block_height
-            ))?;
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "No block header found for hash {} ({})",
+                    block_hash,
+                    block_height
+                )
+            })?;
 
     // Calculate the minimum block height we need to check for transaction conflicts
     // Only transactions anchored within this depth window are considered valid
@@ -1050,7 +1057,12 @@ async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> eyre::Re
             false,
         )
         .map_err(|e| eyre::eyre!("block header lookup failed: {}", e))?
-        .ok_or_else(|| eyre::eyre!("parent block header not found for hash {}", block.previous_block_hash))?;
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "parent block header not found for hash {}",
+                block.previous_block_hash
+            )
+        })?;
 
         block = parent_block;
     }
