@@ -1230,7 +1230,8 @@ impl IrysNode {
                             _ = reth_node => {}
                         }
                         Ok(())
-                    };
+                    }
+                    .instrument(tracing::info_span!("reth_select_loop"));
 
                     let shutdown_reason = match run_until_ctrl_c_or_channel_message(
                         future,

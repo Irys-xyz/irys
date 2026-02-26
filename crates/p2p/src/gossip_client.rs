@@ -714,6 +714,7 @@ impl GossipClient {
         Ok(versions)
     }
 
+    #[instrument(level = "trace", skip(self, peer_list), fields(%peer_id))]
     pub async fn check_health(
         &self,
         peer_id: &IrysPeerId,
@@ -1995,6 +1996,7 @@ impl GossipClient {
         }
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub async fn stake_and_pledge_whitelist(
         &self,
         peer_list: &PeerList,
