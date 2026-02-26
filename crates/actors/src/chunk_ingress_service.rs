@@ -157,12 +157,14 @@ impl ChunkIngressService {
         let max_preheader_chunks_per_item = mempool_config.max_preheader_chunks_per_item;
         let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
         const MAX_PERMITS: usize = u32::MAX as usize;
-        let max_concurrent_chunk_ingress_tasks = raw_max_concurrent.clamp(1, MAX_PERMITS);
+        const MIN_CONCURRENT: usize = 20;
+        let max_concurrent_chunk_ingress_tasks =
+            raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
         if max_concurrent_chunk_ingress_tasks != raw_max_concurrent {
             warn!(
                 configured = raw_max_concurrent,
                 effective = max_concurrent_chunk_ingress_tasks,
-                "Adjusted max_concurrent_chunk_ingress_tasks to supported range 1..=u32::MAX"
+                "Adjusted max_concurrent_chunk_ingress_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
             );
         }
         let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;

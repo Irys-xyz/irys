@@ -338,14 +338,6 @@ impl BlockValidationTask {
                         &consensus_config,
                         &miner_address,
                     )
-                    .inspect_err(|err| {
-                        tracing::error!(
-                            block.hash = %block_hash,
-                            block.height = %block_height,
-                            custom.error = ?err,
-                            "poa validation failed"
-                        )
-                    })
                     .map(|()| ValidationResult::Valid)
                 })
             }

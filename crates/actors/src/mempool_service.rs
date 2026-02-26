@@ -2988,12 +2988,13 @@ impl MempoolService {
         let mempool_config = &config.mempool;
         let raw_max_concurrent = mempool_config.max_concurrent_mempool_tasks;
         const MAX_PERMITS: usize = u32::MAX as usize;
-        let max_concurrent_mempool_tasks = raw_max_concurrent.clamp(1, MAX_PERMITS);
+        const MIN_CONCURRENT: usize = 20;
+        let max_concurrent_mempool_tasks = raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
         if max_concurrent_mempool_tasks != raw_max_concurrent {
             warn!(
                 configured = raw_max_concurrent,
                 effective = max_concurrent_mempool_tasks,
-                "Adjusted max_concurrent_mempool_tasks to supported range 1..=u32::MAX"
+                "Adjusted max_concurrent_mempool_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
             );
         }
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
@@ -3146,13 +3147,49 @@ impl MempoolService {
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
         async {
-            // Phase 1: wait for in-flight spawned handlers to finish
+            // Phase 1: drain queued messages concurrently using semaphore permits
+            while let Ok(traced) = self.msg_rx.try_recv() {
+                let (msg, parent_span) = traced.into_parts();
+                let msg_type = msg.variant_name();
+                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
+
+                let inner = Arc::clone(&self.inner);
+                let semaphore = inner.message_handler_semaphore.clone();
+                match tokio::time::timeout(Duration::from_secs(10), semaphore.acquire_owned()).await {
+                    Ok(Ok(permit)) => {
+                        runtime_handle.spawn(async move {
+                            let _permit = permit;
+                            let task_info = format!("shutdown drain: {}", msg_type);
+                            if let Err(e) = wait_with_progress(
+                                inner.handle_message(msg),
+                                20,
+                                &task_info,
+                            ).await {
+                                tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                            }
+                        }.instrument(span));
+                    }
+                    Ok(Err(_)) => {
+                        tracing::error!("Semaphore closed during shutdown drain");
+                        break;
+                    }
+                    Err(_) => {
+                        tracing::warn!("Timed out acquiring permit during shutdown drain, skipping remaining messages");
+                        break;
+                    }
+                }
+            }
+
+            // Phase 2: acquire all permits to wait for in-flight + drain-spawned handlers
             let acquire_fut = self
                 .inner
                 .message_handler_semaphore
                 .acquire_many(self.inner.max_concurrent_tasks);
             let _all_permits = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
-                Ok(Ok(p)) => Some(p),
+                Ok(Ok(p)) => {
+                    tracing::debug!("All message handlers completed");
+                    Some(p)
+                }
                 Ok(Err(_)) => {
                     tracing::error!("Semaphore closed during mempool shutdown drain");
                     None
@@ -3162,30 +3199,6 @@ impl MempoolService {
                     None
                 }
             };
-
-            // Phase 2: drain queued messages with its own budget
-            let drain_fut = async {
-                while let Ok(traced) = self.msg_rx.try_recv() {
-                    let (msg, parent_span) = traced.into_parts();
-                    let msg_type = msg.variant_name();
-                    let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
-                    let task_info = format!("shutdown drain: {}", msg_type);
-                    if let Err(e) = wait_with_progress(
-                        self.inner.handle_message(msg),
-                        20,
-                        &task_info,
-                    )
-                    .instrument(span)
-                    .await
-                    {
-                        tracing::error!("Error handling message during shutdown drain: {:?}", e);
-                    }
-                }
-            };
-            match tokio::time::timeout(Duration::from_secs(10), drain_fut).await {
-                Ok(()) => tracing::debug!("Processed remaining messages successfully"),
-                Err(_) => tracing::warn!("Timeout draining remaining messages, continuing shutdown"),
-            }
 
             // Persist to disk with timeout
             match tokio::time::timeout(
