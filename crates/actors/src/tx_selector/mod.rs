@@ -369,7 +369,7 @@ pub async fn select_best_txs(
     }
 
     // Prepare data transactions for inclusion after commitments
-    let mut submit_ledger_txs = get_pending_submit_ledger_txs(ctx).await;
+    let mut submit_ledger_txs = get_pending_submit_ledger_txs(ctx).await?;
     let total_data_available = submit_ledger_txs.len();
 
     // Sort data transactions by fee (highest first) to maximize revenue
@@ -685,7 +685,8 @@ async fn get_publish_txs_and_proofs(
 
                 // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
                 for data_root in ingress_proofs.keys() {
-                    let cached_data_root = cached_data_root_by_data_root(tx, *data_root).unwrap();
+                    let cached_data_root = cached_data_root_by_data_root(tx, *data_root)
+                        .map_err(|e| eyre!("Failed to read cached data root for {}: {}", data_root, e))?;
                     if let Some(cached_data_root) = cached_data_root {
                         let txids = cached_data_root.txid_set.clone();
                         trace!(tx.ids = ?txids, "Publish candidates");
@@ -987,17 +988,17 @@ async fn get_publish_txs_and_proofs(
 /// # Notes
 /// - Only considers Submit ledger transactions (filters out Publish, etc.)
 /// - Only examines blocks within the configured `anchor_expiry_depth`
-async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> Vec<DataTransactionHeader> {
+async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> eyre::Result<Vec<DataTransactionHeader>> {
     // Get the current canonical chain head to establish our starting point for block traversal
     // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
-    let optimistic = get_optimistic_chain(ctx.block_tree.clone()).await.unwrap();
+    let optimistic = get_optimistic_chain(ctx.block_tree.clone()).await?;
     let (canonical, _) = ctx.block_tree.read().get_canonical_chain();
-    let canonical_head_entry = canonical.last().unwrap();
+    let canonical_head_entry = canonical.last().ok_or_eyre("canonical chain is empty")?;
 
     // This is just here to catch any oddities in the debug log. The optimistic
     // and canonical should always have the same results from my reading of the code.
     // if the tests are stable and this hasn't come up it can be removed.
-    if optimistic.last().unwrap().0 != canonical_head_entry.block_hash() {
+    if optimistic.last().map(|o| o.0) != Some(canonical_head_entry.block_hash()) {
         debug!("Optimistic and Canonical have different heads");
     }
 
@@ -1007,14 +1008,11 @@ async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> Vec<Data
     // retrieve block from block tree or database
     // be aware that genesis starts its life immediately in the database
     let mut block =
-        crate::block_header_lookup::get_block_header(ctx.block_tree, ctx.db, block_hash, false)
-            .expect("block header lookup should succeed")
-            .unwrap_or_else(|| {
-                panic!(
-                    "No block header found for hash {} ({})",
-                    block_hash, block_height
-                )
-            });
+        crate::block_header_lookup::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
+            .ok_or_else(|| eyre::eyre!(
+                "No block header found for hash {} ({})",
+                block_hash, block_height
+            ))?;
 
     // Calculate the minimum block height we need to check for transaction conflicts
     // Only transactions anchored within this depth window are considered valid
@@ -1051,15 +1049,15 @@ async fn get_pending_submit_ledger_txs(ctx: &TxSelectionContext<'_>) -> Vec<Data
             block.previous_block_hash,
             false,
         )
-        .expect("block header lookup should succeed")
-        .expect("to find the parent block header");
+        .map_err(|e| eyre::eyre!("block header lookup failed: {}", e))?
+        .ok_or_else(|| eyre::eyre!("parent block header not found for hash {}", block.previous_block_hash))?;
 
         block = parent_block;
     }
 
     // Return all remaining Submit transactions by consuming the map
     // These represent Submit transactions that are pending and haven't been included in any recent block
-    pending_valid_submit_ledger_tx.into_values().collect()
+    Ok(pending_valid_submit_ledger_tx.into_values().collect())
 }
 
 /// Helper to look up data transactions from mempool and DB, mirroring
