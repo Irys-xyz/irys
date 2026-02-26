@@ -21,8 +21,8 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 /// Commands that control the partition mining service
 #[derive(Debug)]

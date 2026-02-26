@@ -318,7 +318,9 @@ impl ChunkIngressService {
                 None
             }
             Err(_) => {
-                warn!("Timed out waiting for in-flight chunk ingress handlers; proceeding without full drain");
+                warn!(
+                    "Timed out waiting for in-flight chunk ingress handlers; proceeding without full drain"
+                );
                 None
             }
         };

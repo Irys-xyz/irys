@@ -140,10 +140,10 @@ impl BackgroundWriter {
             }
         }
 
-        if !batch.is_empty() {
-            if let Err(e) = self.write_batch(&batch) {
-                error!("ChunkDataWriter shutdown-drain write failed: {:?}", e);
-            }
+        if !batch.is_empty()
+            && let Err(e) = self.write_batch(&batch)
+        {
+            error!("ChunkDataWriter shutdown-drain write failed: {:?}", e);
         }
     }
 
