@@ -582,12 +582,14 @@ impl Inner {
         // Update in-memory mempool state for txs promoted in both forks:
         // ensure they have the ingress proofs from the new canonical fork.
         // DB metadata is already handled by BlockMigrationService (clear old fork + write new fork).
-        let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
+        let publish_tx_block_map = new_fork_tx_block_map
+            .get(&DataLedger::Publish)
+            .ok_or_else(|| eyre::eyre!("new fork tx block map missing Publish ledger"))?;
         for txid in published_in_both.iter() {
             if let Some(mut tx) = published_tx_from_blocks.remove(txid) {
                 let promoted_in_block = publish_tx_block_map
                     .get(txid)
-                    .unwrap_or_else(|| panic!("new fork publish_tx_block_map missing tx {}", txid));
+                    .ok_or_else(|| eyre::eyre!("new fork publish_tx_block_map missing tx {}", txid))?;
 
                 let header = promoted_in_block.header();
                 let publish_ledger = &header.data_ledgers[DataLedger::Publish];
