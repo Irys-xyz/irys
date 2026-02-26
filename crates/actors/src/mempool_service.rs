@@ -3185,31 +3185,33 @@ impl MempoolService {
                 .inner
                 .message_handler_semaphore
                 .acquire_many(self.inner.max_concurrent_tasks);
-            let _all_permits = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
-                Ok(Ok(p)) => {
+            let handlers_quiesced = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+                Ok(Ok(permits)) => {
                     tracing::debug!("All message handlers completed");
-                    Some(p)
+                    let _all_permits = permits;
+                    true
                 }
                 Ok(Err(_)) => {
                     tracing::error!("Semaphore closed during mempool shutdown drain");
-                    None
+                    false
                 }
                 Err(_) => {
-                    tracing::warn!("Timed out waiting for in-flight mempool handlers; proceeding without full drain");
-                    None
+                    tracing::warn!("Timed out waiting for in-flight mempool handlers; skipping persistence");
+                    false
                 }
             };
 
-            // Persist to disk with timeout
-            match tokio::time::timeout(
-                Duration::from_secs(10),
-                self.inner.persist_mempool_to_disk(),
-            )
-            .await
-            {
-                Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
-                Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
-                Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+            if handlers_quiesced {
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    self.inner.persist_mempool_to_disk(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+                    Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+                    Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+                }
             }
 
             tracing::info!("shutting down Mempool service");
