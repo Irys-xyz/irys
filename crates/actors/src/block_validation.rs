@@ -1742,6 +1742,7 @@ fn validate_shadow_transactions_match(
     Ok(())
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn is_seed_data_valid(
     block_header: &IrysBlockHeader,
     previous_block_header: &IrysBlockHeader,
