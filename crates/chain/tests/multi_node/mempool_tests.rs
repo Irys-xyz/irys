@@ -19,15 +19,13 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
-use reth::{
-    primitives::{Receipt, Transaction},
-    rpc::{
-        api::EthApiClient,
-        types::{Block, Header, TransactionRequest},
-    },
+use reth::rpc::{
+    api::EthApiClient,
+    types::{Block, Header, TransactionRequest},
 };
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
+use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::{debug, info};

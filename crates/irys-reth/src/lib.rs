@@ -22,11 +22,10 @@ use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
-        PayloadBuilderConfig as _,
         components::{ComponentsBuilder, ExecutorBuilder, PoolBuilder},
     },
     payload::EthBuiltPayload,
-    primitives::{InvalidTransactionError, SealedBlock},
+    primitives::SealedBlock,
     providers::{EthStorage, StateProviderFactory, providers::ProviderFactoryBuilder},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
     transaction_pool::TransactionValidationTaskExecutor,
@@ -35,6 +34,7 @@ use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardfor
 use reth_engine_local::LocalPayloadAttributesBuilder;
 pub use reth_ethereum_engine_primitives;
 use reth_ethereum_primitives::TransactionSigned;
+use reth_evm::ConfigureEvm;
 use reth_evm_ethereum::RethReceiptBuilder;
 use reth_node_builder::rpc::RpcAddOns;
 pub use reth_node_ethereum;
@@ -42,7 +42,9 @@ use reth_node_ethereum::{
     EthEngineTypes, EthEvmConfig,
     node::{EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder},
 };
-use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
+use reth_primitives_traits::{
+    BlockTy, constants::MINIMUM_GAS_LIMIT, transaction::error::InvalidTransactionError,
+};
 pub use reth_provider::{BlockReaderIdExt, providers::BlockchainProvider};
 use reth_tracing::tracing;
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
@@ -216,19 +218,24 @@ pub struct IrysPoolBuilder;
 /// <https://github.com/Irys-xyz/reth-irys/blob/6c892d38bfcd6689c618386bd7ccc6fde7fbb64e/crates/ethereum/node/src/node.rs?plain=1#L453>
 ///
 /// Notable changes from the original: we reject all shadow txs, as they are not allowed to land in a the pool.
-impl<Node> PoolBuilder<Node> for IrysPoolBuilder
+impl<Node, Evm> PoolBuilder<Node, Evm> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives> + 'static,
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
-            IrysShadowTxValidator<Node::Provider, EthPooledTransaction>,
+            IrysShadowTxValidator<Node::Provider, EthPooledTransaction, Evm>,
         >,
         CoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
         let pool_config = ctx.pool_config();
 
         let blobs_disabled = ctx.config().txpool.disable_blobs_support
@@ -255,17 +262,17 @@ where
         let blob_store =
             reth_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
 
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
-            .set_eip4844(!blobs_disabled)
-            .kzg_settings(ctx.kzg_settings()?)
-            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .set_eip4844(!blobs_disabled)
+                .kzg_settings(ctx.kzg_settings()?)
+                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
         let validator = TransactionValidationTaskExecutor {
             validator: Arc::new(IrysShadowTxValidator {
                 eth_tx_validator: validator.validator,
@@ -282,7 +289,7 @@ where
                 .eth_tx_validator
                 .kzg_settings()
                 .clone();
-            ctx.task_executor().spawn_blocking(async move {
+            ctx.task_executor().spawn_blocking_task(async move {
                 let _ = kzg_settings.get();
                 tracing::debug!(target: "reth::cli", "Initialized KZG settings");
             });
@@ -300,11 +307,11 @@ where
 }
 
 #[derive(Debug)]
-pub struct IrysShadowTxValidator<Client, T> {
-    eth_tx_validator: Arc<EthTransactionValidator<Client, T>>,
+pub struct IrysShadowTxValidator<Client, T, Evm> {
+    eth_tx_validator: Arc<EthTransactionValidator<Client, T, Evm>>,
 }
 
-impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
+impl<Client, Tx, Evm> IrysShadowTxValidator<Client, Tx, Evm>
 where
     Tx: EthPoolTransaction,
 {
@@ -348,12 +355,14 @@ where
     }
 }
 
-impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
+impl<Client, Tx, Ev> TransactionValidator for IrysShadowTxValidator<Client, Tx, Ev>
 where
-    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
+    Client: ChainSpecProvider<ChainSpec: EthChainSpec + EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
+    Ev: ConfigureEvm,
 {
     type Transaction = Tx;
+    type Block = BlockTy<Ev::Primitives>;
 
     async fn validate_transaction(
         &self,
@@ -369,23 +378,7 @@ where
         self.eth_tx_validator.validate_one(origin, transaction)
     }
 
-    async fn validate_transactions(
-        &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        transactions
-            .into_iter()
-            .map(|(origin, tx)| match self.prefilter_tx(tx) {
-                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
-                Err(outcome) => outcome,
-            })
-            .collect()
-    }
-
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: reth_primitives_traits::Block,
-    {
+    fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
         self.eth_tx_validator.on_new_head_block(new_tip_block);
     }
 }
@@ -402,8 +395,7 @@ where
     type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let evm_config = EthEvmConfig::new(ctx.chain_spec())
-            .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
+        let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
         let evm_factory = IrysEvmFactory::new();
@@ -2590,7 +2582,7 @@ pub mod test_utils {
         builder::{FullNode, NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns},
         providers::{AccountReader as _, BlockHashReader as _},
         rpc::api::eth::helpers::EthTransactions,
-        tasks::TaskManager,
+        tasks::Runtime,
     };
     use reth_e2e_test_utils::{NodeHelperType, node::NodeTestContext, wallet::Wallet};
     use reth_engine_local::LocalPayloadAttributesBuilder;
@@ -2608,7 +2600,7 @@ pub mod test_utils {
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
-        pub tasks: TaskManager,
+        pub tasks: Runtime,
     }
 
     impl std::fmt::Debug for TestContext {
@@ -3349,22 +3341,21 @@ pub mod test_utils {
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
-    /// - `TaskManager`: Task manager for async tasks
+    /// - `Runtime`: Runtime for async tasks
     /// - `Wallet`: Default wallet for test accounts
     pub async fn setup_irys_reth(
         num_nodes: &[Address],
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, Runtime, Wallet)>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
                 <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
             >,
     {
-        let tasks = TaskManager::current();
-        let exec = tasks.executor();
+        let tasks = Runtime::test();
 
         let network_config = NetworkArgs {
             discovery: DiscoveryArgs {
@@ -3391,7 +3382,7 @@ pub mod test_utils {
                 node,
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
-                .testing_node(exec.clone())
+                .testing_node(tasks.clone())
                 .node(IrysEthereumNode)
                 .launch()
                 .await?;

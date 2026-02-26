@@ -97,7 +97,7 @@ impl Iterator for CombinedTransactionIterator {
 }
 
 impl BestTransactions for CombinedTransactionIterator {
-    fn mark_invalid(&mut self, transaction: &Self::Item, kind: InvalidPoolTransactionError) {
+    fn mark_invalid(&mut self, transaction: &Self::Item, kind: &InvalidPoolTransactionError) {
         if self.shadow_tx_hashes.contains(transaction.hash()) {
             // Shadow txs are already removed from the queue, so we don't need to do anything
             // NOTE FOR READER: if you refactor the code here, ensure that we *never*

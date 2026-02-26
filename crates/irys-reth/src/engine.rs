@@ -11,8 +11,8 @@ use alloy_rpc_types::Withdrawals;
 use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload};
 use reth::api::PayloadTypes;
 use reth::payload::{EthBuiltPayload, EthPayloadBuilderAttributes};
-use reth::primitives::SealedBlock;
-use reth_chainspec::EthereumHardforks;
+use reth::primitives::{SealedBlock, SealedHeader};
+use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_node_api::{BuiltPayload, NodePrimitives, PayloadAttributes, PayloadBuilderAttributes};
@@ -190,13 +190,16 @@ impl PayloadTypes for IrysPayloadTypes {
 }
 
 /// Implement PayloadAttributesBuilder for LocalPayloadAttributesBuilder to support IrysPayloadAttributes
-impl<CS> PayloadAttributesBuilder<IrysPayloadAttributes> for LocalPayloadAttributesBuilder<CS>
+impl<CS> PayloadAttributesBuilder<IrysPayloadAttributes, CS::Header>
+    for LocalPayloadAttributesBuilder<CS>
 where
-    CS: EthereumHardforks + Send + Sync + 'static,
+    CS: EthChainSpec + EthereumHardforks + Send + Sync + 'static,
 {
-    fn build(&self, timestamp: u64) -> IrysPayloadAttributes {
+    fn build(&self, parent: &SealedHeader<CS::Header>) -> IrysPayloadAttributes {
         IrysPayloadAttributes {
-            inner: <Self as PayloadAttributesBuilder<EthPayloadAttributes>>::build(self, timestamp),
+            inner: <Self as PayloadAttributesBuilder<EthPayloadAttributes, CS::Header>>::build(
+                self, parent,
+            ),
             shadow_txs: vec![],
         }
     }

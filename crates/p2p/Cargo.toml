@@ -28,6 +28,7 @@ reth-tasks.workspace = true
 lru.workspace = true
 async-trait = "0.1"
 reth.workspace = true
+reth-ethereum-primitives.workspace = true
 moka.workspace = true
 futures.workspace = true
 serde_json.workspace = true

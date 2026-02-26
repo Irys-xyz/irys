@@ -15,7 +15,7 @@ use irys_types::{
 };
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
-use reth::primitives::Block;
+use reth_ethereum_primitives::Block;
 
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(

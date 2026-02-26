@@ -9,7 +9,8 @@ use irys_types::{
     SendTraced as _,
 };
 use reth::builder::Block as _;
-use reth::primitives::{Block, BlockBody, Header};
+use reth::primitives::Header;
+use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
 use tracing::debug;
 

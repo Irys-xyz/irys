@@ -12,7 +12,7 @@ use irys_macros_integer_tagged::IntegerTagged;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
 use reth_db_api::table::{Compress, Decompress};
-use reth_primitives::transaction::recover_signer;
+use reth_primitives_traits::crypto::secp256k1::recover_signer;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 

@@ -4,9 +4,9 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
-use reth::primitives::Block;
 use reth::providers::BlockReader as _;
 use reth::revm::primitives::B256;
+use reth_ethereum_primitives::Block;
 #[cfg(feature = "test-utils")]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;

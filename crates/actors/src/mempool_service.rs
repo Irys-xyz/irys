@@ -46,7 +46,6 @@ use irys_types::{
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
-use reth::tasks::TaskExecutor;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::*;
 use std::collections::BTreeMap;
@@ -175,9 +174,6 @@ pub async fn validate_commitment_transaction(
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
     pub config: Config,
-    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
-    /// instead of the actor executor runtime, while also providing some `QoL`
-    pub exec: TaskExecutor,
     pub irys_db: DatabaseProvider,
     pub reth_node_adapter: IrysRethNodeAdapter,
     pub mempool_state: AtomicMempoolState,
@@ -2679,7 +2675,7 @@ pub struct MempoolState {
 }
 
 /// Create a new instance of the mempool state passing in a reference
-/// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
+/// counted reference to a `DatabaseEnv` and the miner's signer
 pub fn create_state(
     config: &MempoolConfig,
     stake_and_pledge_whitelist: &[IrysAddress],
@@ -3029,7 +3025,6 @@ impl MempoolService {
                     inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
-                        exec: TaskExecutor::current(),
                         irys_db,
                         mempool_state,
                         reth_node_adapter,

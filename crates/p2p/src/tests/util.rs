@@ -34,7 +34,7 @@ use irys_types::{
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
-use reth_tasks::{TaskExecutor, TaskManager};
+use reth_tasks::TaskExecutor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
@@ -242,9 +242,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub mempool_state: AtomicMempoolState,
-    // Tets need the task manager to be stored somewhere
-    #[expect(dead_code)]
-    pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadCache,
@@ -305,7 +302,7 @@ impl GossipServiceTestFixture {
             receiver,
             sender,
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
-            tokio_runtime.clone(),
+            tokio_runtime,
         );
 
         let mempool_config = MempoolConfig::testing();
@@ -327,8 +324,7 @@ impl GossipServiceTestFixture {
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
-        let task_manager = TaskManager::new(tokio_runtime);
-        let task_executor = task_manager.executor();
+        let task_executor = TaskExecutor::test();
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadCache::new(
@@ -386,7 +382,6 @@ impl GossipServiceTestFixture {
             mempool_chunks,
             discovery_blocks,
             mempool_state,
-            task_manager,
             task_executor,
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
