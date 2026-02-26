@@ -3,7 +3,7 @@
 
 use eyre::Context as _;
 use irys_types::block_production::Seed;
-use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
+use irys_types::{H256, H256List, U256, VDFLimiterInfo, VdfConfig};
 use openssl::sha;
 pub use rayon;
 use rayon::prelude::*;

@@ -1,5 +1,4 @@
 use crate::utils::*;
-use alloy_eips::HashOrNumber;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use assert_matches::assert_matches;
 use eyre::eyre;
@@ -12,7 +11,6 @@ use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     IrysAddress, NodeConfig, H256, U256,
 };
-use reth::providers::TransactionsProvider as _;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -29,7 +27,10 @@ macro_rules! assert_ok {
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off")
+    };
     initialize_tracing();
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
@@ -340,10 +341,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "irys_actors::epoch_service::epoch_service=debug",
-    );
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
+            "RUST_LOG",
+            "irys_actors::epoch_service::epoch_service=debug",
+        );
+    }
     initialize_tracing();
 
     let span = debug_span!("TEST");
@@ -984,17 +988,21 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
     );
 
     // Verify TermFeeReward shadow transaction at expiry epoch block
-    let reth_ctx = node.node_ctx.reth_node_adapter.clone();
     let expiry_block = node.get_block_by_height(expiry_height).await?;
-    let block_txs = reth_ctx
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(expiry_block.evm_block_hash))?
-        .unwrap_or_default();
+    let expiry_evm_block = node
+        .wait_for_evm_block(expiry_block.evm_block_hash, 20)
+        .await?;
+    let block_txs = expiry_evm_block.body.transactions;
+    let block_tx_count = block_txs.len();
+    info!(
+        "Expiry block {} has {} EVM txs",
+        expiry_height, block_tx_count
+    );
 
     let mut found_term_fee_reward = false;
-    for tx in &block_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+    for tx in block_txs {
+        let mut input = tx.input().as_ref();
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut input) {
             if let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
                 info!(
                     "Found TermFeeReward at height {}: target={}, amount={}",
@@ -1013,8 +1021,8 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     assert!(
         found_term_fee_reward,
-        "Expected TermFeeReward at expiry epoch block height {}",
-        expiry_height
+        "Expected TermFeeReward at expiry epoch block height {} (evm_txs={})",
+        expiry_height, block_tx_count
     );
 
     info!("TermFeeReward found and correctly sent to custom reward_address");

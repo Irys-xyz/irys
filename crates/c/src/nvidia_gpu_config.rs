@@ -3,7 +3,7 @@ use std::os::raw::c_int;
 // CUDA Runtime API bindings (minimal subset)
 #[cfg(feature = "nvidia")]
 #[link(name = "cudart")]
-extern "C" {
+unsafe extern "C" {
     fn cudaGetDeviceCount(count: *mut c_int) -> c_int;
     fn cudaGetDeviceProperties(prop: *mut CudaDeviceProp, device: c_int) -> c_int;
     fn cudaSetDevice(device: c_int) -> c_int;

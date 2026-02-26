@@ -15,13 +15,13 @@ use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_domain::{get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus};
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
+use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
 use irys_types::{
-    app_state::DatabaseProvider, BoundedFee, Config, IrysTransactionCommon, IrysTransactionId,
-    NodeConfig, SealedBlock, H256, U256,
+    BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig, SealedBlock,
+    U256, app_state::DatabaseProvider,
 };
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
@@ -30,8 +30,8 @@ use irys_types::{
 use irys_types::{TokioServiceHandle, Traced, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
-use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
+use reth::tasks::shutdown::Shutdown;
 use std::fmt::Display;
 use std::fs;
 use std::io::Write as _;
@@ -42,9 +42,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc::UnboundedReceiver, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info, instrument, warn};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
@@ -1576,10 +1576,10 @@ impl MempoolState {
         let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
-        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx_id) {
-                return Ok(()); // Duplicate, already have this commitment
-            }
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address)
+            && existing_txs.iter().any(|t| t.id() == tx_id)
+        {
+            return Ok(()); // Duplicate, already have this commitment
         }
 
         // Check if we need to create a new address entry
@@ -1601,8 +1601,7 @@ impl MempoolState {
                     );
                     return Err(TxIngressError::MempoolFull(format!(
                         "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
-                        new_value,
-                        evict_total_value
+                        new_value, evict_total_value
                     )));
                 }
 
@@ -1888,9 +1887,7 @@ pub enum TxIngressError {
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
     /// The commitment transaction version is below minimum required after hardfork activation
-    #[error(
-        "Commitment transaction version {version} is below minimum required version {minimum}"
-    )]
+    #[error("Commitment transaction version {version} is below minimum required version {minimum}")]
     InvalidVersion { version: u8, minimum: u8 },
     /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
     #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]

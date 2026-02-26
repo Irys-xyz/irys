@@ -4,7 +4,7 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::NodeConfig;
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
+async fn slow_heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
     // setup
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config.clone());
@@ -21,7 +21,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     ctx.mine_block().await?;
     let header_1 = ctx.get_block_by_height(1).await?;
     ctx.mine_blocks(block_migration_depth.try_into()?).await?;
-    ctx.wait_until_block_index_height(1, 5).await?;
+    ctx.wait_until_block_index_height(1, 15).await?;
 
     // restart the node
     let ctx = ctx.stop().await.start().await;
@@ -51,7 +51,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
+async fn slow_heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
     // setup consistent test directory for this test
     let temp_dir = temporary_directory(None, false);
     let test_dir = temp_dir.path().to_path_buf();
@@ -72,7 +72,7 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     ctx.mine_block().await?;
     let header_1 = ctx.get_block_by_height(1).await?;
     ctx.mine_blocks(block_migration_depth.try_into()?).await?;
-    ctx.wait_until_block_index_height(1, 5).await?;
+    ctx.wait_until_block_index_height(1, 15).await?;
     // stop the node
     ctx.stop().await;
 

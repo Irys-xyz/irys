@@ -1,12 +1,12 @@
 use crate::mempool_service::{
-    validate_commitment_transaction, validate_tx_signature, Inner, TxIngressError, TxReadError,
+    Inner, TxIngressError, TxReadError, validate_commitment_transaction, validate_tx_signature,
 };
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
-    CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
+    CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, H256, IrysAddress,
     IrysTransactionCommon as _, SendTraced as _, TxKnownStatus, UnixTimestamp,
-    VersionDiscriminant as _, H256,
+    VersionDiscriminant as _,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
@@ -387,7 +387,7 @@ impl Inner {
         // Reject unsupported or invalid commitment types/targets
         match cache_status {
             CommitmentSnapshotStatus::Unknown | CommitmentSnapshotStatus::Accepted => {
-                return cache_status
+                return cache_status;
             }
             CommitmentSnapshotStatus::UnstakePending
             | CommitmentSnapshotStatus::HasActivePledges

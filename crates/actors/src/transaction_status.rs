@@ -1,6 +1,6 @@
 use irys_domain::BlockIndexReadGuard;
 use irys_types::{
-    CommitmentTransactionMetadata, DataTransactionMetadata, TransactionStatusResponse, H256,
+    CommitmentTransactionMetadata, DataTransactionMetadata, H256, TransactionStatusResponse,
 };
 
 use crate::{MempoolReadGuard, TxMetadata};

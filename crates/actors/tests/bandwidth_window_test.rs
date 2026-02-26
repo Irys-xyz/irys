@@ -73,7 +73,10 @@ fn test_bandwidth_window_load_test() {
             } else if (200_000..=500_000).contains(&current_bps) {
                 println!("✓ Window reset working correctly, BPS stabilized after reset");
             } else {
-                println!("ℹ Window reset behavior - BPS: {} (may be spiking due to very small elapsed time)", current_bps);
+                println!(
+                    "ℹ Window reset behavior - BPS: {} (may be spiking due to very small elapsed time)",
+                    current_bps
+                );
             }
         }
 
@@ -105,10 +108,12 @@ fn test_bandwidth_window_load_test() {
     let reasonable_max_rate = 400.0; // Upper bound for sanity
 
     assert!(
-            actual_rate >= reasonable_min_rate && actual_rate <= reasonable_max_rate,
-            "Actual rate {:.1} should be reasonable (between {} and {} additions/sec), but timing precision may vary",
-            actual_rate, reasonable_min_rate, reasonable_max_rate
-        );
+        actual_rate >= reasonable_min_rate && actual_rate <= reasonable_max_rate,
+        "Actual rate {:.1} should be reasonable (between {} and {} additions/sec), but timing precision may vary",
+        actual_rate,
+        reasonable_min_rate,
+        reasonable_max_rate
+    );
 
     // Log how close we got to the target
     let efficiency = (actual_rate / target_rate) * 100.0;

@@ -1,6 +1,6 @@
 use crate::data_sync_service::peer_stats::PeerStats;
 use irys_domain::ChunkTimeRecord;
-use irys_types::{partition::PartitionAssignment, Config, IrysAddress, PeerAddress, PeerListItem};
+use irys_types::{Config, IrysAddress, PeerAddress, PeerListItem, partition::PartitionAssignment};
 
 #[derive(Debug)]
 pub struct PeerBandwidthManager {

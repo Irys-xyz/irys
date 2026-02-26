@@ -83,25 +83,25 @@ mod types;
 pub use config::PackingConfig;
 use guard::ActiveWorkerGuard;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 pub use types::{Internals, PackingQueues, PackingReceiver, PackingSemaphore, PackingSender};
 pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
 
 use dashmap::DashMap;
-use irys_packing::{PackingType, PACKING_TYPE};
+use irys_packing::{PACKING_TYPE, PackingType};
 use irys_types::{
-    ii, partition_chunk_offset_ii, Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange,
-    TokioServiceHandle,
+    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, ii,
+    partition_chunk_offset_ii,
 };
-use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::metrics;
 
 use self::{
-    strategies::{cpu::CpuPackingStrategy, remote::RemotePackingStrategy, PackingStrategy},
+    strategies::{PackingStrategy, cpu::CpuPackingStrategy, remote::RemotePackingStrategy},
     types::PackingServiceMessage,
 };
 
@@ -271,8 +271,8 @@ impl PackingService {
                 PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
             // Try remote packing first if configured
-            if !self.packing_config.remotes.is_empty() {
-                if let Ok(()) = self
+            if !self.packing_config.remotes.is_empty()
+                && let Ok(()) = self
                     .remote_strategy
                     .pack(
                         &storage_module,
@@ -283,10 +283,9 @@ impl PackingService {
                         short_writes_before_sync,
                     )
                     .await
-                {
-                    sync_with_warning(&storage_module, "remote packing completion");
-                    continue;
-                }
+            {
+                sync_with_warning(&storage_module, "remote packing completion");
+                continue;
             }
 
             // Fall back to local packing strategy
@@ -484,7 +483,7 @@ impl PackingService {
 mod tests {
     use super::*;
     use std::{
-        sync::{atomic::AtomicUsize, Arc},
+        sync::{Arc, atomic::AtomicUsize},
         time::Duration,
     };
 
@@ -493,9 +492,9 @@ mod tests {
     use irys_storage::ie;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        partition::{PartitionAssignment, PartitionHash},
         Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
+        partition::{PartitionAssignment, PartitionHash},
     };
     use tokio::sync::Semaphore;
 

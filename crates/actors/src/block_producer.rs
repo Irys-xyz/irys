@@ -9,7 +9,7 @@ use crate::{
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_consensus::{
-    transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
+    EthereumTxEnvelope, SignableTransaction as _, TxEip4844, transaction::SignerRecoverable as _,
 };
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::TxSignerSync as _;
@@ -17,27 +17,27 @@ use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysEthereumNode, IrysPayloadAttributes,
-    IrysPayloadBuilderAttributes, IrysPayloadTypes,
+    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
+    compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::SystemLedger;
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockBody,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
-    SealedBlock as IrysSealedBlock, SendTraced as _, Signature, SystemTransactionLedger,
-    TokioServiceHandle, Traced, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    AdjustmentStats, Base64, BlockBody, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
+    IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
+    SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
+    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
+    calculate_difficulty, next_cumulative_diff, storage_pricing::Amount,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -54,7 +54,7 @@ use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError
 use reth_transaction_pool::EthPooledTransaction;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, error_span, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, error_span, info, warn};
 
 /// Error type for block production that distinguishes between retryable and irrecoverable errors
 #[derive(Debug, thiserror::Error)]
@@ -1679,7 +1679,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 #[cfg(test)]
 mod oracle_choice_tests {
     use super::choose_oracle_price;
-    use irys_types::{storage_pricing::Amount, UnixTimestamp};
+    use irys_types::{UnixTimestamp, storage_pricing::Amount};
     use rust_decimal_macros::dec;
 
     const MAX_AGE_SECS: u64 = 3 * 60; // 3 minutes

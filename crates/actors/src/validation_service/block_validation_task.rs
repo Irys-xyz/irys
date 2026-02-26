@@ -21,9 +21,9 @@
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
-    commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
-    ValidationError,
+    ValidationError, commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid,
+    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    submit_payload_to_reth,
 };
 use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
@@ -32,7 +32,7 @@ use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger};
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use tracing::{debug, error, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, warn};
 
 /// Result of waiting for parent validation to complete
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

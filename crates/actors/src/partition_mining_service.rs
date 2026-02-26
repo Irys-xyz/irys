@@ -10,18 +10,18 @@ use crate::{
 };
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
-use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
+use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_storage::ii;
 use irys_types::{
+    AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
+    PartitionChunkRange, SendTraced as _, TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext},
-    partition_chunk_offset_ie, u256_from_le_bytes, AtomicVdfStepNumber, Config, H256List,
-    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, SendTraced as _,
-    TokioServiceHandle, U256,
+    partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
 /// Commands that control the partition mining service
@@ -107,44 +107,43 @@ impl PartitionMiningServiceInner {
 
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_partitions_expiration(&mut self, expired: &H256List) {
-        if let Some(partition_hash) = self.storage_module.partition_hash() {
-            if expired.0.contains(&partition_hash) {
-                if let Ok(interval) = self.storage_module.reset() {
-                    debug!(
-                        storage_module.partition_hash = ?partition_hash,
-                        storage_module.packing_interval = ?interval,
-                        "Expiring partition hash"
-                    );
-                    if let Ok(req) = PackingRequest::new(
-                        self.storage_module.clone(),
-                        PartitionChunkRange(interval),
-                    ) {
-                        match self.service_senders.packing_sender.try_send(req) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                warn!(
-                                    storage_module.id = %self.storage_module.id,
-                                    storage_module.partition_hash = ?partition_hash,
-                                    storage_module.packing_interval = ?interval,
-                                    "Dropping packing request due to a saturated channel"
-                                );
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                                error!(
-                                    storage_module.id = %self.storage_module.id,
-                                    storage_module.partition_hash = ?partition_hash,
-                                    storage_module.packing_interval = ?interval,
-                                    "Packing channel closed; failed to enqueue repacking request"
-                                );
-                            }
+        if let Some(partition_hash) = self.storage_module.partition_hash()
+            && expired.0.contains(&partition_hash)
+        {
+            if let Ok(interval) = self.storage_module.reset() {
+                debug!(
+                    storage_module.partition_hash = ?partition_hash,
+                    storage_module.packing_interval = ?interval,
+                    "Expiring partition hash"
+                );
+                if let Ok(req) =
+                    PackingRequest::new(self.storage_module.clone(), PartitionChunkRange(interval))
+                {
+                    match self.service_senders.packing_sender.try_send(req) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                storage_module.id = %self.storage_module.id,
+                                storage_module.partition_hash = ?partition_hash,
+                                storage_module.packing_interval = ?interval,
+                                "Dropping packing request due to a saturated channel"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                            error!(
+                                storage_module.id = %self.storage_module.id,
+                                storage_module.partition_hash = ?partition_hash,
+                                storage_module.packing_interval = ?interval,
+                                "Packing channel closed; failed to enqueue repacking request"
+                            );
                         }
                     }
-                } else {
-                    error!(
-                        storage_module.partition_hash = ?partition_hash,
-                        "Expiring partition hash, could not reset its storage module!"
-                    );
                 }
+            } else {
+                error!(
+                    storage_module.partition_hash = ?partition_hash,
+                    "Expiring partition hash, could not reset its storage module!"
+                );
             }
         }
     }
@@ -243,10 +242,10 @@ impl PartitionMiningServiceInner {
                     .storage_module
                     .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
                 ChunkType::Uninitialized => {
-                    return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
+                    return Err(eyre::eyre!("Cannot mine uninitialized chunks"));
                 }
                 ChunkType::Interrupted => {
-                    return Err(eyre::eyre!("Cannot mine interrupted chunks"))
+                    return Err(eyre::eyre!("Cannot mine interrupted chunks"));
                 }
             };
 
