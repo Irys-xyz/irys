@@ -28,6 +28,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         &ctx.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
+        0,
     )?;
 
     // Calculate expected perm_fee using the same method as the API
@@ -37,6 +38,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         number_of_ingress_proofs_total,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         expected_term_fee,
+        0,
     )?;
 
     // action
@@ -120,6 +122,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         &ctx.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
+        0,
     )?;
 
     // Calculate expected perm_fee using the same method as the API
@@ -158,7 +161,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_submit_ledger_returns_term_fee() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -167,13 +170,21 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
-    // action - try to get price for Submit ledger
+    // action - get price for Submit ledger (term-fee only, no perm_fee)
     let response = price_endpoint_request(&address, DataLedger::Submit, data_size_bytes).await;
 
-    // assert - should return 400 error for Submit ledger
-    assert_eq!(response.status(), 400);
-    let body_str = response.text().await?;
-    assert!(body_str.contains("Term ledger not supported"));
+    // assert - should return 200 with term_fee > 0 and perm_fee = 0
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let price_info = response.json::<PriceInfo>().await?;
+    assert!(
+        price_info.term_fee > U256::from(0),
+        "Submit ledger should have a non-zero term_fee"
+    );
+    assert_eq!(
+        price_info.perm_fee,
+        U256::from(0),
+        "Submit ledger should have perm_fee = 0"
+    );
 
     ctx.stop().await;
     Ok(())
@@ -235,6 +246,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         &ctx.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
+        0,
     )?;
 
     // Calculate expected perm_fee using the same method as the API
@@ -408,6 +420,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         }),
         aurora: None,
         borealis: None,
+        cascade: None,
     };
 
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)
@@ -449,6 +462,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         &ctx.node_ctx.config.consensus,
         FRONTIER_PROOFS,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
+        0,
     )?;
     let expected_perm_fee_before = calculate_perm_fee_from_config(
         data_size_bytes,
@@ -456,6 +470,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         FRONTIER_PROOFS,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         expected_term_fee_before,
+        0,
     )?;
 
     assert_eq!(
@@ -503,6 +518,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         &ctx.node_ctx.config.consensus,
         HARDFORK_PROOFS,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
+        0,
     )?;
     let expected_perm_fee_after = calculate_perm_fee_from_config(
         data_size_bytes,
@@ -510,6 +526,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         HARDFORK_PROOFS,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         expected_term_fee_after,
+        0,
     )?;
 
     assert_eq!(
@@ -644,6 +661,7 @@ async fn verify_pricing_uses_ema(
         &ctx.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         expected_ema,
+        0,
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
@@ -652,6 +670,7 @@ async fn verify_pricing_uses_ema(
         number_of_ingress_proofs_total,
         expected_ema,
         expected_term_fee,
+        0,
     )?;
 
     // Query the pricing API
@@ -672,5 +691,265 @@ async fn verify_pricing_uses_ema(
         block_description
     );
 
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_pricing_endpoint_term_ledgers_pre_post_activation() -> eyre::Result<()> {
+    use irys_types::hardfork_config::Cascade;
+
+    let num_blocks_in_epoch = 4_u64;
+    let activation_height = num_blocks_in_epoch;
+
+    let config = IrysNodeTest::<()>::default_async()
+        .cfg
+        .with_consensus(|consensus| {
+            consensus.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+            consensus.hardforks.cascade = Some(Cascade {
+                activation_height,
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            });
+            // Disable minimum term fee so calculated fees reflect actual epoch-length differences
+            consensus.minimum_term_fee_usd =
+                irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(0)).unwrap();
+        });
+
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    // Pre-Cascade: OneYear and ThirtyDay should return 400
+    let one_year_before =
+        price_endpoint_request(&address, DataLedger::OneYear, data_size_bytes).await;
+    assert_eq!(one_year_before.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let thirty_day_before =
+        price_endpoint_request(&address, DataLedger::ThirtyDay, data_size_bytes).await;
+    assert_eq!(thirty_day_before.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Mine until Cascade activates
+    while ctx.get_canonical_chain_height().await < activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Post-Cascade: OneYear should return 200 with perm_fee=0, term_fee > 0
+    let one_year_after =
+        price_endpoint_request(&address, DataLedger::OneYear, data_size_bytes).await;
+    assert_eq!(one_year_after.status(), reqwest::StatusCode::OK);
+    let one_year_price = one_year_after.json::<PriceInfo>().await?;
+    assert_eq!(one_year_price.perm_fee, U256::from(0));
+    assert!(one_year_price.term_fee > U256::from(0));
+
+    // Post-Cascade: ThirtyDay should return 200 with perm_fee=0, term_fee > 0
+    let thirty_day_after =
+        price_endpoint_request(&address, DataLedger::ThirtyDay, data_size_bytes).await;
+    assert_eq!(thirty_day_after.status(), reqwest::StatusCode::OK);
+    let thirty_day_price = thirty_day_after.json::<PriceInfo>().await?;
+    assert_eq!(thirty_day_price.perm_fee, U256::from(0));
+    assert!(thirty_day_price.term_fee > U256::from(0));
+
+    // Longer storage = higher fee
+    assert!(
+        one_year_price.term_fee > thirty_day_price.term_fee,
+        "OneYear term_fee should be higher than ThirtyDay term_fee"
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Verify that after Cascade activates, the pricing API returns higher fees
+/// based on the Cascade `annual_cost_per_gb` ($0.028) vs the pre-Cascade base ($0.01).
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_pricing_endpoint_uses_higher_annual_cost() -> eyre::Result<()> {
+    use irys_types::hardfork_config::Cascade;
+    use irys_types::ledger_expiry::calculate_submit_ledger_expiry;
+    use irys_types::storage_pricing::calculate_term_fee;
+    use rust_decimal_macros::dec;
+
+    let num_blocks_in_epoch = 4_u64;
+    let activation_height = num_blocks_in_epoch;
+
+    let config = IrysNodeTest::<()>::default_async()
+        .cfg
+        .with_consensus(|consensus| {
+            consensus.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+            // Disable minimum term fee so calculated fees reflect actual cost-basis
+            consensus.minimum_term_fee_usd =
+                irys_types::storage_pricing::Amount::token(dec!(0)).unwrap();
+            consensus.hardforks.cascade = Some(Cascade {
+                activation_height,
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            });
+        });
+
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    // Use enough data so fees are above the minimum floor
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 100;
+    let consensus = &ctx.node_ctx.config.consensus;
+
+    // Pre-Cascade: query Publish pricing at height 0
+    let response_before =
+        price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    assert_eq!(response_before.status(), reqwest::StatusCode::OK);
+    let price_before = response_before.json::<PriceInfo>().await?;
+    let term_fee_before = price_before.term_fee;
+
+    // Mine until Cascade activates
+    while ctx.get_canonical_chain_height().await < activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Post-Cascade: query Publish pricing
+    let response_after =
+        price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    assert_eq!(response_after.status(), reqwest::StatusCode::OK);
+    let price_after = response_after.json::<PriceInfo>().await?;
+    let term_fee_after = price_after.term_fee;
+
+    // Post-Cascade term_fee should be higher due to Cascade annual_cost_per_gb ($0.028 vs $0.01)
+    assert!(
+        term_fee_after > term_fee_before,
+        "Post-Cascade term_fee ({}) should be higher than pre-Cascade ({})",
+        term_fee_after,
+        term_fee_before
+    );
+
+    // Verify post-Cascade term_fee matches manual calculation using the same
+    // formula as the API route (calculate_submit_ledger_expiry + calculate_term_fee)
+    let next_height = ctx.get_canonical_chain_height().await + 1;
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let epochs_for_storage = calculate_submit_ledger_expiry(
+        next_height,
+        consensus.epoch.num_blocks_in_epoch,
+        consensus.epoch.submit_ledger_epoch_length,
+    );
+    let expected_term_fee = calculate_term_fee(
+        data_size_bytes,
+        epochs_for_storage,
+        consensus,
+        number_of_ingress_proofs_total,
+        consensus.genesis.genesis_price,
+        next_height,
+    )?;
+    assert_eq!(
+        term_fee_after, expected_term_fee,
+        "API term_fee should match manual calculation at post-Cascade height"
+    );
+
+    // Perm fee should also be higher post-Cascade
+    assert!(
+        price_after.perm_fee > price_before.perm_fee,
+        "Post-Cascade perm_fee ({}) should be higher than pre-Cascade ({})",
+        price_after.perm_fee,
+        price_before.perm_fee
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Verify the exact transition: fees at height (activation-1) use the base cost,
+/// while fees at height (activation) use the Cascade cost.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_pricing_transition_at_exact_activation_height() -> eyre::Result<()> {
+    use irys_types::hardfork_config::Cascade;
+    use irys_types::ledger_expiry::calculate_submit_ledger_expiry;
+    use irys_types::storage_pricing::calculate_term_fee;
+    use rust_decimal_macros::dec;
+
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = 4_u64;
+
+    let config = IrysNodeTest::<()>::default_async()
+        .cfg
+        .with_consensus(|consensus| {
+            consensus.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+            consensus.minimum_term_fee_usd =
+                irys_types::storage_pricing::Amount::token(dec!(0)).unwrap();
+            consensus.hardforks.cascade = Some(Cascade {
+                activation_height,
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            });
+        });
+
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    let consensus = &ctx.node_ctx.config.consensus;
+    let data_size_bytes = consensus.chunk_size * 100;
+
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+    // Compute fee the same way the API does: use calculate_submit_ledger_expiry
+    // for the dynamic epoch count, then calculate_term_fee with that count.
+    let compute_api_fee = |height: u64| -> eyre::Result<U256> {
+        let epochs = calculate_submit_ledger_expiry(
+            height,
+            consensus.epoch.num_blocks_in_epoch,
+            consensus.epoch.submit_ledger_epoch_length,
+        );
+        calculate_term_fee(
+            data_size_bytes,
+            epochs,
+            consensus,
+            number_of_ingress_proofs_total,
+            consensus.genesis.genesis_price,
+            height,
+        )
+    };
+
+    // At height (activation-1) the annual cost is the base ($0.01)
+    let fee_before = compute_api_fee(activation_height - 1)?;
+    // At height (activation) the annual cost switches to Cascade ($0.028)
+    let fee_at = compute_api_fee(activation_height)?;
+
+    assert!(
+        fee_at > fee_before,
+        "Fee at activation height ({}) must be greater than one block before ({})",
+        fee_at,
+        fee_before
+    );
+
+    // Mine to one block before activation so the API prices the *next* block
+    // at exactly activation_height
+    while ctx.get_canonical_chain_height().await < activation_height - 1 {
+        ctx.mine_block().await?;
+    }
+
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+
+    // The API prices for the *next* block (tip+1). At tip = activation_height-1,
+    // next block = activation_height, so the API should return the Cascade fee.
+    let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let price_info = response.json::<PriceInfo>().await?;
+
+    assert_eq!(
+        price_info.term_fee, fee_at,
+        "API should return Cascade-rate fee when next block is at activation height"
+    );
+
+    ctx.stop().await;
     Ok(())
 }

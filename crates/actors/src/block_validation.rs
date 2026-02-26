@@ -231,6 +231,8 @@ pub enum PreValidationError {
     InvalidTermFeeStructure { tx_id: H256, reason: String },
     #[error("Transaction {tx_id} has invalid perm fee structure: {reason}")]
     InvalidPermFeeStructure { tx_id: H256, reason: String },
+    #[error("Transaction {tx_id} in term-only ledger must not have a perm_fee")]
+    TermLedgerTxHasPermFee { tx_id: H256 },
     #[error(
         "Publish ledger proof count ({proof_count}) does not match transaction count ({tx_count})"
     )]
@@ -638,10 +640,14 @@ pub async fn prevalidate_block(
     // Data Ledger Validation
     // ========================================
     // Ensure only active data ledgers are present in the block
+    let cascade_active = config.consensus.hardforks.is_cascade_active(block.height);
     for ledger in &block.data_ledgers {
         match DataLedger::try_from(ledger.ledger_id) {
             Ok(DataLedger::Publish | DataLedger::Submit) => {
-                // Valid ledgers - continue
+                // Always valid
+            }
+            Ok(DataLedger::OneYear | DataLedger::ThirtyDay) if cascade_active => {
+                // Valid when Cascade hardfork is active
             }
             _ => {
                 return Err(PreValidationError::InvalidLedgerId {
@@ -656,56 +662,56 @@ pub async fn prevalidate_block(
     // Transaction validation
     // ========================================
 
-    // Validate submit ledger transactions
-    let submit_ledger = block
-        .data_ledgers
-        .get(DataLedger::Submit as usize)
-        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
-            expected: DataLedger::Submit.into(),
-            got: block.data_ledgers.len(),
-        })?;
-
-    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
-
-    // Enforce max_data_txs_per_block on submit ledger
+    // Validate all data ledger transactions: count, IDs, and signatures
     let max_data_txs = config
         .node_config
         .consensus_config()
         .mempool
         .max_data_txs_per_block;
-    if submit_txs.len() > max_data_txs as usize {
+    let mut total_term_txs: usize = 0;
+
+    for dl in &block.data_ledgers {
+        let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
+            PreValidationError::InvalidLedgerId {
+                ledger_id: dl.ledger_id,
+                block_height: block.height,
+            }
+        })?;
+
+        let ledger_txs = transactions.get_ledger_txs(ledger);
+        validate_transactions(ledger_txs, &dl.tx_ids.0)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            ledger = ?ledger,
+            "{:?}_transactions_valid", ledger,
+        );
+
+        // Count term ledger txs for max_data_txs enforcement
+        if ledger != DataLedger::Publish {
+            total_term_txs += ledger_txs.len();
+        }
+    }
+
+    // Enforce max_data_txs_per_block across all term ledgers (Submit + OneYear + ThirtyDay)
+    if total_term_txs > max_data_txs as usize {
         return Err(PreValidationError::TooManyDataTxs {
             max: max_data_txs,
-            got: submit_txs.len(),
+            got: total_term_txs,
         });
     }
 
-    // Validate submit transactions: count, IDs, and signatures
-    validate_transactions(submit_txs, &submit_ledger.tx_ids.0)?;
-    debug!(
-        block.hash = ?block.block_hash,
-        block.height = ?block.height,
-        "submit_transactions_valid",
-    );
-
-    // Validate publish ledger transactions
+    // Look up individual ledgers for ingress proof validation
     let publish_ledger = block
         .data_ledgers
-        .get(DataLedger::Publish as usize)
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::Publish as u32)
         .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
             expected: DataLedger::Publish.into(),
             got: block.data_ledgers.len(),
         })?;
 
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
-
-    // Validate publish transactions: count, IDs, and signatures
-    validate_transactions(publish_txs, &publish_ledger.tx_ids.0)?;
-    debug!(
-        block.hash = ?block.block_hash,
-        block.height = ?block.height,
-        "publish_transactions_valid",
-    );
 
     // Validate ingress proofs for published transactions
     for tx_header in publish_txs.iter() {
@@ -1609,7 +1615,8 @@ async fn generate_expected_shadow_transactions(
     let data_txs = transactions.get_ledger_txs(DataLedger::Submit).to_vec();
 
     // Use pre-fetched publish ledger transactions with proofs from block header
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
+    let cascade_active = config.consensus.hardforks.is_cascade_active(block.height);
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)?;
     let publish_ledger_with_txs = PublishLedgerWithTxs {
         txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
         proofs: publish_ledger.proofs.clone(),
@@ -1620,19 +1627,42 @@ async fn generate_expected_shadow_transactions(
 
     // Calculate expired ledger fees for epoch blocks
     let expired_ledger_fees = if is_epoch_block {
-        ledger_expiry::calculate_expired_ledger_fees(
+        let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
             block.height,
-            DataLedger::Submit, // Currently only Submit ledgers expire
+            DataLedger::Submit,
             config,
-            block_index,
+            block_index.clone(),
             block_tree_guard,
             mempool_guard,
             db,
-            true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
+            true, // expect txs to be promoted — return perm fee refund if not
         )
         .in_current_span()
-        .await?
+        .await?;
+
+        // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
+        let cascade_active = config.consensus.hardforks.is_cascade_active(block.height);
+        if cascade_active {
+            for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+                let delta = ledger_expiry::calculate_expired_ledger_fees(
+                    &parent_epoch_snapshot,
+                    block.height,
+                    ledger,
+                    config,
+                    block_index.clone(),
+                    block_tree_guard,
+                    mempool_guard,
+                    db,
+                    false, // no promotion for these ledgers
+                )
+                .in_current_span()
+                .await?;
+                result.merge(delta);
+            }
+        }
+
+        result
     } else {
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
@@ -1989,6 +2019,7 @@ pub fn calculate_perm_storage_total_fee(
     ema_snapshot: &EmaSnapshot,
     config: &Config,
     timestamp_secs: UnixTimestamp,
+    height: u64,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
@@ -1997,6 +2028,7 @@ pub fn calculate_perm_storage_total_fee(
         number_of_ingress_proofs_total,
         ema_snapshot.ema_for_public_pricing(),
         term_fee,
+        height,
     )
 }
 
@@ -2007,15 +2039,16 @@ pub fn calculate_term_storage_base_network_fee(
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    timestamp_secs: UnixTimestamp,
+    replica_count: u64,
+    height: u64,
 ) -> eyre::Result<U256> {
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     irys_types::storage_pricing::calculate_term_fee(
         bytes_to_store,
         epochs_for_storage,
         &config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ema_snapshot.ema_for_public_pricing(),
+        height,
     )
 }
 
@@ -2046,7 +2079,8 @@ pub async fn data_txs_are_valid(
         })?;
 
     // Extract publish ledger for ingress proofs validation
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)
+    let cascade_active = config.consensus.hardforks.is_cascade_active(block.height);
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
@@ -2110,12 +2144,15 @@ pub async fn data_txs_are_valid(
 
         // Convert block timestamp from millis to seconds for hardfork params
         let timestamp_secs = block.timestamp_secs();
+        let number_of_ingress_proofs_total =
+            config.number_of_ingress_proofs_total_at(timestamp_secs);
         let expected_term_fee = calculate_term_storage_base_network_fee(
             tx.data_size,
             epochs_for_storage,
             &block_ema,
             config,
-            timestamp_secs,
+            number_of_ingress_proofs_total,
+            block.height,
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
         let expected_perm_fee = calculate_perm_storage_total_fee(
@@ -2124,6 +2161,7 @@ pub async fn data_txs_are_valid(
             &block_ema,
             config,
             timestamp_secs,
+            block.height,
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
@@ -2171,6 +2209,54 @@ pub async fn data_txs_are_valid(
         Ok(())
     };
 
+    // Term-only fee validation for OneYear/ThirtyDay (no perm_fee, replica_count = 1)
+    let validate_term_price =
+        |tx: &&DataTransactionHeader, ledger: DataLedger| -> Result<(), PreValidationError> {
+            // Term-only ledgers must not carry a perm_fee
+            if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+                return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
+            }
+
+            let cascade = config.consensus.hardforks.cascade.as_ref();
+            let epoch_length = match ledger {
+                DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).unwrap_or(365),
+                DataLedger::ThirtyDay => cascade.map(|c| c.thirty_day_epoch_length).unwrap_or(30),
+                _ => unreachable!(),
+            };
+            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                block.height,
+                config.consensus.epoch.num_blocks_in_epoch,
+                epoch_length,
+            );
+
+            let expected_term_fee = calculate_term_storage_base_network_fee(
+                tx.data_size,
+                epochs_for_storage,
+                &block_ema,
+                config,
+                1, // no ingress proofs for term-only ledgers
+                block.height,
+            )
+            .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+            let actual_term_fee = tx.term_fee;
+            if actual_term_fee < expected_term_fee {
+                return Err(PreValidationError::InsufficientTermFee {
+                    tx_id: tx.id,
+                    expected: expected_term_fee,
+                    actual: actual_term_fee.get(),
+                });
+            }
+
+            TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+                PreValidationError::InvalidTermFeeStructure {
+                    tx_id: tx.id,
+                    reason: e.to_string(),
+                }
+            })?;
+            Ok(())
+        };
+
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
@@ -2210,11 +2296,13 @@ pub async fn data_txs_are_valid(
 
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
-                    DataLedger::OneYear => {
-                        // TODO some validation
-                    }
-                    DataLedger::ThirtyDay => {
-                        // TODO some validation
+                    DataLedger::OneYear | DataLedger::ThirtyDay => {
+                        // Term-only ledger: validate term fee, no promotion
+                        validate_term_price(tx, *ledger_current)?;
+                        debug!(
+                            "Transaction {} is new in {:?} ledger",
+                            tx.id, ledger_current
+                        );
                     }
                 }
             }
@@ -2263,13 +2351,13 @@ pub async fn data_txs_are_valid(
                             block_hash: *historical_block_hash,
                         });
                     }
-                    DataLedger::OneYear => {
-                        // TODO: Validate OneYear term ledger data tx
-                        // For now, accept any historical state
-                    }
-                    DataLedger::ThirtyDay => {
-                        // TODO: Validate ThirtyDay term ledger data tx
-                        // For now, accept any historical state
+                    DataLedger::OneYear | DataLedger::ThirtyDay => {
+                        // Term-only ledger tx should not have any past inclusion
+                        return Err(PreValidationError::SubmitTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            ledger: *ledger_historical,
+                            block_hash: *historical_block_hash,
+                        });
                     }
                 }
             }
@@ -2633,9 +2721,14 @@ pub async fn data_txs_are_valid(
 
 fn extract_data_ledgers(
     block: &IrysBlockHeader,
+    cascade_active: bool,
 ) -> eyre::Result<(&DataTransactionLedger, &DataTransactionLedger)> {
     let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
+            ensure!(
+                !cascade_active,
+                "Post-Cascade blocks must have 4 data ledgers, got 2"
+            );
             ensure!(
                 publish_ledger.ledger_id == DataLedger::Publish,
                 "Publish ledger must be the first ledger in the data ledgers"
@@ -2646,7 +2739,56 @@ fn extract_data_ledgers(
             );
             (publish_ledger, submit_ledger)
         }
-        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+        [
+            publish_ledger,
+            submit_ledger,
+            one_year_ledger,
+            thirty_day_ledger,
+        ] => {
+            ensure!(
+                cascade_active,
+                "Pre-Cascade blocks must have 2 data ledgers, got 4"
+            );
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            ensure!(
+                one_year_ledger.ledger_id == DataLedger::OneYear,
+                "OneYear ledger must be the third ledger in the data ledgers"
+            );
+            ensure!(
+                thirty_day_ledger.ledger_id == DataLedger::ThirtyDay,
+                "ThirtyDay ledger must be the fourth ledger in the data ledgers"
+            );
+            // Validate term-only ledger properties
+            ensure!(
+                one_year_ledger.proofs.is_none(),
+                "OneYear ledger must not have ingress proofs"
+            );
+            ensure!(
+                one_year_ledger.required_proof_count.is_none(),
+                "OneYear ledger must not have required_proof_count"
+            );
+            ensure!(
+                thirty_day_ledger.proofs.is_none(),
+                "ThirtyDay ledger must not have ingress proofs"
+            );
+            ensure!(
+                thirty_day_ledger.required_proof_count.is_none(),
+                "ThirtyDay ledger must not have required_proof_count"
+            );
+            (publish_ledger, submit_ledger)
+        }
+        [..] => eyre::bail!(
+            "Expected {} data ledgers on the block, got {}",
+            if cascade_active { 4 } else { 2 },
+            block.data_ledgers.len()
+        ),
     };
     Ok((publish_ledger, submit_ledger))
 }
@@ -3924,6 +4066,7 @@ mod commitment_version_tests {
                     minimum_commitment_tx_version: min_version,
                 }),
                 borealis: None,
+                cascade: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -3939,6 +4082,7 @@ mod commitment_version_tests {
                 next_name_tbd: None,
                 aurora: None,
                 borealis: None,
+                cascade: None,
             },
             ..ConsensusConfig::testing()
         }

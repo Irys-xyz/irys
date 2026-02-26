@@ -233,6 +233,8 @@ pub struct MempoolTxsBundle {
     pub commitment_txs_to_bill: Vec<CommitmentTransaction>,
 
     pub submit_txs: Vec<DataTransactionHeader>,
+    pub one_year_txs: Vec<DataTransactionHeader>,
+    pub thirty_day_txs: Vec<DataTransactionHeader>,
     pub publish_txs: PublishLedgerWithTxs,
     pub aggregated_miner_fees: LedgerExpiryBalanceDelta,
 
@@ -1064,12 +1066,19 @@ pub trait BlockProdStrategy {
             // Record the hash of the epoch block (previous block) as our epoch reference
             last_epoch_hash = prev_block_hash;
         }
-        let submit_chunks_added = calculate_chunks_added(
-            &mempool_bundle.submit_txs,
-            self.inner().config.consensus.chunk_size,
-        );
+        let chunk_size = self.inner().config.consensus.chunk_size;
+        let submit_chunks_added = calculate_chunks_added(&mempool_bundle.submit_txs, chunk_size);
         let submit_total_chunks =
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
+
+        let cascade = self
+            .inner()
+            .config
+            .consensus
+            .hardforks
+            .cascade
+            .as_ref()
+            .filter(|c| block_height >= c.activation_height);
 
         let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
             let mut txids = H256List::new();
@@ -1104,55 +1113,119 @@ pub trait BlockProdStrategy {
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
             timestamp: current_timestamp,
             system_ledgers,
-            data_ledgers: vec![
-                // Permanent Publish Ledger
-                DataTransactionLedger {
-                    ledger_id: DataLedger::Publish.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(
-                        &mempool_bundle.publish_txs.txs,
-                    )
-                    .0,
-                    tx_ids: H256List(
-                        mempool_bundle
-                            .publish_txs
-                            .txs
-                            .iter()
-                            .map(|t| t.id)
-                            .collect::<Vec<_>>(),
-                    ),
-                    total_chunks: publish_total_chunks,
-                    expires: None,
-                    proofs: opt_proofs,
-                    required_proof_count: Some(
-                        self.inner()
-                            .config
-                            .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
-                            .try_into()?,
-                    ),
-                },
-                // Term Submit Ledger
-                DataTransactionLedger {
-                    ledger_id: DataLedger::Submit.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&mempool_bundle.submit_txs).0,
-                    tx_ids: H256List(
-                        mempool_bundle
-                            .submit_txs
-                            .iter()
-                            .map(|t| t.id)
-                            .collect::<Vec<_>>(),
-                    ),
-                    total_chunks: submit_total_chunks,
-                    expires: Some(
-                        self.inner()
-                            .config
-                            .consensus
-                            .epoch
-                            .submit_ledger_epoch_length,
-                    ),
-                    proofs: None,
-                    required_proof_count: None,
-                },
-            ],
+            data_ledgers: {
+                let mut ledgers = vec![
+                    // Permanent Publish Ledger
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Publish.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(
+                            &mempool_bundle.publish_txs.txs,
+                        )
+                        .0,
+                        tx_ids: H256List(
+                            mempool_bundle
+                                .publish_txs
+                                .txs
+                                .iter()
+                                .map(|t| t.id)
+                                .collect::<Vec<_>>(),
+                        ),
+                        total_chunks: publish_total_chunks,
+                        expires: None,
+                        proofs: opt_proofs,
+                        required_proof_count: Some(
+                            self.inner()
+                                .config
+                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
+                                .try_into()?,
+                        ),
+                    },
+                    // Term Submit Ledger
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Submit.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(
+                            &mempool_bundle.submit_txs,
+                        )
+                        .0,
+                        tx_ids: H256List(
+                            mempool_bundle
+                                .submit_txs
+                                .iter()
+                                .map(|t| t.id)
+                                .collect::<Vec<_>>(),
+                        ),
+                        total_chunks: submit_total_chunks,
+                        expires: Some(
+                            self.inner()
+                                .config
+                                .consensus
+                                .epoch
+                                .submit_ledger_epoch_length,
+                        ),
+                        proofs: None,
+                        required_proof_count: None,
+                    },
+                ];
+                if let Some(cascade) = &cascade {
+                    let one_year_chunks_added =
+                        calculate_chunks_added(&mempool_bundle.one_year_txs, chunk_size);
+                    let one_year_total_chunks = prev_block_header
+                        .data_ledgers
+                        .iter()
+                        .find(|l| l.ledger_id == DataLedger::OneYear as u32)
+                        .map(|l| l.total_chunks)
+                        .unwrap_or(0)
+                        + one_year_chunks_added;
+
+                    let thirty_day_chunks_added =
+                        calculate_chunks_added(&mempool_bundle.thirty_day_txs, chunk_size);
+                    let thirty_day_total_chunks = prev_block_header
+                        .data_ledgers
+                        .iter()
+                        .find(|l| l.ledger_id == DataLedger::ThirtyDay as u32)
+                        .map(|l| l.total_chunks)
+                        .unwrap_or(0)
+                        + thirty_day_chunks_added;
+
+                    ledgers.push(DataTransactionLedger {
+                        ledger_id: DataLedger::OneYear.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(
+                            &mempool_bundle.one_year_txs,
+                        )
+                        .0,
+                        tx_ids: H256List(
+                            mempool_bundle
+                                .one_year_txs
+                                .iter()
+                                .map(|t| t.id)
+                                .collect::<Vec<_>>(),
+                        ),
+                        total_chunks: one_year_total_chunks,
+                        expires: Some(cascade.one_year_epoch_length),
+                        proofs: None,
+                        required_proof_count: None,
+                    });
+                    ledgers.push(DataTransactionLedger {
+                        ledger_id: DataLedger::ThirtyDay.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(
+                            &mempool_bundle.thirty_day_txs,
+                        )
+                        .0,
+                        tx_ids: H256List(
+                            mempool_bundle
+                                .thirty_day_txs
+                                .iter()
+                                .map(|t| t.id)
+                                .collect::<Vec<_>>(),
+                        ),
+                        total_chunks: thirty_day_total_chunks,
+                        expires: Some(cascade.thirty_day_epoch_length),
+                        proofs: None,
+                        required_proof_count: None,
+                    });
+                }
+                ledgers
+            },
             evm_block_hash,
             vdf_limiter_info: VDFLimiterInfo::new(
                 solution,
@@ -1172,6 +1245,8 @@ pub trait BlockProdStrategy {
         // Build BlockTransactions from the mempool bundle
         let mut all_data_txs = Vec::new();
         all_data_txs.extend(mempool_bundle.submit_txs);
+        all_data_txs.extend(mempool_bundle.one_year_txs);
+        all_data_txs.extend(mempool_bundle.thirty_day_txs);
         all_data_txs.extend(mempool_bundle.publish_txs.txs);
 
         let block_body = BlockBody {
@@ -1424,6 +1499,8 @@ pub trait BlockProdStrategy {
             commitment_txs,
             commitment_txs_to_bill: vec![],
             submit_txs: mempool_txs.submit_tx,
+            one_year_txs: mempool_txs.one_year_tx,
+            thirty_day_txs: mempool_txs.thirty_day_tx,
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees,
             commitment_refund_events,
@@ -1513,6 +1590,8 @@ pub trait BlockProdStrategy {
             commitment_txs_to_bill: mempool_txs.commitment_tx.clone(),
             commitment_txs: mempool_txs.commitment_tx,
             submit_txs: mempool_txs.submit_tx,
+            one_year_txs: mempool_txs.one_year_tx,
+            thirty_day_txs: mempool_txs.thirty_day_tx,
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
             commitment_refund_events: Vec::new(),
@@ -1579,25 +1658,55 @@ pub trait BlockProdStrategy {
     /// Calculates the aggregated fees owed to miners when data ledgers expire.
     ///
     /// Delegates to the dedicated ledger_expiry module for processing.
-    /// Currently processes Submit ledger as that's the only expiring ledger type.
+    /// Processes Submit ledger (with promotion/perm_fee refund) and, when Cascade
+    /// is active, also OneYear and ThirtyDay ledgers (no promotion expected).
     async fn calculate_expired_ledger_fees(
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
     ) -> eyre::Result<LedgerExpiryBalanceDelta> {
-        ledger_expiry::calculate_expired_ledger_fees(
+        let mut result = ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,
-            DataLedger::Submit, // Currently only Submit ledgers expire
+            DataLedger::Submit,
             &self.inner().config,
             self.inner().block_index.clone(),
             &self.inner().block_tree_guard,
             &self.inner().mempool_guard,
             &self.inner().db,
-            true, // we expect the txs to be promoted otherwise return perm fee
+            true, // expect txs to be promoted — return perm fee refund if not
         )
         .in_current_span()
-        .await
+        .await?;
+
+        // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
+        // These are term-only (no promotion), so expect_txs_to_be_promoted = false.
+        let cascade_active = self
+            .inner()
+            .config
+            .consensus
+            .hardforks
+            .is_cascade_active(block_height);
+        if cascade_active {
+            for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+                let delta = ledger_expiry::calculate_expired_ledger_fees(
+                    parent_epoch_snapshot,
+                    block_height,
+                    ledger,
+                    &self.inner().config,
+                    self.inner().block_index.clone(),
+                    &self.inner().block_tree_guard,
+                    &self.inner().mempool_guard,
+                    &self.inner().db,
+                    false, // no promotion for these ledgers
+                )
+                .in_current_span()
+                .await?;
+                result.merge(delta);
+            }
+        }
+
+        Ok(result)
     }
 }
 

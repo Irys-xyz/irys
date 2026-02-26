@@ -37,6 +37,8 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
                 commitment_txs: vec![invalid_unpledge.clone()],
                 commitment_txs_to_bill: vec![invalid_unpledge],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -174,6 +176,8 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
                 commitment_txs: commitment_txs.clone(),
                 commitment_txs_to_bill: commitment_txs,
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -295,6 +299,8 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
                 commitment_txs: vec![commitment.clone()],
                 commitment_txs_to_bill: vec![commitment],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -392,6 +398,8 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
                 commitment_txs: commitments.clone(),
                 commitment_txs_to_bill: commitments,
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,

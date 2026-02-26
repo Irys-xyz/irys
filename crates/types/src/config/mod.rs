@@ -146,6 +146,16 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
+        if let Some(cascade) = &self.consensus.hardforks.cascade {
+            ensure!(
+                cascade.activation_height == 0
+                    || cascade.activation_height % self.consensus.epoch.num_blocks_in_epoch == 0,
+                "Cascade activation_height ({}) must be on an epoch boundary (multiple of {})",
+                cascade.activation_height,
+                self.consensus.epoch.num_blocks_in_epoch
+            );
+        }
+
         Ok(())
     }
 }
@@ -626,6 +636,7 @@ mod tests {
 
         [hardforks.borealis]
         activation_timestamp = "1970-01-01T00:00:00+00:00"
+
         "#;
 
         // Create the expected config
@@ -841,5 +852,53 @@ mod tests {
         assert_eq!(updated.consensus.expected_genesis_hash, Some(hash));
         assert_eq!(updated.consensus.chain_id, config.consensus.chain_id);
         assert_eq!(updated.peer_id(), config.peer_id());
+    }
+
+    #[test]
+    fn test_cascade_activation_height_epoch_boundary_valid() {
+        use crate::hardfork_config::Cascade;
+
+        // Valid: activation at 0
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+            activation_height: 0,
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // Valid: activation at epoch boundary
+        let mut node_config = NodeConfig::testing();
+        let num_blocks = node_config.consensus_config().epoch.num_blocks_in_epoch;
+        node_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+            activation_height: num_blocks * 5,
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cascade_activation_height_non_epoch_boundary_invalid() {
+        use crate::hardfork_config::Cascade;
+
+        let mut node_config = NodeConfig::testing();
+        let num_blocks = node_config.consensus_config().epoch.num_blocks_in_epoch;
+        node_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+            activation_height: num_blocks * 5 + 1,
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("epoch boundary"),
+            "Expected epoch boundary error, got: {err}"
+        );
     }
 }

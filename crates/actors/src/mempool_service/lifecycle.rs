@@ -28,9 +28,26 @@ impl Inner {
         let block = sealed_block.header();
         let submit_txids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
         let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+        let one_year_txids = block
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::OneYear as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+            .unwrap_or(&[]);
+        let thirty_day_txids = block
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::ThirtyDay as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+            .unwrap_or(&[]);
         let commitment_txids = block.commitment_tx_ids();
 
-        for txid in submit_txids.iter().chain(publish_txids.iter()) {
+        for txid in submit_txids
+            .iter()
+            .chain(publish_txids.iter())
+            .chain(one_year_txids.iter())
+            .chain(thirty_day_txids.iter())
+        {
             self.mempool_state
                 .set_data_tx_included_height_overwrite(*txid, block.height)
                 .await;
@@ -481,35 +498,48 @@ impl Inner {
                 .extend(orphaned_txs);
         }
 
-        // if a SUBMIT a tx is CONFIRMED in the old fork, but orphaned in the new - resubmit it to the mempool
-        let submit_txs = orphaned_confirmed_ledger_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
+        // Term ledger txs (Submit, OneYear, ThirtyDay) confirmed in the old fork but orphaned
+        // in the new should be re-submitted to the mempool.
+        let term_ledgers = [
+            DataLedger::Submit,
+            DataLedger::OneYear,
+            DataLedger::ThirtyDay,
+        ];
+        let mut orphaned_term_txs: Vec<IrysTransactionId> = Vec::new();
+        for ledger in term_ledgers {
+            orphaned_term_txs.extend(
+                orphaned_confirmed_ledger_txs
+                    .get(&ledger)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
 
-        // Clear included_height for orphaned submit transactions
-        for tx_id in submit_txs.iter().copied() {
+        // Clear included_height for orphaned term transactions
+        for tx_id in orphaned_term_txs.iter().copied() {
             if self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned submit tx");
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
             }
         }
 
-        // Extract full orphaned submit transactions
-        let mut orphaned_submit_tx_map = HashMap::new();
+        // Extract full orphaned term transactions from old fork blocks
+        let mut orphaned_term_tx_map = HashMap::new();
         for block in old_fork_confirmed.iter() {
-            for tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                orphaned_submit_tx_map.insert(tx.id, tx.clone());
+            for ledger in term_ledgers {
+                for tx in block.transactions().get_ledger_txs(ledger) {
+                    orphaned_term_tx_map.insert(tx.id, tx.clone());
+                }
             }
         }
 
-        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
+        // 2. Re-post any reorged term ledger transactions through handle_tx_ingress_message so account balances and anchors are checked
         // 3. Filter out any invalidated transactions
-        for tx_id in submit_txs.iter() {
-            if let Some(tx) = orphaned_submit_tx_map.remove(tx_id) {
+        for tx_id in orphaned_term_txs.iter() {
+            if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
                 // TODO: handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
                 if let Err(e) = self

@@ -865,6 +865,8 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
+        let mut one_year_tx = Vec::new();
+        let mut thirty_day_tx = Vec::new();
         let max_data_txs: usize = self
             .config
             .node_config
@@ -918,6 +920,7 @@ impl Inner {
                         expected_term_fee,
                         &ema_snapshot,
                         current_timestamp,
+                        next_block_height,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -992,7 +995,7 @@ impl Inner {
                     }
                 }
                 irys_types::DataLedger::Submit => {
-                    // todo: add to list of invalid txs because we don't support Submit txs
+                    // Submit ledger txs are not eligible for promotion
                     debug!(
                         tx.id = ?tx.id,
                         tx.signer = ?tx.signer(),
@@ -1001,12 +1004,22 @@ impl Inner {
                     continue;
                 }
                 DataLedger::OneYear | DataLedger::ThirtyDay => {
-                    warn!(
-                        tx.id = ?tx.id,
-                        tx.ledger = ?ledger,
-                        "Skipping unsupported term ledger"
-                    );
-                    continue;
+                    // Term-only ledgers: same validation as Submit (term-fee only, no promotion)
+                    if !self
+                        .config
+                        .node_config
+                        .consensus_config()
+                        .hardforks
+                        .is_cascade_active(current_height)
+                    {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.ledger = ?ledger,
+                            "Skipping term ledger tx - Cascade hardfork not active"
+                        );
+                        continue;
+                    }
+                    // Term-fee validation is handled in the funding check below
                 }
             }
 
@@ -1037,16 +1050,21 @@ impl Inner {
                 &mut unfunded_address,
                 &mut fees_spent_per_address,
             ) {
+                let total_selected = submit_tx.len() + one_year_tx.len() + thirty_day_tx.len();
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
-                    tx.selected_count = submit_tx.len() + 1,
+                    tx.selected_count = total_selected + 1,
                     tx.max_data_txs = max_data_txs,
                     "Data transaction passed funding check"
                 );
-                submit_tx.push(tx);
-                if submit_tx.len() >= max_data_txs {
+                match ledger {
+                    DataLedger::Publish | DataLedger::Submit => submit_tx.push(tx),
+                    DataLedger::OneYear => one_year_tx.push(tx),
+                    DataLedger::ThirtyDay => thirty_day_tx.push(tx),
+                }
+                if submit_tx.len() + one_year_tx.len() + thirty_day_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
@@ -1113,6 +1131,8 @@ impl Inner {
         Ok(MempoolTxs {
             commitment_tx,
             submit_tx,
+            one_year_tx,
+            thirty_day_tx,
             publish_tx: publish_txs_and_proofs,
         })
     }
@@ -1761,6 +1781,7 @@ impl Inner {
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
         timestamp_secs: UnixTimestamp,
+        height: u64,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
         let total_perm_fee = calculate_perm_storage_total_fee(
@@ -1769,6 +1790,7 @@ impl Inner {
             ema,
             &self.config,
             timestamp_secs,
+            height,
         )
         .map_err(TxIngressError::other_display)?;
 
@@ -1801,6 +1823,7 @@ impl Inner {
             &self.config.consensus,
             number_of_ingress_proofs_total,
             ema.ema_for_public_pricing(),
+            block_height,
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
@@ -2950,6 +2973,8 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
+    pub one_year_tx: Vec<DataTransactionHeader>,
+    pub thirty_day_tx: Vec<DataTransactionHeader>,
     pub publish_tx: PublishLedgerWithTxs,
 }
 

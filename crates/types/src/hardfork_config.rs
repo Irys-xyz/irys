@@ -1,6 +1,14 @@
 //! Configurable hardfork parameters.
 
-use crate::{serialization::unix_timestamp_string_serde, UnixTimestamp, VersionDiscriminant};
+use crate::{
+    serialization::unix_timestamp_string_serde,
+    storage_pricing::{
+        phantoms::{CostPerGb, Usd},
+        Amount,
+    },
+    UnixTimestamp, VersionDiscriminant,
+};
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -22,6 +30,12 @@ pub struct IrysHardforkConfig {
     /// timestamp >= activation_timestamp. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borealis: Option<Borealis>,
+
+    /// Cascade hardfork - enables OneYear and ThirtyDay term data ledgers.
+    /// Activation is height-based: enabled for all blocks at or above activation_height.
+    /// Must be set to an epoch boundary block height. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cascade: Option<Cascade>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -70,6 +84,42 @@ pub struct Borealis {
     /// epoch block's timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
+}
+
+/// Cascade hardfork - enables OneYear and ThirtyDay term data ledgers.
+///
+/// Activation is height-based: the feature is enabled for all blocks at or above
+/// `activation_height`. This should be set to an epoch boundary block height.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Cascade {
+    /// Block height at which this hardfork activates (should be an epoch boundary).
+    pub activation_height: u64,
+    /// Epoch length for the OneYear term ledger (default: 365 epochs).
+    #[serde(default = "Cascade::default_one_year_epoch_length")]
+    pub one_year_epoch_length: u64,
+    /// Epoch length for the ThirtyDay term ledger (default: 30 epochs).
+    #[serde(default = "Cascade::default_thirty_day_epoch_length")]
+    pub thirty_day_epoch_length: u64,
+    /// Override for annual cost per GB in USD when Cascade is active.
+    /// Default: $0.028/GB/year (raised from $0.01 to make term fees economically viable).
+    #[serde(
+        default = "Cascade::default_annual_cost_per_gb",
+        deserialize_with = "crate::serde_utils::token_amount",
+        serialize_with = "crate::serde_utils::serializes_token_amount"
+    )]
+    pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
+}
+
+impl Cascade {
+    fn default_one_year_epoch_length() -> u64 {
+        365
+    }
+    fn default_thirty_day_epoch_length() -> u64 {
+        30
+    }
+    pub fn default_annual_cost_per_gb() -> Amount<(CostPerGb, Usd)> {
+        Amount::token(dec!(0.028)).expect("valid token amount")
+    }
 }
 
 impl IrysHardforkConfig {
@@ -128,6 +178,13 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
+    /// Check if the Cascade hardfork is active at a given block height.
+    pub fn is_cascade_active(&self, height: u64) -> bool {
+        self.cascade
+            .as_ref()
+            .is_some_and(|f| height >= f.activation_height)
+    }
+
     /// Retain only commitment transactions that meet the minimum version requirement.
     /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
     pub fn retain_valid_commitment_versions<T: VersionDiscriminant>(
@@ -157,6 +214,7 @@ mod tests {
             next_name_tbd: None,
             aurora: None,
             borealis: None,
+            cascade: None,
         };
 
         assert_eq!(
@@ -188,6 +246,7 @@ mod tests {
                 minimum_commitment_tx_version: 2,
             }),
             borealis: None,
+            cascade: None,
         };
 
         // Before activation timestamp
@@ -217,6 +276,7 @@ mod tests {
             }),
             aurora: None,
             borealis: None,
+            cascade: None,
         };
 
         // Before activation timestamp
@@ -266,6 +326,7 @@ mod tests {
             }),
             aurora: None,
             borealis: None,
+            cascade: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -311,6 +372,7 @@ mod tests {
                     minimum_commitment_tx_version: min_version,
                 }),
                 borealis: None,
+                cascade: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -336,6 +398,7 @@ mod tests {
                     minimum_commitment_tx_version: min_version,
                 }),
                 borealis: None,
+                cascade: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -354,6 +417,7 @@ mod tests {
                 next_name_tbd: None,
                 aurora: None,
                 borealis: None,
+                cascade: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -385,6 +449,7 @@ mod tests {
                     minimum_commitment_tx_version: min_version,
                 }),
                 borealis: None,
+                cascade: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -416,6 +481,7 @@ mod tests {
                     minimum_commitment_tx_version: min_version,
                 }),
                 borealis: None,
+                cascade: None,
             }
         }
 
@@ -428,6 +494,7 @@ mod tests {
                 next_name_tbd: None,
                 aurora: None,
                 borealis: None,
+                cascade: None,
             }
         }
 
@@ -481,6 +548,125 @@ mod tests {
                 config.minimum_commitment_version_at(UnixTimestamp::from_secs(timestamp_secs)),
                 expected
             );
+        }
+    }
+
+    mod cascade_tests {
+        use super::*;
+
+        fn base_config() -> IrysHardforkConfig {
+            IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: None,
+                borealis: None,
+                cascade: None,
+            }
+        }
+
+        #[test]
+        fn test_is_cascade_active_boundary() {
+            let config = IrysHardforkConfig {
+                cascade: Some(Cascade {
+                    activation_height: 100,
+                    one_year_epoch_length: 365,
+                    thirty_day_epoch_length: 30,
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
+                ..base_config()
+            };
+            assert!(!config.is_cascade_active(0));
+            assert!(!config.is_cascade_active(99));
+            assert!(config.is_cascade_active(100));
+            assert!(config.is_cascade_active(101));
+            assert!(config.is_cascade_active(u64::MAX));
+        }
+
+        #[test]
+        fn test_is_cascade_active_disabled() {
+            let config = base_config();
+            assert!(!config.is_cascade_active(0));
+            assert!(!config.is_cascade_active(u64::MAX));
+        }
+
+        #[test]
+        fn test_is_cascade_active_from_genesis() {
+            let config = IrysHardforkConfig {
+                cascade: Some(Cascade {
+                    activation_height: 0,
+                    one_year_epoch_length: 365,
+                    thirty_day_epoch_length: 30,
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
+                ..base_config()
+            };
+            assert!(config.is_cascade_active(0));
+            assert!(config.is_cascade_active(1));
+        }
+
+        #[test]
+        fn test_cascade_serde_toml_roundtrip() {
+            let config = IrysHardforkConfig {
+                cascade: Some(Cascade {
+                    activation_height: 300,
+                    one_year_epoch_length: 365,
+                    thirty_day_epoch_length: 30,
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
+                ..base_config()
+            };
+            let toml_str = toml::to_string_pretty(&config).unwrap();
+            assert!(toml_str.contains("[cascade]"));
+            assert!(toml_str.contains("activation_height = 300"));
+
+            let deserialized: IrysHardforkConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(deserialized, config);
+        }
+
+        #[test]
+        fn test_cascade_serde_default_epoch_lengths() {
+            let toml_str = "
+                [frontier]
+                number_of_ingress_proofs_total = 1
+                number_of_ingress_proofs_from_assignees = 0
+
+                [cascade]
+                activation_height = 100
+            ";
+            let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+            let cascade = config.cascade.unwrap();
+            assert_eq!(cascade.activation_height, 100);
+            assert_eq!(cascade.one_year_epoch_length, 365);
+            assert_eq!(cascade.thirty_day_epoch_length, 30);
+            // Default annual_cost_per_gb should be $0.028
+            let expected = Amount::token(dec!(0.028)).unwrap();
+            assert_eq!(cascade.annual_cost_per_gb, expected);
+        }
+
+        #[test]
+        fn test_cascade_serde_custom_annual_cost() {
+            let toml_str = "
+                [frontier]
+                number_of_ingress_proofs_total = 1
+                number_of_ingress_proofs_from_assignees = 0
+
+                [cascade]
+                activation_height = 200
+                annual_cost_per_gb = 0.05
+            ";
+            let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+            let cascade = config.cascade.as_ref().unwrap();
+            assert_eq!(cascade.activation_height, 200);
+            let expected = Amount::token(dec!(0.05)).unwrap();
+            assert_eq!(cascade.annual_cost_per_gb, expected);
+
+            // Roundtrip
+            let toml_out = toml::to_string_pretty(&config).unwrap();
+            let reparsed: IrysHardforkConfig = toml::from_str(&toml_out).unwrap();
+            assert_eq!(reparsed, config);
         }
     }
 }

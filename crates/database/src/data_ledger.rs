@@ -62,12 +62,12 @@ impl PermanentLedger {
 }
 
 impl TermLedger {
-    /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: DataLedger, config: &ConsensusConfig) -> Self {
+    /// Creates a term ledger with the specified ledger type and epoch length.
+    pub fn new(ledger: DataLedger, config: &ConsensusConfig, epoch_length: u64) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length: config.epoch.submit_ledger_epoch_length,
+            epoch_length,
             num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }
@@ -265,11 +265,56 @@ pub struct Ledgers {
 }
 
 impl Ledgers {
-    /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new(config: &ConsensusConfig) -> Self {
+    /// Instantiate a Ledgers struct with the correct Ledgers.
+    /// When `cascade_active` is true, includes OneYear and ThirtyDay term ledgers.
+    pub fn new(config: &ConsensusConfig, cascade_active: bool) -> Self {
+        let mut term = vec![TermLedger::new(
+            DataLedger::Submit,
+            config,
+            config.epoch.submit_ledger_epoch_length,
+        )];
+        if let Some(cascade) = cascade_active
+            .then_some(config.hardforks.cascade.as_ref())
+            .flatten()
+        {
+            term.push(TermLedger::new(
+                DataLedger::OneYear,
+                config,
+                cascade.one_year_epoch_length,
+            ));
+            term.push(TermLedger::new(
+                DataLedger::ThirtyDay,
+                config,
+                cascade.thirty_day_epoch_length,
+            ));
+        }
         Self {
             perm: PermanentLedger::new(config),
-            term: vec![TermLedger::new(DataLedger::Submit, config)],
+            term,
+        }
+    }
+
+    /// Adds OneYear and ThirtyDay term ledgers when the Cascade hardfork activates mid-chain.
+    /// No-op if these ledgers are already present.
+    pub fn activate_cascade(&mut self, config: &ConsensusConfig) {
+        if self
+            .term
+            .iter()
+            .any(|t| t.ledger_id == DataLedger::OneYear as u32)
+        {
+            return; // already activated
+        }
+        if let Some(cascade) = config.hardforks.cascade.as_ref() {
+            self.term.push(TermLedger::new(
+                DataLedger::OneYear,
+                config,
+                cascade.one_year_epoch_length,
+            ));
+            self.term.push(TermLedger::new(
+                DataLedger::ThirtyDay,
+                config,
+                cascade.thirty_day_epoch_length,
+            ));
         }
     }
 
@@ -280,6 +325,21 @@ impl Ledgers {
     )]
     pub fn len(&self) -> usize {
         1 + self.term.len()
+    }
+
+    /// Returns the list of active DataLedger variants managed by this instance.
+    /// Use this instead of `DataLedger::ALL` or `DataLedger::iter()` to iterate
+    /// only over ledgers that are actually active under the current hardfork state.
+    pub fn active_ledgers(&self) -> Vec<DataLedger> {
+        let mut ledgers = vec![DataLedger::Publish];
+        for term in &self.term {
+            // ledger_id is set from known DataLedger variants in TermLedger::new,
+            // so this conversion should always succeed.
+            if let Ok(ledger) = DataLedger::try_from(term.ledger_id) {
+                ledgers.push(ledger);
+            }
+        }
+        ledgers
     }
 
     /// Get all of the partition hashes that have expired out of term ledgers
@@ -424,5 +484,89 @@ impl IndexMut<DataLedger> for Ledgers {
                     .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{DataLedger, config::consensus::ConsensusConfig, hardfork_config::Cascade};
+
+    fn config_with_cascade() -> ConsensusConfig {
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = Some(Cascade {
+            activation_height: 0,
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        config
+    }
+
+    #[test]
+    fn test_ledgers_new_without_cascade() {
+        let config = ConsensusConfig::testing();
+        let ledgers = Ledgers::new(&config, false);
+        assert_eq!(ledgers.len(), 2);
+        assert_eq!(
+            ledgers.active_ledgers(),
+            vec![DataLedger::Publish, DataLedger::Submit]
+        );
+    }
+
+    #[test]
+    fn test_ledgers_new_with_cascade_active() {
+        let config = config_with_cascade();
+        let ledgers = Ledgers::new(&config, true);
+        assert_eq!(ledgers.len(), 4);
+        let active = ledgers.active_ledgers();
+        assert!(active.contains(&DataLedger::Publish));
+        assert!(active.contains(&DataLedger::Submit));
+        assert!(active.contains(&DataLedger::OneYear));
+        assert!(active.contains(&DataLedger::ThirtyDay));
+    }
+
+    #[test]
+    fn test_ledgers_new_cascade_active_but_no_config() {
+        // cascade_active=true but cascade config is None: only 2 ledgers
+        let config = ConsensusConfig::testing(); // cascade is None
+        let ledgers = Ledgers::new(&config, true);
+        assert_eq!(ledgers.len(), 2);
+    }
+
+    #[test]
+    fn test_ledgers_activate_cascade() {
+        let config = config_with_cascade();
+        let mut ledgers = Ledgers::new(&config, false);
+        assert_eq!(ledgers.len(), 2);
+
+        ledgers.activate_cascade(&config);
+        assert_eq!(ledgers.len(), 4);
+        let active = ledgers.active_ledgers();
+        assert!(active.contains(&DataLedger::OneYear));
+        assert!(active.contains(&DataLedger::ThirtyDay));
+    }
+
+    #[test]
+    fn test_ledgers_activate_cascade_idempotent() {
+        let config = config_with_cascade();
+        let mut ledgers = Ledgers::new(&config, false);
+
+        ledgers.activate_cascade(&config);
+        assert_eq!(ledgers.len(), 4);
+
+        // Second call: no-op
+        ledgers.activate_cascade(&config);
+        assert_eq!(ledgers.len(), 4);
+    }
+
+    #[test]
+    fn test_ledgers_activate_cascade_no_config() {
+        let config = ConsensusConfig::testing(); // cascade is None
+        let mut ledgers = Ledgers::new(&config, false);
+        assert_eq!(ledgers.len(), 2);
+
+        ledgers.activate_cascade(&config);
+        assert_eq!(ledgers.len(), 2); // no change
     }
 }

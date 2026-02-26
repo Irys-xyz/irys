@@ -159,48 +159,61 @@ impl BlockIndex {
             bytes_added / chunk_size
         }
 
-        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
-        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
-
-        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
-        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
-
         let num_blocks = block_index_num_blocks(tx)?;
+        let is_genesis = num_blocks == 0 && block.height == 0;
 
-        let (max_publish_chunks, max_submit_chunks) = if num_blocks == 0 && block.height == 0 {
-            (0, sub_chunks_added)
+        let prev_block = if is_genesis {
+            None
         } else {
             let prev_height = block.height.saturating_sub(1);
-            let prev_block = block_index_item_by_height(tx, &prev_height)?;
-            if prev_block.block_hash != block.previous_block_hash {
+            let prev = block_index_item_by_height(tx, &prev_height)?;
+            if prev.block_hash != block.previous_block_hash {
                 eyre::bail!(
                     "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
                     prev_height,
                     block.previous_block_hash,
-                    prev_block.block_hash
+                    prev.block_hash
                 );
             }
-            (
-                prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
-                prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
-            )
+            Some(prev)
         };
+
+        // Build ledger index items from all data ledgers present in the block header
+        let mut ledgers = Vec::with_capacity(block.data_ledgers.len());
+        for dl in &block.data_ledgers {
+            let ledger = DataLedger::try_from(dl.ledger_id)
+                .map_err(|_| eyre::eyre!("Unknown ledger_id {} in block header", dl.ledger_id))?;
+
+            let ledger_txs = transactions.get_ledger_txs(ledger);
+            let chunks_added = calculate_chunks_added(ledger_txs, chunk_size);
+
+            // Publish ledger has no chunks at genesis (genesis block only contains Submit data).
+            // For all other cases, accumulate from the previous block's total.
+            let total_chunks = if is_genesis && ledger == DataLedger::Publish {
+                0
+            } else if let Some(prev) = &prev_block {
+                let prev_total = prev
+                    .ledgers
+                    .iter()
+                    .find(|item| item.ledger == ledger)
+                    .map(|item| item.total_chunks)
+                    .unwrap_or(0);
+                prev_total + chunks_added
+            } else {
+                chunks_added
+            };
+
+            ledgers.push(LedgerIndexItem {
+                total_chunks,
+                tx_root: dl.tx_root,
+                ledger,
+            });
+        }
 
         let block_index_item = BlockIndexItem {
             block_hash: block.block_hash,
-            num_ledgers: 2,
-            ledgers: vec![
-                LedgerIndexItem {
-                    total_chunks: max_publish_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
-                    ledger: DataLedger::Publish,
-                },
-                LedgerIndexItem {
-                    total_chunks: max_submit_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
-                    ledger: DataLedger::Submit,
-                },
-            ],
+            num_ledgers: ledgers.len() as u8,
+            ledgers,
         };
 
         insert_block_index_item(tx, block.height, &block_index_item)
