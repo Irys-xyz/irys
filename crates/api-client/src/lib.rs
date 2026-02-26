@@ -13,8 +13,12 @@ pub use ext::ApiClientExt;
 
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn peer_base_url(peer: SocketAddr) -> String {
+    format!("http://{}/v1", peer)
+}
+
 #[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
-enum Method {
+pub enum Method {
     GET,
     POST,
 }
@@ -126,11 +130,11 @@ impl IrysApiClient {
         path: &str,
         body: Option<&REQBODY>,
     ) -> Result<Option<RESBODY>> {
-
-        self.make_request_url(& format!("http://{}/v1{}", peer, path), method, body).await
+        self.make_request_url(&format!("{}{}", peer_base_url(peer), path), method, body)
+            .await
     }
 
-    async fn make_request_url<RESBODY: DeserializeOwned, REQBODY: Serialize>(
+    pub async fn make_request_url<RESBODY: DeserializeOwned, REQBODY: Serialize>(
         &self,
         url: &str,
         method: Method,
@@ -171,6 +175,137 @@ impl IrysApiClient {
             }
         }
     }
+
+    pub async fn get_transaction_url(
+        &self,
+        url: &str,
+        tx_id: H256,
+    ) -> Result<IrysTransactionResponse> {
+        let url = format!("{}/tx/{}", url, tx_id);
+        self.make_request_url(&url, Method::GET, None::<&()>)
+            .await?
+            .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
+    }
+
+    pub async fn post_transaction_url(
+        &self,
+        url: &str,
+        transaction: DataTransactionHeader,
+    ) -> Result<()> {
+        let url = format!("{}/tx", url);
+        self.make_request_url::<(), _>(&url, Method::POST, Some(&transaction))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn post_commitment_transaction_url(
+        &self,
+        url: &str,
+        transaction: CommitmentTransaction,
+    ) -> Result<()> {
+        let url = format!("{}/commitment-tx", url);
+        self.make_request_url::<(), _>(&url, Method::POST, Some(&transaction))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_transactions_url(
+        &self,
+        url: &str,
+        tx_ids: &[H256],
+    ) -> Result<Vec<IrysTransactionResponse>> {
+        let mut results = Vec::with_capacity(tx_ids.len());
+        for &tx_id in tx_ids {
+            let result = self.get_transaction_url(url, tx_id).await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    pub async fn get_block_by_hash_url(
+        &self,
+        url: &str,
+        block_hash: H256,
+        with_poa: bool,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        let url = if with_poa {
+            format!("{}/block/{}/full", url, block_hash)
+        } else {
+            format!("{}/block/{}", url, block_hash)
+        };
+        self.make_request_url::<CombinedBlockHeader, _>(&url, Method::GET, None::<&()>)
+            .await
+    }
+
+    pub async fn get_block_by_height_url(
+        &self,
+        url: &str,
+        block_height: u64,
+        with_poa: bool,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        let url = if with_poa {
+            format!("{}/block/{}/full", url, block_height)
+        } else {
+            format!("{}/block/{}", url, block_height)
+        };
+        self.make_request_url::<CombinedBlockHeader, _>(&url, Method::GET, None::<&()>)
+            .await
+    }
+
+    pub async fn get_latest_block_url(
+        &self,
+        url: &str,
+        with_poa: bool,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        let url = if with_poa {
+            format!("{}/block/latest/full", url)
+        } else {
+            format!("{}/block/latest", url)
+        };
+        self.make_request_url::<CombinedBlockHeader, _>(&url, Method::GET, None::<&()>)
+            .await
+    }
+
+    pub async fn get_block_index_url(
+        &self,
+        url: &str,
+        block_index_query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>> {
+        let url = format!(
+            "{}/block-index?height={}&limit={}",
+            url, block_index_query.height, block_index_query.limit
+        );
+        let response = self
+            .make_request_url::<Vec<BlockIndexItem>, _>(&url, Method::GET, Some(&block_index_query))
+            .await;
+        match response {
+            Ok(Some(block_index)) => Ok(block_index),
+            Ok(None) => Ok(vec![]),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn node_info_url(&self, url: &str) -> Result<NodeInfo> {
+        let url = format!("{}/info", url);
+        let response = self
+            .make_request_url::<NodeInfo, _>(&url, Method::GET, Some(&()))
+            .await;
+        match response {
+            Ok(Some(node_info)) => Ok(node_info),
+            Ok(None) => Err(eyre::eyre!("No response from peer")),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn get_transaction_status_url(
+        &self,
+        url: &str,
+        tx_id: H256,
+    ) -> Result<Option<TransactionStatusResponse>> {
+        let url = format!("{}/tx/{}/status", url, tx_id);
+        self.make_request_url::<TransactionStatusResponse, _>(&url, Method::GET, None::<&()>)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -180,11 +315,8 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        // H256 Display prints full base58; using Display here is correct.
-        let path = format!("/tx/{}", tx_id);
-        self.make_request(peer, Method::GET, &path, None::<&()>)
-            .await?
-            .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
+        self.get_transaction_url(&peer_base_url(peer), tx_id)
+            .await
     }
 
     async fn post_transaction(
@@ -192,15 +324,8 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         transaction: DataTransactionHeader,
     ) -> Result<()> {
-        let path = "/tx";
-        let response = self
-            .make_request::<(), _>(peer, Method::POST, path, Some(&transaction))
-            .await;
-
-        match response {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        self.post_transaction_url(&peer_base_url(peer), transaction)
+            .await
     }
 
     async fn post_commitment_transaction(
@@ -208,15 +333,8 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         transaction: CommitmentTransaction,
     ) -> Result<()> {
-        let path = "/commitment-tx";
-        let response = self
-            .make_request::<(), _>(peer, Method::POST, path, Some(&transaction))
-            .await;
-
-        match response {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        self.post_commitment_transaction_url(&peer_base_url(peer), transaction)
+            .await
     }
 
     async fn get_transactions(
@@ -224,14 +342,8 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_ids: &[H256],
     ) -> Result<Vec<IrysTransactionResponse>> {
-        let mut results = Vec::with_capacity(tx_ids.len());
-
-        for &tx_id in tx_ids {
-            let result = self.get_transaction(peer, tx_id).await?;
-            results.push(result);
-        }
-
-        Ok(results)
+        self.get_transactions_url(&peer_base_url(peer), tx_ids)
+            .await
     }
 
     async fn get_block_by_hash(
@@ -240,13 +352,7 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa {
-            format!("/block/{}/full", block_hash)
-        } else {
-            format!("/block/{}", block_hash)
-        };
-
-        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+        self.get_block_by_hash_url(&peer_base_url(peer), block_hash, with_poa)
             .await
     }
 
@@ -256,13 +362,7 @@ impl ApiClient for IrysApiClient {
         block_height: u64,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa {
-            format!("/block/{}/full", block_height)
-        } else {
-            format!("/block/{}", block_height)
-        };
-
-        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+        self.get_block_by_height_url(&peer_base_url(peer), block_height, with_poa)
             .await
     }
 
@@ -271,13 +371,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa {
-            "/block/latest/full"
-        } else {
-            "/block/latest"
-        };
-
-        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, path, None::<&()>)
+        self.get_latest_block_url(&peer_base_url(peer), with_poa)
             .await
     }
 
@@ -286,36 +380,12 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>> {
-        let path = format!(
-            "/block-index?height={}&limit={}",
-            block_index_query.height, block_index_query.limit
-        );
-
-        let response = self
-            .make_request::<Vec<BlockIndexItem>, _>(
-                peer,
-                Method::GET,
-                &path,
-                Some(&block_index_query),
-            )
-            .await;
-        match response {
-            Ok(Some(block_index)) => Ok(block_index),
-            Ok(None) => Ok(vec![]),
-            Err(e) => Err(e),
-        }
+        self.get_block_index_url(&peer_base_url(peer), block_index_query)
+            .await
     }
 
     async fn node_info(&self, peer: SocketAddr) -> Result<NodeInfo> {
-        let path = "/info";
-        let response = self
-            .make_request::<NodeInfo, _>(peer, Method::GET, path, Some(&()))
-            .await;
-        match response {
-            Ok(Some(node_info)) => Ok(node_info),
-            Ok(None) => Err(eyre::eyre!("No response from peer")),
-            Err(e) => Err(e),
-        }
+        self.node_info_url(&peer_base_url(peer)).await
     }
 
     async fn get_transaction_status(
@@ -323,9 +393,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<Option<TransactionStatusResponse>> {
-        // H256 Display prints full base58; using Display here is correct.
-        let path = format!("/tx/{}/status", tx_id);
-        self.make_request::<TransactionStatusResponse, _>(peer, Method::GET, &path, None::<&()>)
+        self.get_transaction_status_url(&peer_base_url(peer), tx_id)
             .await
     }
 }
