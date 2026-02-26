@@ -1072,8 +1072,6 @@ async fn get_pending_submit_ledger_txs(
     Ok(pending_valid_submit_ledger_tx.into_values().collect())
 }
 
-/// Helper to look up data transactions from mempool and DB, mirroring
-/// `Inner::handle_get_data_tx_message` but using the selection context.
 async fn get_data_txs(
     ctx: &TxSelectionContext<'_>,
     txids: Vec<H256>,

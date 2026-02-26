@@ -208,16 +208,11 @@ impl Inner {
             }
         };
 
-        // Uses a snapshot-evaluate-remove pattern. The TOCTOU window between
-        // snapshot and removal is benign: transactions added between snapshot
-        // and removal will be evaluated on the next prune cycle, and removing
-        // a transaction that was already removed is a no-op (HashMap::remove).
-
         // Phase 1: Snapshot all txs under a single read lock each
         let data_txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
         let commitment_txs_by_addr = self.mempool_state.all_valid_commitment_txs_cloned().await;
 
-        // Phase 2: Evaluate expiry OUTSIDE the lock (reads block tree + DB, not mempool)
+        // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
