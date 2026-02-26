@@ -217,7 +217,7 @@ impl BlockDiscoveryService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "block_discovery_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block discovery service");
 

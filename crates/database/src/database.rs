@@ -77,6 +77,7 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 }
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
+#[tracing::instrument(level = "debug", skip_all, fields(block_hash = ?block.block_hash))]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
@@ -263,6 +264,7 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 /// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
 /// callers (e.g. the write-behind writer) that have already validated the data root.
 /// Returns `true` if the chunk was a duplicate and was not inserted.
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     tx: &T,
     chunk: &UnpackedChunk,

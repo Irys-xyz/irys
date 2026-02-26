@@ -560,6 +560,7 @@ impl EpochSnapshot {
     /// Process slot needs for a given ledger, assigning partitions to each slot
     /// as needed. Accounts for not assigning the same mining address to multiple
     /// replicas of a single slot.
+    #[tracing::instrument(level = "trace", skip_all, fields(ledger = ?ledger))]
     pub fn process_slot_needs(
         &mut self,
         ledger: DataLedger,

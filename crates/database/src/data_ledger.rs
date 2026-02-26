@@ -78,6 +78,7 @@ impl TermLedger {
         &self.slots
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(epoch_height = %epoch_height))]
     pub fn get_expired_slot_indexes(&self, epoch_height: u64) -> Vec<usize> {
         let mut expired_slot_indexes = Vec::new();
 
