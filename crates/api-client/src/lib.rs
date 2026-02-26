@@ -93,14 +93,12 @@ pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 /// Real implementation of the API client that makes actual HTTP requests.
 ///
 /// By default, requests are sent as `http://{peer}/v1{path}`. Use
-/// [`IrysApiClient::with_base_url`] to override the base URL — this is
-/// necessary for HTTPS endpoints where the original hostname must be
-/// preserved
+/// [`IrysApiClient::make_request_url`] to override this pattern
+
 #[derive(Clone, Debug)]
 pub struct IrysApiClient {
     pub client: Client,
-    /// When set, used as the URL prefix instead of `http://{peer}/v1`.
-    base_url: Option<String>,
+
 }
 
 impl Default for IrysApiClient {
@@ -117,24 +115,9 @@ impl IrysApiClient {
                 .read_timeout(CLIENT_TIMEOUT)
                 .build()
                 .unwrap(),
-            base_url: None,
         }
     }
 
-    /// Create a client that sends requests to the given base URL
-    /// (e.g. `https://testnet-rpc.irys.xyz/v1`) instead of deriving
-    /// it from the peer `SocketAddr`.
-    pub fn with_base_url(base_url: String) -> Self {
-        let base_url = base_url.strip_suffix('/').unwrap_or(&base_url).to_string();
-        Self {
-            client: Client::builder()
-                .timeout(CLIENT_TIMEOUT)
-                .read_timeout(CLIENT_TIMEOUT)
-                .build()
-                .unwrap(),
-            base_url: Some(base_url),
-        }
-    }
 
     async fn make_request<RESBODY: DeserializeOwned, REQBODY: Serialize>(
         &self,
@@ -143,14 +126,19 @@ impl IrysApiClient {
         path: &str,
         body: Option<&REQBODY>,
     ) -> Result<Option<RESBODY>> {
-        let url = match &self.base_url {
-            Some(base) => format!("{}{}", base, path),
-            None => format!("http://{}/v1{}", peer, path),
-        };
 
+        self.make_request_url(& format!("http://{}/v1{}", peer, path), method, body).await
+    }
+
+    async fn make_request_url<RESBODY: DeserializeOwned, REQBODY: Serialize>(
+        &self,
+        url: &str,
+        method: Method,
+        body: Option<&REQBODY>,
+    ) -> Result<Option<RESBODY>> {
         let mut request = match method {
-            Method::GET => self.client.get(&url),
-            Method::POST => self.client.post(&url),
+            Method::GET => self.client.get(url),
+            Method::POST => self.client.post(url),
         };
 
         if let Some(body) = body {
