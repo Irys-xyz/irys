@@ -16,20 +16,20 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionId, LedgerIndexItem, PeerListItem, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, H256, MEGABYTE,
+    DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
+    IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
+use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
 use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
-use reth_db::TableSet;
 use reth_db::{
+    ClientVersion, DatabaseEnv, DatabaseError,
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration, SyncMode},
-    ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_db_api::Database as _;
 use tracing::{debug, warn};
@@ -101,12 +101,10 @@ pub fn block_header_by_hash<T: DbTx>(
         .get::<IrysBlockHeaders>(*block_hash)?
         .map(IrysBlockHeader::from);
 
-    if include_chunk {
-        if let Some(ref mut b) = block {
-            b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
-            if b.poa.chunk.is_none() && b.height != 0 {
-                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
-            }
+    if include_chunk && let Some(ref mut b) = block {
+        b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
+        if b.poa.chunk.is_none() && b.height != 0 {
+            tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
         }
     }
 
@@ -729,7 +727,7 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 #[cfg(test)]
 mod tests {
     use arbitrary::Arbitrary as _;
-    use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
     use rand::Rng as _;
     use reth_db::Database as _;
     use tempfile::tempdir;
@@ -750,7 +748,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let (min, max) = irys_types::DataTransactionMetadata::size_hint(0);
         let length = max.unwrap_or(min.saturating_mul(4).max(256));
-        let bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..length).map(|_| rng.r#gen()).collect();
         let mut u = arbitrary::Unstructured::new(&bytes);
 
         let tx_header =

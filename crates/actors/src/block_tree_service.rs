@@ -1,4 +1,5 @@
 use crate::{
+    StorageModuleServiceMessage,
     block_migration_service::BlockMigrationService,
     block_validation::PreValidationError,
     mempool_service::MempoolServiceMessage,
@@ -7,18 +8,17 @@ use crate::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    StorageModuleServiceMessage,
 };
 use eyre::OptionExt as _;
 use irys_domain::{
+    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
-    forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry, BlockState, BlockTree,
-    BlockTreeEntry, BlockTreeReadGuard, ChainState,
+    forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
 };
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, H256,
+    BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
+    SendTraced as _, SystemLedger, TokioServiceHandle, Traced,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -26,7 +26,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -180,7 +180,14 @@ impl BlockTreeService {
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(traced) = self.msg_rx.try_recv() {
             let (msg, parent_span) = traced.into_parts();
-            self.inner.handle_message(msg, parent_span).await?;
+            match msg {
+                // Skip: talks to downstream services (reth FCU, migration) that
+                // may already be stopped during shutdown.
+                BlockTreeServiceMessage::BlockValidationFinished { .. } => {
+                    debug!("Skipping BlockValidationFinished during shutdown drain");
+                }
+                msg => self.inner.handle_message(msg, parent_span).await?,
+            }
         }
 
         tracing::info!("shutting down BlockTree service gracefully");
@@ -255,7 +262,7 @@ impl BlockTreeServiceInner {
                 },
                 response: tx,
             })
-            .expect("Unable to send confirmation FCU message to reth");
+            .map_err(|e| eyre::eyre!("Reth service channel closed, cannot send FCU: {e}"))?;
 
         rx.await
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
@@ -716,13 +723,13 @@ impl BlockTreeServiceInner {
         }
 
         // Broadcast reorg event if applicable
-        if let Some(reorg_event) = reorg_event {
-            if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
-                error!(
-                    "Failed to broadcast reorg event - mempool state may be stale: {:?}",
-                    e
-                );
-            }
+        if let Some(reorg_event) = reorg_event
+            && let Err(e) = self.service_senders.reorg_events.send(reorg_event)
+        {
+            error!(
+                "Failed to broadcast reorg event - mempool state may be stale: {:?}",
+                e
+            );
         }
 
         if let Some(markers) = &new_canonical_markers {
@@ -833,7 +840,12 @@ impl BlockTreeServiceInner {
                     None,
                 ),
             ) {
-                error!("Failed to send EpochProcessed event to CacheService for block {} (height {}): {}", block_hash, epoch_block.height(), e);
+                error!(
+                    "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
+                    block_hash,
+                    epoch_block.height(),
+                    e
+                );
             }
         }
 

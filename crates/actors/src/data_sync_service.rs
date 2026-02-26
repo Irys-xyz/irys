@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, warn};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -201,13 +201,13 @@ impl DataSyncServiceInner {
                         1 // Decent peer, conservative increase
                     };
                     debug!(
-                    "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
-                    current_max,
-                    current_max + increase,
-                    peer_addr,
-                    utilization_ratio * 100.0,
-                    health_score
-                );
+                        "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
+                        current_max,
+                        current_max + increase,
+                        peer_addr,
+                        utilization_ratio * 100.0,
+                        health_score
+                    );
                     peer_manager.set_max_concurrency(current_max + increase);
                 }
             } else {
@@ -510,7 +510,9 @@ impl DataSyncServiceInner {
         for (sm_id, best_peers) in peer_updates {
             // Skip ff we don't have an orchestrator for this storage_module
             let Some(orchestrator) = self.chunk_orchestrators.get_mut(&sm_id) else {
-                warn!("Storage module with id: {sm_id} does not have a chunk_orchestrator and it should.");
+                warn!(
+                    "Storage module with id: {sm_id} does not have a chunk_orchestrator and it should."
+                );
                 continue;
             };
 

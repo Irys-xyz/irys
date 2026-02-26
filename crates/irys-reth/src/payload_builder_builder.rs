@@ -8,7 +8,7 @@ use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
 use reth_node_api::{FullNodeTypes, NodeTypes, PrimitivesTy};
 use reth_node_builder::{
-    components::PayloadBuilderBuilder, BuilderContext, PayloadBuilderConfig as _, PayloadTypes,
+    BuilderContext, PayloadBuilderConfig as _, PayloadTypes, components::PayloadBuilderBuilder,
 };
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 
@@ -28,10 +28,10 @@ where
             NextBlockEnvCtx = reth_evm::NextBlockEnvAttributes,
         > + 'static,
     Types::Payload: PayloadTypes<
-        BuiltPayload = EthBuiltPayload,
-        PayloadAttributes = IrysPayloadAttributes,
-        PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
-    >,
+            BuiltPayload = EthBuiltPayload,
+            PayloadAttributes = IrysPayloadAttributes,
+            PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
+        >,
 {
     type PayloadBuilder = crate::payload::IrysPayloadBuilder<Pool, Node::Provider, Evm>;
 

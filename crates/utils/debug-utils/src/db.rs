@@ -12,7 +12,7 @@ use std::{path::PathBuf, sync::Arc};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
-use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
+use tracing_subscriber::{EnvFilter, Layer as _, Registry, layer::SubscriberExt as _};
 
 pub fn load_db() -> DatabaseEnv {
     let path = "/workspaces/irys-rs/.irys/1/reth/db";
@@ -31,9 +31,9 @@ fn _promotion_debug() -> eyre::Result<()> {
 }
 
 fn _check_db_for_commitments() -> eyre::Result<()> {
+    use irys_database::reth_db::Database as _;
     use irys_database::reth_db::cursor::DbCursorRO as _;
     use irys_database::reth_db::transaction::DbTx as _;
-    use irys_database::reth_db::Database as _;
 
     let subscriber = Registry::default();
     let filter = EnvFilter::builder()

@@ -2,11 +2,11 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, H256,
+    Base64, ChunkPathHash, Compact, H256, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    partition::PartitionHash,
 };
-use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
+use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 // TODO: move all of these into types

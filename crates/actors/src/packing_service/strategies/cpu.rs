@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::IrysAddress;
-use irys_types::{partition::PartitionHash, Config, PartitionChunkOffset, PartitionChunkRange};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::yield_now;
 use tracing::{debug, trace, warn};

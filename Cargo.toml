@@ -25,12 +25,13 @@ members = [
   "crates/packing-worker",
   "crates/tui",
   "crates/macros/integer-tagged",
+  "crates/macros/diag-slow",
 ]
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
-rust-version = "1.91.1"
+edition = "2024"
+rust-version = "1.93.0"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -61,6 +62,7 @@ irys-utils = { path = "./crates/utils/utils" }
 irys-packing-worker = { path = "./crates/packing-worker" }
 irys-tui = { path = "./crates/tui" }
 irys-macros-integer-tagged = { path = "./crates/macros/integer-tagged" }
+irys-macros-diag-slow = { path = "./crates/macros/diag-slow" }
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix-web = "4.9.0"
 actix-http = "3.9.0"
@@ -100,6 +102,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 toml = "0.8"
 semver = { version = "1.0", features = ["serde"] }
+quote = "1.0"
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
@@ -489,7 +492,7 @@ unseparated_literal_suffix = "deny"
 single_char_pattern = "deny"
 suspicious_operation_groupings = "deny"
 trait_duplication_in_bounds = "deny"
-unchecked_duration_subtraction = "deny"
+unchecked_time_subtraction = "deny"
 unnecessary_join = "deny"
 unnecessary_literal_bound = "deny"
 unnecessary_struct_initialization = "deny"

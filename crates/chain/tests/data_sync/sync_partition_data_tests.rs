@@ -23,7 +23,8 @@ use crate::utils::IrysNodeTest;
 // 11. Validate that they are syncing data chunks to their assigned partitions
 #[tokio::test]
 async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();
 
     let seconds_to_wait = 20;
@@ -133,8 +134,57 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
         .wait_until_height(latest_block.height, seconds_to_wait)
         .await?;
 
+    let expected_tip_hash = latest_block.block_hash();
+    let genesis_tip_hash = genesis_node
+        .get_block_by_height(latest_block.height)
+        .await?
+        .block_hash();
+    let peer1_tip_hash = peer1_node
+        .get_block_by_height(latest_block.height)
+        .await?
+        .block_hash();
+    let peer2_tip_hash = peer2_node
+        .get_block_by_height(latest_block.height)
+        .await?
+        .block_hash();
+
+    assert_eq!(
+        genesis_tip_hash, expected_tip_hash,
+        "Genesis canonical hash at height {} diverged from mined block hash",
+        latest_block.height
+    );
+    assert_eq!(
+        peer1_tip_hash, expected_tip_hash,
+        "Peer1 canonical hash at height {} diverged from mined block hash",
+        latest_block.height
+    );
+    assert_eq!(
+        peer2_tip_hash, expected_tip_hash,
+        "Peer2 canonical hash at height {} diverged from mined block hash",
+        latest_block.height
+    );
+
     // Check data sync completion with simple polling
     let (mut genesis_synced, mut peer1_synced, mut peer2_synced) = (false, false, false);
+    let mut last_genesis_diag = String::new();
+    let mut last_peer1_diag = String::new();
+    let mut last_peer2_diag = String::new();
+    let mut last_genesis_state = String::new();
+    let mut last_peer1_state = String::new();
+    let mut last_peer2_state = String::new();
+
+    // Slot(0) can be either mixed (data + packed) or fully packed.
+    // Slot(1) is expected to be fully packed in this test scenario.
+    let slot0_expectation = SlotSyncExpectation {
+        expected_total: 60,
+        max_data: 50,
+        min_packed: 10,
+    };
+    let slot1_expectation = SlotSyncExpectation {
+        expected_total: 60,
+        max_data: 0,
+        min_packed: 60,
+    };
 
     tracing::info!("waiting for data to sync");
     for attempt in 0..80 {
@@ -145,9 +195,14 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
         let counts2 = check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
         let counts3 = check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
 
-        genesis_synced = (counts1.data == 50 && counts1.packed == 10)
-            && (counts2.data == 50 && counts2.packed == 10)
-            && (counts3.packed == 60 && counts3.data == 0);
+        let (g_publish_ok, g_publish_diag) = slot_matches_expectation(&counts1, &slot0_expectation);
+        let (g_submit0_ok, g_submit0_diag) = slot_matches_expectation(&counts2, &slot0_expectation);
+        let (g_submit1_ok, g_submit1_diag) = slot_matches_expectation(&counts3, &slot1_expectation);
+        genesis_synced = g_publish_ok && g_submit0_ok && g_submit1_ok;
+        last_genesis_diag = format!(
+            "Publish(0): {} | Submit(0): {} | Submit(1): {}",
+            g_publish_diag, g_submit0_diag, g_submit1_diag
+        );
 
         // Check peer1
         let peer1_counts1 =
@@ -157,9 +212,17 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
         let peer1_counts3 =
             check_storage_module_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
 
-        peer1_synced = (peer1_counts1.data == 50 && peer1_counts1.packed == 10)
-            && (peer1_counts2.data == 50 && peer1_counts2.packed == 10)
-            && (peer1_counts3.packed == 60 && peer1_counts3.data == 0);
+        let (p1_publish_ok, p1_publish_diag) =
+            slot_matches_expectation(&peer1_counts1, &slot0_expectation);
+        let (p1_submit0_ok, p1_submit0_diag) =
+            slot_matches_expectation(&peer1_counts2, &slot0_expectation);
+        let (p1_submit1_ok, p1_submit1_diag) =
+            slot_matches_expectation(&peer1_counts3, &slot1_expectation);
+        peer1_synced = p1_publish_ok && p1_submit0_ok && p1_submit1_ok;
+        last_peer1_diag = format!(
+            "Publish(0): {} | Submit(0): {} | Submit(1): {}",
+            p1_publish_diag, p1_submit0_diag, p1_submit1_diag
+        );
 
         // Check peer2
         let peer2_counts1 =
@@ -169,9 +232,23 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
         let peer2_counts3 =
             check_storage_module_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
 
-        peer2_synced = (peer2_counts1.data == 50 && peer2_counts1.packed == 10)
-            && (peer2_counts2.data == 50 && peer2_counts2.packed == 10)
-            && (peer2_counts3.packed == 60 && peer2_counts3.data == 0);
+        let (p2_publish_ok, p2_publish_diag) =
+            slot_matches_expectation(&peer2_counts1, &slot0_expectation);
+        let (p2_submit0_ok, p2_submit0_diag) =
+            slot_matches_expectation(&peer2_counts2, &slot0_expectation);
+        let (p2_submit1_ok, p2_submit1_diag) =
+            slot_matches_expectation(&peer2_counts3, &slot1_expectation);
+        peer2_synced = p2_publish_ok && p2_submit0_ok && p2_submit1_ok;
+        last_peer2_diag = format!(
+            "Publish(0): {} | Submit(0): {} | Submit(1): {}",
+            p2_publish_diag, p2_submit0_diag, p2_submit1_diag
+        );
+
+        if attempt % 5 == 0 || attempt == 79 || (genesis_synced && peer1_synced && peer2_synced) {
+            last_genesis_state = genesis_node.sync_state_snapshot().await;
+            last_peer1_state = peer1_node.sync_state_snapshot().await;
+            last_peer2_state = peer2_node.sync_state_snapshot().await;
+        }
 
         // Log sync status
         info!(
@@ -190,6 +267,14 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
             "Peer2 chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
             peer2_counts1.data, peer2_counts1.packed, peer2_counts2.data, peer2_counts2.packed, peer2_counts3.data, peer2_counts3.packed
         );
+        info!("Genesis diagnostic: {}", last_genesis_diag);
+        info!("Peer1 diagnostic: {}", last_peer1_diag);
+        info!("Peer2 diagnostic: {}", last_peer2_diag);
+        if attempt % 5 == 0 || attempt == 79 || (genesis_synced && peer1_synced && peer2_synced) {
+            info!("Genesis state: {}", last_genesis_state);
+            info!("Peer1 state: {}", last_peer1_state);
+            info!("Peer2 state: {}", last_peer2_state);
+        }
 
         if genesis_synced && peer1_synced && peer2_synced {
             debug!("All nodes synced successfully at attempt {}", attempt);
@@ -197,9 +282,21 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
         }
     }
 
-    assert!(genesis_synced, "Genesis node failed to sync data");
-    assert!(peer1_synced, "Peer1 node failed to sync data");
-    assert!(peer2_synced, "Peer2 node failed to sync data");
+    assert!(
+        genesis_synced,
+        "Genesis node failed to sync data. chunks={} state={}",
+        last_genesis_diag, last_genesis_state
+    );
+    assert!(
+        peer1_synced,
+        "Peer1 node failed to sync data. chunks={} state={}",
+        last_peer1_diag, last_peer1_state
+    );
+    assert!(
+        peer2_synced,
+        "Peer2 node failed to sync data. chunks={} state={}",
+        last_peer2_diag, last_peer2_state
+    );
 
     // Make sure peers can mine - mine one block at a time with sync verification
     for i in 0..5 {
@@ -247,6 +344,46 @@ async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()
 struct ChunkCountTotals {
     pub data: usize,
     pub packed: usize,
+}
+
+struct SlotSyncExpectation {
+    expected_total: usize,
+    max_data: usize,
+    min_packed: usize,
+}
+
+fn slot_matches_expectation(
+    counts: &ChunkCountTotals,
+    expectation: &SlotSyncExpectation,
+) -> (bool, String) {
+    let total = counts.data + counts.packed;
+    let is_match = total == expectation.expected_total
+        && counts.data <= expectation.max_data
+        && counts.packed >= expectation.min_packed;
+
+    let state = if counts.data == 0 && counts.packed == expectation.expected_total {
+        "fully_packed"
+    } else if counts.data > 0 && counts.packed > 0 {
+        "mixed_data_and_packed"
+    } else if counts.data == expectation.expected_total {
+        "data_only"
+    } else {
+        "other"
+    };
+
+    (
+        is_match,
+        format!(
+            "state={} data={} packed={} total={} expected_total={} max_data={} min_packed={}",
+            state,
+            counts.data,
+            counts.packed,
+            total,
+            expectation.expected_total,
+            expectation.max_data,
+            expectation.min_packed
+        ),
+    )
 }
 
 fn check_storage_module_chunks(

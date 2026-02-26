@@ -16,7 +16,7 @@ use irys_types::{DataLedger, NodeConfig};
 /// 2. Having the peer node mine a block (which triggers re-anchoring)
 /// 3. Asserting the peer's block contains exactly one ingress proof per signer
 #[test_log::test(tokio::test)]
-async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
+async fn heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     let seconds_to_wait = 30;
 
     // Configure consensus for short epochs and low expiry depth.
@@ -53,7 +53,7 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
 
     let current_height = genesis_node.get_canonical_chain_height().await;
     peer_node
-        .wait_until_height(current_height, seconds_to_wait)
+        .wait_for_block_at_height(current_height, seconds_to_wait)
         .await?;
     let genesis_signer = genesis_config.signer();
 
@@ -99,11 +99,14 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
         send_block_to_block_tree(&peer_node.node_ctx, sealed_block, false).await?;
     }
 
+    // Wait for peer to fully validate all 6 fed blocks (and trigger re-anchoring)
+    // before re-enabling gossip
+    peer_node
+        .wait_for_block_at_height(order[5].0.height, seconds_to_wait)
+        .await?;
+
     // Peer mines a block with the genesis ingress proof present in its db
     peer_node.gossip_enable();
-    genesis_node
-        .wait_for_block(&order[5].0.block_hash, seconds_to_wait)
-        .await?;
     genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;

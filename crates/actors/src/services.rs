@@ -1,6 +1,7 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
+    DataSyncServiceMessage, StorageModuleServiceMessage,
     block_discovery::BlockDiscoveryMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
@@ -10,7 +11,6 @@ use crate::{
     packing_service::{PackingRequest, PackingSender, PackingService},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
-    DataSyncServiceMessage, StorageModuleServiceMessage,
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
@@ -20,7 +20,7 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 
 #[derive(Debug, Clone)]
@@ -215,5 +215,24 @@ impl ServiceSendersInner {
 
     pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<Arc<MiningBroadcastEvent>> {
         self.mining_bus.subscribe()
+    }
+}
+
+/// Waits until no events arrive on `rx` for `idle` duration, bounded by `deadline`.
+/// Treats `RecvError::Lagged` as activity (continues waiting).
+/// Returns when idle timeout elapses, deadline is reached, or channel closes.
+pub async fn wait_until_broadcast_idle<T: Clone>(
+    rx: &mut tokio::sync::broadcast::Receiver<T>,
+    idle: std::time::Duration,
+    deadline: tokio::time::Instant,
+) {
+    loop {
+        match tokio::time::timeout_at(deadline, tokio::time::timeout(idle, rx.recv())).await {
+            Ok(Ok(Ok(_))) => continue,
+            Ok(Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => continue,
+            Ok(Ok(Err(tokio::sync::broadcast::error::RecvError::Closed))) => break,
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
     }
 }

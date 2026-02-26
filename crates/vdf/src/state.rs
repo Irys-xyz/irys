@@ -4,10 +4,10 @@ use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
-    block_production::Seed, Config, DatabaseProvider, H256List, VDFLimiterInfo, VdfConfig, H256,
-    U256,
+    Config, DatabaseProvider, H256, H256List, U256, VDFLimiterInfo, VdfConfig,
+    block_production::Seed,
 };
-use nodit::{interval::ii, InclusiveInterval as _, Interval};
+use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
 use reth_db::Database as _;
 use sha2::{Digest as _, Sha256};
@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
@@ -314,11 +314,13 @@ pub fn vdf_steps_are_valid(
                 return Err(eyre::eyre!("VDF steps are invalid!"));
             } else {
                 // Do not need to check last step checkpoints here, were checked in pre validation
-                return Ok(())
+                return Ok(());
             }
-        },
-        Err(err) =>
-           tracing::debug!("Unable to get full steps range from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err.to_string())
+        }
+        Err(err) => tracing::debug!(
+            "Unable to get full steps range from VdfStepsReadGuard: {:?} so calculating vdf steps for validation",
+            err.to_string()
+        ),
     };
 
     let mut step_hashes = vdf_info.steps.clone();
@@ -449,8 +451,8 @@ pub mod test_helpers {
 mod tests {
     use super::*;
     use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
-    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
     #[tokio::test]

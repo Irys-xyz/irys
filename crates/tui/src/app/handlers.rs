@@ -30,11 +30,10 @@ impl EventHandlers {
         if let Some(result) = input_handler.handle_input(key)? {
             match result {
                 InputResult::AddNode(url) => {
-                    if NodeManager::is_valid_url(&url) {
-                        if let Ok(node_url) = NodeUrl::new(&url) {
-                            NodeManager::add_node(node_url, state, api_client, database_writer)
-                                .await?;
-                        }
+                    if NodeManager::is_valid_url(&url)
+                        && let Ok(node_url) = NodeUrl::new(&url)
+                    {
+                        NodeManager::add_node(node_url, state, api_client, database_writer).await?;
                     }
                 }
                 InputResult::SetNodeAlias { url, alias } => {
@@ -203,14 +202,14 @@ impl EventHandlers {
             state.get_selected_node_url()
         };
 
-        if let Some(url) = url_to_edit {
-            if let Ok(node_url) = NodeUrl::new(&url) {
-                let current_alias = state
-                    .nodes
-                    .get(&node_url)
-                    .and_then(|node| node.alias.as_ref().map(std::string::ToString::to_string));
-                input_handler.start_set_alias(url, current_alias);
-            }
+        if let Some(url) = url_to_edit
+            && let Ok(node_url) = NodeUrl::new(&url)
+        {
+            let current_alias = state
+                .nodes
+                .get(&node_url)
+                .and_then(|node| node.alias.as_ref().map(std::string::ToString::to_string));
+            input_handler.start_set_alias(url, current_alias);
         }
     }
 
@@ -230,10 +229,10 @@ impl EventHandlers {
             state.get_selected_node_url()
         };
 
-        if let Some(url) = url_to_delete {
-            if state.nodes.len() > 1 {
-                input_handler.start_remove_node(url);
-            }
+        if let Some(url) = url_to_delete
+            && state.nodes.len() > 1
+        {
+            input_handler.start_remove_node(url);
         }
     }
 
@@ -243,10 +242,10 @@ impl EventHandlers {
                 let node_urls: Vec<NodeUrl> = state.nodes.keys().cloned().collect();
                 if state.focused_node_index < node_urls.len() {
                     let url = &node_urls[state.focused_node_index];
-                    if let Some(node) = state.nodes.get_mut(url) {
-                        if node.scroll_offset > 0 {
-                            node.scroll_offset = node.scroll_offset.saturating_sub(1);
-                        }
+                    if let Some(node) = state.nodes.get_mut(url)
+                        && node.scroll_offset > 0
+                    {
+                        node.scroll_offset = node.scroll_offset.saturating_sub(1);
                     }
                 }
             }

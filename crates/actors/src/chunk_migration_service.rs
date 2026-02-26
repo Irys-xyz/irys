@@ -6,14 +6,13 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_overlapped_storage_modules, BlockIndex, StorageModule, StorageModulesReadGuard,
+    BlockIndex, StorageModule, StorageModulesReadGuard, get_overlapped_storage_modules,
 };
-use irys_storage::{ie, ii, InclusiveInterval as _};
+use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, BlockHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset,
-    LedgerChunkRange, Proof, SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset,
-    UnpackedChunk, H256,
+    Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
+    H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{collections::HashMap, sync::Arc};

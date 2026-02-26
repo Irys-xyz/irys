@@ -20,8 +20,8 @@ pub struct Node {
     pub data_hash: Option<[u8; HASH_SIZE]>,
     pub min_byte_range: usize,
     pub max_byte_range: usize,
-    pub left_child: Option<Box<Node>>,
-    pub right_child: Option<Box<Node>>,
+    pub left_child: Option<Box<Self>>,
+    pub right_child: Option<Box<Self>>,
 }
 
 /// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
