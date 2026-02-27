@@ -13,7 +13,7 @@ use std::time::Duration;
 use tracing::debug;
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
+async fn heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;

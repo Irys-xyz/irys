@@ -49,7 +49,7 @@ async fn gossip_commitment_to_node(
 /// Expected behavior: Block validation must reject the block because unstake commitments
 /// are invalid when the account has pledge_count > 0.
 #[test_log::test(tokio::test)]
-async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unstake: CommitmentTransaction,
@@ -191,7 +191,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
 /// Expected behavior: Block validation must reject the block because unstake commitments
 /// are invalid when the account has no stake in the epoch snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy3_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unstake: CommitmentTransaction,

@@ -124,7 +124,9 @@ async fn slow_heavy3_test_auto_stake_pledge(
     // gossip the block to the peer so it syncs up to the chain head
     genesis_node.gossip_block_to_peers(&Arc::new(tip_block))?;
 
-    peer_node.wait_for_block_at_height(tip_height, seconds_to_wait as usize).await?;
+    peer_node
+        .wait_for_block_at_height(tip_height, seconds_to_wait as usize)
+        .await?;
 
     // wait for the expected txs to show up on the genesis node
     genesis_node
@@ -143,7 +145,9 @@ async fn slow_heavy3_test_auto_stake_pledge(
     // Mine the epoch block
     let (_, head_height) = genesis_node.mine_until_next_epoch().await?;
 
-    peer_node.wait_for_block_at_height(head_height, seconds_to_wait as usize).await?;
+    peer_node
+        .wait_for_block_at_height(head_height, seconds_to_wait as usize)
+        .await?;
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());

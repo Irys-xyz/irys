@@ -39,7 +39,7 @@ fn insert_block_header_for_gossip_test(
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -137,7 +137,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -214,7 +214,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
 #[test_log::test(tokio::test)]
-async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
+async fn heavy3_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub extra_tx: DataTransactionHeader,
@@ -423,7 +423,7 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
+async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(

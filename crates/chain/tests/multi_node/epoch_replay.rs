@@ -36,7 +36,7 @@ macro_rules! assert_ok {
 /// - Partition assignments are correctly replayed
 /// - Peer catches up to the correct data ledger assignment state
 #[tokio::test]
-async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
+async fn heavy3_test_multi_node_epoch_replay() -> eyre::Result<()> {
     // Configure minimal logging
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {

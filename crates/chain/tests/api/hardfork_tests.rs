@@ -216,7 +216,7 @@ mod single_version_acceptance {
     #[case::post_activation_v1_rejected(false, TxVersion::V1, false)]
     #[case::post_activation_v2_accepted(false, TxVersion::V2, true)]
     #[test_log::test(tokio::test)]
-    async fn heavy_test_aurora_tx_acceptance(
+    async fn test_aurora_tx_acceptance(
         #[case] pre_activation: bool,
         #[case] version: TxVersion,
         #[case] expect_accepted: bool,
@@ -410,7 +410,7 @@ mod edge_cases {
     /// and validators must reject blocks containing V1 transactions post-activation.
     /// This ensures consensus - all nodes agree on block validity.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
+    async fn test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -446,7 +446,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -477,7 +477,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);

@@ -340,7 +340,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
+async fn heavy3_no_commitments_basic_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(

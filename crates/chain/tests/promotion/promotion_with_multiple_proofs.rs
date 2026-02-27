@@ -5,7 +5,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig};
 
 #[tokio::test]
-async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
+async fn heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
