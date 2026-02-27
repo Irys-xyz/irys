@@ -11,7 +11,7 @@ use reth::{
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
-use reth_db::init_db;
+use reth_db::{init_db, mdbx::MEGABYTE};
 use reth_node_builder::{
     rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
     NodeComponentsBuilder, NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
@@ -182,6 +182,11 @@ pub async fn run_node(
     };
 
     let db_args = DatabaseArgs::default();
+    // TODO: figure out if we shouldn't use smaller growth steps in production
+    let db_arguements = db_args
+        .database_args()
+        .with_growth_step((10 * MEGABYTE).into())
+        .with_shrink_threshold((20 * MEGABYTE).try_into()?);
 
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();
@@ -191,8 +196,7 @@ pub async fn run_node(
         custom.path = ?db_path,
         "Opening database"
     );
-    let database =
-        RethDbWrapper::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db_arguements)?.with_metrics());
 
     if random_ports {
         reth_config = reth_config.with_unused_ports();
