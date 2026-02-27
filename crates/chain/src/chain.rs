@@ -1136,6 +1136,10 @@ impl IrysNode {
         info!("Lifecycle task shutting down: {}", shutdown_reason);
 
         // Phase 4: Ordered shutdown
+        // Cancel the shutdown token so all subsystems (VDF, actors, backfill) see it
+        // regardless of which select arm triggered the shutdown (ctrl_c, reth_exit, etc.).
+        shutdown_token.cancel();
+
         // Stop actix server (handle was captured before spawning the task)
         debug!("Stopping API server");
         match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, api_server_handle.stop(true)).await {
