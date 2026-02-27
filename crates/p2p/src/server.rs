@@ -966,6 +966,19 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let cache_key = irys_types::GossipCacheKey::CustodyProof(v2_request.data.partition_hash);
+        let already_seen = server
+            .data_handler
+            .cache
+            .seen_custody_proof_from_any_peer(&v2_request.data.partition_hash);
+
+        if matches!(already_seen, Ok(true)) {
+            debug!(
+                partition.hash = %v2_request.data.partition_hash,
+                "Custody proof already seen, skipping",
+            );
+            return HttpResponse::Ok().json(GossipResponse::Accepted(()));
+        }
+
         if let Err(e) = server
             .data_handler
             .cache
@@ -976,8 +989,17 @@ where
 
         debug!(
             partition.hash = %v2_request.data.partition_hash,
-            "Received custody proof via gossip",
+            "Received custody proof via gossip, forwarding to custody service",
         );
+
+        use irys_actors::custody_proof_service::CustodyProofMessage;
+        if let Err(e) = server
+            .data_handler
+            .custody_proof_sender
+            .send(CustodyProofMessage::ReceivedProof(v2_request.data))
+        {
+            warn!(error = %e, "Failed to forward custody proof to service");
+        }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }

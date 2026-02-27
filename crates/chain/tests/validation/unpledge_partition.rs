@@ -127,6 +127,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         BlockTransactions {
             commitment_txs: vec![invalid_unpledge.clone()],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -144,6 +145,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         BlockTransactions {
             commitment_txs: vec![invalid_unpledge.clone()],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -161,6 +163,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         BlockTransactions {
             commitment_txs: vec![invalid_unpledge],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -284,6 +287,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         BlockTransactions {
             commitment_txs: unpledge_txs,
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -396,6 +400,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         BlockTransactions {
             commitment_txs: vec![invalid_unpledge],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -525,6 +530,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         BlockTransactions {
             commitment_txs: commitments,
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )

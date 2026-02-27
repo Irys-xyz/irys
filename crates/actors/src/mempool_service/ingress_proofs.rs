@@ -26,13 +26,11 @@ impl Inner {
             )
             .map_err(|msg| IngressProofError::RejectedVersion(msg.into()))?;
 
-        // Validate the proofs signature and basic details
         let data_root_val = ingress_proof.data_root();
         let address = ingress_proof
             .pre_validate(&data_root_val)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
-        // Validate the proof address is a staked address
         let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
         let commitment_snapshot = self
             .block_tree_read_guard
@@ -43,13 +41,7 @@ impl Inner {
             return Err(IngressProofError::UnstakedAddress);
         }
 
-        // validate the anchor
-        match self.validate_ingress_proof_anchor(&ingress_proof) {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(e);
-            }
-        }
+        self.validate_ingress_proof_anchor(&ingress_proof)?;
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
             .irys_db
@@ -288,6 +280,56 @@ impl ProofCheckResult {
     }
 }
 
+/// RAII guard that notifies the cache service when proof generation completes.
+/// Sends `NotifyProofGenerationStarted` on acquisition and `NotifyProofGenerationCompleted`
+/// on drop — guaranteeing the completion signal even on early-return error paths.
+struct ProofGenerationGuard<'a> {
+    data_root: DataRoot,
+    cache_sender: &'a CacheServiceSender,
+}
+
+impl<'a> ProofGenerationGuard<'a> {
+    fn acquire(data_root: DataRoot, cache_sender: &'a CacheServiceSender) -> eyre::Result<Self> {
+        let (response_sender, response_receiver) = std::sync::mpsc::channel();
+        cache_sender
+            .send(CacheServiceAction::RequestIngressProofGenerationState {
+                data_root,
+                response_sender,
+            })
+            .map_err(|err| {
+                eyre::eyre!("Failed to request ingress proof generation state: {err}")
+            })?;
+
+        let is_already_generating = response_receiver.recv().map_err(|err| {
+            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
+        })?;
+
+        if is_already_generating {
+            return Err(eyre::eyre!(
+                "Ingress proof generation already in progress for data_root {:?}",
+                data_root
+            ));
+        }
+
+        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
+
+        Ok(Self {
+            data_root,
+            cache_sender,
+        })
+    }
+}
+
+impl Drop for ProofGenerationGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .cache_sender
+            .send(CacheServiceAction::NotifyProofGenerationCompleted(
+                self.data_root,
+            ));
+    }
+}
+
 /// Generates (and stores) an ingress proof for the provided `data_root` if all chunks are present.
 /// Validates the generated proof's anchor against the canonical chain and gossips it if valid.
 /// Returns the generated proof on success.
@@ -306,41 +348,15 @@ pub fn generate_and_store_ingress_proof(
 
     let data_size = calculate_and_validate_data_size(db, data_root, chunk_size)?;
 
-    // Pick anchor: hint or latest canonical block
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
         .block_hash;
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
-    let is_already_generating = {
-        let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) =
-            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
-                data_root,
-                response_sender,
-            })
-        {
-            return Err(eyre::eyre!(
-                "Failed to request ingress proof generation state: {err}"
-            ));
-        }
+    let _guard = ProofGenerationGuard::acquire(data_root, cache_sender)?;
 
-        response_receiver.recv().map_err(|err| {
-            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
-        })?
-    };
-
-    if is_already_generating {
-        return Err(eyre::eyre!(
-            "Ingress proof generation is already in progress for data_root {:?}",
-            data_root
-        ));
-    }
-
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
-
-    let proof_res = crate::mempool_service::chunks::generate_ingress_proof(
+    let proof = crate::mempool_service::chunks::generate_ingress_proof(
         db.clone(), // clone: Arc-wrapped DatabaseProvider — cheap ref-count bump
         data_root,
         data_size,
@@ -350,25 +366,10 @@ pub fn generate_and_store_ingress_proof(
         anchor,
         config.consensus.enable_shadow_kzg_logging,
         config.consensus.use_kzg_ingress_proofs,
-    );
-
-    let proof = match proof_res {
-        Ok(p) => p,
-        Err(e) => {
-            // Notify completion on error
-            let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-                data_root,
-            ));
-            return Err(e);
-        }
-    };
+    )?;
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    // Notify completion after stored & gossiped
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-        data_root,
-    ));
     Ok(proof)
 }
 
@@ -381,41 +382,10 @@ pub fn reanchor_and_store_ingress_proof(
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
-    let is_already_generating = {
-        let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) =
-            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
-                data_root: proof.data_root(),
-                response_sender,
-            })
-        {
-            return Err(eyre::eyre!(
-                "Failed to request ingress proof generation state: {err}"
-            ));
-        }
-
-        response_receiver.recv().map_err(|err| {
-            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
-        })?
-    };
-
     let data_root = proof.data_root();
+    let _guard = ProofGenerationGuard::acquire(data_root, cache_sender)?;
 
-    if is_already_generating {
-        return Err(eyre::eyre!(
-            "Ingress proof reanchoring already in progress for data_root {:?}",
-            data_root
-        ));
-    }
-
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
-
-    if let Err(e) = calculate_and_validate_data_size(db, data_root, config.consensus.chunk_size) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            data_root,
-        ));
-        return Err(e);
-    }
+    calculate_and_validate_data_size(db, data_root, config.consensus.chunk_size)?;
 
     let latest_anchor = block_tree_guard
         .read()
@@ -424,25 +394,11 @@ pub fn reanchor_and_store_ingress_proof(
 
     let mut proof = proof.clone(); // clone: need owned value for set_anchor + sign mutation
     proof.set_anchor(latest_anchor);
-    if let Err(e) = signer.sign_ingress_proof(&mut proof) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            data_root,
-        ));
-        return Err(e);
-    }
-
-    if let Err(e) = store_ingress_proof(db, &proof, signer) {
-        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-            data_root,
-        ));
-        return Err(e);
-    }
+    signer.sign_ingress_proof(&mut proof)?;
+    store_ingress_proof(db, &proof, signer)?;
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
-    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
-        data_root,
-    ));
     Ok(proof)
 }
 

@@ -1410,6 +1410,7 @@ impl IrysNode {
                 config.clone(),                           // clone: Config is Arc-wrapped internally
                 storage_modules_guard.clone(),            // clone: Arc-based read guard
                 service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
+                irys_db.clone(),                          // clone: DatabaseProvider is Arc-wrapped
                 receivers.custody_proof,
                 runtime_handle.clone(),
             );

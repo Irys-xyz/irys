@@ -195,8 +195,16 @@ pub enum DataSourceType {
     EvmBlob = 1,
 }
 
-impl DataSourceType {
-    pub fn from_u8(val: u8) -> eyre::Result<Self> {
+impl From<DataSourceType> for u8 {
+    fn from(val: DataSourceType) -> Self {
+        val as Self // safe: #[repr(u8)]
+    }
+}
+
+impl TryFrom<u8> for DataSourceType {
+    type Error = eyre::Report;
+
+    fn try_from(val: u8) -> eyre::Result<Self> {
         match val {
             0 => Ok(Self::NativeData),
             1 => Ok(Self::EvmBlob),
@@ -207,20 +215,20 @@ impl DataSourceType {
 
 impl<'a> Arbitrary<'a> for DataSourceType {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Self::from_u8(u.int_in_range(0..=1)?).map_err(|_| arbitrary::Error::IncorrectFormat)
+        Self::try_from(u.int_in_range(0..=1)?).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
 impl Compact for DataSourceType {
     fn to_compact<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) -> usize {
-        buf.put_u8(*self as u8);
+        buf.put_u8(u8::from(*self));
         1
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         // Compact deserialization: default to NativeData for forward compatibility
         // with unknown discriminants in stored data
-        let source = Self::from_u8(buf[0]).unwrap_or_default();
+        let source = Self::try_from(buf[0]).unwrap_or_default();
         (source, &buf[1..])
     }
 }
@@ -300,7 +308,7 @@ impl alloy_rlp::Encodable for IngressProofV2 {
                 + self.composite_commitment.length()
                 + self.chain_id.length()
                 + self.anchor.length()
-                + (self.source_type as u8).length(),
+                + u8::from(self.source_type).length(),
         };
         header.encode(out);
         self.data_root.encode(out);
@@ -308,7 +316,7 @@ impl alloy_rlp::Encodable for IngressProofV2 {
         self.composite_commitment.encode(out);
         self.chain_id.encode(out);
         self.anchor.encode(out);
-        (self.source_type as u8).encode(out);
+        u8::from(self.source_type).encode(out);
     }
 }
 
@@ -331,7 +339,7 @@ impl alloy_rlp::Decodable for IngressProofV2 {
             composite_commitment,
             chain_id,
             anchor,
-            source_type: DataSourceType::from_u8(source_type_u8)
+            source_type: DataSourceType::try_from(source_type_u8)
                 .map_err(|_| alloy_rlp::Error::Custom("unknown DataSourceType discriminant"))?,
         })
     }
@@ -408,19 +416,14 @@ pub fn generate_ingress_proof_v2(
     let per_chunk_bytes: Vec<KzgCommitmentBytes> = chunk_commitments
         .iter()
         .map(|c| {
-            let bytes: [u8; 48] = c
-                .as_ref()
-                .try_into()
-                .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))?;
-            Ok(KzgCommitmentBytes::from(bytes))
+            Ok(KzgCommitmentBytes::from(crate::kzg::commitment_to_bytes(
+                c,
+            )?))
         })
         .collect::<eyre::Result<Vec<_>>>()?;
 
     let aggregated = aggregate_all_commitments(&chunk_commitments)?;
-    let kzg_bytes: [u8; 48] = aggregated
-        .as_ref()
-        .try_into()
-        .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))?;
+    let kzg_bytes = crate::kzg::commitment_to_bytes(&aggregated)?;
 
     let composite = compute_composite_commitment(&kzg_bytes, &signer.address());
 
@@ -451,16 +454,9 @@ pub fn generate_ingress_proof_v2_from_blob(
     chain_id: u64,
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
-    use crate::kzg::{compute_composite_commitment, KzgCommitmentBytes, CHUNK_SIZE_FOR_KZG};
+    use crate::kzg::{compute_composite_commitment, KzgCommitmentBytes};
 
-    eyre::ensure!(
-        blob_data.len() <= CHUNK_SIZE_FOR_KZG,
-        "blob data exceeds max chunk size ({})",
-        CHUNK_SIZE_FOR_KZG,
-    );
-
-    let mut padded = vec![0_u8; CHUNK_SIZE_FOR_KZG];
-    padded[..blob_data.len()].copy_from_slice(blob_data);
+    let padded = crate::kzg::zero_pad_to_chunk_size(blob_data)?;
 
     // Use regular leaves (without signer) for data_root — consistent with native V2 path
     let (_, regular_leaves) = generate_ingress_leaves(
@@ -541,10 +537,7 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
                 .collect::<eyre::Result<Vec<_>>>()?;
 
             let aggregated = crate::kzg::aggregate_all_commitments(&chunk_commitments)?;
-            let kzg_bytes: [u8; 48] = aggregated
-                .as_ref()
-                .try_into()
-                .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))?;
+            let kzg_bytes = crate::kzg::commitment_to_bytes(&aggregated)?;
 
             if kzg_bytes != v2.kzg_commitment.0 {
                 return Ok(false);
@@ -960,10 +953,7 @@ mod tests {
             _ => panic!("expected V2 proof"),
         }
 
-        // Verify with the zero-padded chunk (256KB) — the verifier recomputes
-        // the KZG commitment from the provided chunks
-        let mut padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
-        padded[..blob_data.len()].copy_from_slice(&blob_data);
+        let padded = crate::kzg::zero_pad_to_chunk_size(&blob_data).unwrap();
 
         assert!(verify_ingress_proof(&proof, [padded.as_slice()], chain_id)?);
 
@@ -991,8 +981,7 @@ mod tests {
 
         // Verify with different data (wrong fill value) — should fail
         let bad_blob = kzg_safe_data(131_072, 7);
-        let mut bad_padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
-        bad_padded[..bad_blob.len()].copy_from_slice(&bad_blob);
+        let bad_padded = crate::kzg::zero_pad_to_chunk_size(&bad_blob).unwrap();
 
         assert!(!verify_ingress_proof(
             &proof,
@@ -1021,8 +1010,7 @@ mod tests {
             H256::random(),
         )?;
 
-        let mut padded = vec![0_u8; crate::kzg::CHUNK_SIZE_FOR_KZG];
-        padded[..blob_data.len()].copy_from_slice(&blob_data);
+        let padded = crate::kzg::zero_pad_to_chunk_size(&blob_data).unwrap();
 
         // Verify with wrong chain_id — should fail
         assert!(!verify_ingress_proof(&proof, [padded.as_slice()], 2)?);

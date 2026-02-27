@@ -93,11 +93,17 @@ impl<S: BlobStore> BlobExtractionService<S> {
                 }
             };
 
-            for (blob_idx, blob) in sidecar.blobs.iter().enumerate() {
+            eyre::ensure!(
+                sidecar.commitments.len() == sidecar.blobs.len(),
+                "sidecar commitment count ({}) != blob count ({})",
+                sidecar.commitments.len(),
+                sidecar.blobs.len(),
+            );
+            for (blob, commitment) in sidecar.blobs.iter().zip(sidecar.commitments.iter()) {
                 self.process_single_blob(
                     &signer,
                     blob.as_ref(),
-                    sidecar.commitments[blob_idx].as_ref(),
+                    commitment.as_ref(),
                     chain_id,
                     anchor,
                 )?;
@@ -126,6 +132,7 @@ impl<S: BlobStore> BlobExtractionService<S> {
         anchor: H256,
     ) -> eyre::Result<()> {
         use irys_types::ingress::generate_ingress_proof_v2_from_blob;
+        use irys_types::kzg::KzgCommitmentBytes;
 
         let proof = generate_ingress_proof_v2_from_blob(
             signer,
@@ -136,6 +143,9 @@ impl<S: BlobStore> BlobExtractionService<S> {
         )?;
 
         let data_root = proof.data_root();
+
+        // Blob is a single chunk (index 0) — store its KZG commitment for custody verification
+        let per_chunk_commitments = vec![(0_u32, KzgCommitmentBytes::from(*commitment_bytes))];
 
         let chunk_size = u64::try_from(irys_types::kzg::CHUNK_SIZE_FOR_KZG)
             .map_err(|_| eyre::eyre!("chunk size overflow"))?;
@@ -160,8 +170,7 @@ impl<S: BlobStore> BlobExtractionService<S> {
             },
         );
 
-        let mut chunk_data = vec![0_u8; irys_types::kzg::CHUNK_SIZE_FOR_KZG];
-        chunk_data[..blob_data.len()].copy_from_slice(blob_data);
+        let chunk_data = irys_types::kzg::zero_pad_to_chunk_size(blob_data)?;
 
         if let Err(e) = self
             .mempool_sender
@@ -169,6 +178,7 @@ impl<S: BlobStore> BlobExtractionService<S> {
                 tx_header,
                 ingress_proof: proof,
                 chunk_data,
+                per_chunk_commitments,
             })
         {
             warn!(data_root = %data_root, error = %e, "Failed to send blob-derived tx to mempool");

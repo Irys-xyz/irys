@@ -1,23 +1,33 @@
+use irys_database::get_per_chunk_kzg_commitment;
 use irys_domain::StorageModulesReadGuard;
 use irys_types::custody::{
-    select_challenged_offsets, CustodyChallenge, CustodyOpening, CustodyProof,
+    derive_challenge_seed, select_challenged_offsets, verify_custody_proof, CustodyChallenge,
+    CustodyOpening, CustodyProof, CustodyVerificationResult,
 };
 use irys_types::kzg::{compute_chunk_opening_proof, default_kzg_settings, derive_challenge_point};
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataV2};
-use irys_types::{Config, GossipCacheKey, PartitionChunkOffset};
+use irys_types::{
+    Config, DatabaseProvider, GossipCacheKey, IrysAddress, PartitionChunkOffset, H256,
+};
 use reth::revm::primitives::FixedBytes;
+use reth_db::Database as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum CustodyProofMessage {
     Challenge(CustodyChallenge),
+    ReceivedProof(CustodyProof),
+    TakePendingProofs(tokio::sync::oneshot::Sender<Vec<CustodyProof>>),
+    NewBlock { vdf_output: H256, block_height: u64 },
 }
 
 pub struct CustodyProofService {
     config: Config,
     storage_modules_guard: StorageModulesReadGuard,
     gossip_sender: UnboundedSender<GossipBroadcastMessageV2>,
+    irys_db: DatabaseProvider,
+    pending_proofs: Vec<CustodyProof>,
 }
 
 impl CustodyProofService {
@@ -25,6 +35,7 @@ impl CustodyProofService {
         config: Config,
         storage_modules_guard: StorageModulesReadGuard,
         gossip_sender: UnboundedSender<GossipBroadcastMessageV2>,
+        irys_db: DatabaseProvider,
         rx: UnboundedReceiver<CustodyProofMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) {
@@ -32,12 +43,14 @@ impl CustodyProofService {
             config,
             storage_modules_guard,
             gossip_sender,
+            irys_db,
+            pending_proofs: Vec::new(),
         };
 
         runtime_handle.spawn(service.start(rx));
     }
 
-    async fn start(self, mut rx: UnboundedReceiver<CustodyProofMessage>) {
+    async fn start(mut self, mut rx: UnboundedReceiver<CustodyProofMessage>) {
         debug!("Custody proof service started");
         while let Some(msg) = rx.recv().await {
             match msg {
@@ -50,9 +63,69 @@ impl CustodyProofService {
                         );
                     }
                 }
+                CustodyProofMessage::ReceivedProof(proof) => {
+                    self.handle_received_proof(proof);
+                }
+                CustodyProofMessage::TakePendingProofs(sender) => {
+                    let proofs = std::mem::take(&mut self.pending_proofs);
+                    let _ = sender.send(proofs);
+                }
+                CustodyProofMessage::NewBlock {
+                    vdf_output,
+                    block_height,
+                } => {
+                    self.handle_new_block(&vdf_output, block_height);
+                }
             }
         }
         debug!("Custody proof service stopped");
+    }
+
+    fn handle_received_proof(&mut self, proof: CustodyProof) {
+        if !self.config.consensus.enable_custody_proofs {
+            return;
+        }
+
+        let kzg_settings = default_kzg_settings();
+        let result = self
+            .irys_db
+            .view(|tx| {
+                verify_custody_proof(
+                    &proof,
+                    |data_root, chunk_index| {
+                        get_per_chunk_kzg_commitment(tx, data_root, chunk_index)
+                    },
+                    kzg_settings,
+                    self.config.consensus.custody_challenge_count,
+                    self.config.consensus.num_chunks_in_partition,
+                )
+            })
+            .map_err(eyre::Report::from)
+            .and_then(|inner| inner);
+
+        match result {
+            Ok(CustodyVerificationResult::Valid) => {
+                debug!(
+                    partition.hash = %proof.partition_hash,
+                    "Received valid custody proof, storing as pending",
+                );
+                self.pending_proofs.push(proof);
+            }
+            Ok(invalid) => {
+                warn!(
+                    partition.hash = %proof.partition_hash,
+                    result = ?invalid,
+                    "Received invalid custody proof, discarding",
+                );
+            }
+            Err(e) => {
+                warn!(
+                    partition.hash = %proof.partition_hash,
+                    error = %e,
+                    "Failed to verify received custody proof",
+                );
+            }
+        }
     }
 
     fn handle_challenge(&self, challenge: &CustodyChallenge) -> eyre::Result<()> {
@@ -142,6 +215,38 @@ impl CustodyProofService {
 
         Ok(())
     }
+
+    fn handle_new_block(&self, vdf_output: &H256, block_height: u64) {
+        if !self.config.consensus.enable_custody_proofs {
+            return;
+        }
+
+        let mining_address = IrysAddress::from_private_key(&self.config.node_config.mining_key);
+        let storage_modules = self.storage_modules_guard.read();
+
+        for sm in storage_modules.iter() {
+            let partition_hash = match sm.partition_hash() {
+                Some(h) => h,
+                None => continue,
+            };
+
+            let challenge_seed = derive_challenge_seed(&vdf_output.0, &partition_hash);
+            let challenge = CustodyChallenge {
+                challenged_miner: mining_address,
+                partition_hash,
+                challenge_seed,
+                challenge_block_height: block_height,
+            };
+
+            if let Err(e) = self.handle_challenge(&challenge) {
+                warn!(
+                    partition.hash = %partition_hash,
+                    error = %e,
+                    "Failed to generate self-custody proof",
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +269,17 @@ mod tests {
         irys_domain::StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())))
     }
 
+    fn test_db() -> DatabaseProvider {
+        let path = tempfile::tempdir().unwrap();
+        let db = irys_database::open_or_create_db(
+            path.path(),
+            irys_database::tables::IrysTables::ALL,
+            None,
+        )
+        .unwrap();
+        DatabaseProvider(Arc::new(db))
+    }
+
     #[test]
     fn handle_challenge_unknown_partition_returns_ok() {
         let config = test_config_with_custody();
@@ -172,6 +288,8 @@ mod tests {
             config,
             storage_modules_guard: empty_storage_guard(),
             gossip_sender: gossip_tx,
+            irys_db: test_db(),
+            pending_proofs: Vec::new(),
         };
 
         let challenge = CustodyChallenge {

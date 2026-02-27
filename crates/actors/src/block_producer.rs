@@ -1195,13 +1195,30 @@ pub trait BlockProdStrategy {
 
         let block = Arc::new(irys_block);
 
-        // Build BlockTransactions from the mempool bundle
+        let custody_proofs = if self.inner().config.consensus.enable_custody_proofs {
+            let (tx, rx) = oneshot::channel();
+            if let Err(e) = self
+                .inner()
+                .service_senders
+                .custody_proof
+                .send(crate::custody_proof_service::CustodyProofMessage::TakePendingProofs(tx))
+            {
+                warn!(error = %e, "Failed to request pending custody proofs");
+                Vec::new()
+            } else {
+                rx.await.unwrap_or_default()
+            }
+        } else {
+            Vec::new()
+        };
+
         let block_transactions = BlockTransactions {
             commitment_txs: mempool_bundle.commitment_txs,
             data_txs: HashMap::from([
                 (DataLedger::Submit, mempool_bundle.submit_txs),
                 (DataLedger::Publish, mempool_bundle.publish_txs.txs),
             ]),
+            custody_proofs,
         };
 
         Ok(Some((block, stats, block_transactions)))

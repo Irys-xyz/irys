@@ -52,6 +52,8 @@ where
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
     pub started_at: Instant,
+    pub custody_proof_sender:
+        tokio::sync::mpsc::UnboundedSender<irys_actors::custody_proof_service::CustodyProofMessage>,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -73,6 +75,7 @@ where
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
             started_at: self.started_at,
+            custody_proof_sender: self.custody_proof_sender.clone(),
         }
     }
 }

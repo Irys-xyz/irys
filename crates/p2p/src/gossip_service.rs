@@ -178,6 +178,7 @@ impl P2PService {
     {
         debug!("Starting the gossip service");
 
+        let custody_proof_sender = service_senders.custody_proof.clone(); // clone: extract before move into BlockPool
         let block_pool = BlockPool::new(
             db,
             block_discovery,
@@ -206,6 +207,7 @@ impl P2PService {
             block_tree,
             config: config.clone(),
             started_at,
+            custody_proof_sender,
         });
         let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 

@@ -499,6 +499,22 @@ impl BlockValidationTask {
             })
         };
 
+        let transactions_for_custody = Arc::clone(&transactions);
+        let custody_config = self.service_inner.config.clone(); // clone: Config is Arc-wrapped
+        let custody_db = self.service_inner.db.clone(); // clone: DatabaseProvider is Arc-wrapped
+        let custody_proofs_task = async move {
+            crate::block_validation::validate_custody_proofs(
+                &transactions_for_custody.custody_proofs,
+                &custody_config.consensus,
+                &custody_db,
+            )
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or_else(|err| {
+                tracing::error!(custom.error = ?err, "custody proofs validation failed");
+                ValidationResult::Invalid(ValidationError::Other(err.to_string()))
+            })
+        };
+
         // Wait for all validation tasks to complete
         let (
             recall_result,
@@ -507,13 +523,15 @@ impl BlockValidationTask {
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
+            custody_proofs_result,
         ) = tokio::join!(
             recall_task,
             poa_task,
             shadow_tx_task,
             seeds_validation_task,
             commitment_ordering_task,
-            data_txs_validation_task
+            data_txs_validation_task,
+            custody_proofs_task,
         );
 
         // Check shadow_tx_result first to extract ExecutionData
@@ -533,8 +551,10 @@ impl BlockValidationTask {
             &seeds_validation_result,
             &commitment_ordering_result,
             &data_txs_result,
+            &custody_proofs_result,
         ) {
             (
+                ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
@@ -559,6 +579,16 @@ impl BlockValidationTask {
                 match reth_result {
                     Ok(()) => {
                         tracing::debug!("Reth execution layer validation successful");
+
+                        // Store per-chunk KZG commitments from blob ingress proofs
+                        // so custody verification can find them for peer-received blocks.
+                        if let Err(e) = crate::block_validation::store_blob_ingress_commitments(
+                            &self.block,
+                            &self.service_inner.db,
+                        ) {
+                            tracing::warn!(error = %e, "Failed to store blob ingress commitments");
+                        }
+
                         ValidationResult::Valid
                     }
                     Err(err) => {
@@ -578,6 +608,7 @@ impl BlockValidationTask {
                     &seeds_validation_result,
                     &commitment_ordering_result,
                     &data_txs_result,
+                    &custody_proofs_result,
                 ]
                 .into_iter()
                 .find_map(|r| match r {

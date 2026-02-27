@@ -1024,6 +1024,7 @@ pub(crate) async fn data_handler_stub(
     };
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider.clone());
+    let custody_proof_sender = service_senders.custody_proof.clone(); // clone: extract before move into BlockPool
     let block_pool_stub = Arc::new(BlockPool::new(
         db.clone(),
         block_discovery_stub,
@@ -1060,6 +1061,7 @@ pub(crate) async fn data_handler_stub(
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
         started_at: std::time::Instant::now(),
+        custody_proof_sender,
     })
 }
 
@@ -1089,6 +1091,10 @@ pub(crate) async fn data_handler_with_stubbed_pool(
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
     info!("Created GossipDataHandler stub");
+    let custody_proof_sender = {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tx
+    };
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         block_pool,
@@ -1106,6 +1112,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
         started_at: std::time::Instant::now(),
+        custody_proof_sender,
     })
 }
 

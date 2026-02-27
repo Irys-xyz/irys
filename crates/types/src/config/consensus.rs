@@ -454,19 +454,16 @@ impl ConsensusConfig {
     /// Enforce logical implications between KZG/blob config flags.
     /// Call before wrapping in `Arc` to fix contradictions early.
     pub fn normalize(&mut self) {
-        for flag_name in [
-            "enable_blobs",
-            "require_kzg_ingress_proofs",
-            "use_kzg_ingress_proofs",
-            "enable_custody_proofs",
-        ] {
-            let flag_set = match flag_name {
-                "enable_blobs" => self.enable_blobs,
-                "require_kzg_ingress_proofs" => self.require_kzg_ingress_proofs,
-                "use_kzg_ingress_proofs" => self.use_kzg_ingress_proofs,
-                "enable_custody_proofs" => self.enable_custody_proofs,
-                _ => unreachable!(),
-            };
+        let dependents: &[(&str, bool)] = &[
+            ("enable_blobs", self.enable_blobs),
+            (
+                "require_kzg_ingress_proofs",
+                self.require_kzg_ingress_proofs,
+            ),
+            ("use_kzg_ingress_proofs", self.use_kzg_ingress_proofs),
+            ("enable_custody_proofs", self.enable_custody_proofs),
+        ];
+        for &(flag_name, flag_set) in dependents {
             if flag_set && !self.accept_kzg_ingress_proofs {
                 tracing::warn!(
                     "{flag_name}=true requires accept_kzg_ingress_proofs=true, auto-enabling"

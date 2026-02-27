@@ -919,6 +919,7 @@ pub async fn build_block_body_for_processed_block_header(
         block_hash: block_header.block_hash,
         data_transactions: data_txs,
         commitment_transactions: commitment_txs,
+        custody_proofs: Vec::new(),
     };
 
     Ok(block_body)

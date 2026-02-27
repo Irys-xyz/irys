@@ -954,6 +954,21 @@ impl BlockTreeServiceInner {
             );
         }
 
+        if state == ChainState::Onchain && self.config.consensus.enable_custody_proofs {
+            let msg = crate::custody_proof_service::CustodyProofMessage::NewBlock {
+                vdf_output: arc_block.vdf_limiter_info.output,
+                block_height: height,
+            };
+            if let Err(e) = self.service_senders.custody_proof.send(msg) {
+                tracing::warn!(
+                    block.hash = ?block_hash,
+                    block.height = height,
+                    error = %e,
+                    "Failed to send custody proof new block trigger",
+                );
+            }
+        }
+
         Ok(())
     }
 

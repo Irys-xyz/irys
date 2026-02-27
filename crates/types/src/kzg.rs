@@ -142,8 +142,21 @@ impl arbitrary::Arbitrary<'_> for PerChunkCommitment {
     }
 }
 
+/// Returns a reference to the lazily-initialized Ethereum KZG trusted setup.
+///
+/// The trusted setup (~50MB) overflows the default 8MB thread stack, so
+/// initialization is performed on a dedicated thread with a 64MB stack.
 pub fn default_kzg_settings() -> &'static KzgSettings {
-    EnvKzgSettings::Default.get()
+    static SETTINGS: std::sync::OnceLock<&'static KzgSettings> = std::sync::OnceLock::new();
+    SETTINGS.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("kzg-setup".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| EnvKzgSettings::Default.get())
+            .expect("failed to spawn KZG setup thread")
+            .join()
+            .expect("KZG setup thread panicked")
+    })
 }
 
 /// Compute a KZG commitment for a single 128KB blob (4096 field elements).
@@ -183,8 +196,10 @@ pub fn aggregate_commitments(
     Ok(KzgCommitment::from(compressed))
 }
 
-/// Zero-pad chunk data and split into two `BLOB_SIZE` halves.
-fn pad_and_split_chunk(chunk_data: &[u8]) -> eyre::Result<([u8; BLOB_SIZE], [u8; BLOB_SIZE])> {
+/// Zero-pad chunk data and split into two heap-allocated `BLOB_SIZE` halves.
+fn pad_and_split_chunk(
+    chunk_data: &[u8],
+) -> eyre::Result<(Box<[u8; BLOB_SIZE]>, Box<[u8; BLOB_SIZE]>)> {
     if chunk_data.len() > CHUNK_SIZE_FOR_KZG {
         return Err(eyre::eyre!(
             "chunk data too large: {} bytes (max {})",
@@ -193,18 +208,24 @@ fn pad_and_split_chunk(chunk_data: &[u8]) -> eyre::Result<([u8; BLOB_SIZE], [u8;
         ));
     }
 
-    let mut padded = [0_u8; CHUNK_SIZE_FOR_KZG];
-    padded[..chunk_data.len()].copy_from_slice(chunk_data);
+    let mut first_vec = vec![0_u8; BLOB_SIZE];
+    let mut second_vec = vec![0_u8; BLOB_SIZE];
 
-    // split_at at BLOB_SIZE on a CHUNK_SIZE_FOR_KZG (2*BLOB_SIZE) array
-    // always yields two BLOB_SIZE slices, so try_into is infallible here.
-    let (first, second) = padded.split_at(BLOB_SIZE);
-    let first: [u8; BLOB_SIZE] = first
+    let split = chunk_data.len().min(BLOB_SIZE);
+    first_vec[..split].copy_from_slice(&chunk_data[..split]);
+    if chunk_data.len() > BLOB_SIZE {
+        second_vec[..chunk_data.len() - BLOB_SIZE].copy_from_slice(&chunk_data[BLOB_SIZE..]);
+    }
+
+    let first: Box<[u8; BLOB_SIZE]> = first_vec
+        .into_boxed_slice()
         .try_into()
         .map_err(|_| eyre::eyre!("split invariant"))?;
-    let second: [u8; BLOB_SIZE] = second
+    let second: Box<[u8; BLOB_SIZE]> = second_vec
+        .into_boxed_slice()
         .try_into()
         .map_err(|_| eyre::eyre!("split invariant"))?;
+
     Ok((first, second))
 }
 
@@ -258,6 +279,26 @@ pub fn compute_composite_commitment(
     hasher.update(kzg_commitment);
     hasher.update(&signer_address.0 .0);
     H256(hasher.finish())
+}
+
+/// Convert a [`KzgCommitment`] to a fixed-size byte array.
+pub fn commitment_to_bytes(c: &KzgCommitment) -> eyre::Result<[u8; COMMITMENT_SIZE]> {
+    c.as_ref()
+        .try_into()
+        .map_err(|_| eyre::eyre!("KZG commitment is not 48 bytes"))
+}
+
+/// Zero-pad data to [`CHUNK_SIZE_FOR_KZG`] bytes.
+pub fn zero_pad_to_chunk_size(data: &[u8]) -> eyre::Result<Vec<u8>> {
+    eyre::ensure!(
+        data.len() <= CHUNK_SIZE_FOR_KZG,
+        "data exceeds chunk size: {} > {}",
+        data.len(),
+        CHUNK_SIZE_FOR_KZG,
+    );
+    let mut padded = vec![0_u8; CHUNK_SIZE_FOR_KZG];
+    padded[..data.len()].copy_from_slice(data);
+    Ok(padded)
 }
 
 // SAFETY for all blst FFI calls in this module: All blst types are initialized via
@@ -360,11 +401,15 @@ pub fn compute_chunk_opening_proof(
 ) -> eyre::Result<([u8; PROOF_SIZE], [u8; SCALAR_SIZE])> {
     let (first_half, second_half) = pad_and_split_chunk(chunk_data)?;
 
-    let blob1 = Blob::new(first_half);
-    let blob2 = Blob::new(second_half);
+    let blob1 = Blob::new(*first_half);
+    let blob2 = Blob::new(*second_half);
 
-    let c1 = compute_blob_commitment(&first_half, settings)?;
-    let c2 = compute_blob_commitment(&second_half, settings)?;
+    let c1 = settings
+        .blob_to_kzg_commitment(&blob1)
+        .map_err(|e| eyre::eyre!("KZG commitment failed for first half: {e}"))?;
+    let c2 = settings
+        .blob_to_kzg_commitment(&blob2)
+        .map_err(|e| eyre::eyre!("KZG commitment failed for second half: {e}"))?;
 
     let mut hasher = sha::Sha256::new();
     hasher.update(c1.as_ref());

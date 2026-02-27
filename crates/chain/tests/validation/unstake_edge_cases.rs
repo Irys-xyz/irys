@@ -154,6 +154,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
         BlockTransactions {
             commitment_txs: vec![invalid_unstake.clone()],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -180,6 +181,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
         BlockTransactions {
             commitment_txs: vec![invalid_unstake],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -313,6 +315,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
         BlockTransactions {
             commitment_txs: vec![invalid_unstake],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )

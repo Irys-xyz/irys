@@ -188,6 +188,7 @@ impl GossipClient {
             block_hash: header.block_hash,
             data_transactions,
             commitment_transactions,
+            custody_proofs: Vec::new(),
         };
 
         Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockBody(

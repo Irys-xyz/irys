@@ -62,6 +62,7 @@ fn send_block_to_block_validation(
     let transactions = BlockTransactions {
         commitment_txs: vec![],
         data_txs: HashMap::new(),
+        ..Default::default()
     };
 
     node_ctx
@@ -167,6 +168,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         BlockTransactions {
             commitment_txs: vec![invalid_pledge],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -276,6 +278,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         BlockTransactions {
             commitment_txs: vec![invalid_pledge],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -398,6 +401,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         BlockTransactions {
             commitment_txs: vec![pledge, stake],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )
@@ -565,6 +569,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
         BlockTransactions {
             commitment_txs: vec![unstake_low_fee, unstake_high_fee],
             data_txs: Default::default(),
+            ..Default::default()
         },
         false,
     )
@@ -671,6 +676,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         BlockTransactions {
             commitment_txs: vec![wrong_commitment],
             data_txs: HashMap::new(),
+            ..Default::default()
         },
         false,
     )

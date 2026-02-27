@@ -1388,6 +1388,7 @@ pub(crate) fn order_transactions_for_block(
             (DataLedger::Submit, submit_txs),
             (DataLedger::Publish, publish_txs),
         ]),
+        custody_proofs: Vec::new(),
     })
 }
 
@@ -1582,6 +1583,7 @@ mod tests {
             block_hash: child1.block_hash,
             data_transactions: vec![DataTransactionHeader::default()],
             commitment_transactions: vec![],
+            custody_proofs: vec![],
         });
 
         // Add block with the BlockBody
