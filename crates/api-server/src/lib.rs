@@ -10,15 +10,15 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{
-    mempool_guard::MempoolReadGuard, mempool_service::MempoolServiceMessage,
-    pledge_provider::MempoolPledgeProvider,
+    chunk_ingress_service::ChunkIngressMessage, mempool_guard::MempoolReadGuard,
+    mempool_service::MempoolServiceMessage, pledge_provider::MempoolPledgeProvider,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList, SupplyStateReadGuard,
 };
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress};
+use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress, Traced};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
     mining, pd_pricing, peer_list, post_chunk, price, proxy::proxy, storage, tx,
@@ -39,7 +39,8 @@ pub const API_VERSION: &str = "v1";
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub mempool_service: UnboundedSender<MempoolServiceMessage>,
+    pub mempool_service: UnboundedSender<Traced<MempoolServiceMessage>>,
+    pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
     pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,
@@ -208,6 +209,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .service(routes())
             .wrap(Cors::permissive())
             .wrap(TracingLogger::default())
+            .wrap(metrics::RequestMetrics)
     })
     .listen(listener)
     .unwrap()

@@ -199,7 +199,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND SeverityText: ERROR",
           "metrics": [
             {
               "type": "count",
@@ -274,7 +274,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND message: panic",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND Body: panic",
           "metrics": [
             {
               "type": "count",
@@ -345,7 +345,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND message: \"starting the node\"",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND Body: \"starting the node\"",
           "metrics": [
             {
               "type": "count",
@@ -420,7 +420,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND message: deadlock",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND Body: deadlock",
           "metrics": [
             {
               "type": "count",
@@ -492,7 +492,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(irys_node_shutdown_total{job=~\"$node_re\"}[5m])",
+          "expr": "increase(irys_node_shutdown_total{job=~\"$node_re\"}[$__rate_interval])",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -528,7 +528,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND SeverityText: ERROR",
           "metrics": [
             {
               "type": "count",
@@ -538,7 +538,7 @@
           "bucketAggs": [
             {
               "type": "terms",
-              "field": "service.name.keyword",
+              "field": "Resource.service.name.keyword",
               "id": "3",
               "settings": {
                 "size": "10",
@@ -593,7 +593,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene}",
+          "query": "Resource.service.name.keyword: ${node:lucene}",
           "metrics": [
             {
               "type": "count",
@@ -603,7 +603,7 @@
           "bucketAggs": [
             {
               "type": "terms",
-              "field": "service.name.keyword",
+              "field": "Resource.service.name.keyword",
               "id": "3",
               "settings": {
                 "size": "10",
@@ -667,7 +667,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND message: (mark_tip OR add_block)",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND Body: (mark_tip OR add_block)",
           "metrics": [
             {
               "type": "raw_data",
@@ -725,15 +725,15 @@
             },
             "indexByName": {
               "@timestamp": 0,
-              "service.name": 1,
-              "scope.name": 2,
-              "message": 3
+              "Resource.service.name": 1,
+              "Scope.name": 2,
+              "Body": 3
             },
             "renameByName": {
               "@timestamp": "_time",
-              "service.name": "service.name",
-              "scope.name": "scope.name",
-              "message": "body"
+              "Resource.service.name": "service.name",
+              "Scope.name": "Scope.name",
+              "Body": "body"
             }
           }
         }
@@ -766,7 +766,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
+          "query": "Resource.service.name.keyword: ${node:lucene} AND SeverityText: ERROR",
           "metrics": [
             {
               "type": "raw_data",
@@ -824,15 +824,15 @@
             },
             "indexByName": {
               "@timestamp": 0,
-              "service.name": 1,
-              "scope.name": 2,
-              "message": 3
+              "Resource.service.name": 1,
+              "Scope.name": 2,
+              "Body": 3
             },
             "renameByName": {
               "@timestamp": "_time",
-              "service.name": "service.name",
-              "scope.name": "scope.name",
-              "message": "body"
+              "Resource.service.name": "service.name",
+              "Scope.name": "Scope.name",
+              "Body": "body"
             }
           }
         }
@@ -856,7 +856,7 @@
       "description": "Methods consuming the most total CPU time (avg duration \u00d7 call rate). Unit is ms/s \u2014 milliseconds of work per second.",
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 10
       },
@@ -866,7 +866,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(20, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[5m])))",
+          "expr": "topk(20, sum by (span_name) (rate(traces_span_metrics_duration_milliseconds_sum{job=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -880,7 +880,7 @@
         "valueMode": "color",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "mean"
           ],
           "fields": "",
           "values": false
@@ -910,7 +910,7 @@
       "description": "Stacked view of total time spent per method over time (top 15). Shows how CPU time is distributed across instrumented methods.",
       "gridPos": {
         "x": 12,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 10
       },
@@ -920,7 +920,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(15, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[5m])))",
+          "expr": "topk(15, sum by (span_name) (rate(traces_span_metrics_duration_milliseconds_sum{job=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -947,7 +947,7 @@
       "title": "All Logs",
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 46,
         "w": 24,
         "h": 1
       },
@@ -959,7 +959,7 @@
       "title": "All Logs (Live)",
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 47,
         "w": 24,
         "h": 10
       },
@@ -969,7 +969,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: ${node:lucene}",
+          "query": "Resource.service.name.keyword: ${node:lucene}",
           "metrics": [
             {
               "type": "raw_data",
@@ -1027,15 +1027,15 @@
             },
             "indexByName": {
               "@timestamp": 0,
-              "service.name": 1,
-              "scope.name": 2,
-              "message": 3
+              "Resource.service.name": 1,
+              "Scope.name": 2,
+              "Body": 3
             },
             "renameByName": {
               "@timestamp": "_time",
-              "service.name": "service.name",
-              "scope.name": "scope.name",
-              "message": "body"
+              "Resource.service.name": "service.name",
+              "Scope.name": "Scope.name",
+              "Body": "body"
             }
           }
         }

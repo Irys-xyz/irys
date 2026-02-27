@@ -1,10 +1,10 @@
 mod common;
 
 use irys_actors::{
+    DataSyncServiceInner, DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher},
     peer_bandwidth_manager::PeerBandwidthManager,
     services::{ServiceReceivers, ServiceSenders},
-    DataSyncServiceInner, DataSyncServiceMessage,
 };
 use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
@@ -12,11 +12,11 @@ use irys_domain::{
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
-    partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig,
-    DataTransaction, IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange,
-    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore,
-    ProtocolVersion, StorageSyncConfig, TxChunkOffset, UnpackedChunk, H256,
+    Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256,
+    IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+    StorageSyncConfig, TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ie,
+    partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -33,7 +33,8 @@ use tracing::{debug, error};
 #[ignore = "flaky, non critical function test"]
 #[tokio::test]
 async fn slow_heavy_test_data_sync_with_different_peer_performance() {
-    std::env::set_var("RUST_LOG", "debug,storage=off");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug,storage=off") };
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
     let setup = TestSetup::new(100, Duration::from_secs(5), &tmp_dir);
@@ -147,7 +148,7 @@ fn format_intervals(intervals: &[Interval<PartitionChunkOffset>]) -> String {
 //==============================================================================
 struct DataSyncServiceTestHarness {
     inner: DataSyncServiceInner,
-    msg_rx: UnboundedReceiver<DataSyncServiceMessage>,
+    msg_rx: UnboundedReceiver<irys_types::Traced<DataSyncServiceMessage>>,
 }
 
 impl DataSyncServiceTestHarness {
@@ -157,7 +158,7 @@ impl DataSyncServiceTestHarness {
         peer_list: PeerList,
         chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: ServiceSenders,
-        rx: UnboundedReceiver<DataSyncServiceMessage>,
+        rx: UnboundedReceiver<irys_types::Traced<DataSyncServiceMessage>>,
         config: Config,
     ) -> Self {
         let inner = DataSyncServiceInner::new(
@@ -175,8 +176,8 @@ impl DataSyncServiceTestHarness {
     /// Process all pending messages in the queue
     async fn process_pending_messages(&mut self) -> eyre::Result<usize> {
         let mut count = 0;
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            self.inner.handle_message(traced.inner).await?;
             self.inner.storage_modules.read().unwrap()[0]
                 .sync_pending_chunks()
                 .expect("sync pending chunks to disk");
@@ -194,15 +195,15 @@ impl DataSyncServiceTestHarness {
         let mut count = 0;
 
         while start.elapsed() < duration {
-            let remaining = duration - start.elapsed();
+            let remaining = duration.checked_sub(start.elapsed()).unwrap();
             match tokio::time::timeout(
                 remaining.min(Duration::from_millis(100)),
                 self.msg_rx.recv(),
             )
             .await
             {
-                Ok(Some(msg)) => {
-                    self.inner.handle_message(msg).await?;
+                Ok(Some(traced)) => {
+                    self.inner.handle_message(traced.inner).await?;
                     self.inner.storage_modules.read().unwrap()[0]
                         .sync_pending_chunks()
                         .expect("sync pending chunks to disk");
@@ -290,7 +291,8 @@ impl DataSyncServiceTestHarness {
             let request_count = peer_fetcher.request_log.read().unwrap().len();
             total_requests += request_count;
 
-            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
+            println!(
+                "{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
                 peer_name,
                 peer_manager.health_score(),
                 request_count,
@@ -884,11 +886,11 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
             .await;
 
         // Simulate a timeout when there is one
-        if let Err(err) = result.clone() {
-            if err == ChunkFetchError::Timeout {
-                tokio::time::sleep(timeout - delay * 2).await;
-                debug!("Timing out request: {ledger_chunk_offset} {api_addr} ");
-            }
+        if let Err(err) = result.clone()
+            && err == ChunkFetchError::Timeout
+        {
+            tokio::time::sleep(timeout.checked_sub(delay * 2).unwrap()).await;
+            debug!("Timing out request: {ledger_chunk_offset} {api_addr} ");
         }
 
         result

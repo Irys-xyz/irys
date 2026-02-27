@@ -1,17 +1,17 @@
-use eyre::{eyre, Result};
+use eyre::{Result, eyre};
 use irys_domain::EpochSnapshot;
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, IrysUsdPriceUpdate, PdBaseFeeUpdate,
     ShadowTransaction, TransactionPacket, TreasuryDeposit, UnstakeDebit,
 };
 use irys_types::{
+    BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
+    IngressProofsList, IrysAddress, IrysBlockHeader, IrysTokenPrice, U256, UnixTimestamp,
     storage_pricing::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysAddress, IrysBlockHeader, IrysTokenPrice, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -475,7 +475,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     .entry(reward_addr)
                     .or_insert((RewardAmount::zero(), RollingHash::zero()));
                 entry.0.add_assign(charge.amount); // Add to total amount
-                                                   // XOR the rolling hash with the transaction ID
+                // XOR the rolling hash with the transaction ID
                 entry.1.xor_assign(U256::from_be_bytes(tx.id.0));
             }
         }
@@ -930,11 +930,11 @@ impl RollingHash {
 mod tests {
     use super::*;
     use irys_types::ingress::IngressProofV1;
-    use irys_types::{
-        ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
-        Signature, H256,
-    };
     use irys_types::{BlockHash, CommitmentStatus, CommitmentTransactionV2, CommitmentTypeV1};
+    use irys_types::{
+        ConsensusConfig, H256, IrysBlockHeader, IrysSignature, Signature, ingress::IngressProof,
+        irys::IrysSigner,
+    };
     use itertools::Itertools as _;
 
     fn test_epoch_snapshot() -> EpochSnapshot {
@@ -1499,7 +1499,7 @@ mod tests {
         // Key difference: Create separate reward addresses for signers 1 and 2
         let reward_dest1 = IrysAddress::random(); // Different from signer1
         let reward_dest2 = IrysAddress::random(); // Different from signer2
-                                                  // signer3 keeps reward_address = signer (tests mixed scenario)
+        // signer3 keeps reward_address = signer (tests mixed scenario)
 
         // Create epoch snapshot with reward redirection
         let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[

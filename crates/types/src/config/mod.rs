@@ -78,12 +78,11 @@ impl Config {
     }
 
     // validate configuration invariants
-    // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
-        // ensures the block tree is able to contain all unmigrated blocks
+        // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
-            (self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth,
-            "Block tree depth ({}) is smaller than the block migration depth ({}) - the block tree must be able to hold blocks until they're migrated",
+            (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
+            "Block tree depth ({}) must be strictly greater than block migration depth ({}) - cache.prune(depth-1) retains exactly depth blocks, so equal values risk pruning the migration block",
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
         );
@@ -126,6 +125,25 @@ impl Config {
                 .num_chunks_in_partition
                 .is_multiple_of(self.consensus.num_chunks_in_recall_range),
             "num_chunks_in_partition must be a multiple of num_chunks_in_recall_range"
+        );
+
+        // Validate mempool fields that are converted to NonZeroUsize or used as semaphore/LRU
+        // capacities. A value of zero causes an immediate panic at service startup.
+        ensure!(
+            self.mempool.max_valid_chunks > 0,
+            "mempool.max_valid_chunks must be > 0 (used as an LruCache capacity)"
+        );
+        ensure!(
+            self.mempool.max_preheader_chunks_per_item > 0,
+            "mempool.max_preheader_chunks_per_item must be > 0 (used as an LruCache capacity inside PriorityPendingChunks)"
+        );
+        ensure!(
+            self.mempool.max_concurrent_chunk_ingress_tasks > 0,
+            "mempool.max_concurrent_chunk_ingress_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall the chunk ingress service)"
+        );
+        ensure!(
+            self.mempool.max_pending_chunk_items > 0,
+            "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
         Ok(())
@@ -185,6 +203,8 @@ impl From<&NodeConfig> for MempoolConfig {
             anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
+            max_concurrent_chunk_ingress_tasks: value.mempool.max_concurrent_chunk_ingress_tasks,
+            chunk_writer_buffer_size: value.mempool.chunk_writer_buffer_size,
         }
     }
 }
@@ -291,6 +311,12 @@ pub struct MempoolConfig {
 
     /// Maximum number of concurrent handlers for mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent handlers for chunk ingress messages
+    pub max_concurrent_chunk_ingress_tasks: usize,
+
+    /// Backpressure channel capacity for the async chunk write-behind buffer
+    pub chunk_writer_buffer_size: usize,
 }
 
 impl MempoolConfig {
@@ -315,6 +341,8 @@ impl MempoolConfig {
             max_valid_commitment_addresses: 100,
             max_commitments_per_address: 10,
             max_concurrent_mempool_tasks: 10,
+            max_concurrent_chunk_ingress_tasks: 10,
+            chunk_writer_buffer_size: 4096,
         }
     }
 }

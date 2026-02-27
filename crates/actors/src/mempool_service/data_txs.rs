@@ -1,4 +1,4 @@
-use crate::mempool_service::metrics::record_chunk_error;
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
@@ -8,15 +8,16 @@ use irys_database::{
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::TxKnownStatus;
 use irys_types::{
+    DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
+    SendTraced as _, U256,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, IrysTransactionCommon as _, IrysTransactionId, H256, U256,
 };
-use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
+use reth_db::transaction::DbTxMut as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, trace, warn};
 
@@ -87,32 +88,48 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         self.mempool_state.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
-        self.process_pending_chunks_for_root(tx.data_root).await?;
+        // Notify the ChunkIngressService to process any pending chunks for this data root
+        if let Err(e) = self
+            .service_senders
+            .chunk_ingress
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
+        {
+            tracing::warn!(
+                "Failed to send ProcessPendingChunks for data_root {:?}: {:?}",
+                tx.data_root,
+                e
+            );
+        }
         self.broadcast_tx_gossip(tx);
         metrics::record_data_tx_ingested();
         Ok(())
     }
-    /// check the mempool and mdbx for data transaction
-    /// TODO: align the logic with handle_get_commitment_tx_message (specifically HashMap output)
+    /// Check the mempool and mdbx for data transactions.
+    /// Uses batch mempool lookup (single READ lock) then falls back to DB for missing txs.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = txs.len()))]
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
+        // Batch mempool lookup: single READ lock for all txids
+        let mempool_results = self
+            .mempool_state
+            .batch_valid_submit_ledger_tx_cloned(&txs)
+            .await;
+
         let mut found_txs = Vec::with_capacity(txs.len());
 
-        for tx in txs {
-            // if data tx exists in mempool
-            if let Some(tx_header) = self.mempool_state.valid_submit_ledger_tx_cloned(&tx).await {
-                trace!("Got tx {} from mempool", &tx);
+        for (tx_id, mempool_result) in txs.iter().zip(mempool_results) {
+            if let Some(tx_header) = mempool_result {
+                trace!("Got tx {} from mempool", tx_id);
                 found_txs.push(Some(tx_header));
                 continue;
             }
 
-            // if data tx exists in mdbx
+            // Fall back to DB for txs not in mempool
             let db_result = self
                 .irys_db
-                .view(|read_tx| tx_header_by_txid(read_tx, &tx))
+                .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
                 .map_err(|e| {
                     warn!("Failed to open DB read transaction: {}", e);
                     e
@@ -120,26 +137,20 @@ impl Inner {
                 .ok()
                 .and_then(|result| match result {
                     Ok(Some(tx_header)) => {
-                        trace!("Got tx {} from DB", &tx);
+                        trace!("Got tx {} from DB", tx_id);
                         Some(tx_header)
                     }
                     Ok(None) => {
-                        debug!("Tx {} not found in DB", &tx);
+                        debug!("Tx {} not found in DB", tx_id);
                         None
                     }
                     Err(e) => {
-                        warn!("DB error reading tx {}: {}", &tx, e);
+                        warn!("DB error reading tx {}: {}", tx_id, e);
                         None
                     }
                 });
 
-            if let Some(tx_header) = db_result {
-                found_txs.push(Some(tx_header));
-                continue;
-            }
-
-            // not found anywhere
-            found_txs.push(None);
+            found_txs.push(db_result);
         }
 
         found_txs
@@ -439,43 +450,13 @@ impl Inner {
         };
     }
 
-    /// Processes any pending chunks that arrived before their parent transaction.
-    #[tracing::instrument(level = "trace", skip_all, fields(chunk.data_root = ?data_root))]
-    async fn process_pending_chunks_for_root(&self, data_root: H256) -> Result<(), TxIngressError> {
-        let option_chunks_map = self
-            .mempool_state
-            .pop_pending_chunks_cache(&data_root)
-            .await;
-
-        if let Some(chunks_map) = option_chunks_map {
-            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            for chunk in chunks {
-                let msg_result = self.handle_chunk_ingress_message(chunk).await;
-
-                if let Err(err) = msg_result {
-                    record_chunk_error(err.error_type(), err.is_advisory());
-                    tracing::error!(
-                        "Failed to handle chunk ingress for data_root {:?}: {:?}",
-                        data_root,
-                        err
-                    );
-                    return Err(TxIngressError::Other(format!(
-                        "Failed to handle chunk ingress for data_root {:?}",
-                        data_root
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Broadcasts the transaction over gossip, with error logging.
     fn broadcast_tx_gossip(&self, tx: &DataTransactionHeader) {
         let gossip_broadcast_message = GossipBroadcastMessageV2::from(tx.clone());
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!("Failed to send gossip data for tx {}: {:?}", tx.id, error);
         }

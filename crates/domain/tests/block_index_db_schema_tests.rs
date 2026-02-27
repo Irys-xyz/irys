@@ -3,7 +3,7 @@ use irys_database::{
     open_or_create_db, prune_ledger_range, tables::IrysTables,
 };
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{hash_sha256, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, H256};
+use irys_types::{DataLedger, DataTransactionLedger, H256, H256List, IrysBlockHeader, hash_sha256};
 use tracing::info;
 
 #[test_log::test(test)]

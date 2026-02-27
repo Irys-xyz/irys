@@ -1,57 +1,34 @@
-use opentelemetry::metrics::Counter;
-use opentelemetry::{global, KeyValue};
-use std::sync::OnceLock;
+use opentelemetry::KeyValue;
 
-fn meter() -> opentelemetry::metrics::Meter {
-    global::meter("irys-p2p")
+irys_utils::define_metrics! {
+    meter: "irys-p2p";
+
+    counter CHUNKS_RECEIVED("irys.gossip.chunks.received_total", "Total chunks received via gossip");
+    counter BYTES_RECEIVED("irys.gossip.chunks.bytes_received_total", "Total bytes received in gossip chunk payloads");
+    histogram PROCESSING_MS("irys.gossip.chunks.processing_duration_ms", "Gossip chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    counter INBOUND_ERRORS("irys.gossip.inbound.errors_total", "Gossip inbound processing errors by type");
+    counter OUTBOUND_ERRORS("irys.gossip.outbound.errors_total", "Gossip outbound send errors by type");
 }
 
-static CHUNKS_RECEIVED: OnceLock<Counter<u64>> = OnceLock::new();
-static BYTES_RECEIVED: OnceLock<Counter<u64>> = OnceLock::new();
-static INBOUND_ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
-static OUTBOUND_ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
-
 pub(crate) fn record_gossip_chunk_received(bytes: u64) {
-    let chunks = CHUNKS_RECEIVED.get_or_init(|| {
-        meter()
-            .u64_counter("irys.gossip.chunks.received_total")
-            .with_description("Total chunks received via gossip")
-            .build()
-    });
-    let bytes_counter = BYTES_RECEIVED.get_or_init(|| {
-        meter()
-            .u64_counter("irys.gossip.chunks.bytes_received_total")
-            .with_description("Total bytes received in gossip chunk payloads")
-            .build()
-    });
-    chunks.add(1, &[]);
-    bytes_counter.add(bytes, &[]);
+    CHUNKS_RECEIVED.add(1, &[]);
+    BYTES_RECEIVED.add(bytes, &[]);
+}
+
+pub(crate) fn record_gossip_chunk_processing_duration(ms: f64) {
+    PROCESSING_MS.record(ms, &[]);
 }
 
 pub(crate) fn record_gossip_inbound_error(error_type: &'static str, is_advisory: bool) {
-    INBOUND_ERRORS
-        .get_or_init(|| {
-            meter()
-                .u64_counter("irys.gossip.inbound.errors_total")
-                .with_description("Gossip inbound processing errors by type")
-                .build()
-        })
-        .add(
-            1,
-            &[
-                KeyValue::new("error_type", error_type),
-                KeyValue::new("advisory", is_advisory),
-            ],
-        );
+    INBOUND_ERRORS.add(
+        1,
+        &[
+            KeyValue::new("error_type", error_type),
+            KeyValue::new("advisory", is_advisory),
+        ],
+    );
 }
 
 pub(crate) fn record_gossip_outbound_error(error_type: &'static str) {
-    OUTBOUND_ERRORS
-        .get_or_init(|| {
-            meter()
-                .u64_counter("irys.gossip.outbound.errors_total")
-                .with_description("Gossip outbound send errors by type")
-                .build()
-        })
-        .add(1, &[KeyValue::new("error_type", error_type)]);
+    OUTBOUND_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
 }

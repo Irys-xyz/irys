@@ -1,6 +1,6 @@
 use crate::mempool_service::AtomicMempoolState;
 use irys_types::{
-    CommitmentTransaction, CommitmentTransactionMetadata, DataRoot, DataTransactionHeader,
+    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
     DataTransactionMetadata, IrysTransactionId,
 };
 use std::collections::HashMap;
@@ -61,13 +61,6 @@ impl MempoolReadGuard {
         data_tx_ids: &[IrysTransactionId],
     ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
         self.mempool_state.get_data_txs(data_tx_ids).await
-    }
-
-    /// Returns the number of pending chunks cached for a given data_root.
-    pub async fn pending_chunk_count_for_data_root(&self, data_root: &DataRoot) -> usize {
-        self.mempool_state
-            .pending_chunk_count_for_data_root(data_root)
-            .await
     }
 
     /// Check if a transaction ID is in the recent valid transactions cache.

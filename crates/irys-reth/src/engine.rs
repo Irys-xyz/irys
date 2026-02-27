@@ -5,14 +5,14 @@
 
 use std::convert::Infallible;
 
-use alloy_eips::{eip4895::Withdrawal, eip7685::Requests, Encodable2718 as _};
+use alloy_eips::{Encodable2718 as _, eip4895::Withdrawal, eip7685::Requests};
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types::Withdrawals;
 use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload};
 use reth::api::PayloadTypes;
 use reth::payload::{EthBuiltPayload, EthPayloadBuilderAttributes};
-use reth::primitives::SealedBlock;
-use reth_chainspec::EthereumHardforks;
+use reth::primitives::{SealedBlock, SealedHeader};
+use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::EthPrimitives;
@@ -261,13 +261,16 @@ impl PayloadTypes for IrysPayloadTypes {
 }
 
 /// Implement PayloadAttributesBuilder for LocalPayloadAttributesBuilder to support IrysPayloadAttributes
-impl<CS> PayloadAttributesBuilder<IrysPayloadAttributes> for LocalPayloadAttributesBuilder<CS>
+impl<CS> PayloadAttributesBuilder<IrysPayloadAttributes, CS::Header>
+    for LocalPayloadAttributesBuilder<CS>
 where
-    CS: EthereumHardforks + Send + Sync + 'static,
+    CS: EthChainSpec + EthereumHardforks + Send + Sync + 'static,
 {
-    fn build(&self, timestamp: u64) -> IrysPayloadAttributes {
+    fn build(&self, parent: &SealedHeader<CS::Header>) -> IrysPayloadAttributes {
         IrysPayloadAttributes {
-            inner: <Self as PayloadAttributesBuilder<EthPayloadAttributes>>::build(self, timestamp),
+            inner: <Self as PayloadAttributesBuilder<EthPayloadAttributes, CS::Header>>::build(
+                self, parent,
+            ),
             shadow_txs: vec![],
         }
     }
@@ -282,7 +285,7 @@ where
 
 use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV2, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4,
-    ExecutionPayloadEnvelopeV5, ExecutionPayloadV1,
+    ExecutionPayloadEnvelopeV5, ExecutionPayloadEnvelopeV6, ExecutionPayloadV1,
 };
 use reth_ethereum_engine_primitives::BuiltPayloadConversionError;
 
@@ -317,6 +320,14 @@ impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV4 {
 }
 
 impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV5 {
+    type Error = BuiltPayloadConversionError;
+
+    fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV6 {
     type Error = BuiltPayloadConversionError;
 
     fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {

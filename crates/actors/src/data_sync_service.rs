@@ -11,7 +11,10 @@ use crate::{
 };
 use chunk_orchestrator::ChunkOrchestrator;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
-use irys_types::{Config, IrysAddress, PackedChunk, PartitionChunkOffset, TokioServiceHandle};
+use irys_types::{
+    Config, IrysAddress, PackedChunk, PartitionChunkOffset, SendTraced as _, TokioServiceHandle,
+    Traced,
+};
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -20,11 +23,11 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, warn};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<DataSyncServiceMessage>,
+    msg_rx: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
     pub inner: DataSyncServiceInner,
 }
 
@@ -203,13 +206,13 @@ impl DataSyncServiceInner {
                         1 // Decent peer, conservative increase
                     };
                     debug!(
-                    "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
-                    current_max,
-                    current_max + increase,
-                    peer_addr,
-                    utilization_ratio * 100.0,
-                    health_score
-                );
+                        "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
+                        current_max,
+                        current_max + increase,
+                        peer_addr,
+                        utilization_ratio * 100.0,
+                        health_score
+                    );
                     peer_manager.set_max_concurrency(current_max + increase);
                 }
             } else {
@@ -265,12 +268,17 @@ impl DataSyncServiceInner {
             .clone();
         if sm.write_data_chunk(&unpacked_chunk).is_err() {
             // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
-            self.service_senders
-                .mempool
-                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
+            if let Err(e) = self.service_senders.chunk_ingress.send_traced(
+                crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                     unpacked_chunk,
-                ))
-                .expect("to send MempoolServiceMessage");
+                    None,
+                ),
+            ) {
+                tracing::warn!(
+                    "Failed to send ChunkIngressMessage to chunk ingress channel: {:?}",
+                    e
+                );
+            }
         }
 
         Ok(())
@@ -511,7 +519,9 @@ impl DataSyncServiceInner {
         for (sm_id, best_peers) in peer_updates {
             // Skip ff we don't have an orchestrator for this storage_module
             let Some(orchestrator) = self.chunk_orchestrators.get_mut(&sm_id) else {
-                warn!("Storage module with id: {sm_id} does not have a chunk_orchestrator and it should.");
+                warn!(
+                    "Storage module with id: {sm_id} does not have a chunk_orchestrator and it should."
+                );
                 continue;
             };
 
@@ -575,7 +585,7 @@ impl DataSyncServiceInner {
 
 impl DataSyncService {
     pub fn spawn_service(
-        rx: UnboundedReceiver<DataSyncServiceMessage>,
+        rx: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
         block_tree: BlockTreeReadGuard,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         peer_list: PeerList,
@@ -617,7 +627,7 @@ impl DataSyncService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "data_sync_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 
@@ -638,7 +648,11 @@ impl DataSyncService {
 
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => self.inner.handle_message(msg).await?,
+                        Some(traced) => {
+                            let (msg, _entered) = traced.into_inner();
+                            drop(_entered);
+                            self.inner.handle_message(msg).await?;
+                        }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
                             break;
@@ -686,7 +700,9 @@ impl DataSyncService {
         }
 
         // Process remaining messages before shutdown
-        while let Ok(msg) = self.msg_rx.try_recv() {
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, _entered) = traced.into_inner();
+            drop(_entered);
             self.inner.handle_message(msg).await?;
         }
 

@@ -21,9 +21,9 @@
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
-    commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
-    ValidationError,
+    ValidationError, commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid,
+    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    submit_payload_to_reth,
 };
 use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
@@ -32,7 +32,7 @@ use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger};
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use tracing::{debug, error, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, warn};
 
 /// Result of waiting for parent validation to complete
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +50,7 @@ pub(super) struct BlockValidationTask {
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
+    pub parent_span: tracing::Span,
 }
 
 impl PartialEq for BlockValidationTask {
@@ -89,17 +90,19 @@ impl BlockValidationTask {
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         skip_vdf_validation: bool,
+        parent_span: tracing::Span,
     ) -> Self {
         Self {
             sealed_block,
             service_inner,
             block_tree_guard,
             skip_vdf_validation,
+            parent_span,
         }
     }
 
     /// Execute the concurrent validation task
-    #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
+    #[tracing::instrument(parent = &self.parent_span, skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference
@@ -316,31 +319,28 @@ impl BlockValidationTask {
             let block_index_guard = self.service_inner.block_index_guard.clone();
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
-            tokio::task::spawn_blocking(move || {
-                if skip_vdf_validation {
-                    debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
-                    return Ok(ValidationResult::Valid);
-                }
-                poa_is_valid(
-                    &poa,
-                    &block_index_guard,
-                    &parent_epoch_snapshot,
-                    &consensus_config,
-                    &miner_address,
-                )
-                .inspect_err(|err| tracing::error!(
+            {
+                let poa_span = tracing::info_span!(
+                    "poa_validation",
                     block.hash = %block_hash,
-                    block.height = %block_height,
-                    custom.error = ?err,
-                    "poa validation failed"
-                ))
-                .map(|()| ValidationResult::Valid)
-            })
-            .instrument(tracing::info_span!(
-                "poa_validation",
-                block.hash = %block_hash,
-                block.height = %block_height
-            ))
+                    block.height = %block_height
+                );
+                tokio::task::spawn_blocking(move || {
+                    let _guard = poa_span.enter();
+                    if skip_vdf_validation {
+                        debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
+                        return Ok(ValidationResult::Valid);
+                    }
+                    poa_is_valid(
+                        &poa,
+                        &block_index_guard,
+                        &parent_epoch_snapshot,
+                        &consensus_config,
+                        &miner_address,
+                    )
+                    .map(|()| ValidationResult::Valid)
+                })
+            }
         };
 
         let poa_task = async move {
@@ -463,6 +463,8 @@ impl BlockValidationTask {
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
+        let seeds_block_hash = self.sealed_block.header().block_hash;
+        let seeds_block_height = self.sealed_block.header().height;
         let seeds_validation_task = async move {
             let binding = self.block_tree_guard.read();
             let previous_block =
@@ -483,7 +485,12 @@ impl BlockValidationTask {
                 previous_block,
                 vdf_reset_frequency,
             )
-        };
+        }
+        .instrument(tracing::info_span!(
+            "seeds_validation",
+            block.hash = %seeds_block_hash,
+            block.height = %seeds_block_height
+        ));
 
         // Commitment transaction ordering validation
         let sealed_block_for_commitment = self.sealed_block.clone();

@@ -58,6 +58,7 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 reth-db.workspace = true
 reth.workspace = true
+reth-ethereum-primitives.workspace = true
 alloy-core.workspace = true
 alloy-genesis.workspace = true
 alloy-eips.workspace = true
@@ -84,6 +85,7 @@ thiserror.workspace = true
 itertools.workspace = true
 alloy-rpc-types-trace.workspace = true
 serde = { workspace = true, features = ["derive"] }
+irys-macros-diag-slow.workspace = true
 alloy-consensus.workspace = true
 alloy-signer.workspace = true
 alloy-primitives.workspace = true

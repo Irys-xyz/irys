@@ -114,7 +114,8 @@ impl MockedServices {
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
-                    Some(step) => {
+                    Some(traced_step) => {
+                        let (step, _parent_span) = traced_step.into_parts();
                         debug!("Received VDF step: {:?}", step);
                         let state = vdf_state.into_inner_cloned();
                         let mut lock = state.write().unwrap();

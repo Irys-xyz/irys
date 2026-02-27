@@ -1,6 +1,6 @@
 use irys_domain::BlockIndexReadGuard;
 use irys_types::{
-    CommitmentTransactionMetadata, DataTransactionMetadata, TransactionStatusResponse, H256,
+    CommitmentTransactionMetadata, DataTransactionMetadata, H256, TransactionStatusResponse,
 };
 
 use crate::{MempoolReadGuard, TxMetadata};
@@ -14,14 +14,13 @@ pub async fn compute_transaction_status(
     current_head_height: u64,
     mempool_guard: &MempoolReadGuard,
 ) -> eyre::Result<Option<TransactionStatusResponse>> {
-    // First check mempool for metadata
     let mempool_metadata = mempool_guard.get_tx_metadata(tx_id).await;
-
-    // Check if in mempool
     let in_mempool = mempool_metadata.is_some() || mempool_guard.is_recent_valid_tx(tx_id).await;
 
-    // Try mempool metadata first, then database
-    let metadata = mempool_metadata.or(db_metadata);
+    // Prefer DB metadata over mempool: BlockMigrationService writes included_height
+    // to DB synchronously at confirmation time, so it is always authoritative.
+    // Mempool metadata is the fallback for pending txs not yet in the DB.
+    let metadata = db_metadata.or(mempool_metadata);
 
     match (metadata, in_mempool) {
         (Some(metadata), _) if metadata.included_height().is_some() => {
@@ -43,14 +42,8 @@ pub async fn compute_transaction_status(
                 )))
             }
         }
-        (_, true) => {
-            // In mempool but not included in any block
-            Ok(Some(TransactionStatusResponse::pending()))
-        }
-        _ => {
-            // Not found anywhere
-            Ok(None)
-        }
+        (_, true) => Ok(Some(TransactionStatusResponse::pending())),
+        _ => Ok(None),
     }
 }
 

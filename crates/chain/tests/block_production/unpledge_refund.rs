@@ -10,10 +10,12 @@ use irys_types::{
     NodeConfig, PledgeDataProvider as _, U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
+use reth::rpc::types::BlockNumberOrTag;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+use tokio::time::{sleep, Duration};
 use tracing::warn;
 
 use crate::utils::IrysNodeTest;
@@ -69,17 +71,31 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     // Refund will occur later at the epoch boundary.
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(head_height),
+            head_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
     let balance_before_inclusion = genesis_node
         .get_balance(peer_addr, head_block.evm_block_hash)
         .await;
 
     let inclusion_block_peer = genesis_node.mine_block().await?;
     genesis_node
-        .wait_until_height(inclusion_block_peer.height, seconds_to_wait)
+        .wait_for_block_at_height(inclusion_block_peer.height, seconds_to_wait)
         .await
         .expect("genesis should sync peer-mined inclusion block");
     let inclusion_block = genesis_node
         .get_block_by_height(inclusion_block_peer.height)
+        .await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(inclusion_block.height),
+            inclusion_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
         .await?;
 
     // ---------- Assert (inclusion): storage modules not released yet ----------
@@ -91,7 +107,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Assert (inclusion): UNPLEDGE only, fee-only debit ----------
     // First, verify the Irys commitment ledger actually contains the unpledge tx id
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     warn!(
         custom.inclusion_commitments = ?inclusion_commitments,
         tx.expected_unpledge = ?unpledge_tx.id(),
@@ -192,10 +208,17 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let (_mined, final_height) = genesis_node.mine_until_next_epoch().await?;
     // Ensure the peer has fully synced the epoch block so SM updates are applied
     peer_node
-        .wait_until_height(final_height, seconds_to_wait)
+        .wait_for_block_at_height(final_height, seconds_to_wait)
         .await
         .expect("peer to sync to epoch height");
     let last_block = genesis_node.get_block_by_height(final_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(last_block.height),
+            last_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
 
     // ---------- Assert (epoch): UNPLEDGE_REFUND with value, balances and treasury ----------
     let receipts_epoch = reth_ctx
@@ -258,7 +281,13 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     // ---------- Assert (epoch): storage module released for target (if it was assigned) ----------
-    let epoch_hashes = assigned_sm_hashes(&peer_node);
+    let epoch_hashes = wait_for_sm_hashes(
+        &peer_node,
+        seconds_to_wait,
+        "target partition should be unassigned at epoch boundary",
+        |hashes| !hashes.contains(&capacity_pa.partition_hash),
+    )
+    .await?;
     tracing::error!(custom.part_hash = ?capacity_pa.partition_hash, "hash unassigned");
     assert!(
         !epoch_hashes.contains(&capacity_pa.partition_hash),
@@ -351,6 +380,13 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(head_height),
+            head_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
     let treasury_before = head_block.treasury;
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
 
@@ -387,6 +423,13 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     }
 
     let inclusion_block = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(inclusion_block.height),
+            inclusion_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
 
     let inclusion_assignments: Vec<_> = {
         let sms = genesis_node.node_ctx.storage_modules_guard.read();
@@ -407,7 +450,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         );
     }
 
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),
@@ -476,6 +519,13 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
 
     let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(epoch_block.height),
+            epoch_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
     let epoch_receipts = reth_ctx
         .inner
         .provider
@@ -548,12 +598,21 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         "Epoch treasury should decrease by total refund amount"
     );
 
-    let post_epoch_assignments: HashSet<_> = {
-        let sms = genesis_node.node_ctx.storage_modules_guard.read();
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
-            .collect()
-    };
+    let expected_remaining: HashSet<_> = assigned_partitions
+        .iter()
+        .skip(partitions_to_unpledge.len())
+        .map(|pa| pa.partition_hash)
+        .collect();
+    let expected_remaining_for_wait = expected_remaining.clone();
+    let post_epoch_assignments: HashSet<_> = wait_for_sm_hashes(
+        &genesis_node,
+        seconds_to_wait,
+        "post-epoch assignments should converge to expected remaining set",
+        |hashes| hashes.iter().copied().collect::<HashSet<_>>() == expected_remaining_for_wait,
+    )
+    .await?
+    .into_iter()
+    .collect();
     for (_, assignment) in &unpledge_txs {
         assert!(
             !post_epoch_assignments.contains(&assignment.partition_hash),
@@ -561,11 +620,6 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
             assignment.partition_hash
         );
     }
-    let expected_remaining: HashSet<_> = assigned_partitions
-        .iter()
-        .skip(partitions_to_unpledge.len())
-        .map(|pa| pa.partition_hash)
-        .collect();
     assert_eq!(
         post_epoch_assignments, expected_remaining,
         "Only the non-unpledged partitions should remain assigned locally"
@@ -618,6 +672,13 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(head_height),
+            head_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
     let balance_before_inclusion = genesis_node
         .get_balance(genesis_signer.address(), head_block.evm_block_hash)
         .await;
@@ -635,13 +696,25 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let inclusion_block = peer_node.mine_block().await?;
 
+    // Wait for genesis node to receive the block via gossip before querying its Reth provider
+    genesis_node
+        .wait_for_block_at_height(inclusion_block.height, seconds_to_wait)
+        .await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(inclusion_block.height),
+            inclusion_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
     let inclusion_hashes = assigned_sm_hashes(&genesis_node);
     assert_eq!(
         inclusion_hashes, pre_hashes,
         "Inclusion block must not change storage module assignments"
     );
 
-    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = inclusion_block.commitment_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),
@@ -722,10 +795,17 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let (_mined, epoch_height) = peer_node.mine_until_next_epoch().await?;
     genesis_node
-        .wait_until_height(epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height, seconds_to_wait)
         .await
         .expect("genesis should sync peer-mined epoch block");
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(epoch_block.height),
+            epoch_block.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
 
     let epoch_receipts = reth_ctx
         .inner
@@ -811,7 +891,13 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         "Final balance should equal initial balance minus aggregate inclusion fees plus refunded pledges"
     );
 
-    let post_epoch_hashes = assigned_sm_hashes(&genesis_node);
+    let post_epoch_hashes = wait_for_sm_hashes(
+        &genesis_node,
+        seconds_to_wait,
+        "genesis storage modules should be fully de-assigned after epoch refunds",
+        <[irys_types::H256]>::is_empty,
+    )
+    .await?;
     assert!(
         post_epoch_hashes.is_empty(),
         "Genesis storage modules should be fully de-assigned after epoch refunds"
@@ -956,7 +1042,7 @@ pub(crate) async fn setup_env(
 }
 
 pub(crate) fn assert_single_log_for(
-    receipts: &[reth::primitives::Receipt],
+    receipts: &[reth_ethereum_primitives::Receipt],
     topic: &[u8; 32],
     addr: IrysAddress,
     context: &str,
@@ -982,4 +1068,41 @@ pub(crate) fn assert_single_log_for(
         .collect();
     assert_eq!(hits.len(), 1, "{}: expected exactly one log", context);
     idx.expect("receipt index")
+}
+
+async fn wait_for_sm_hashes<F>(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    seconds_to_wait: usize,
+    context: &str,
+    predicate: F,
+) -> eyre::Result<Vec<irys_types::H256>>
+where
+    F: Fn(&[irys_types::H256]) -> bool,
+{
+    let retries_per_second = 10;
+    let max_retries = seconds_to_wait * retries_per_second;
+
+    for _ in 0..max_retries {
+        let hashes: Vec<irys_types::H256> = {
+            let sms = node.node_ctx.storage_modules_guard.read();
+            sms.iter().filter_map(|sm| sm.partition_hash()).collect()
+        };
+        if predicate(&hashes) {
+            return Ok(hashes);
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    let hashes: Vec<irys_types::H256> = {
+        let sms = node.node_ctx.storage_modules_guard.read();
+        sms.iter().filter_map(|sm| sm.partition_hash()).collect()
+    };
+    let state = node.sync_state_snapshot().await;
+    Err(eyre::eyre!(
+        "{} not satisfied within {}s. hashes={:?} state={}",
+        context,
+        seconds_to_wait,
+        hashes,
+        state
+    ))
 }

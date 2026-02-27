@@ -6,13 +6,13 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_overlapped_storage_modules, BlockIndex, StorageModule, StorageModulesReadGuard,
+    BlockIndex, StorageModule, StorageModulesReadGuard, get_overlapped_storage_modules,
 };
-use irys_storage::{ie, ii, InclusiveInterval as _};
+use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, BlockHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset,
-    LedgerChunkRange, Proof, TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
+    Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
+    H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{collections::HashMap, sync::Arc};
@@ -21,7 +21,7 @@ use tracing::{error, instrument};
 
 pub struct ChunkMigrationService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<ChunkMigrationServiceMessage>,
+    msg_rx: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
     inner: ChunkMigrationServiceInner,
 }
 
@@ -198,7 +198,7 @@ impl ChunkMigrationServiceInner {
         // forward the finalization message to the cache service for cleanup
         if let Err(e) = service_senders
             .chunk_cache
-            .send(CacheServiceAction::OnBlockMigrated(block_height, None))
+            .send_traced(CacheServiceAction::OnBlockMigrated(block_height, None))
         {
             tracing::warn!(
                 block.height = ?block_height,
@@ -458,7 +458,7 @@ fn write_chunk_to_module(
 
 impl ChunkMigrationService {
     pub fn spawn_service(
-        rx: UnboundedReceiver<ChunkMigrationServiceMessage>,
+        rx: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
         block_index: BlockIndex,
         storage_modules_guard: &StorageModulesReadGuard,
         db: DatabaseProvider,
@@ -496,7 +496,7 @@ impl ChunkMigrationService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all, err)]
+    #[tracing::instrument(name = "chunk_migration_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 
@@ -511,7 +511,10 @@ impl ChunkMigrationService {
 
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => self.inner.handle_message(msg)?,
+                        Some(traced) => {
+                            let (msg, _entered) = traced.into_inner();
+                            self.inner.handle_message(msg)?;
+                        }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
                             break;
@@ -522,7 +525,8 @@ impl ChunkMigrationService {
         }
 
         // Process remaining messages before shutdown
-        while let Ok(msg) = self.msg_rx.try_recv() {
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, _entered) = traced.into_inner();
             self.inner.handle_message(msg)?;
         }
 

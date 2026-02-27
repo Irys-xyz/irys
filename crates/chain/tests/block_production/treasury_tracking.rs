@@ -231,7 +231,7 @@ async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
     );
 
     // Get commitment ledger to verify the treasury matches commitment values
-    let commitment_tx_ids = genesis_block.get_commitment_ledger_tx_ids();
+    let commitment_tx_ids = genesis_block.commitment_tx_ids();
     info!(
         "Genesis has {} commitment transactions",
         commitment_tx_ids.len()

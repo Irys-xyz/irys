@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 irys-config.workspace = true
+irys-utils.workspace = true
 irys-database.workspace = true
 irys-domain.workspace = true
 irys-efficient-sampling.workspace = true

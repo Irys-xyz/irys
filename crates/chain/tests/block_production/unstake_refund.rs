@@ -9,10 +9,13 @@ use irys_types::{
     partition::PartitionAssignment, CommitmentTransaction, PledgeDataProvider as _, U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
+use reth::rpc::types::BlockNumberOrTag;
+use tokio::time::{sleep, Duration};
 
 use crate::block_production::unpledge_refund::{
     assert_single_log_for, send_unpledge_all, setup_env, setup_env_with_block_migration_depth,
 };
+use crate::utils::IrysNodeTest;
 
 /// Two-node scenario exercising the full unstake flow:
 /// 1. unpledge all partitions from a signer and process epoch refunds.
@@ -72,7 +75,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(unpledge_inclusion.height)
         .await?;
 
-    let inclusion_commitments = unpledge_block.get_commitment_ledger_tx_ids();
+    let inclusion_commitments = unpledge_block.commitment_tx_ids();
     for tx in &unpledge_txs {
         assert!(
             inclusion_commitments.contains(&tx.id()),
@@ -84,7 +87,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     // Advance to epoch boundary so pledges fully clear before unstaking.
     let (_mined, epoch_height_after_unpledge) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height_after_unpledge, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height_after_unpledge, seconds_to_wait)
         .await
         .expect("peer to sync post-unpledge epoch");
     let post_unpledge_epoch_block = genesis_node
@@ -92,11 +95,14 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .await?;
 
     // Epoch block must emit refunds for each unpledge.
-    let epoch_receipts = reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(post_unpledge_epoch_block.evm_block_hash))?
-        .expect("epoch receipts available");
+    let epoch_receipts = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        post_unpledge_epoch_block.height,
+        post_unpledge_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let mut refund_logs = 0_usize;
     for receipt in &epoch_receipts {
         refund_logs += receipt
@@ -157,8 +163,8 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .await?;
 
     let unstake_inclusion = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_until_height(unstake_inclusion.height, seconds_to_wait)
+    peer_node
+        .wait_for_block_at_height(unstake_inclusion.height, seconds_to_wait)
         .await
         .expect("peer should sync unstake inclusion block");
     let unstake_block = genesis_node
@@ -171,7 +177,14 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Unstake commitment must appear in the inclusion ledger",
     );
 
-    let receipts_inclusion = get_block_receipts(&reth_ctx, unstake_block.evm_block_hash)?;
+    let receipts_inclusion = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        unstake_block.height,
+        unstake_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let debit_receipt_idx = assert_single_log_for(
         &receipts_inclusion,
         &shadow_tx_topics::UNSTAKE_DEBIT,
@@ -219,14 +232,21 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     // Advance to epoch and validate refunds + treasury delta
     let (_produced, epoch_height_after_unstake) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height_after_unstake, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height_after_unstake, seconds_to_wait)
         .await
         .expect("peer to sync unstake refund epoch");
     let epoch_block = genesis_node
         .get_block_by_height(epoch_height_after_unstake)
         .await?;
 
-    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
+    let receipts_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        epoch_block.height,
+        epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let refund_receipt_idx = assert_single_log_for(
         &receipts_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -346,8 +366,8 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 
     // Mine a block - unstake should NOT be included due to HasActivePledges
     let first_block_after_unstake = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_until_height(first_block_after_unstake.height, seconds_to_wait)
+    peer_node
+        .wait_for_block_at_height(first_block_after_unstake.height, seconds_to_wait)
         .await
         .expect("peer should sync first block after unstake attempt");
     let first_block = genesis_node
@@ -362,7 +382,14 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     );
 
     // Assert no UNSTAKE_DEBIT shadow tx in block
-    let receipts_first_block = get_block_receipts(&reth_ctx, first_block.evm_block_hash)?;
+    let receipts_first_block = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        first_block.height,
+        first_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_first_block,
         &shadow_tx_topics::UNSTAKE_DEBIT,
@@ -400,13 +427,20 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Advance to epoch boundary
     let (_mined, first_epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(first_epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(first_epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync first epoch after unstake attempt");
     let first_epoch_block = genesis_node.get_block_by_height(first_epoch_height).await?;
 
     // Assert no UNSTAKE refund shadow tx at epoch
-    let receipts_first_epoch = get_block_receipts(&reth_ctx, first_epoch_block.evm_block_hash)?;
+    let receipts_first_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        first_epoch_block.height,
+        first_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_first_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -455,7 +489,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Mine another block to verify unstake continues to be rejected
     let second_block_after_unstake = genesis_node.mine_block().await?;
     peer_node
-        .wait_until_height(second_block_after_unstake.height, seconds_to_wait)
+        .wait_for_block_at_height(second_block_after_unstake.height, seconds_to_wait)
         .await
         .expect("peer to sync second block");
     let second_block = genesis_node
@@ -480,7 +514,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Advance to another epoch - unstake should still not be processed
     let (_mined, second_epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(second_epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(second_epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync second epoch");
     let second_epoch_block = genesis_node
@@ -488,7 +522,14 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         .await?;
 
     // Verify no UNSTAKE refund at this epoch either
-    let receipts_second_epoch = get_block_receipts(&reth_ctx, second_epoch_block.evm_block_hash)?;
+    let receipts_second_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        second_epoch_block.height,
+        second_epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     assert_no_shadow_tx_log(
         &receipts_second_epoch,
         &shadow_tx_topics::UNSTAKE,
@@ -555,8 +596,22 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         },
     )
     .await?;
-    genesis_node.mine_until_next_epoch().await?;
-    genesis_node.mine_until_next_epoch().await?;
+    let (_mined, epoch_height_1) = genesis_node
+        .mine_until_next_epoch()
+        .await
+        .expect("failed to mine until next epoch (first)");
+    peer_node
+        .wait_for_block_at_height(epoch_height_1, seconds_to_wait)
+        .await
+        .expect("peer did not sync to epoch_height_1");
+    let (_mined, epoch_height_2) = genesis_node
+        .mine_until_next_epoch()
+        .await
+        .expect("failed to mine until next epoch (second)");
+    peer_node
+        .wait_for_block_at_height(epoch_height_2, seconds_to_wait)
+        .await
+        .expect("peer did not sync to epoch_height_2");
 
     // Verify peer has no pledges
     let assigned_partitions: Vec<PartitionAssignment> = {
@@ -565,7 +620,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
             .filter_map(|sm| sm.partition_assignment())
             .collect()
     };
-    tracing::error!(?assigned_partitions);
+    tracing::debug!(?assigned_partitions);
     assert!(
         assigned_partitions.is_empty(),
         "Test requires the peer to have no pledges"
@@ -606,7 +661,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut pledge_tx)
         .expect("sign pledge commitment");
 
-    tracing::error!(
+    tracing::debug!(
         tx.id = ?pledge_tx.id(),
         tx.commitment_type = ?pledge_tx.commitment_type(),
         tx.anchor = ?anchor,
@@ -617,7 +672,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     let pledge_mempool_result = genesis_node
         .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
         .await;
-    tracing::error!(
+    tracing::debug!(
         tx.pledge_mempool_result = ?pledge_mempool_result,
         "Pledge wait_for_mempool result"
     );
@@ -630,7 +685,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
 
-    tracing::error!(
+    tracing::debug!(
         tx.id = ?unstake_tx.id(),
         tx.commitment_type = ?unstake_tx.commitment_type(),
         tx.anchor = ?anchor,
@@ -641,13 +696,13 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     let unstake_mempool_result = genesis_node
         .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await;
-    tracing::error!(
+    tracing::debug!(
         tx.unstake_mempool_result = ?unstake_mempool_result,
         "Unstake wait_for_mempool result"
     );
     unstake_mempool_result?;
 
-    tracing::error!("Both transactions confirmed in mempool, now mining block");
+    tracing::debug!("Both transactions confirmed in mempool, now mining block");
 
     // Mine block and verify pledge is included, unstake is NOT
     let block = genesis_node.mine_block().await?;
@@ -676,7 +731,14 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     );
 
     // Verify shadow transactions
-    let receipts = get_block_receipts(&reth_ctx, block_header.evm_block_hash)?;
+    let receipts = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        block_header.height,
+        block_header.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
 
     // Verify PLEDGE shadow transaction exists
     let pledge_receipt_idx = assert_single_log_for(
@@ -807,20 +869,50 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 }
 
 /// Get receipts for a block
-fn get_block_receipts(
+async fn get_block_receipts(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     reth_ctx: &irys_reth_node_bridge::IrysRethNodeAdapter,
+    block_height: u64,
     block_hash: FixedBytes<32>,
-) -> eyre::Result<Vec<reth::primitives::Receipt>> {
-    reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(block_hash))?
-        .ok_or_else(|| eyre::eyre!("Receipts not found for block {:?}", block_hash))
+    seconds_to_wait: usize,
+) -> eyre::Result<Vec<reth_ethereum_primitives::Receipt>> {
+    node.wait_for_reth_marker(
+        BlockNumberOrTag::Number(block_height),
+        block_hash,
+        seconds_to_wait as u64,
+    )
+    .await?;
+
+    let poll_interval = Duration::from_millis(200);
+    let max_retries = ((seconds_to_wait * 1000) / poll_interval.as_millis() as usize).max(1);
+
+    for retry in 0..=max_retries {
+        if let Some(receipts) = reth_ctx
+            .inner
+            .provider
+            .receipts_by_block(HashOrNumber::Hash(block_hash))?
+        {
+            return Ok(receipts);
+        }
+
+        if retry == max_retries {
+            break;
+        }
+        sleep(poll_interval).await;
+    }
+
+    Err(eyre::eyre!(
+        "Receipts not found for block {:?} at height {} after {} retries ({}s)",
+        block_hash,
+        block_height,
+        max_retries,
+        seconds_to_wait
+    ))
 }
 
 /// Assert that a specific shadow tx log is NOT present in receipts
 fn assert_no_shadow_tx_log(
-    receipts: &[reth::primitives::Receipt],
+    receipts: &[reth_ethereum_primitives::Receipt],
     topic: &[u8; 32],
     address: irys_types::IrysAddress,
     context: &str,
@@ -856,7 +948,7 @@ fn assert_commitment_in_ledger(
     tx_id: irys_types::H256,
     message: &str,
 ) {
-    let commitments = block.get_commitment_ledger_tx_ids();
+    let commitments = block.commitment_tx_ids();
     assert!(commitments.contains(&tx_id), "{}", message);
 }
 
@@ -866,7 +958,7 @@ fn assert_commitment_not_in_ledger(
     tx_id: irys_types::H256,
     message: &str,
 ) {
-    let commitments = block.get_commitment_ledger_tx_ids();
+    let commitments = block.commitment_tx_ids();
     assert!(!commitments.contains(&tx_id), "{}", message);
 }
 
@@ -1005,7 +1097,7 @@ fn assert_no_unstake_in_commitment_snapshot(
 /// 7. No storage modules remain assigned (all pledges cleared)
 /// 8. User is no longer staked (removed from epoch snapshot)
 #[test_log::test(tokio::test)]
-async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
+async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -1099,13 +1191,20 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     // Mine until next epoch - this should process both unpledges and unstake
     let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
-        .wait_until_height(epoch_height, seconds_to_wait)
+        .wait_for_block_at_height(epoch_height, seconds_to_wait)
         .await
         .expect("peer to sync to epoch");
     let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
 
     // Assert epoch block contains UNPLEDGE_REFUND logs
-    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
+    let receipts_epoch = get_block_receipts(
+        &genesis_node,
+        &reth_ctx,
+        epoch_block.height,
+        epoch_block.evm_block_hash,
+        seconds_to_wait,
+    )
+    .await?;
     let mut unpledge_refund_logs = 0_usize;
     let mut unstake_refund_logs = 0_usize;
 

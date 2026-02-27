@@ -1,7 +1,7 @@
 use crate::mempool_service::AtomicMempoolState;
 use irys_domain::BlockTreeReadGuard;
 use irys_types::CommitmentTypeV2;
-use irys_types::{transaction::PledgeDataProvider, IrysAddress, H256};
+use irys_types::{H256, IrysAddress, transaction::PledgeDataProvider};
 use std::collections::HashSet;
 
 /// A pledge data provider that combines both canonical chain state and mempool pending transactions

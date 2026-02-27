@@ -1,17 +1,19 @@
 use crate::{
+    DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher},
     data_sync_service::peer_bandwidth_manager::PeerBandwidthManager,
     services::ServiceSenders,
-    DataSyncServiceMessage,
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
-use irys_types::{IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
+use irys_types::{
+    IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
+};
 use std::{
-    collections::{hash_map, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{debug, Instrument as _};
+use tracing::{Instrument as _, debug};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -469,7 +471,7 @@ impl ChunkOrchestrator {
                 // Send the message to the DataSyncService so it can update the PeerBandwidthManagers and
                 // then call back into the orchestrator using `on_chunk_completed(...)` to mark the request as
                 // completed
-                let _ = tx.send(message);
+                let _ = tx.send_traced(message);
             }
             .instrument(tracing::Span::current()),
         );
@@ -491,7 +493,7 @@ impl ChunkOrchestrator {
                     "Invalid state for chunk request completion at offset {}: expected Requested, got {:?}",
                     chunk_offset,
                     invalid_state
-                ))
+                ));
             }
         };
 
@@ -513,10 +515,10 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
-        if let Ok(mut peers) = self.active_sync_peers.write() {
-            if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                peer_manager.on_chunk_request_completed(completion_record.clone());
-            }
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(peer_manager) = peers.get_mut(&peer_addr)
+        {
+            peer_manager.on_chunk_request_completed(completion_record.clone());
         }
 
         Ok(completion_record)
@@ -542,7 +544,7 @@ impl ChunkOrchestrator {
                 return Err(eyre::eyre!(
                     "Invalid request state for chunk failure: {:?}",
                     chunk_offset
-                ))
+                ));
             }
         };
 
@@ -563,10 +565,10 @@ impl ChunkOrchestrator {
             .get_or_insert_with(HashSet::new)
             .insert(expected_peer);
 
-        if let Ok(mut peers) = self.active_sync_peers.write() {
-            if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                peer_manager.on_chunk_request_failure();
-            }
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(peer_manager) = peers.get_mut(&peer_addr)
+        {
+            peer_manager.on_chunk_request_failure();
         }
 
         Ok(())
@@ -582,14 +584,14 @@ impl ChunkOrchestrator {
         self.current_peers.retain(|&addr| addr != peer_addr);
 
         for request in self.chunk_requests.values_mut() {
-            if let ChunkRequestState::Requested(addr, _) = request.request_state {
-                if addr == peer_addr {
-                    request.request_state = ChunkRequestState::Pending;
-                    request
-                        .excluded
-                        .get_or_insert_with(HashSet::new)
-                        .insert(addr);
-                }
+            if let ChunkRequestState::Requested(addr, _) = request.request_state
+                && addr == peer_addr
+            {
+                request.request_state = ChunkRequestState::Pending;
+                request
+                    .excluded
+                    .get_or_insert_with(HashSet::new)
+                    .insert(addr);
             }
         }
     }

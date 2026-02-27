@@ -1,9 +1,9 @@
 use crate::{
+    MempoolServiceMessage,
     block_tree_service::BlockTreeServiceMessage,
-    block_validation::{prevalidate_block, PreValidationError},
+    block_validation::{PreValidationError, prevalidate_block},
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    MempoolServiceMessage,
 };
 
 use crate::metrics;
@@ -14,14 +14,14 @@ use irys_database::{
     db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
+    BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    get_ingress_proofs, BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, SealedBlock,
-    SystemLedger, TokioServiceHandle, H256,
+    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced, get_ingress_proofs,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -31,7 +31,7 @@ use tokio::sync::{
     mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
 };
-use tracing::{debug, error, info, trace, warn, Instrument as _};
+use tracing::{Instrument as _, debug, info, trace, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -68,6 +68,24 @@ pub enum BlockDiscoveryError {
     },
 }
 
+impl BlockDiscoveryError {
+    pub(crate) fn metric_label(&self) -> &'static str {
+        match self {
+            Self::BlockValidationError(_) => "validation",
+            Self::PreviousBlockNotFound { .. } => "previous_block_not_found",
+            Self::InternalError(_) => "internal",
+            Self::DuplicateTransaction(_) => "duplicate_transaction",
+            Self::MissingTransactions(_) => "missing_transactions",
+            Self::InvalidEpochBlock(_) => "invalid_epoch_block",
+            Self::InvalidCommitmentTransaction(_) => "invalid_commitment_transaction",
+            Self::InvalidDataLedgersLength(_, _) => "invalid_data_ledgers_length",
+            Self::InvalidAnchor { .. } => "invalid_anchor",
+            Self::InvalidSignature(_) => "invalid_signature",
+            Self::TransactionIdMismatch { .. } => "transaction_id_mismatch",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
@@ -88,7 +106,7 @@ pub enum BlockDiscoveryInternalError {
     #[error("Database error: {0:?}")]
     DatabaseError(eyre::Report),
     #[error("Failed to send message to the BlockDiscovery service: {0}")]
-    SenderError(#[from] SendError<BlockDiscoveryMessage>),
+    SenderError(#[from] SendError<Traced<BlockDiscoveryMessage>>),
     #[error("Failed to receive message from the BlockDiscovery service: {0}")]
     RecvError(#[from] RecvError),
     #[error("Failed to send message to the epoch service: {0}")]
@@ -108,11 +126,11 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct BlockDiscoveryFacadeImpl {
-    sender: mpsc::UnboundedSender<BlockDiscoveryMessage>,
+    sender: mpsc::UnboundedSender<Traced<BlockDiscoveryMessage>>,
 }
 
 impl BlockDiscoveryFacadeImpl {
-    pub fn new(sender: mpsc::UnboundedSender<BlockDiscoveryMessage>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<Traced<BlockDiscoveryMessage>>) -> Self {
         Self { sender }
     }
 }
@@ -126,7 +144,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered {
+            .send_traced(BlockDiscoveryMessage::BlockDiscovered {
                 block,
                 skip_vdf,
                 response: Some(tx),
@@ -162,7 +180,7 @@ pub struct BlockDiscoveryServiceInner {
 
 pub struct BlockDiscoveryService {
     shutdown: Shutdown,
-    msg_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+    msg_rx: mpsc::UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
     inner: Arc<BlockDiscoveryServiceInner>,
 }
 
@@ -170,7 +188,7 @@ impl BlockDiscoveryService {
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_discovery")]
     pub fn spawn_service(
         inner: Arc<BlockDiscoveryServiceInner>,
-        rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        rx: mpsc::UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block discovery service");
@@ -199,7 +217,7 @@ impl BlockDiscoveryService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "block_discovery_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block discovery service");
 
@@ -213,10 +231,11 @@ impl BlockDiscoveryService {
                     break;
                 },
                 // Handle commands
-                cmd = self.msg_rx.recv() => {
-                    match cmd {
-                        Some(cmd) => {
-                            self.handle_message(cmd).await?;
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
+                            self.handle_message(msg, parent_span).await?;
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -232,7 +251,11 @@ impl BlockDiscoveryService {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
+    async fn handle_message(
+        &self,
+        msg: BlockDiscoveryMessage,
+        parent_span: tracing::Span,
+    ) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered {
                 block,
@@ -241,20 +264,22 @@ impl BlockDiscoveryService {
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
-                let result = self.inner.clone().block_discovered(block, skip_vdf).await;
+                let result = self.inner.clone().block_discovered(block, skip_vdf)
+                    .instrument(tracing::info_span!(parent: &parent_span, "block_discovery.process", block.hash = %block_hash, block.height = block_height))
+                    .await;
                 if let Err(ref e) = result {
-                    metrics::record_block_discovery_error(&format!("{e}"));
+                    metrics::record_block_discovery_error(e.metric_label());
                 }
-                if let Some(sender) = response {
-                    if let Err(e) = sender.send(result) {
-                        tracing::error!(
-                            "Block discovery sender error for block {} (height {}): {:?}",
-                            block_hash,
-                            block_height,
-                            e
-                        );
-                    };
-                }
+                if let Some(sender) = response
+                    && let Err(e) = sender.send(result)
+                {
+                    tracing::error!(
+                        "Block discovery sender error for block {} (height {}): {:?}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
+                };
             }
         };
 
@@ -316,7 +341,7 @@ impl BlockDiscoveryServiceInner {
         let previous_block_header = {
             let (tx_prev, rx_prev) = oneshot::channel();
             mempool_sender
-                .send(MempoolServiceMessage::GetBlockHeader(
+                .send_traced(MempoolServiceMessage::GetBlockHeader(
                     parent_block_hash,
                     false,
                     tx_prev,
@@ -412,7 +437,7 @@ impl BlockDiscoveryServiceInner {
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
             new_block_header.block_hash,
             new_block_header.height,
-            new_block_header.get_commitment_ledger_tx_ids(),
+            new_block_header.commitment_tx_ids(),
             new_block_header.get_data_ledger_tx_ids()
         );
 
@@ -484,7 +509,7 @@ impl BlockDiscoveryServiceInner {
                                 Err(e) => {
                                     return Err(BlockDiscoveryError::InternalError(
                                         BlockDiscoveryInternalError::DatabaseError(e),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -503,7 +528,12 @@ impl BlockDiscoveryServiceInner {
         {
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
-            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash);
+            debug!(
+                target = "preval-anchor",
+                "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}",
+                &new_block_header.height,
+                &new_block_header.block_hash
+            );
 
             // get from the block index
             let block_index = self.block_index_guard.read();
@@ -522,15 +552,20 @@ impl BlockDiscoveryServiceInner {
                     && block_index_item.block_hash != parent_block.previous_block_hash
                 {
                     // this indicates some sort of block index corruption
-                    panic!("Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
+                    panic!(
+                        "Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}",
+                        &parent_block.height - 1,
+                        &parent_block.previous_block_hash,
+                        &height,
+                        &block_index_item.block_hash
+                    )
                 }
                 valid_ingress_anchor_blocks.push(block_index_item.block_hash);
             }
         }
         trace!(
             "Valid ingress proof anchors for {}: {:?}",
-            &new_block_header.block_hash,
-            &valid_ingress_anchor_blocks
+            &new_block_header.block_hash, &valid_ingress_anchor_blocks
         );
 
         // validate anchors for submit, publish, commitments, and ingress proofs
@@ -660,11 +695,17 @@ impl BlockDiscoveryServiceInner {
                     let commitments_match = expected_commitment_tx.iter().eq(commitment_txs.iter());
                     if !commitments_match {
                         debug!(
-                                "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
-                                new_block_header.block_hash,
-                                expected_commitment_tx.iter().map(CommitmentTransaction::id).collect::<Vec<_>>(),
-                                commitment_txs.iter().map(CommitmentTransaction::id).collect::<Vec<_>>()
-                            );
+                            "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
+                            new_block_header.block_hash,
+                            expected_commitment_tx
+                                .iter()
+                                .map(CommitmentTransaction::id)
+                                .collect::<Vec<_>>(),
+                            commitment_txs
+                                .iter()
+                                .map(CommitmentTransaction::id)
+                                .collect::<Vec<_>>()
+                        );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
                         ));
@@ -742,7 +783,7 @@ impl BlockDiscoveryServiceInner {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 let header_for_broadcast = Arc::clone(new_block_header);
                 block_tree_sender
-                    .send(BlockTreeServiceMessage::BlockPreValidated {
+                    .send_traced(BlockTreeServiceMessage::BlockPreValidated {
                         block,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
@@ -767,7 +808,7 @@ impl BlockDiscoveryServiceInner {
                 // Send the block to the gossip bus
                 tracing::trace!("sending block to bus: block height {:?}", &block_height);
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessageV2::from(header_for_broadcast))
+                    gossip_sender.send_traced(GossipBroadcastMessageV2::from(header_for_broadcast))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",

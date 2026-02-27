@@ -210,7 +210,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()>
+async fn slow_heavy3_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()>
 {
     // settings
     let max_seconds = 10;
@@ -285,7 +285,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         "Commitment whitelist test: waiting for a block {} to appear on peer",
         first_block.height
     );
-    peer.wait_until_height(first_block.height, max_seconds)
+    peer.wait_for_block_at_height(first_block.height, max_seconds)
         .await?;
 
     info!("Commitment whitelist test: getting block 1 from peer");
@@ -340,13 +340,13 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         block_to_wait_for
     );
     genesis_node
-        .wait_until_height(block_to_wait_for, max_seconds)
+        .wait_for_block_at_height(block_to_wait_for, max_seconds)
         .await?;
     info!(
         "Commitment whitelist test: waiting for block {} to appear on peer",
         block_to_wait_for
     );
-    peer.wait_until_height(block_to_wait_for, max_seconds)
+    peer.wait_for_block_at_height(block_to_wait_for, max_seconds)
         .await?;
 
     let genesis_peers = genesis_node.node_ctx.peer_list.all_known_peers();
@@ -373,7 +373,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         block_to_wait_for
     );
     genesis_node
-        .wait_until_height(block_to_wait_for, max_seconds)
+        .wait_for_block_at_height(block_to_wait_for, max_seconds)
         .await?;
 
     // mine a couple blocks
@@ -385,7 +385,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         "Commitment whitelist test: waiting for block {} to appear on peer",
         block_to_wait_for
     );
-    peer.wait_until_height(block_to_wait_for, max_seconds)
+    peer.wait_for_block_at_height(block_to_wait_for, max_seconds)
         .await?;
 
     let another_anchor_block = api_client

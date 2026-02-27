@@ -11,7 +11,7 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use eyre::{ensure, eyre, OptionExt as _};
+use eyre::{OptionExt as _, ensure, eyre};
 use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -20,25 +20,26 @@ use irys_domain::{
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
-use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
+use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
+use irys_types::{BlockHash, LedgerChunkRange};
+use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
+    BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
+    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
+    validate_path,
 };
-use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
-use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
-use irys_types::{BlockHash, LedgerChunkRange};
-use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
+use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
+use irys_types::{IrysTransactionId, u256_from_le_bytes as hash_to_number};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -56,7 +57,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
@@ -76,7 +77,9 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
-    #[error("Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}")]
+    #[error(
+        "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
+    )]
     InvalidPromotionDataSizeMismatch { txid: H256, expected: u64, got: u64 },
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch {
@@ -96,7 +99,9 @@ pub enum PreValidationError {
         entropy_first: Option<u8>,
         poa_first: Option<u8>,
     },
-    #[error("PoA chunk hash mismatch: expected {expected:?}, got {got:?}, ledger_id={ledger_id:?}, ledger_chunk_offset={ledger_chunk_offset:?}")]
+    #[error(
+        "PoA chunk hash mismatch: expected {expected:?}, got {got:?}, ledger_id={ledger_id:?}, ledger_chunk_offset={ledger_chunk_offset:?}"
+    )]
     PoAChunkHashMismatch {
         expected: H256,
         got: H256,
@@ -115,7 +120,9 @@ pub enum PreValidationError {
     PartitionAssignmentMissing { partition_hash: H256 },
     #[error("Partition assignment for partition hash {partition_hash} is missing slot index")]
     PartitionAssignmentSlotIndexMissing { partition_hash: H256 },
-    #[error("Partition assignment slot index too large for u64: {slot_index} (partition {partition_hash})")]
+    #[error(
+        "Partition assignment slot index too large for u64: {slot_index} (partition {partition_hash})"
+    )]
     PartitionAssignmentSlotIndexTooLarge {
         partition_hash: H256,
         slot_index: usize,
@@ -146,7 +153,9 @@ pub enum PreValidationError {
     ValidationServiceUnreachable,
     #[error("last_step_checkpoints validation failed: {0}")]
     VDFCheckpointsInvalid(String),
-    #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
+    #[error(
+        "vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})"
+    )]
     VDFPreviousOutputMismatch { got: H256, expected: H256 },
     #[error("Invalid block height (expected {expected} got {got})")]
     HeightInvalid { expected: u64, got: u64 },
@@ -166,20 +175,26 @@ pub enum PreValidationError {
         to: DataLedger,
     },
 
-    #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
+    #[error(
+        "Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}"
+    )]
     SubmitTxAlreadyIncluded {
         tx_id: H256,
         ledger: DataLedger,
         block_hash: BlockHash,
     },
 
-    #[error("Transaction {tx_id} found in multiple previous blocks. First occurrence in {ledger:?} ledger at block {block_hash}")]
+    #[error(
+        "Transaction {tx_id} found in multiple previous blocks. First occurrence in {ledger:?} ledger at block {block_hash}"
+    )]
     TxFoundInMultipleBlocks {
         tx_id: H256,
         ledger: DataLedger,
         block_hash: BlockHash,
     },
-    #[error("Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs")]
+    #[error(
+        "Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs"
+    )]
     PublishTxProofLengthMismatch,
     #[error("Block EMA snapshot not found for block {block_hash}")]
     BlockEmaSnapshotNotFound { block_hash: BlockHash },
@@ -199,13 +214,17 @@ pub enum PreValidationError {
     InvalidLedgerId { ledger_id: u32, block_height: u64 },
     #[error("Failed to calculate fees: {0}")]
     FeeCalculationFailed(String),
-    #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
+    #[error(
+        "Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}"
+    )]
     InsufficientPermFee {
         tx_id: H256,
         expected: U256,
         actual: U256,
     },
-    #[error("Transaction {tx_id} has insufficient term_fee. Expected at least: {expected}, Actual: {actual}")]
+    #[error(
+        "Transaction {tx_id} has insufficient term_fee. Expected at least: {expected}, Actual: {actual}"
+    )]
     InsufficientTermFee {
         tx_id: H256,
         expected: U256,
@@ -223,7 +242,9 @@ pub enum PreValidationError {
         "Incorrect Ingress proof count to publish a transaction. Expected: {expected}, Actual: {actual}"
     )]
     IngressProofCountMismatch { expected: usize, actual: usize },
-    #[error("Incorrect number of ingress proofs from assigned owners. Expected {expected}, Actual: {actual}")]
+    #[error(
+        "Incorrect number of ingress proofs from assigned owners. Expected {expected}, Actual: {actual}"
+    )]
     AssignedProofCountMismatch { expected: usize, actual: usize },
     #[error("Transaction {tx_id} has invalid ingress proof: {reason}")]
     InvalidIngressProof { tx_id: H256, reason: String },
@@ -262,7 +283,9 @@ pub enum PreValidationError {
     InvalidTransactionSignature(IrysTransactionId),
 
     /// Commitment transaction version is below minimum required after hardfork activation
-    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    #[error(
+        "Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}"
+    )]
     CommitmentVersionInvalid {
         tx_id: H256,
         position: usize,
@@ -331,7 +354,9 @@ pub enum ValidationError {
     },
 
     /// Commitment transaction version is below minimum required after hardfork activation
-    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    #[error(
+        "Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}"
+    )]
     CommitmentVersionInvalid {
         tx_id: H256,
         position: usize,
@@ -340,7 +365,9 @@ pub enum ValidationError {
     },
 
     /// Commitment type not allowed before hardfork activation (e.g., UpdateRewardAddress before Borealis)
-    #[error("Commitment {tx_id} at position {position} uses type {commitment_type} not allowed before hardfork activation")]
+    #[error(
+        "Commitment {tx_id} at position {position} uses type {commitment_type} not allowed before hardfork activation"
+    )]
     CommitmentTypeNotAllowed {
         tx_id: H256,
         position: usize,
@@ -359,7 +386,9 @@ pub enum ValidationError {
     },
 
     /// Unpledge commitment targets partition not owned by signer
-    #[error("Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}")]
+    #[error(
+        "Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}"
+    )]
     UnpledgePartitionNotOwned {
         tx_id: H256,
         partition_hash: H256,
@@ -621,7 +650,7 @@ pub async fn prevalidate_block(
                 return Err(PreValidationError::InvalidLedgerId {
                     ledger_id: ledger.ledger_id,
                     block_height: block.height,
-                })
+                });
             }
         }
     }
@@ -1340,28 +1369,28 @@ pub async fn shadow_transactions_are_valid(
 
     // Reject any block that carries blob sidecars (EIP-4844).
     // We keep Cancun active but disable blobs/sidecars entirely.
-    if let Some(versioned_hashes) = sidecar.versioned_hashes() {
-        if !versioned_hashes.is_empty() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                block.versioned_hashes_len = versioned_hashes.len(),
-                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
-            );
-            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
-        }
+    if let Some(versioned_hashes) = sidecar.versioned_hashes()
+        && !versioned_hashes.is_empty()
+    {
+        tracing::debug!(
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.versioned_hashes_len = versioned_hashes.len(),
+            "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+        );
+        eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
-    if let Some(requests) = sidecar.requests() {
-        if !requests.is_empty() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                block.versioned_hashes_len = requests.len(),
-                "Rejecting block: EIP-7685 requests which are disabled",
-            );
-            eyre::bail!("block contains EIP-7685 requests which are disabled");
-        }
+    if let Some(requests) = sidecar.requests()
+        && !requests.is_empty()
+    {
+        tracing::debug!(
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.versioned_hashes_len = requests.len(),
+            "Rejecting block: EIP-7685 requests which are disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests which are disabled");
     }
     // Note: `requests_hash` may be present even when the requests list is empty.
     // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
@@ -1758,15 +1787,14 @@ fn validate_shadow_transactions_match(
             packet: _,
             solution_hash,
         } = &actual
+            && *solution_hash != expected_hash
         {
-            if *solution_hash != expected_hash {
-                eyre::bail!(
-                    "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
-                    idx,
-                    H256::from(*expected_hash),
-                    H256::from(**solution_hash)
-                );
-            }
+            eyre::bail!(
+                "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
+                idx,
+                H256::from(*expected_hash),
+                H256::from(**solution_hash)
+            );
         }
 
         ensure!(
@@ -1781,6 +1809,7 @@ fn validate_shadow_transactions_match(
     Ok(())
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn is_seed_data_valid(
     block_header: &IrysBlockHeader,
     previous_block_header: &IrysBlockHeader,
@@ -1871,10 +1900,10 @@ pub async fn commitment_txs_are_valid(
                 CommitmentTypeV2::UpdateRewardAddress { .. }
             ) {
                 error!(
-                        "Commitment transaction {} at position {} uses UpdateRewardAddress before Borealis activation",
-                        tx.id(),
-                        idx
-                    );
+                    "Commitment transaction {} at position {} uses UpdateRewardAddress before Borealis activation",
+                    tx.id(),
+                    idx
+                );
                 return Err(ValidationError::CommitmentTypeNotAllowed {
                     tx_id: tx.id(),
                     position: idx,
@@ -1994,7 +2023,9 @@ pub async fn commitment_txs_are_valid(
                 if actual.id() != expected.id() {
                     error!(
                         "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
-                        idx, expected.id(), actual.id()
+                        idx,
+                        expected.id(),
+                        actual.id()
                     );
                     return Err(ValidationError::CommitmentWrongOrder { position: idx });
                 }
@@ -2005,9 +2036,10 @@ pub async fn commitment_txs_are_valid(
                     "Internal error: commitment ordering validation mismatch for block {} (height {})",
                     block.block_hash, block.height
                 );
-                return Err(ValidationError::CommitmentOrderingFailed(
-                    format!("Internal error: commitment ordering validation mismatch for block {} (height {})", block.block_hash, block.height),
-                ));
+                return Err(ValidationError::CommitmentOrderingFailed(format!(
+                    "Internal error: commitment ordering validation mismatch for block {} (height {})",
+                    block.block_hash, block.height
+                )));
             }
         }
     }
@@ -2215,7 +2247,10 @@ pub async fn data_txs_are_valid(
                     DataLedger::Publish => {
                         // check the db - if we can fetch it, we have a previous inclusion
                         if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                            warn!("had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth", &_header, &tx.id, &tx);
+                            warn!(
+                                "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
+                                &_header, &tx.id, &tx
+                            );
                         } else {
                             // Publish tx with no past inclusion - INVALID
                             return Err(PreValidationError::PublishTxMissingPriorSubmit {
@@ -2267,9 +2302,9 @@ pub async fn data_txs_are_valid(
 
                                 // OK: Transaction promoted from past Submit to current Publish
                                 debug!(
-                        "Transaction {} promoted from past Submit to current Publish ledger",
-                        tx.id
-                    );
+                                    "Transaction {} promoted from past Submit to current Publish ledger",
+                                    tx.id
+                                );
                             }
                             DataLedger::Publish => {
                                 return Err(PreValidationError::PublishTxAlreadyIncluded {
@@ -2347,10 +2382,11 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    if publish_txs.is_empty() && publish_ledger.proofs.is_some() {
-        let proof_count = publish_ledger.proofs.as_ref().unwrap().len();
+    if publish_txs.is_empty()
+        && let Some(proofs) = &publish_ledger.proofs
+    {
         return Err(PreValidationError::PublishLedgerProofCountMismatch {
-            proof_count,
+            proof_count: proofs.len(),
             tx_count: publish_txs.len(),
         });
     }
@@ -2410,7 +2446,10 @@ pub async fn data_txs_are_valid(
             // While the protocol can require X number of assigned proofs, if there
             // is less than that many assigned to the slot, it still needs to function.
             if assigned_miners < expected_assigned_proofs {
-                warn!("Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ", expected_assigned_proofs, assigned_miners);
+                warn!(
+                    "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
+                    expected_assigned_proofs, assigned_miners
+                );
                 expected_assigned_proofs = assigned_miners;
             }
 
@@ -2442,7 +2481,7 @@ pub async fn data_txs_are_valid(
                     let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
                     let _ = service_senders
                         .data_sync
-                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+                        .send_traced(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
 
                     match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
                         Ok(Ok(active_peers)) => {
@@ -2537,11 +2576,16 @@ pub async fn data_txs_are_valid(
                                 continue;
                             }
 
-                            // Ingest via mempool to persist and validate
+                            // Ingest via chunk ingress service to persist and validate
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
-                                .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .chunk_ingress
+                                .send_traced(
+                                    crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
+                                        unpacked,
+                                        Some(ing_tx),
+                                    ),
+                                )
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
@@ -2570,18 +2614,18 @@ pub async fn data_txs_are_valid(
                                 Ok(Ok(ingest_res)) => match ingest_res {
                                     Ok(()) => {
                                         tracing::debug!(
-                                                "Chunk ingested successfully for data_root {:?}, tx_offset {}",
-                                                tx_header.data_root,
-                                                tx_offset_u32
-                                            );
+                                            "Chunk ingested successfully for data_root {:?}, tx_offset {}",
+                                            tx_header.data_root,
+                                            tx_offset_u32
+                                        );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                                "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
-                                                tx_header.data_root,
-                                                tx_offset_u32,
-                                                e
-                                            );
+                                            "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
+                                            tx_header.data_root,
+                                            tx_offset_u32,
+                                            e
+                                        );
                                     }
                                 },
                             }
@@ -2797,7 +2841,7 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+        .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
@@ -2908,7 +2952,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .send_traced(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }
@@ -3093,17 +3137,16 @@ fn get_submit_ledger_slot_addresses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_index_service::{BlockIndexService, BlockIndexServiceMessage};
 
     use irys_config::StorageSubmodulesConfig;
+    use irys_database::db::IrysDatabaseExt as _;
     use irys_database::add_genesis_commitments;
-    use irys_domain::{BlockIndex, EpochSnapshot};
+    use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::TokioServiceHandle;
     use irys_types::{
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
-        IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
+        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger, H256,
+        H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256, hash_sha256,
+        irys::IrysSigner, partition::PartitionAssignment,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -3111,9 +3154,6 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: BlockIndex,
-        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
-        #[expect(dead_code)]
-        pub block_index_handle: TokioServiceHandle,
         pub miner_address: IrysAddress,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
@@ -3168,16 +3208,6 @@ mod tests {
         let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db);
 
-        // Spawn Tokio BlockIndex service
-        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
-        let block_index_handle = BlockIndexService::spawn_service(
-            block_index_rx,
-            block_index.clone(),
-            None, // No supply state needed for tests
-            &consensus_config,
-            tokio::runtime::Handle::current(),
-        );
-
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
                 .expect("Expected to load storage submodules config");
@@ -3186,23 +3216,18 @@ mod tests {
         let epoch_snapshot = EpochSnapshot::new(
             &storage_submodules_config,
             genesis_block,
-            commitments.clone(),
+            commitments,
             &config,
         );
         info!("Genesis Epoch tasks complete.");
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: arc_genesis.clone(),
-                all_txs: Arc::new(vec![]),
-                response: tx,
-            })
-            .expect("send migrate block");
-        rx.await
-            .expect("Failed to receive migration result")
+        let genesis_sealed =
+            SealedBlock::new_unchecked(Arc::clone(&arc_genesis), BlockTransactions::default());
+        block_index
+            .db()
+            .update_eyre(|tx| BlockIndex::push_block(tx, &genesis_sealed, chunk_size))
             .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
@@ -3215,8 +3240,6 @@ mod tests {
             data_dir,
             TestContext {
                 block_index,
-                block_index_tx,
-                block_index_handle,
                 miner_address,
                 epoch_snapshot,
                 partition_hash,
@@ -3229,7 +3252,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_test_3_complete_txs() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -3256,26 +3279,26 @@ mod tests {
             txs.push(tx);
         }
 
+        let chunk_size = context.consensus_config.chunk_size as usize;
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
                 poa_test(
-                    &context,
+                    &mut context,
                     &txs,
                     &mut poa_chunk,
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
-                )
-                .await;
+                    chunk_size,
+                );
             }
         }
     }
 
     #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
@@ -3297,15 +3320,14 @@ mod tests {
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
             poa_test(
-                &context,
+                &mut context,
                 &txs,
                 &mut poa_chunk,
                 poa_tx_num,
                 poa_chunk_num,
                 2,
                 chunk_size,
-            )
-            .await;
+            );
         }
     }
 
@@ -3366,8 +3388,8 @@ mod tests {
         );
     }
 
-    async fn poa_test(
-        context: &TestContext,
+    fn poa_test(
+        context: &mut TestContext,
         txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
@@ -3441,7 +3463,7 @@ mod tests {
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
-                    tx_ids: H256List(data_tx_ids.clone()),
+                    tx_ids: H256List(data_tx_ids),
                     total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
@@ -3451,29 +3473,21 @@ mod tests {
             ..IrysBlockHeaderV1::default()
         });
 
-        // Send the block confirmed message
-        let block = Arc::new(irys_block);
-        let txs = Arc::new(tx_headers);
-        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: block.clone(),
-                all_txs: Arc::clone(&txs),
-                response: tx_migrate,
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
-            .expect("send migrate block");
-        rx_migrate
-            .await
-            .expect("Failed to receive migration result")
             .expect("Failed to index second block");
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
-        let block_index_guard = rx.await.expect("receive block index guard");
+        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 
         let ledger_chunk_offset = context
             .partition_assignment
@@ -3519,7 +3533,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
-        let (_tmp, context) = init().await;
+        let (_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -3546,25 +3560,25 @@ mod tests {
             txs.push(tx);
         }
 
+        let chunk_size = context.consensus_config.chunk_size as usize;
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
                 test_poa_with_malicious_merkle_data(
-                    &context,
+                    &mut context,
                     &txs,
                     &mut poa_chunk,
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
-                )
-                .await;
+                    chunk_size,
+                );
             }
         }
     }
 
-    async fn test_poa_with_malicious_merkle_data(
-        context: &TestContext,
+    fn test_poa_with_malicious_merkle_data(
+        context: &mut TestContext,
         txs: &[DataTransaction],
         #[expect(
             clippy::ptr_arg,
@@ -3693,7 +3707,7 @@ mod tests {
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
-                    tx_ids: H256List(data_tx_ids.clone()),
+                    tx_ids: H256List(data_tx_ids),
                     total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
@@ -3703,29 +3717,21 @@ mod tests {
             ..IrysBlockHeaderV1::default()
         });
 
-        // Send the block confirmed message
-        let block = Arc::new(irys_block);
-        let txs = Arc::new(tx_headers);
-        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        // Migrate block into the block index
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
+            ..Default::default()
+        };
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
         context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: block.clone(),
-                all_txs: Arc::clone(&txs),
-                response: tx_migrate,
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
-            .expect("send migrate block");
-        rx_migrate
-            .await
-            .expect("Failed to receive migration result")
             .expect("Failed to index second block");
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        context
-            .block_index_tx
-            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
-        let block_index_guard = rx.await.expect("receive block index guard");
+        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 
         let ledger_chunk_offset = context
             .partition_assignment
@@ -3980,8 +3986,8 @@ mod tests {
 mod commitment_version_tests {
     use super::*;
     use irys_types::{
-        hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
         CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1, CommitmentTypeV2,
+        hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
     };
     use proptest::prelude::*;
     use rstest::rstest;

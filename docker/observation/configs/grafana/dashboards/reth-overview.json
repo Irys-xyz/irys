@@ -1783,11 +1783,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[5m])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[$__rate_interval])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "Avg Gas/s (5m)",
+          "legendFormat": "Avg Gas/s",
           "range": true,
           "refId": "C",
           "useBackend": false

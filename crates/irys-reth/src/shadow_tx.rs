@@ -439,7 +439,7 @@ impl BorshDeserialize for TransactionPacket {
                 return Err(borsh::io::Error::new(
                     borsh::io::ErrorKind::InvalidData,
                     "Unknown shadow tx discriminant",
-                ))
+                ));
             }
         })
     }
@@ -475,7 +475,7 @@ impl BorshDeserialize for EitherIncrementOrDecrement {
                 return Err(borsh::io::Error::new(
                     borsh::io::ErrorKind::InvalidData,
                     "Unknown EitherIncrementOrDecrement discriminant",
-                ))
+                ));
             }
         })
     }

@@ -2,7 +2,10 @@ use crate::utils::IrysNodeTest;
 use irys_actors::block_validation::poa_is_valid;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{Base64, DataLedger, DataTransaction, DataTransactionLedger, NodeConfig, PoaData};
+use irys_types::{
+    Base64, DataLedger, DataTransaction, DataTransactionLedger, LedgerChunkOffset, NodeConfig,
+    PoaData,
+};
 use tracing::info;
 
 //==============================================================================
@@ -15,7 +18,8 @@ use tracing::info;
 // (this will validate chunks in the first and second submit ledger slot)
 #[tokio::test]
 async fn multi_slot_poa_test() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();
 
     let seconds_to_wait = 20;
@@ -90,10 +94,22 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         epoch_block.data_ledgers[DataLedger::Submit]
     );
 
-    // Wait for the data block to be confirmed and migrated to the block index,
-    // so that poa_is_valid can look up block bounds for chunk offsets.
     genesis_node
         .wait_until_height_confirmed(new_block.height, 20)
+        .await?;
+    genesis_node
+        .wait_until_block_index_height(new_block.height, 20)
+        .await?;
+
+    let max_submit_chunk_offset = new_block.data_ledgers[DataLedger::Submit]
+        .total_chunks
+        .saturating_sub(1);
+    genesis_node
+        .wait_until_block_bounds_available(
+            DataLedger::Submit,
+            LedgerChunkOffset::from(max_submit_chunk_offset),
+            20,
+        )
         .await?;
 
     // Get the epoch snapshot of the latest block

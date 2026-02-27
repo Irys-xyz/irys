@@ -1,6 +1,6 @@
 {
   "title": "Block Production & Progression",
-  "uid": "irys-block-production",
+  "uid": "irys-block-production-detailed",
   "tags": [
     "irys",
     "blocks",
@@ -415,7 +415,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_block_producer_blocks_produced_total{job=~\"$node\"}[5m])",
+          "expr": "rate(irys_block_producer_blocks_produced_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} blocks/s",
           "refId": "A"
         }
@@ -450,7 +450,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_block_producer_retry_attempts_total{job=~\"$node\"}[5m])",
+          "expr": "rate(irys_block_producer_retry_attempts_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} retries",
           "refId": "A"
         },
@@ -459,7 +459,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_block_producer_rebuilds_total{job=~\"$node\"}[5m])",
+          "expr": "rate(irys_block_producer_rebuilds_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} rebuilds",
           "refId": "B"
         }
@@ -494,7 +494,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(irys_block_tree_reorgs_total{job=~\"$node\"}[5m])",
+          "expr": "increase(irys_block_tree_reorgs_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} reorgs",
           "refId": "A"
         }

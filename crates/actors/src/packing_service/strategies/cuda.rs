@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
-use irys_packing::{capacity_pack_range_cuda_c, CUDAConfig};
+use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
 use irys_types::{
-    partition::PartitionHash, split_interval, Config, IrysAddress, PartitionChunkRange,
+    Config, IrysAddress, PartitionChunkRange, partition::PartitionHash, split_interval,
 };
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;

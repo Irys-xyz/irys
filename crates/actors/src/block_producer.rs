@@ -9,7 +9,7 @@ use crate::{
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_consensus::{
-    transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
+    EthereumTxEnvelope, SignableTransaction as _, TxEip4844, transaction::SignerRecoverable as _,
 };
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::TxSignerSync as _;
@@ -17,7 +17,7 @@ use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
@@ -25,24 +25,23 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysBuiltPayload, IrysEthereumNode,
-    IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
+    IrysBuiltPayload, IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
+    IrysPayloadTypes, compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::SystemLedger;
 use irys_types::{
-    app_state::DatabaseProvider,
-    block_production::SolutionContext,
+    AdjustmentStats, Base64, BlockBody, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
+    IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
+    SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
+    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
     calculate_difficulty, next_cumulative_diff,
     storage_pricing::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    AdjustmentStats, Base64, BlockBody, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader,
-    IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger,
-    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -59,7 +58,7 @@ use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError
 use reth_transaction_pool::EthPooledTransaction;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, error_span, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, error_span, info, warn};
 
 /// Error type for block production that distinguishes between retryable and irrecoverable errors
 #[derive(Debug, thiserror::Error)]
@@ -145,7 +144,7 @@ pub struct BlockProducerService {
     /// Graceful shutdown handle
     shutdown: Shutdown,
     /// Command receiver
-    cmd_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
     /// Inner logic
     inner: Arc<BlockProducerInner>,
     /// Enforces block production limits during testing
@@ -257,7 +256,7 @@ impl BlockProducerService {
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
-        rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!(
@@ -289,7 +288,13 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all, ret, err)]
+    #[tracing::instrument(
+        name = "block_producer_service_start",
+        level = "trace",
+        skip_all,
+        ret,
+        err
+    )]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(
@@ -306,8 +311,10 @@ impl BlockProducerService {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(cmd) => {
-                            if self.handle_command(cmd).await? {
+                        Some(traced) => {
+                            let (cmd, parent_span) = traced.into_parts();
+                            let span = tracing::trace_span!(parent: &parent_span, "block_producer_handle_command");
+                            if self.handle_command(cmd).instrument(span).await? {
                                 break;
                             }
                         }
@@ -325,7 +332,6 @@ impl BlockProducerService {
     }
 
     /// Handles a single command. Returns `true` if the service should shut down.
-    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<bool> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
@@ -437,7 +443,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+            .send_traced(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
         match rx.await? {
             Some(header) => Ok(header),
@@ -1304,7 +1310,7 @@ pub trait BlockProdStrategy {
             .inner()
             .service_senders
             .gossip_broadcast
-            .send(execution_payload_gossip_data)
+            .send_traced(execution_payload_gossip_data)
         {
             error!(
                 block.hash = ?block.header().block_hash,
@@ -1506,7 +1512,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
+            .send_traced(MempoolServiceMessage::GetBestMempoolTxs(
                 prev_block_header.block_hash,
                 tx,
             ))
@@ -1752,7 +1758,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 #[cfg(test)]
 mod oracle_choice_tests {
     use super::choose_oracle_price;
-    use irys_types::{storage_pricing::Amount, UnixTimestamp};
+    use irys_types::{UnixTimestamp, storage_pricing::Amount};
     use rust_decimal_macros::dec;
 
     const MAX_AGE_SECS: u64 = 3 * 60; // 3 minutes

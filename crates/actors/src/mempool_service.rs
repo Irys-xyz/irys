@@ -1,62 +1,52 @@
-pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;
 pub mod facade;
-pub mod ingress_proofs;
 pub mod lifecycle;
-mod metrics;
-mod pending_chunks;
 pub mod pledge_provider;
 pub mod types;
 
-pub use pending_chunks::PriorityPendingChunks;
-
-pub use chunks::*;
 pub use facade::*;
 use irys_database::db_cache::CachedDataRoot;
 pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
+use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
+use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{
-    get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
-    StorageModulesReadGuard,
-};
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
+use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
-use irys_types::{
-    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
-};
-use irys_types::{
-    storage_pricing::{
-        calculate_term_fee,
-        phantoms::{Irys, NetworkFee},
-        Amount,
-    },
-    ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
-};
 use irys_types::{BlockHash, CommitmentTypeV2};
+use irys_types::{
+    BoundedFee, Config, H256, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    NodeConfig, SealedBlock, SystemLedger, Traced, U256, UnixTimestamp,
+    app_state::DatabaseProvider,
+};
+use irys_types::{
+    CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
+    MempoolConfig,
+    storage_pricing::{
+        Amount, calculate_term_fee,
+        phantoms::{Irys, NetworkFee},
+    },
+};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
-use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -69,9 +59,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc::UnboundedReceiver, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info, instrument, trace, warn};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
@@ -184,33 +174,24 @@ pub async fn validate_commitment_transaction(
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
     pub config: Config,
-    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
-    /// instead of the actor executor runtime, while also providing some `QoL`
-    pub exec: TaskExecutor,
     pub irys_db: DatabaseProvider,
     pub reth_node_adapter: IrysRethNodeAdapter,
     pub mempool_state: AtomicMempoolState,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
-    pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    max_concurrent_tasks: u32,
+    /// Shared state handle for reading chunk ingress pending count
+    pub chunk_ingress_state: ChunkIngressState,
 }
 
 /// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
-    BlockConfirmed(Arc<IrysBlockHeader>),
-    /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
-    IngestChunk(
-        UnpackedChunk,
-        oneshot::Sender<Result<(), ChunkIngressError>>,
-    ),
-    IngestChunkFireAndForget(UnpackedChunk),
-    IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
-
+    BlockConfirmed(Arc<SealedBlock>),
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool (from API)
@@ -277,9 +258,6 @@ impl MempoolServiceMessage {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::BlockConfirmed(_) => "BlockConfirmed",
-            Self::IngestChunk(_, _) => "IngestChunk",
-            Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
-            Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::CommitmentTxExists(_, _) => "CommitmentTxExists",
             Self::IngestCommitmentTxFromApi(_, _) => "IngestCommitmentTxFromApi",
             Self::IngestCommitmentTxFromGossip(_, _) => "IngestCommitmentTxFromGossip",
@@ -311,10 +289,10 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::BlockConfirmed(block) => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
-                if let Err(e) = self.handle_block_confirmed_message(block).await {
+            MempoolServiceMessage::BlockConfirmed(sealed_block) => {
+                let block_hash = sealed_block.header().block_hash;
+                let block_height = sealed_block.header().height;
+                if let Err(e) = self.handle_block_confirmed_message(sealed_block).await {
                     tracing::error!(
                         "Failed to handle block confirmed message for block {} (height {}): {:#}",
                         block_hash,
@@ -326,6 +304,10 @@ impl Inner {
             MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "api"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
@@ -334,30 +316,14 @@ impl Inner {
             MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
                 let response_message = self
                     .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_commitment_tx",
+                        source = "gossip"
+                    ))
                     .await;
                 if let Err(e) = response.send(response_message) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
-            }
-            MempoolServiceMessage::IngestChunk(chunk, response) => {
-                let response_value: Result<(), ChunkIngressError> =
-                    self.handle_chunk_ingress_message(chunk).await;
-                if let Err(ref e) = response_value {
-                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
-                }
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!(
-                        "handle_chunk_ingress_message response.send() error: {:?}",
-                        e
-                    );
-                };
-            }
-            MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
-                let result = self.handle_chunk_ingress_message(chunk).await;
-                if let Err(e) = result {
-                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
-                    tracing::error!("handle_chunk_ingress_message error: {:?}", e);
-                }
             }
             MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
                 let response_value = self.handle_get_best_mempool_txs(block_id).await;
@@ -398,13 +364,25 @@ impl Inner {
                 };
             }
             MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                let response_value = self
+                    .handle_data_tx_ingress_message_api(tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "api"
+                    ))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
             MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                let response_value = self
+                    .handle_data_tx_ingress_message_gossip(tx)
+                    .instrument(tracing::info_span!(
+                        "mempool.ingest_data_tx",
+                        source = "gossip"
+                    ))
+                    .await;
                 if let Err(e) = response.send(response_value) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
@@ -417,12 +395,6 @@ impl Inner {
                 {
                     tracing::error!("response.send() error: {:?}", e);
                 }
-            }
-            MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                let response_value = self.handle_ingest_ingress_proof(ingress_proof);
-                if let Err(e) = response.send(response_value) {
-                    tracing::error!("response.send() error: {:?}", e);
-                };
             }
             MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
                 let response_value = self.remove_from_blacklists(tx_ids).await;
@@ -462,7 +434,7 @@ impl Inner {
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
         Ok(self
             .mempool_state
-            .get_status(&self.config.node_config)
+            .get_status(&self.config.node_config, &self.chunk_ingress_state)
             .await)
     }
 
@@ -499,13 +471,19 @@ impl Inner {
         if old_enough && new_enough {
             Ok(true)
         } else if !old_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}"
+            );
             Ok(false)
         } else if !new_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}"
+            );
             Ok(false)
         } else {
-            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+            eyre::bail!(
+                "SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}"
+            );
         }
     }
 
@@ -531,7 +509,10 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
+        debug!(
+            "ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}",
+            &ingress_proof.id()
+        );
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -539,7 +520,10 @@ impl Inner {
             Ok(true)
         } else {
             // TODO: recover the signer's address here? (or compute an ID)
-            warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+            warn!(
+                "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
+                &ingress_proof.data_root, &ingress_proof.signature
+            );
             Ok(false)
         }
     }
@@ -580,7 +564,9 @@ impl Inner {
 
             eyre::ensure!(
                 // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-                canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
+                canonical
+                    .iter()
+                    .any(|entry| entry.block_hash() == parent_block_hash),
                 "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
                 canonical.last().map(BlockTreeEntry::block_hash)
@@ -1273,9 +1259,13 @@ impl Inner {
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
                     .filter(|(_root, cached_proof)| {
-                        let expired = self
-                            .is_ingress_proof_expired(&cached_proof.proof)
-                            .expired_or_invalid;
+                        let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
+                            &self.block_tree_read_guard,
+                            &self.irys_db,
+                            &self.config,
+                            &cached_proof.proof,
+                        )
+                        .expired_or_invalid;
                         !expired
                     })
                     .collect::<Vec<_>>();
@@ -1418,11 +1408,11 @@ impl Inner {
                 // Final check - do we have enough total proofs?
                 if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
-                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
-                            &tx_header.id,
-                            final_proofs.len(),
-                            number_of_ingress_proofs_total
-                        );
+                        "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                        &tx_header.id,
+                        final_proofs.len(),
+                        number_of_ingress_proofs_total
+                    );
                     continue;
                 }
 
@@ -1465,10 +1455,8 @@ impl Inner {
         let guard = self.block_tree_read_guard.read();
         let mut block = guard.get_block(&block_hash).cloned();
 
-        if !include_chunk {
-            if let Some(ref mut b) = block {
-                b.poa.chunk = None
-            }
+        if !include_chunk && let Some(ref mut b) = block {
+            b.poa.chunk = None
         }
         block
     }
@@ -1659,6 +1647,46 @@ impl Inner {
         }
 
         self.mempool_state.wipe_blacklists().await;
+    }
+
+    /// After restoring the mempool from disk, reconstruct metadata fields (included_height,
+    /// promoted_height) from the database. The `#[serde(skip)]` on `DataTransactionMetadata`
+    /// means these fields are lost during serialization. The DB is authoritative since
+    /// `BlockMigrationService` persists them at confirmation time.
+    pub async fn reconstruct_metadata_from_db(&self) {
+        let mut state = self.mempool_state.0.write().await;
+        let mut reconstructed = 0_u64;
+        for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
+            let db_meta = match self.irys_db.view_eyre(|tx| {
+                irys_database::get_data_tx_metadata(tx, txid).map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::error!(tx.id = %txid, "Failed to read tx metadata from DB: {e}");
+                    None
+                }
+            };
+            if let Some(meta) = db_meta {
+                let mut changed = false;
+                if meta.included_height.is_some() {
+                    tx_header.metadata_mut().included_height = meta.included_height;
+                    changed = true;
+                }
+                if meta.promoted_height.is_some() {
+                    tx_header.metadata_mut().promoted_height = meta.promoted_height;
+                    changed = true;
+                }
+                if changed {
+                    reconstructed += 1;
+                }
+            }
+        }
+        if reconstructed > 0 {
+            tracing::info!(
+                reconstructed,
+                "Reconstructed metadata (included_height, promoted_height) from DB for mempool txs"
+            );
+        }
     }
 
     // Helper to verify signature
@@ -1912,7 +1940,14 @@ impl AtomicMempoolState {
         write.recent_invalid_payload_fingerprints.clear();
     }
 
-    pub async fn get_status(&self, config: &NodeConfig) -> MempoolStatus {
+    pub async fn get_status(
+        &self,
+        config: &NodeConfig,
+        chunk_ingress: &ChunkIngressState,
+    ) -> MempoolStatus {
+        // Read chunk ingress count first to avoid holding the mempool lock across the await.
+        let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
+
         let state = self.read().await;
 
         // Calculate total data size
@@ -1965,7 +2000,7 @@ impl AtomicMempoolState {
         MempoolStatus {
             data_tx_count: state.valid_submit_ledger_tx.len(),
             commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
-            pending_chunks_count: state.pending_chunks.len(),
+            pending_chunks_count,
             pending_pledges_count: state.pending_pledges.len(),
             recent_valid_tx_count: state.recent_valid_tx.len(),
             recent_invalid_tx_count: state.recent_invalid_tx.len(),
@@ -2036,13 +2071,6 @@ impl AtomicMempoolState {
         mempool_guard.recent_valid_tx.put(header.id, ());
     }
 
-    pub async fn is_a_recent_valid_chunk(&self, chunk_path_hash: &ChunkPathHash) -> bool {
-        let mempool_state_guard = self.read().await;
-        mempool_state_guard
-            .recent_valid_chunks
-            .contains(chunk_path_hash)
-    }
-
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
@@ -2061,27 +2089,6 @@ impl AtomicMempoolState {
                     .count() as u64
             })
             .unwrap_or(0)
-    }
-
-    pub async fn put_chunk(&self, chunk: UnpackedChunk) {
-        let mempool_state_write_guard = &mut self.write().await;
-        mempool_state_write_guard.pending_chunks.put(chunk);
-    }
-
-    pub async fn pending_chunk_count_for_data_root(&self, data_root: &DataRoot) -> usize {
-        self.read()
-            .await
-            .pending_chunks
-            .get(data_root)
-            .map(lru::LruCache::len)
-            .unwrap_or(0)
-    }
-
-    pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
-        let mut mempool_state_guard = self.write().await;
-        mempool_state_guard
-            .recent_valid_chunks
-            .put(chunk_path_hash, ());
     }
 
     /// Inserts tx into the mempool and marks it as recently valid.
@@ -2230,13 +2237,6 @@ impl AtomicMempoolState {
         }
 
         false
-    }
-
-    pub async fn pop_pending_chunks_cache(
-        &self,
-        data_root: &DataRoot,
-    ) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
-        self.write().await.pending_chunks.pop(data_root)
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -2623,6 +2623,18 @@ impl AtomicMempoolState {
         hash_map
     }
 
+    /// Batch lookup data transactions from mempool in a single READ lock.
+    pub async fn batch_valid_submit_ledger_tx_cloned(
+        &self,
+        tx_ids: &[H256],
+    ) -> Vec<Option<DataTransactionHeader>> {
+        let state = self.read().await;
+        tx_ids
+            .iter()
+            .map(|tx_id| state.valid_submit_ledger_tx.get(tx_id).cloned())
+            .collect()
+    }
+
     /// Do not call this function from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
     async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
@@ -2658,22 +2670,16 @@ pub struct MempoolState {
     pub recent_invalid_payload_fingerprints: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
     pub recent_valid_tx: LruCache<H256, ()>,
-    /// Tracks recently processed chunk hashes to prevent re-gossip
-    pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
-    /// Priority-based cache for out of order gossip chunks.
-    /// Evicts entries with fewer chunks first to mitigate cache poisoning attacks.
-    pub pending_chunks: PriorityPendingChunks,
     pub pending_pledges: LruCache<IrysAddress, LruCache<IrysTransactionId, CommitmentTransaction>>,
     pub stake_and_pledge_whitelist: HashSet<IrysAddress>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
-/// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
+/// counted reference to a `DatabaseEnv` and the miner's signer
 pub fn create_state(
     config: &MempoolConfig,
     stake_and_pledge_whitelist: &[IrysAddress],
 ) -> MempoolState {
-    let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         valid_submit_ledger_tx: BTreeMap::new(),
@@ -2686,11 +2692,6 @@ pub fn create_state(
             NonZeroUsize::new(config.max_invalid_items).unwrap(),
         ),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
-        recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
-        pending_chunks: PriorityPendingChunks::new(
-            max_pending_chunk_items,
-            config.max_preheader_chunks_per_item,
-        ),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
     }
@@ -2775,10 +2776,10 @@ impl MempoolState {
         let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
-        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx_id) {
-                return Ok(()); // Duplicate, already have this commitment
-            }
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address)
+            && existing_txs.iter().any(|t| t.id() == tx_id)
+        {
+            return Ok(()); // Duplicate, already have this commitment
         }
 
         // Check if we need to create a new address entry
@@ -2800,8 +2801,7 @@ impl MempoolState {
                     );
                     return Err(TxIngressError::MempoolFull(format!(
                         "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
-                        new_value,
-                        evict_total_value
+                        new_value, evict_total_value
                     )));
                 }
 
@@ -2895,9 +2895,7 @@ pub enum TxIngressError {
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
     /// The commitment transaction version is below minimum required after hardfork activation
-    #[error(
-        "Commitment transaction version {version} is below minimum required version {minimum}"
-    )]
+    #[error("Commitment transaction version {version} is below minimum required version {minimum}")]
     InvalidVersion { version: u8, minimum: u8 },
     /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
     #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]
@@ -2955,59 +2953,12 @@ pub struct MempoolTxs {
     pub publish_tx: PublishLedgerWithTxs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum IngressProofError {
-    /// The proofs signature is invalid
-    #[error("Ingress proof signature is invalid")]
-    InvalidSignature,
-    /// There was a database error storing the proof
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    /// The proof does not come from a staked address
-    #[error("Unstaked address")]
-    UnstakedAddress,
-    /// The ingress proof is anchored to an unknown/expired anchor
-    #[error("Invalid anchor: {0}")]
-    InvalidAnchor(BlockHash),
-    /// Catch-all variant for other errors.
-    #[error("Ingress proof error: {0}")]
-    Other(String),
-}
-
-/// Errors that can occur when generating an ingress proof locally.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum IngressProofGenerationError {
-    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
-    #[error("Node is not staked in current epoch")]
-    NodeNotStaked,
-    /// Proof generation is already in progress for this data root.
-    #[error("Proof generation already in progress")]
-    AlreadyGenerating,
-    /// Failed to communicate with cache service.
-    #[error("Cache service error: {0}")]
-    CacheServiceError(String),
-    /// Invalid data size for the transaction.
-    #[error("Invalid data size: {0}")]
-    InvalidDataSize(String),
-    /// Failed to generate the proof.
-    #[error("Proof generation failed: {0}")]
-    GenerationFailed(String),
-}
-
-impl IngressProofGenerationError {
-    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
-    pub fn is_benign(&self) -> bool {
-        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
-    }
-}
-
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
-    block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
+    msg_rx: UnboundedReceiver<Traced<MempoolServiceMessage>>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
     inner: Arc<Inner>,
 }
 
@@ -3022,12 +2973,12 @@ impl MempoolService {
     pub fn spawn_service(
         irys_db: DatabaseProvider,
         reth_node_adapter: IrysRethNodeAdapter,
-        storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessage>,
+        rx: UnboundedReceiver<Traced<MempoolServiceMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
+        chunk_ingress_state: ChunkIngressState,
     ) -> eyre::Result<TokioServiceHandle> {
         info!("Spawning mempool service");
 
@@ -3040,12 +2991,20 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.mempool;
-        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let raw_max_concurrent = mempool_config.max_concurrent_mempool_tasks;
+        const MAX_PERMITS: usize = u32::MAX as usize;
+        const MIN_CONCURRENT: usize = 20;
+        let max_concurrent_mempool_tasks = raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
+        if max_concurrent_mempool_tasks != raw_max_concurrent {
+            warn!(
+                configured = raw_max_concurrent,
+                effective = max_concurrent_mempool_tasks,
+                "Adjusted max_concurrent_mempool_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
+            );
+        }
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
-        let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
         let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
@@ -3063,20 +3022,20 @@ impl MempoolService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    block_migrated_rx,
                     inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
-                        exec: TaskExecutor::current(),
                         irys_db,
                         mempool_state,
                         reth_node_adapter,
                         service_senders,
-                        storage_modules_guard,
                         pledge_provider,
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        max_concurrent_tasks: u32::try_from(max_concurrent_mempool_tasks)
+                            .expect("clamped to u32::MAX above"),
+                        chunk_ingress_state,
                     }),
                 };
                 mempool_service
@@ -3098,26 +3057,25 @@ impl MempoolService {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
+        self.inner.reconstruct_metadata_from_db().await;
 
         let mut shutdown_future = pin!(self.shutdown);
         loop {
             tokio::select! {
                 // Handle regular mempool messages
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            // Create a new span for each message at process time (not send time)
+                traced = self.msg_rx.recv() => {
+                    match traced {
+                        Some(traced) => {
+                            let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let span = tracing::info_span!("mempool_handle_message", msg_type = %msg_type);
+                            let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
 
-                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
                                     let inner = Arc::clone(&self.inner);
-                                    // Permit acquired immediately
                                     runtime_handle.spawn(async move {
-                                        let _permit = permit; // Hold until task completes
+                                        let _permit = permit;
                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                         if let Err(err) = wait_with_progress(
                                             inner.handle_message(msg),
@@ -3138,16 +3096,14 @@ impl MempoolService {
                                             warn!("Mempool message handler semaphore at capacity, waiting for permit");
                                         }
                                     }
-                                    // No permits available, will wait
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    // Wait a minute before crashing out
                                     match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
                                         Ok(permit_result) => {
                                             match permit_result {
                                                 Ok(permit) => {
                                                     runtime_handle.spawn(async move {
-                                                        let _permit = permit; // Hold until task completes
+                                                        let _permit = permit;
                                                         let task_info = format!("Mempool message handler for {}", msg_type);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
@@ -3184,14 +3140,6 @@ impl MempoolService {
                     }
                 }
 
-                // Handle block migrated events
-                 migrated_result = self.block_migrated_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(migrated_result, "BlockMigrated") {
-                        self.inner.handle_block_migrated(event).await?;
-                    }
-                }
-
-
                 // Handle shutdown signal
                 _ = &mut shutdown_future => {
                     info!("Shutdown signal received for mempool service");
@@ -3202,39 +3150,92 @@ impl MempoolService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
-        // Process remaining messages with timeout
-        let process_remaining = async {
-            while let Ok(msg) = self.msg_rx.try_recv() {
-                let span =
-                    tracing::info_span!("mempool_handle_message", msg_type = %msg.variant_name());
-                self.inner.handle_message(msg).instrument(span).await?;
+        async {
+            // Phase 1: drain queued messages, spawning concurrently when permits are available
+            while let Ok(traced) = self.msg_rx.try_recv() {
+                let (msg, parent_span) = traced.into_parts();
+                let msg_type = msg.variant_name();
+                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
+
+                let inner = Arc::clone(&self.inner);
+                match inner.message_handler_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        runtime_handle.spawn(async move {
+                            let _permit = permit;
+                            let task_info = format!("shutdown drain: {}", msg_type);
+                            if let Err(e) = wait_with_progress(
+                                inner.handle_message(msg),
+                                20,
+                                &task_info,
+                            ).await {
+                                tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                            }
+                        }.instrument(span));
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        tracing::error!("Semaphore closed during shutdown drain");
+                        break;
+                    }
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        let task_info = format!("shutdown drain (inline): {}", msg_type);
+                        if let Err(e) = wait_with_progress(
+                            inner.handle_message(msg),
+                            20,
+                            &task_info,
+                        )
+                        .instrument(span)
+                        .await
+                        {
+                            tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                        }
+                    }
+                }
             }
-            Ok::<(), eyre::Error>(())
-        };
 
-        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
-            Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
-            Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
-            Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
+            // Phase 2: acquire all permits to wait for in-flight + drain-spawned handlers
+            let acquire_fut = self
+                .inner
+                .message_handler_semaphore
+                .acquire_many(self.inner.max_concurrent_tasks);
+            let handlers_quiesced = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+                Ok(Ok(permits)) => {
+                    tracing::debug!("All message handlers completed");
+                    let _all_permits = permits;
+                    true
+                }
+                Ok(Err(_)) => {
+                    tracing::error!("Semaphore closed during mempool shutdown drain");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!("Timed out waiting for in-flight mempool handlers; skipping persistence");
+                    false
+                }
+            };
+
+            if handlers_quiesced {
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    self.inner.persist_mempool_to_disk(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+                    Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+                    Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+                }
+            }
+
+            tracing::info!("shutting down Mempool service");
         }
+        .instrument(tracing::info_span!("mempool_shutdown"))
+        .await;
 
-        // Persist to disk with timeout
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            self.inner.persist_mempool_to_disk(),
-        )
-        .await
-        {
-            Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
-            Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
-            Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
-        }
-
-        tracing::info!("shutting down Mempool service");
         Ok(())
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn handle_broadcast_recv<T>(
     result: Result<T, broadcast::error::RecvError>,
     channel_name: &str,
@@ -3322,7 +3323,7 @@ fn check_funding<T: IrysTransactionCommon>(
 }
 
 /// Waits for `fut` to finish while printing every `n_secs`.
-async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+pub(crate) async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -3339,7 +3340,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let _ = span.enter();
+                let _guard = span.enter();
                 warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {
@@ -3414,8 +3415,6 @@ mod bounded_mempool_tests {
             recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            pending_chunks: PriorityPendingChunks::new(10, 100),
             pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
             stake_and_pledge_whitelist: HashSet::new(),
         }

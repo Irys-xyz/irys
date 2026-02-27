@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 // Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
@@ -159,17 +160,28 @@ async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     node_2.gossip_enable();
     node_1.gossip_enable();
 
-    // converge to the longest chain
+    // Converge to the longest chain.
+    // We intentionally gossip ONLY the tip block to exercise the background block sync
+    // mechanism: node_1 must discover it's on a shorter fork, fetch all intermediate
+    // blocks from node_2, validate them, and reorg — all via the production sync path.
     let tip_block = node_2.get_max_difficulty_block();
     assert_eq!(
         tip_block.height,
         common_height.height + BLOCKS_TO_MINE_NODE_2 as u64
     );
+
+    // Subscribe before gossip to avoid missing the reorg events (Pattern 2 prevention)
+    let idle =
+        node_1.wait_until_block_events_idle(Duration::from_millis(500), Duration::from_secs(30));
     node_2.gossip_block_to_peers(&Arc::new(tip_block.clone()))?;
 
+    // Event-driven wait: reacts instantly to block state updates instead of polling
     node_1
-        .wait_until_height_confirmed(tip_block.height, 200)
+        .wait_for_block_at_height(tip_block.height, 30)
         .await?;
+
+    // Wait for all block processing to settle before checking convergence
+    idle.await;
 
     // Verify both nodes have converged to the same canonical chain
     let final_chain_node_1 = node_1.get_canonical_chain();

@@ -1,11 +1,12 @@
 use crate::reth_db::DatabaseError;
-use reth_db::mdbx::cursor::Cursor;
 use reth_db::mdbx::TransactionKind;
+use reth_db::mdbx::cursor::Cursor;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
 use reth_db::transaction::DbTx as _;
-use reth_db::{Database as _, DatabaseEnv};
+use reth_db::{Database, DatabaseEnv};
 use reth_db_api::database_metrics::DatabaseMetrics;
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::RwLock;
 use std::sync::{Arc, PoisonError, RwLockReadGuard};
 use tracing::info;
@@ -91,6 +92,11 @@ impl reth_db::Database for RethDbWrapper {
             .as_ref()
             .ok_or_else(db_connection_closed_error)?
             .update(f)
+    }
+
+    fn path(&self) -> PathBuf {
+        let guard = self.db.read().expect("failed to acquire read lock on DB");
+        guard.as_ref().map(Database::path).unwrap_or_default()
     }
 }
 

@@ -10,9 +10,10 @@ use irys_database::{
     db::IrysDatabaseExt as _, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader,
-    LedgerChunkOffset, LedgerIndexItem, NodeConfig, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, H256, LedgerChunkOffset,
+    LedgerIndexItem, NodeConfig, SealedBlock,
 };
+use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;
 use std::io::{BufReader, Read as _};
 use std::path::Path;
@@ -134,60 +135,55 @@ impl BlockIndex {
             .update_eyre(|tx| insert_block_index_item(tx, height, block_index_item))
     }
 
-    #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
+    /// Computes and inserts a [`BlockIndexItem`] for a sealed block.
+    ///
+    /// Extracts Submit/Publish transactions from the [`SealedBlock`], computes
+    /// cumulative chunk counts (looking up the previous block in the index),
+    /// and writes the resulting [`BlockIndexItem`] to the database.
+    ///
+    /// This allows the block index write to participate in a larger atomic transaction
+    /// (e.g. combined with block header and tx persistence).
+    #[instrument(skip_all, err, fields(block.hash = %sealed_block.header().block_hash, block.height = %sealed_block.header().height))]
     pub fn push_block(
-        &self,
-        block: &IrysBlockHeader,
-        all_txs: &[DataTransactionHeader],
+        tx: &(impl DbTxMut + DbTx),
+        sealed_block: &SealedBlock,
         chunk_size: u64,
     ) -> eyre::Result<()> {
-        /// Inner function: Calculates the total number of full chunks needed to store transactions
-        /// Each transaction's data is padded to the next full chunk boundary
+        let block = sealed_block.header();
+        let transactions = sealed_block.transactions();
+
         fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
             let bytes_added = txs.iter().fold(0, |acc, tx| {
                 acc + tx.data_size.div_ceil(chunk_size) * chunk_size
             });
-
             bytes_added / chunk_size
         }
 
-        // Extract just the transactions referenced in the submit ledger
-        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
-        let submit_txs = &all_txs[..submit_tx_count];
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
-        // Extract just the transactions referenced in the publish ledger
-        let publish_txs = &all_txs[submit_tx_count..];
-
-        // Calculate chunk counts for both ledger types
         let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
         let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
 
-        // Get previous ledger sizes or default to 0 for genesis
-        let (max_publish_chunks, max_submit_chunks) = if self.num_blocks() == 0 && block.height == 0
-        {
+        let num_blocks = block_index_num_blocks(tx)?;
+
+        let (max_publish_chunks, max_submit_chunks) = if num_blocks == 0 && block.height == 0 {
             (0, sub_chunks_added)
         } else {
-            let prev_block = self.get_item(block.height.saturating_sub(1));
-            if let Some(prev_block) = prev_block {
-                if prev_block.block_hash != block.previous_block_hash {
-                    eyre::bail!(
-                        "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
-                        block.height.saturating_sub(1),
-                        block.previous_block_hash,
-                        prev_block.block_hash
-                    );
-                }
-                (
-                    prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
-                    prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
-                )
-            } else {
+            let prev_height = block.height.saturating_sub(1);
+            let prev_block = block_index_item_by_height(tx, &prev_height)?;
+            if prev_block.block_hash != block.previous_block_hash {
                 eyre::bail!(
-                    "prev_block at index {} not found in block_index (index is at height {})",
-                    block.height.saturating_sub(1),
-                    self.latest_height()
+                    "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
+                    prev_height,
+                    block.previous_block_hash,
+                    prev_block.block_hash
                 );
             }
+            (
+                prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
+                prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
+            )
         };
 
         let block_index_item = BlockIndexItem {
@@ -207,7 +203,7 @@ impl BlockIndex {
             ],
         };
 
-        self.push_item(&block_index_item, block.height)
+        insert_block_index_item(tx, block.height, &block_index_item)
     }
 
     /// For a given chunk offset in a ledger, what block was responsible for adding

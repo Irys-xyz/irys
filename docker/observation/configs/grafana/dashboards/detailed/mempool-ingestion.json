@@ -1,6 +1,6 @@
 {
   "title": "Mempool & Data Ingestion",
-  "uid": "irys-mempool-ingestion",
+  "uid": "irys-mempool-ingestion-detailed",
   "tags": [
     "irys",
     "mempool",
@@ -241,7 +241,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[1h]))",
+          "expr": "sum(increase(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[$__range]))",
           "legendFormat": "unfunded",
           "refId": "A"
         }
@@ -383,7 +383,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (error_type) (rate(irys_api_chunks_errors_total{job=~\"$node\"}[5m]))",
+          "expr": "sum by (error_type) (rate(irys_api_chunks_errors_total{job=~\"$node\"}[$__rate_interval]))",
           "legendFormat": "{{error_type}}",
           "refId": "A"
         }
@@ -420,7 +420,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk_ingress_message\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p50",
           "refId": "A"
         },
@@ -429,7 +429,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk_ingress_message\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p95",
           "refId": "B"
         },
@@ -438,7 +438,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{job=~\"$node\", span_name=\"handle_chunk_ingress_message\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p99",
           "refId": "C"
         }
@@ -681,7 +681,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_mempool_data_tx_ingested_total{job=~\"$node\"}[5m])",
+          "expr": "rate(irys_mempool_data_tx_ingested_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} ingested/s",
           "refId": "A"
         }
@@ -716,7 +716,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[5m])",
+          "expr": "rate(irys_mempool_data_tx_unfunded_total{job=~\"$node\"}[$__rate_interval])",
           "legendFormat": "{{job}} unfunded/s",
           "refId": "A"
         }
