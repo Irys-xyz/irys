@@ -141,7 +141,7 @@ fn validate_supply_invariants(
 
 /// Tests the supply endpoint returns valid supply data (actual or estimated based on readiness)
 #[test_log::test(tokio::test)]
-async fn test_supply_endpoint_returns_valid_supply() -> eyre::Result<()> {
+async fn heavy_test_supply_endpoint_returns_valid_supply() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node().await;
     ctx.mine_blocks(BLOCKS_FOR_ESTIMATED_TEST).await?;
 
@@ -163,7 +163,7 @@ async fn test_supply_endpoint_returns_valid_supply() -> eyre::Result<()> {
 
 /// Verifies actual supply calculation after block migration/pruning.
 #[test_log::test(tokio::test)]
-async fn test_supply_endpoint_actual() -> eyre::Result<()> {
+async fn heavy_test_supply_endpoint_actual() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node_with_small_tree().await;
 
     // Mine blocks (6x block_tree_depth) - with block_tree_depth=5, this ensures

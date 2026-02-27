@@ -17,7 +17,7 @@ use tracing::info;
 // Create poa's for each of the chunks and validate them
 // (this will validate chunks in the first and second submit ledger slot)
 #[tokio::test]
-async fn multi_slot_poa_test() -> eyre::Result<()> {
+async fn heavy_multi_slot_poa_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();

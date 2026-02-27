@@ -5,7 +5,7 @@ use crate::utils::IrysNodeTest;
 /// mine 10 blocks, check that they get migrated to the database.
 /// ensure that the poa chuk is present
 #[test_log::test(tokio::test)]
-async fn heavy3_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
+async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
     // Configure a node with block_migration_depth = 2
     let mut config = irys_types::NodeConfig::testing();
     config.consensus.get_mut().block_migration_depth = 2;

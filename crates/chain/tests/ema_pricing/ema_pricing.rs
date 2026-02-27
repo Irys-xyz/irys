@@ -17,7 +17,7 @@ fn get_block(
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
+async fn test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testing();
@@ -65,7 +65,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::Result<()> {
+async fn heavy3_test_genesis_ema_price_updates_after_second_interval() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testing();
@@ -122,7 +122,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
+async fn heavy3_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
     let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();

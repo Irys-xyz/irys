@@ -10,7 +10,7 @@ use irys_types::{irys::IrysSigner, IrysAddress};
 use crate::utils::IrysNodeTest;
 
 #[tokio::test]
-async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
+async fn heavy_test_genesis_state_dump_and_restore() -> eyre::Result<()> {
     initialize_tracing();
 
     let mut node = IrysNodeTest::default_async();

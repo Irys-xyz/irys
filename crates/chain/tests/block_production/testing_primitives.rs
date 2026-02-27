@@ -6,7 +6,7 @@ use tracing::info;
 use crate::utils::IrysNodeTest;
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_wait_until_height() {
+async fn heavy3_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
@@ -23,7 +23,7 @@ async fn heavy_test_wait_until_height() {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_mine() {
+async fn heavy3_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
@@ -37,7 +37,7 @@ async fn heavy_test_mine() {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_mine_tx() {
+async fn heavy3_test_mine_tx() {
     // output tracing
     let mut config = NodeConfig::testing();
     let account = IrysSigner::random_signer(&config.consensus_config());

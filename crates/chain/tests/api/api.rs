@@ -24,7 +24,7 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
+async fn heavy3_api_end_to_end_test_256kb() -> eyre::Result<()> {
     api_end_to_end_test(256 * 1024).await?;
     Ok(())
 }

@@ -22,7 +22,7 @@ use crate::utils::IrysNodeTest;
 /// 2. Submit an unstake commitment, mine the inclusion block, and ensure it is fee-only.
 /// 3. Advance to the next epoch to assert the unstake refund, treasury delta, and stake removal.
 #[test_log::test(tokio::test)]
-async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
+async fn heavy3_unstake_epoch_refund_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -320,7 +320,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 /// 3. No balance changes or treasury changes occur from the unstake attempt
 /// 4. After all pledges are cleared, the same unstake transaction can be included and processed normally
 #[test_log::test(tokio::test)]
-async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
+async fn heavy3_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -567,7 +567,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 /// 3. The simulation validation sees the pledge being added, which creates an active pledge that blocks the unstake
 /// 4. This demonstrates transaction priority ordering: Pledge (1) < Unstake (3)
 #[test_log::test(tokio::test)]
-async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
+async fn heavy3_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
