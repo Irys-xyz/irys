@@ -32,10 +32,10 @@ where
             NextBlockEnvCtx = reth_evm::NextBlockEnvAttributes,
         > + 'static,
     Types::Payload: PayloadTypes<
-        BuiltPayload = IrysBuiltPayload,
-        PayloadAttributes = IrysPayloadAttributes,
-        PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
-    >,
+            BuiltPayload = IrysBuiltPayload,
+            PayloadAttributes = IrysPayloadAttributes,
+            PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
+        >,
 {
     type PayloadBuilder = crate::payload::IrysPayloadBuilder<Pool, Node::Provider, Evm>;
 

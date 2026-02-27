@@ -3,26 +3,26 @@ use std::time::SystemTime;
 
 use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
-use irys_types::hardfork_config::IrysHardforkConfig;
 use irys_types::UnixTimestamp;
+use irys_types::hardfork_config::IrysHardforkConfig;
 use reth::{
     api::FullNodeTypes,
-    builder::{components::PoolBuilder, BuilderContext},
+    builder::{BuilderContext, components::PoolBuilder},
     primitives::SealedBlock,
     providers::StateProviderFactory,
     transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::BlockTy;
+use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use reth_provider::CanonStateSubscriptions as _;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator,
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
 use std::marker::PhantomData;
@@ -66,7 +66,11 @@ where
         DiskFileBlobStore,
     >;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>, evm_config: Evm) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
         let data_dir = ctx.config().datadir();
         let pool_config = ctx.pool_config();
 
@@ -97,16 +101,17 @@ where
 
         let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
         let hardfork_config = self.hardfork_config;
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
-            .kzg_settings(ctx.kzg_settings()?)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
-            .map(|eth_validator| IrysShadowTxValidator {
-                eth_tx_validator: eth_validator,
-                hardfork_config: hardfork_config.clone(),
-            });
+        let validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .kzg_settings(ctx.kzg_settings()?)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
+                .map(|eth_validator| IrysShadowTxValidator {
+                    eth_tx_validator: eth_validator,
+                    hardfork_config: hardfork_config.clone(),
+                });
 
         let ordering = PdAwareCoinbaseTipOrdering::new(hardfork_config);
         let transaction_pool =

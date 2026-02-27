@@ -36,11 +36,13 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
+    VDFLimiterInfo,
+    app_state::DatabaseProvider,
+    block_production::SolutionContext,
     calculate_difficulty, next_cumulative_diff,
     storage_pricing::{
-        phantoms::{CostPerChunk, Irys},
         Amount,
+        phantoms::{CostPerChunk, Irys},
     },
 };
 use irys_vdf::state::VdfStateReadonly;

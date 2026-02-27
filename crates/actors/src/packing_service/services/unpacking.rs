@@ -6,9 +6,9 @@
 //! - Graceful shutdown via tokio::select! on shutdown signals
 
 use crate::packing_service::{
+    UnpackingInternals, UnpackingPriority,
     config::UnpackingConfig,
     types::{PackedChunks, UnpackingHandle},
-    UnpackingInternals, UnpackingPriority,
 };
 
 use super::super::{errors::UnpackingError, types::UnpackingRequest};

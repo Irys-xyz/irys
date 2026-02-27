@@ -71,8 +71,6 @@ pub async fn send_block_and_read_state(
     Ok(read_block_from_state(node_ctx, &block.header().block_hash, event_rx).await)
 }
 
-
-
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
 // The assertion will fail (block will be discarded) because stake commitments must have exact stake_value
 // from the consensus config.

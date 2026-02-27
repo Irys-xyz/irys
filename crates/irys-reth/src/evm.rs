@@ -10,7 +10,7 @@ use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256, keccak256};
 use std::sync::LazyLock;
 
 use reth::primitives::{SealedBlock, SealedHeader};
@@ -1759,13 +1759,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use crate::pd_tx::{PdHeaderV1, prepend_pd_header_v1_to_calldata};
     use crate::shadow_tx::{
         IrysUsdPriceUpdate, PdBaseFeeUpdate, ShadowTransaction, TransactionPacket,
     };
     use crate::test_utils::{
-        advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
-        DEFAULT_PRIORITY_FEE,
+        DEFAULT_PRIORITY_FEE, TestContext, advance_block, get_balance, get_nonce, sign_shadow_tx,
+        sign_tx,
     };
     use alloy_consensus::TxEip1559;
     use alloy_eips::eip2930::AccessListItem as AlItem;

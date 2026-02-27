@@ -132,7 +132,10 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     peer_node.gossip_eth_block_to_peers(block_eth_payload.block())?;
 
     // Check that peer node rejected the block
-    let event_rx = genesis_node.node_ctx.service_senders.subscribe_block_state_updates();
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash, event_rx).await;
     assert!(
         matches!(outcome, BlockValidationOutcome::Discarded(_)),

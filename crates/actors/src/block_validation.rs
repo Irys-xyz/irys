@@ -3139,8 +3139,8 @@ mod tests {
     use super::*;
 
     use irys_config::StorageSubmodulesConfig;
-    use irys_database::db::IrysDatabaseExt as _;
     use irys_database::add_genesis_commitments;
+    use irys_database::db::IrysDatabaseExt as _;
     use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{

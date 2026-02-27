@@ -131,10 +131,10 @@ impl IrysEthereumNode {
     where
         Node: FullNodeTypes<Types = Self>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
-            BuiltPayload = IrysBuiltPayload,
-            PayloadAttributes = IrysPayloadAttributes,
-            PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
-        >,
+                BuiltPayload = IrysBuiltPayload,
+                PayloadAttributes = IrysPayloadAttributes,
+                PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
+            >,
     {
         ComponentsBuilder::default()
             .node_types::<Node>()

@@ -8,8 +8,8 @@ use irys_types::{
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
     IngressProofsList, IrysAddress, IrysBlockHeader, IrysTokenPrice, U256, UnixTimestamp,
     storage_pricing::{
-        phantoms::{CostPerChunk, Irys},
         Amount,
+        phantoms::{CostPerChunk, Irys},
     },
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
