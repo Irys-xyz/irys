@@ -875,8 +875,7 @@ impl IrysNode {
         let pd_chunk_rx_for_manager = pd_chunk_rx;
         tokio_runtime.handle().spawn(async move {
             // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
-            let mock_provider =
-                Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+            let mock_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
             let mut manager = PdChunkManager::new(mock_provider);
             manager.run(pd_chunk_rx_for_manager).await;
         });

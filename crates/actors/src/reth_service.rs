@@ -10,7 +10,7 @@ use irys_types::{
 };
 use reth::{
     network::{NetworkInfo as _, Peers as _},
-    revm::primitives::{bytes::Bytes, B256},
+    revm::primitives::{B256, bytes::Bytes},
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
@@ -52,7 +52,7 @@ struct CachedChunk {
     data: Arc<Bytes>,
     /// Transactions currently referencing this chunk
     referencing_txs: HashSet<B256>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     cached_at: Instant,
 }
 
@@ -103,7 +103,7 @@ impl PdChunkManager {
                     tx_hash,
                     chunk_specs,
                 } => {
-                    self.start_provisioning(tx_hash, chunk_specs).await;
+                    self.start_provisioning(tx_hash, chunk_specs);
                 }
                 PdChunkMessage::TransactionRemoved { tx_hash } => {
                     self.remove(&tx_hash);
@@ -158,7 +158,7 @@ impl PdChunkManager {
     }
 
     /// Start provisioning chunks for a PD transaction.
-    async fn start_provisioning(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
+    fn start_provisioning(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
         let required_chunks = self.specs_to_keys(&chunk_specs);
         let total_chunks = required_chunks.len();
 
@@ -289,11 +289,11 @@ impl PdChunkManager {
 
     /// Unlock chunks after execution completes.
     fn unlock(&mut self, tx_hash: &B256) {
-        if let Some(state) = self.txs.get_mut(tx_hash) {
-            if state.state == TxState::Locked {
-                state.state = TxState::Ready;
-                trace!(tx_hash = %tx_hash, "PD chunks unlocked");
-            }
+        if let Some(state) = self.txs.get_mut(tx_hash)
+            && state.state == TxState::Locked
+        {
+            state.state = TxState::Ready;
+            trace!(tx_hash = %tx_hash, "PD chunks unlocked");
         }
     }
 

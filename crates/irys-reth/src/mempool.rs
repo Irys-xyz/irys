@@ -6,11 +6,11 @@ use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_consensus::Transaction as _;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
+use irys_types::UnixTimestamp;
 use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
+use irys_types::hardfork_config::IrysHardforkConfig;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArg};
-use irys_types::UnixTimestamp;
-use irys_types::hardfork_config::IrysHardforkConfig;
 use reth::{
     api::FullNodeTypes,
     builder::{BuilderContext, components::PoolBuilder},
@@ -207,14 +207,12 @@ where
         // Spawn PD transaction monitoring task
         {
             let pool_clone = transaction_pool.clone();
-            let sender = self.pd_chunk_sender.clone();
+            let sender = self.pd_chunk_sender;
             let hardfork_clone = hardfork_for_pd_monitor;
             ctx.task_executor()
                 .spawn_critical_with_graceful_shutdown_signal(
                     "pd transaction monitoring task",
-                    |shutdown| {
-                        pd_transaction_monitor(pool_clone, sender, hardfork_clone, shutdown)
-                    },
+                    |shutdown| pd_transaction_monitor(pool_clone, sender, hardfork_clone, shutdown),
                 );
             info!(target: "reth::cli", "PD transaction monitoring task spawned");
         }
@@ -272,55 +270,56 @@ where
 
         // Reject PD transactions before Sprite hardfork is active
         if !self.is_sprite_active()
-            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
+            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input)
+        {
+            tracing::trace!(
+                sender = ?tx.sender(),
+                tx_hash = ?tx.hash(),
+                "PD transaction rejected: Sprite hardfork not active"
+            );
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::TxTypeNotSupported,
+                ),
+            ));
+        }
+
+        // Validate minimum PD transaction cost when Sprite is active
+        if self.is_sprite_active()
+            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input)
+        {
+            // Count PD chunks from access list
+            let chunks = tx
+                .access_list()
+                .map(sum_pd_chunks_in_access_list)
+                .unwrap_or(0);
+
+            // Calculate total fees in IRYS tokens:
+            // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
+            let total_per_chunk = pd_header
+                .max_base_fee_per_chunk
+                .saturating_add(pd_header.max_priority_fee_per_chunk);
+            let total_fees = total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
+
+            // Basic sanity check: PD transactions must have non-zero fees.
+            // The full min_pd_transaction_cost validation (USD→IRYS conversion)
+            // happens at EVM execution time.
+            if total_fees.is_zero() {
                 tracing::trace!(
                     sender = ?tx.sender(),
                     tx_hash = ?tx.hash(),
-                    "PD transaction rejected: Sprite hardfork not active"
+                    chunks = chunks,
+                    "PD transaction rejected: zero total fees"
                 );
                 return Err(TransactionValidationOutcome::Invalid(
                     tx,
                     reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                        InvalidTransactionError::TxTypeNotSupported,
+                        InvalidTransactionError::FeeCapTooLow,
                     ),
                 ));
             }
-
-        // Validate minimum PD transaction cost when Sprite is active
-        if self.is_sprite_active()
-            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
-                // Count PD chunks from access list
-                let chunks = tx
-                    .access_list()
-                    .map(sum_pd_chunks_in_access_list)
-                    .unwrap_or(0);
-
-                // Calculate total fees in IRYS tokens:
-                // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
-                let total_per_chunk = pd_header
-                    .max_base_fee_per_chunk
-                    .saturating_add(pd_header.max_priority_fee_per_chunk);
-                let total_fees =
-                    total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
-
-                // Basic sanity check: PD transactions must have non-zero fees.
-                // The full min_pd_transaction_cost validation (USD→IRYS conversion)
-                // happens at EVM execution time.
-                if total_fees.is_zero() {
-                    tracing::trace!(
-                        sender = ?tx.sender(),
-                        tx_hash = ?tx.hash(),
-                        chunks = chunks,
-                        "PD transaction rejected: zero total fees"
-                    );
-                    return Err(TransactionValidationOutcome::Invalid(
-                        tx,
-                        reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                            InvalidTransactionError::FeeCapTooLow,
-                        ),
-                    ));
-                }
-            }
+        }
 
         // once we support blobs, we can start accepting eip4844 txs
         if tx.is_eip4844() {
@@ -453,7 +452,9 @@ where
 ///
 /// Returns all `ChunkRangeSpecifier` entries found under the PD precompile address.
 /// Invalid encodings are logged as warnings and skipped.
-fn extract_pd_chunk_specs(access_list: &alloy_eips::eip2930::AccessList) -> Vec<ChunkRangeSpecifier> {
+fn extract_pd_chunk_specs(
+    access_list: &alloy_eips::eip2930::AccessList,
+) -> Vec<ChunkRangeSpecifier> {
     access_list
         .0
         .iter()
@@ -531,21 +532,21 @@ async fn pd_transaction_monitor<P>(
                         current_pd_txs.insert(tx_hash);
 
                         // If this is a new PD transaction, send NewTransaction message
-                        if !known_pd_txs.contains(&tx_hash) {
-                            if let Some(access_list) = tx.transaction.access_list() {
-                                let chunk_specs = extract_pd_chunk_specs(access_list);
-                                if !chunk_specs.is_empty() {
-                                    trace!(
-                                        target: "reth::pd",
-                                        tx_hash = %tx_hash,
-                                        chunk_specs_count = chunk_specs.len(),
-                                        "New PD transaction detected, sending to chunk manager"
-                                    );
-                                    let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                        tx_hash,
-                                        chunk_specs,
-                                    });
-                                }
+                        if !known_pd_txs.contains(&tx_hash)
+                            && let Some(access_list) = tx.transaction.access_list()
+                        {
+                            let chunk_specs = extract_pd_chunk_specs(access_list);
+                            if !chunk_specs.is_empty() {
+                                trace!(
+                                    target: "reth::pd",
+                                    tx_hash = %tx_hash,
+                                    chunk_specs_count = chunk_specs.len(),
+                                    "New PD transaction detected, sending to chunk manager"
+                                );
+                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
+                                    tx_hash,
+                                    chunk_specs,
+                                });
                             }
                         }
                     }
@@ -559,21 +560,21 @@ async fn pd_transaction_monitor<P>(
                     if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
                         current_pd_txs.insert(tx_hash);
 
-                        if !known_pd_txs.contains(&tx_hash) {
-                            if let Some(access_list) = tx.transaction.access_list() {
-                                let chunk_specs = extract_pd_chunk_specs(access_list);
-                                if !chunk_specs.is_empty() {
-                                    trace!(
-                                        target: "reth::pd",
-                                        tx_hash = %tx_hash,
-                                        chunk_specs_count = chunk_specs.len(),
-                                        "New queued PD transaction detected, sending to chunk manager"
-                                    );
-                                    let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                        tx_hash,
-                                        chunk_specs,
-                                    });
-                                }
+                        if !known_pd_txs.contains(&tx_hash)
+                            && let Some(access_list) = tx.transaction.access_list()
+                        {
+                            let chunk_specs = extract_pd_chunk_specs(access_list);
+                            if !chunk_specs.is_empty() {
+                                trace!(
+                                    target: "reth::pd",
+                                    tx_hash = %tx_hash,
+                                    chunk_specs_count = chunk_specs.len(),
+                                    "New queued PD transaction detected, sending to chunk manager"
+                                );
+                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
+                                    tx_hash,
+                                    chunk_specs,
+                                });
                             }
                         }
                     }

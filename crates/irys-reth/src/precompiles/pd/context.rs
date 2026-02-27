@@ -86,6 +86,11 @@ impl PdContext {
         }
     }
 
+    /// Returns the chunk configuration.
+    pub fn chunk_config(&self) -> ChunkConfig {
+        self.chunk_config
+    }
+
     /// Set the current transaction hash before EVM execution.
     pub fn set_current_tx(&self, tx_hash: B256) {
         *self.tx_hash.write() = Some(tx_hash);
@@ -126,9 +131,9 @@ impl PdContext {
                     })
                     .map_err(|e| eyre::eyre!("Failed to send GetChunk message: {}", e))?;
 
-                // Blocking receive since EVM execution is sync
-                let chunk = resp_rx
-                    .blocking_recv()
+                // Blocking receive since EVM execution is sync.
+                // block_in_place is required when called from within a tokio runtime.
+                let chunk = tokio::task::block_in_place(|| resp_rx.blocking_recv())
                     .map_err(|e| eyre::eyre!("Failed to receive chunk response: {}", e))?;
 
                 Ok(chunk.map(|arc| (*arc).clone()))
