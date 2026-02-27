@@ -2217,8 +2217,7 @@ async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
 #[test_log::test(tokio::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
-async fn unheavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
-) -> eyre::Result<()> {
+async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
 
     let signer = genesis_config.new_random_signer();

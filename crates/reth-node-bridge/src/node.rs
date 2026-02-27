@@ -183,7 +183,7 @@ pub async fn run_node(
 
     let db_args = DatabaseArgs::default();
     // TODO: figure out if we shouldn't use smaller growth steps in production
-    let db_arguements = db_args
+    let db_arguments = db_args
         .database_args()
         .with_growth_step((10 * MEGABYTE).into())
         .with_shrink_threshold((20 * MEGABYTE).try_into()?);
@@ -196,7 +196,7 @@ pub async fn run_node(
         custom.path = ?db_path,
         "Opening database"
     );
-    let database = RethDbWrapper::new(init_db(db_path.clone(), db_arguements)?.with_metrics());
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db_arguments)?.with_metrics());
 
     if random_ports {
         reth_config = reth_config.with_unused_ports();

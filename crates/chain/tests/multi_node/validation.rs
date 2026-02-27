@@ -422,7 +422,7 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[test_log::test(tokio::test)]
 async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
