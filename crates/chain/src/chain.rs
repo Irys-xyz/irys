@@ -1092,6 +1092,11 @@ impl IrysNode {
             .await
             .expect("initializing services should not fail");
 
+        // Spawn the actix API server so its future gets polled and it accepts connections.
+        // (The gossip server is spawned separately via spawn_p2p_server_watcher_task.)
+        let api_server_handle = actix_server.handle();
+        let actix_task = tokio::spawn(actix_server);
+
         // Send IrysNodeCtx back to start()
         irys_node_ctx_tx
             .send(irys_node_ctx)
@@ -1131,12 +1136,15 @@ impl IrysNode {
         info!("Lifecycle task shutting down: {}", shutdown_reason);
 
         // Phase 4: Ordered shutdown
-        // Stop actix server
-        let server_handle = actix_server.handle();
+        // Stop actix server (handle was captured before spawning the task)
         debug!("Stopping API server");
-        match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, server_handle.stop(true)).await {
+        match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, api_server_handle.stop(true)).await {
             Ok(()) => debug!("API server stopped"),
             Err(_) => error!("API server stop timed out after {API_SERVER_STOP_TIMEOUT:?}"),
+        }
+        // Wait for the actix task to finish after the server is stopped
+        if let Err(e) = actix_task.await {
+            error!("API server task panicked: {:?}", e);
         }
 
         // Stop gossip

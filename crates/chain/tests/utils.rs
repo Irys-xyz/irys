@@ -292,8 +292,27 @@ pub struct IrysNodeTest<T = ()> {
     restart_gossip_ports: bool,
     restart_reth_ports: bool,
     /// Dedicated multi-thread runtime for test isolation.
-    /// Created on start(), dropped on stop() via spawn_blocking.
-    runtime: Option<tokio::runtime::Runtime>,
+    /// Wrapped in RuntimeGuard to safely drop from async contexts.
+    runtime: RuntimeGuard,
+}
+
+/// Wrapper that safely drops a tokio Runtime from any context (including async).
+/// When dropped, moves the runtime to a background OS thread so `Runtime::drop()`
+/// can block without panicking.
+struct RuntimeGuard(Option<tokio::runtime::Runtime>);
+
+impl RuntimeGuard {
+    fn none() -> Self {
+        Self(None)
+    }
+}
+
+impl Drop for RuntimeGuard {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            std::thread::spawn(move || drop(rt));
+        }
+    }
 }
 
 impl IrysNodeTest<()> {
@@ -330,7 +349,7 @@ impl IrysNodeTest<()> {
             restart_http_ports,
             restart_gossip_ports,
             restart_reth_ports,
-            runtime: None,
+            runtime: RuntimeGuard::none(),
         }
     }
 
@@ -388,7 +407,7 @@ impl IrysNodeTest<()> {
             restart_http_ports: self.restart_http_ports,
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
-            runtime: Some(runtime),
+            runtime: RuntimeGuard(Some(runtime)),
         }
     }
 
@@ -2451,13 +2470,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
             .await;
-        // Runtime::drop() blocks (joins worker threads), which is not allowed
-        // inside an async context. Move it to a blocking thread.
-        if let Some(rt) = self.runtime {
-            tokio::task::spawn_blocking(move || drop(rt))
-                .await
-                .expect("runtime shutdown should not panic");
-        }
+        // RuntimeGuard::drop handles moving the runtime to a background thread.
+        // Explicitly drop it here so shutdown completes before we return.
+        drop(self.runtime);
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
@@ -2467,7 +2482,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             restart_http_ports: self.restart_http_ports,
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
-            runtime: None,
+            runtime: RuntimeGuard::none(),
         }
     }
 
