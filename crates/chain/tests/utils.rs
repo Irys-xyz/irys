@@ -390,6 +390,7 @@ impl IrysNodeTest<()> {
             };
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .expect("Failed to build dedicated tokio runtime");
