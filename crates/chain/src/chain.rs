@@ -3,7 +3,7 @@ use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
-use eyre::{ensure, Context as _};
+use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
     block_discovery::{
@@ -2311,16 +2311,13 @@ async fn stake_and_pledge(
     latest_block_hash: BlockHash,
     mempool_pledge_provider: Arc<MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
-    // get all SMs with and without a partition assignment
-    let (assigned_modules, unassigned_modules): (Vec<Arc<StorageModule>>, Vec<Arc<StorageModule>>) = {
+    let total_module_count = {
         let sms = storage_modules_guard.read();
-        sms.iter()
-            .cloned()
-            .partition(|sm| sm.partition_assignment().is_some())
+        sms.len()
     };
 
-    if unassigned_modules.is_empty() {
-        debug!("No unassigned modules locally, skipping...");
+    if total_module_count == 0 {
+        debug!("No storage modules configured locally, skipping...");
         return Ok(());
     }
 
@@ -2387,20 +2384,21 @@ async fn stake_and_pledge(
         latest_block_hash
     };
 
-    // get the number of pending & historic commitment txs for partitions, if the count is >= the unassigned len, do nothing
+    // Determine how many NEW pledges are needed by comparing total storage
+    // module capacity against pledges that already exist (historic + pending).
+    // NOTE: we intentionally use the epoch snapshot and pending commitments as
+    // the source of truth rather than the in-memory StorageModule partition
+    // assignments, because the async StorageModuleService may not have processed
+    // the latest PartitionAssignmentsUpdated message yet.
     let pending_pledge_count = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
     let historic_pledge_count = epoch_snapshot.get_partition_assignments(address).len();
-    let to_pledge_count = unassigned_modules
-        .len()
-        .saturating_sub(pending_pledge_count);
+    let already_pledged = historic_pledge_count + pending_pledge_count;
+    let to_pledge_count = total_module_count.saturating_sub(already_pledged);
 
     debug!(
-        "Found {} SMs without partition assignments ({} pending pledges, {} historic, {} assigned SMs) - sending {} pledges",
-        &unassigned_modules.len(), &pending_pledge_count, &historic_pledge_count, &assigned_modules.len(), &to_pledge_count
+        "Pledge status: {} total SMs, {} historic pledges, {} pending pledges, {} new pledges needed",
+        total_module_count, historic_pledge_count, pending_pledge_count, to_pledge_count
     );
-
-    ensure!(historic_pledge_count == assigned_modules.len(), "Historic pledge count ({}) and assigned module count ({}) are different! this indicates an issue with storage module partition assignment logic!\nDEBUG\n historic_pledges {:?}, assigned_modules: {:?}, unassigned modules: {:?}",
-&historic_pledge_count, assigned_modules.len(), epoch_snapshot.get_partition_assignments(address), assigned_modules, unassigned_modules  );
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
