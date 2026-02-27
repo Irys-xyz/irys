@@ -59,10 +59,10 @@ use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CommitmentTransaction,
-    Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange,
-    PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _,
-    ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp, UnixTimestampMs, H256,
-    U256,
+    Config, ConsensusOptions, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
+    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
+    UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::vdf::run_vdf_for_genesis_block;
@@ -1264,6 +1264,9 @@ impl IrysNode {
             node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
         }
 
+        // Preserve the runtime-resolved consensus (especially expected_genesis_hash) when
+        // rebuilding Config for updated reth networking values.
+        node_config.consensus = ConsensusOptions::Custom(config.consensus.clone());
         let config = Config::new(node_config, config.peer_id());
 
         let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
