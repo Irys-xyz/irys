@@ -324,7 +324,8 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::EpochCommitmentMismatch { .. }
         | VE::EpochExtraCommitment { .. }
         | VE::EpochMissingCommitment { .. }
-        | VE::CommitmentWrongOrder { .. } => {
+        | VE::CommitmentWrongOrder { .. }
+        | VE::CustodyProofInvalid(_) => {
             unreachable!(
                 "Consensus variant routed to DiscardKind::Invalid at on_block_validation_finished, never reaches soft_internal_reason_tag"
             )
@@ -1399,6 +1400,21 @@ impl BlockTreeServiceInner {
                 block.height = height,
                 "Failed to broadcast block state update event: {}", e
             );
+        }
+
+        if state == ChainState::Onchain && self.config.consensus.enable_custody_proofs {
+            let msg = crate::custody_proof_service::CustodyProofMessage::NewBlock {
+                vdf_output: arc_block.vdf_limiter_info.output,
+                block_height: height,
+            };
+            if let Err(e) = self.service_senders.custody_proof.send(msg) {
+                tracing::warn!(
+                    block.hash = ?block_hash,
+                    block.height = height,
+                    error = %e,
+                    "Failed to send custody proof new block trigger",
+                );
+            }
         }
 
         Ok(())

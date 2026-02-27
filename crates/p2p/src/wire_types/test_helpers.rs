@@ -345,6 +345,7 @@ pub(crate) fn canonical_block_body() -> BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![canonical_data_tx_header()],
         commitment_transactions: vec![canonical_commitment_v2_stake()],
+        custody_proofs: Vec::new(),
     }
 }
 

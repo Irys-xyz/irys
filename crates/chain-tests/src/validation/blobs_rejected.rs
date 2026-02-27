@@ -98,6 +98,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
         block_hash: header.block_hash,
         data_transactions: vec![],
         commitment_transactions: vec![],
+        custody_proofs: Vec::new(),
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
@@ -153,6 +154,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
         block_hash: header.block_hash,
         data_transactions: vec![],
         commitment_transactions: vec![],
+        custody_proofs: Vec::new(),
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
@@ -219,6 +221,7 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
         block_hash: header.block_hash,
         data_transactions: vec![],
         commitment_transactions: vec![],
+        custody_proofs: Vec::new(),
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
@@ -295,6 +298,7 @@ async fn heavy_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<(
         block_hash: header.block_hash,
         data_transactions: vec![],
         commitment_transactions: vec![],
+        custody_proofs: Vec::new(),
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 

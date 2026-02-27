@@ -1009,7 +1009,25 @@ impl BlockValidationTask {
             capture_stage_result(&data_txs_captures, result)
         };
 
-        // Race the six concurrent stages against the height-diff /
+        let transactions_for_custody = Arc::clone(self.sealed_block.transactions());
+        let custody_config = self.service_inner.config.clone(); // clone: Config is Arc-wrapped
+        let custody_db = self.service_inner.db.clone(); // clone: DatabaseProvider is Arc-wrapped
+        let custody_captures = Arc::clone(&stage_captures);
+        let custody_proofs_task = async move {
+            let result = crate::block_validation::validate_custody_proofs(
+                &transactions_for_custody.custody_proofs,
+                &custody_config.consensus,
+                &custody_db,
+            )
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or_else(|err| {
+                tracing::error!(custom.error = ?err, "custody proofs validation failed");
+                ValidationError::CustodyProofInvalid(err.to_string()).into()
+            });
+            capture_stage_result(&custody_captures, result)
+        };
+
+        // Race the seven concurrent stages against the height-diff /
         // channel-closed cancellation future. On cancel, the in-flight
         // stages are abandoned (their tuple slots in `tokio::join!` will
         // never be observed) — BUT a safety-critical NodeFault or
@@ -1049,7 +1067,8 @@ impl BlockValidationTask {
                 shadow_tx_task,
                 seeds_validation_task,
                 commitment_ordering_task,
-                data_txs_validation_task
+                data_txs_validation_task,
+                custody_proofs_task,
             )
         };
         let cancel_future = self.exit_if_block_is_too_old(|_| ControlFlow::Continue(()));
@@ -1079,7 +1098,7 @@ impl BlockValidationTask {
             }
         };
 
-        // Unpack: natural-join path gets the full six-tuple; cancel
+        // Unpack: natural-join path gets the full seven-tuple; cancel
         // path is handled out-of-band via the side channel below.
         let (
             recall_result,
@@ -1088,6 +1107,7 @@ impl BlockValidationTask {
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
+            custody_proofs_result,
         ) = match stage_outcome {
             StageOutcome::Joined(joined) => joined,
             StageOutcome::Cancelled(cancel) => {
@@ -1140,8 +1160,10 @@ impl BlockValidationTask {
             &seeds_validation_result,
             &commitment_ordering_result,
             &data_txs_result,
+            &custody_proofs_result,
         ) {
             (
+                ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
@@ -1176,6 +1198,16 @@ impl BlockValidationTask {
                 let result: ValidationResult = match reth_result {
                     Ok(()) => {
                         tracing::debug!("Reth execution layer validation successful");
+
+                        // Store per-chunk KZG commitments from blob ingress proofs
+                        // so custody verification can find them for peer-received blocks.
+                        if let Err(e) = crate::block_validation::store_blob_ingress_commitments(
+                            self.sealed_block.header(),
+                            &self.service_inner.db,
+                        ) {
+                            tracing::warn!(error = %e, "Failed to store blob ingress commitments");
+                        }
+
                         ValidationResult::Valid
                     }
                     Err(err) => {
@@ -1211,6 +1243,7 @@ impl BlockValidationTask {
                     &seeds_validation_result,
                     &commitment_ordering_result,
                     &data_txs_result,
+                    &custody_proofs_result,
                 ];
                 merge_stage_results(&stage_results)
             }

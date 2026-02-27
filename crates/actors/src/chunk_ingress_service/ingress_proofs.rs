@@ -197,13 +197,11 @@ impl ChunkIngressServiceInner {
             )
             .map_err(|msg| IngressProofError::RejectedVersion(msg.into()))?;
 
-        // Validate the proofs signature and basic details
         let data_root_val = ingress_proof.data_root();
         let address = ingress_proof
             .pre_validate(&data_root_val)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
-        // Reject proofs from addresses not staked or pending stake (spam protection)
         let block_tree = self.block_tree_read_guard.read();
         let epoch_snapshot = block_tree.canonical_epoch_snapshot();
         let commitment_snapshot = block_tree.canonical_commitment_snapshot();
@@ -540,7 +538,6 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
 
     let chain_id = config.consensus.chain_id;
 
-    // Pick anchor: hint or latest canonical block
     let latest_anchor = block_tree_guard
         .read()
         .get_latest_canonical_entry()
@@ -548,7 +545,7 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
     let proof = super::chunks::generate_ingress_proof(
-        db.clone(),
+        db.clone(), // clone: Arc-wrapped DatabaseProvider — cheap ref-count bump
         data_root,
         leaves,
         signer,
@@ -572,7 +569,6 @@ pub fn reanchor_and_store_ingress_proof(
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     generation_state: &IngressProofGenerationState,
 ) -> Result<IngressProof, IngressProofGenerationError> {
-    // Only staked nodes should reanchor ingress proofs
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     if !epoch_snapshot.is_staked(signer.address()) {
         return Err(IngressProofGenerationError::NodeNotStaked);

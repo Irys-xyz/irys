@@ -1117,6 +1117,11 @@ pub enum ValidationError {
     /// Commitment transaction in wrong order
     #[error("Commitment transaction at position {position} in wrong order")]
     CommitmentWrongOrder { position: usize },
+
+    /// Custody proof verification failed. Consensus rejection: the block's
+    /// proofs do not open the challenged chunks.
+    #[error("Custody proof validation failed: {0}")]
+    CustodyProofInvalid(String),
 }
 
 impl ValidationError {
@@ -1195,7 +1200,8 @@ impl ValidationError {
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
             | Self::EpochMissingCommitment { .. }
-            | Self::CommitmentWrongOrder { .. } => ErrorClass::Consensus,
+            | Self::CommitmentWrongOrder { .. }
+            | Self::CustodyProofInvalid(_) => ErrorClass::Consensus,
         }
     }
 
@@ -1260,7 +1266,8 @@ impl ValidationError {
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
             | Self::EpochMissingCommitment { .. }
-            | Self::CommitmentWrongOrder { .. } => "invalid",
+            | Self::CommitmentWrongOrder { .. }
+            | Self::CustodyProofInvalid(_) => "invalid",
         }
     }
 }
@@ -1531,6 +1538,7 @@ impl ValidationError {
             Self::EpochExtraCommitment { .. } => "epoch_extra_commitment",
             Self::EpochMissingCommitment { .. } => "epoch_missing_commitment",
             Self::CommitmentWrongOrder { .. } => "commitment_wrong_order",
+            Self::CustodyProofInvalid(_) => "custody_proof_invalid",
             Self::ExecutionLayerTransportFailed(_) => "execution_layer_transport_failed",
             Self::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
             Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
@@ -7415,8 +7423,6 @@ fn get_submit_ledger_slot_addresses(
 /// Verify custody proofs included in a block.
 ///
 /// Returns `Ok(())` if all proofs are valid or custody proofs are disabled.
-/// This function is not yet wired into `validate_block()` — that happens once
-/// blocks carry custody proofs via gossip (Phase 3).
 pub fn validate_custody_proofs(
     custody_proofs: &[irys_types::custody::CustodyProof],
     consensus_config: &ConsensusConfig,
@@ -7477,6 +7483,53 @@ pub fn validate_custody_proofs(
             }
         }
     }
+
+    Ok(())
+}
+
+/// Store per-chunk KZG commitments extracted from V2 EvmBlob ingress proofs.
+///
+/// For blob-derived data (single chunk), the per-chunk commitment at index 0
+/// equals the blob's KZG commitment from the ingress proof. This ensures
+/// custody proof verification can find the commitment for peer-received blocks.
+pub fn store_blob_ingress_commitments(
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    use irys_types::ingress::DataSourceType;
+    use irys_types::kzg::KzgCommitmentBytes;
+
+    let mut to_store: Vec<(H256, KzgCommitmentBytes)> = Vec::new();
+
+    for ledger in &block.data_ledgers {
+        let proofs = match &ledger.proofs {
+            Some(p) => &p.0,
+            None => continue,
+        };
+        for proof in proofs {
+            if let IngressProof::V2(v2) = proof {
+                if v2.source_type == DataSourceType::EvmBlob {
+                    to_store.push((v2.data_root, v2.kzg_commitment));
+                }
+            }
+        }
+    }
+
+    if to_store.is_empty() {
+        return Ok(());
+    }
+
+    db.update_scoped(|rw_tx| {
+        for (data_root, commitment) in &to_store {
+            irys_database::store_per_chunk_kzg_commitments(rw_tx, *data_root, &[(0, *commitment)])?;
+        }
+        Ok::<(), eyre::Report>(())
+    })??;
+
+    tracing::debug!(
+        count = to_store.len(),
+        "Stored per-chunk KZG commitments from blob ingress proofs",
+    );
 
     Ok(())
 }

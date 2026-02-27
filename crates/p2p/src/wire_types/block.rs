@@ -95,6 +95,8 @@ pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custody_proofs: Vec<irys_types::custody::CustodyProof>,
 }
 
 // conversions (mirror structs)
@@ -135,7 +137,7 @@ impl From<std::sync::Arc<irys_types::IrysBlockHeader>> for IrysBlockHeader {
 }
 
 super::impl_mirror_from!(irys_types::BlockBody => BlockBody {
-    block_hash,
+    block_hash, custody_proofs,
 } convert_iter { data_transactions, commitment_transactions });
 
 impl From<std::sync::Arc<irys_types::BlockBody>> for BlockBody {

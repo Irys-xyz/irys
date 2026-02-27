@@ -238,6 +238,7 @@ fn fixture_block_body_none() -> wire::BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![fixture_data_tx_header_none()],
         commitment_transactions: vec![fixture_commitment_v2_stake()],
+        custody_proofs: Vec::new(),
     }
 }
 

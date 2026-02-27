@@ -802,6 +802,7 @@ impl IrysNode {
                 block_hash: genesis_block.block_hash,
                 data_transactions: vec![],
                 commitment_transactions: genesis_commitments.to_vec(),
+                custody_proofs: Vec::new(),
             };
             let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
             BlockIndex::push_block(write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
@@ -1992,6 +1993,7 @@ impl IrysNode {
                 config.clone(),                           // clone: Config is Arc-wrapped internally
                 storage_modules_guard.clone(),            // clone: Arc-based read guard
                 service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
+                irys_db.clone(),                          // clone: DatabaseProvider is Arc-wrapped
                 receivers.custody_proof,
                 runtime_handle.clone(),
             );
