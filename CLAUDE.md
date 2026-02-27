@@ -28,7 +28,7 @@ Always run these checks and fix any issues:
 
 ### Toolchain
 
-Rust 1.91.1 (pinned in `rust-toolchain.toml`). Requires clang, gmp, pkg-config for OpenSSL build.
+Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp, pkg-config for OpenSSL build.
 
 ### Environment Notes
 

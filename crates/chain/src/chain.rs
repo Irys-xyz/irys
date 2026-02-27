@@ -73,9 +73,9 @@ use irys_vdf::{
 };
 use reth::{
     chainspec::ChainSpec,
-    tasks::{TaskExecutor, TaskManager},
+    tasks::{RuntimeBuilder, RuntimeConfig, TaskExecutor, TokioConfig},
 };
-use reth_db::Database as _;
+use reth_db::{transaction::DbTx as _, Database as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{
@@ -397,8 +397,6 @@ const VDF_THREAD_TIMEOUT: Duration = Duration::from_secs(10);
 const ACTOR_SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the actor thread to finish (API 5s + gossip 5s + VDF 10s + jitter).
 const ACTOR_THREAD_TIMEOUT: Duration = Duration::from_secs(25);
-/// Timeout for the TaskManager graceful shutdown.
-const TASK_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for the reth thread to complete its full shutdown sequence.
 /// Budget: send(5s) + actor(25s) + service_set(~10 services × 10s) + task_manager(10s).
 /// Using 60s to cover typical case with margin; worst-case depends on service count.
@@ -761,7 +759,7 @@ impl IrysNode {
         BlockIndex::push_block(&write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
 
         // Commit the database transaction
-        write_tx.inner.commit()?;
+        write_tx.commit()?;
 
         info!("Genesis block and commitments successfully persisted");
         Ok(())
@@ -838,7 +836,11 @@ impl IrysNode {
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let task_manager = TaskManager::new(tokio_runtime.handle().clone());
+        let reth_runtime = RuntimeBuilder::new(
+            RuntimeConfig::default()
+                .with_tokio(TokioConfig::existing_handle(tokio_runtime.handle().clone())),
+        )
+        .build()?;
 
         // Common node startup logic
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
@@ -855,7 +857,7 @@ impl IrysNode {
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
-        let task_executor = task_manager.executor();
+        let task_executor = reth_runtime.clone();
         // vdf gets started here...
         // init the services
         let actor_done_rx = Self::init_services_thread(
@@ -888,7 +890,7 @@ impl IrysNode {
             irys_provider.clone(),
             reth_chainspec.clone(),
             latest_block_height,
-            task_manager,
+            reth_runtime,
             tokio_runtime,
             service_set_rx,
         )?;
@@ -1007,7 +1009,7 @@ impl IrysNode {
             let storage_modules_guard = ctx.storage_modules_guard.clone();
             let chunk_ingress_state = ctx.chunk_ingress_state.clone();
             // use executor so we get automatic termination when the node starts to shut down
-            task_executor.spawn(async move {
+            task_executor.spawn_task(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
 
                 loop {
@@ -1182,7 +1184,7 @@ impl IrysNode {
         irys_provider: IrysRethProvider,
         reth_chainspec: Arc<ChainSpec>,
         latest_block_height: u64,
-        mut task_manager: TaskManager,
+        reth_runtime: reth::tasks::Runtime,
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
     ) -> eyre::Result<oneshot::Receiver<ShutdownReason>> {
@@ -1194,7 +1196,7 @@ impl IrysNode {
             .name("reth-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let exec = task_manager.executor();
+                let exec = reth_runtime.clone();
                 let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async || {
                     let node_handle = start_reth_node(
@@ -1210,14 +1212,19 @@ impl IrysNode {
                     let service_set = service_set.await.expect("Service Set must be awaited");
 
                     let mut service_set = std::pin::pin!(service_set);
-                    let mut task_manager_pinned = std::pin::pin!(&mut task_manager);
+                    let task_manager_handle = reth_runtime.take_task_manager_handle();
                     let reth_node = std::pin::pin!(node_handle.node_exit_future.instrument(span2));
 
                     let future = async {
                         tokio::select! {
                             _ = &mut service_set => {
                             },
-                            res = &mut task_manager_pinned => {
+                            res = async {
+                                match task_manager_handle {
+                                    Some(handle) => handle.await.ok(),
+                                    None => std::future::pending().await,
+                                }
+                            } => {
                                 tracing::warn!(custom.res = ?res)
                             }
                             _ = reth_node => {}
@@ -1252,7 +1259,10 @@ impl IrysNode {
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            debug!("Shutdown signal send failed (receiver likely dropped): {}", e)
+                            debug!(
+                                "Shutdown signal send failed (receiver likely dropped): {}",
+                                e
+                            )
                         }
                         Err(_) => error!("Timed out sending shutdown signal to actor thread"),
                     }
@@ -1265,7 +1275,9 @@ impl IrysNode {
                         Ok(Err(_)) => {
                             error!("Actor thread likely panicked (completion channel dropped)")
                         }
-                        Err(_) => error!("Actor main thread did not finish within {ACTOR_THREAD_TIMEOUT:?}"),
+                        Err(_) => error!(
+                            "Actor main thread did not finish within {ACTOR_THREAD_TIMEOUT:?}"
+                        ),
                     }
 
                     // Each service has an individual 10s shutdown timeout (see ServiceSet::initiate_shutdown),
@@ -1274,9 +1286,7 @@ impl IrysNode {
                     debug!(
                         "Shutting down the rest of the reth jobs in case there are unfinished ones"
                     );
-                    if !task_manager.graceful_shutdown_with_timeout(TASK_MANAGER_TIMEOUT) {
-                        warn!("TaskManager graceful shutdown timed out after {TASK_MANAGER_TIMEOUT:?}");
-                    }
+                    reth_runtime.graceful_shutdown();
                     (node_handle.node, shutdown_reason)
                 };
 
@@ -1533,6 +1543,7 @@ impl IrysNode {
                 &config,
                 &service_senders,
                 runtime_handle.clone(),
+                task_exec.clone(),
             );
 
         // Spawn mempool service

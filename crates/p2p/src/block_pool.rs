@@ -1100,7 +1100,7 @@ where
     /// retrieved by the [`irys_domain::execution_payload_cache::RethBlockProvider`].
     pub async fn add_execution_payload_to_cache(
         &self,
-        sealed_block: reth::primitives::SealedBlock<reth::primitives::Block>,
+        sealed_block: reth::primitives::SealedBlock<reth_ethereum_primitives::Block>,
     ) {
         self.execution_payload_provider
             .add_payload_to_cache(sealed_block)

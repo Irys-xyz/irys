@@ -1042,7 +1042,7 @@ pub(crate) async fn setup_env(
 }
 
 pub(crate) fn assert_single_log_for(
-    receipts: &[reth::primitives::Receipt],
+    receipts: &[reth_ethereum_primitives::Receipt],
     topic: &[u8; 32],
     addr: IrysAddress,
     context: &str,

@@ -19,7 +19,7 @@ use reth_node_api::{
 };
 use reth_node_builder::rpc::PayloadValidatorBuilder;
 use reth_node_ethereum::EthEngineTypes;
-use reth_primitives_traits::RecoveredBlock;
+use reth_primitives_traits::SealedBlock;
 
 use crate::IrysEthereumNode;
 use crate::engine::{IrysPayloadAttributes, IrysPayloadTypes};
@@ -48,14 +48,13 @@ impl IrysEngineValidator {
 impl PayloadValidator<EthEngineTypes<IrysPayloadTypes>> for IrysEngineValidator {
     type Block = Block;
 
-    fn ensure_well_formed_payload(
+    fn convert_payload_to_block(
         &self,
         payload: ExecutionData,
-    ) -> Result<RecoveredBlock<Self::Block>, NewPayloadError> {
-        let sealed_block = self.inner.ensure_well_formed_payload(payload)?;
-        sealed_block
-            .try_recover()
-            .map_err(|e| NewPayloadError::Other(e.into()))
+    ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
+        self.inner
+            .ensure_well_formed_payload(payload)
+            .map_err(Into::into)
     }
 }
 

@@ -29,7 +29,7 @@ use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
-use reth_primitives::Header;
+use reth_primitives_traits::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

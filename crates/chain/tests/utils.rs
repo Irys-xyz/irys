@@ -1761,7 +1761,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub fn get_evm_block_by_hash(
         &self,
         hash: alloy_core::primitives::B256,
-    ) -> eyre::Result<reth::primitives::Block> {
+    ) -> eyre::Result<reth_ethereum_primitives::Block> {
         use reth::providers::BlockReader as _;
 
         self.node_ctx
@@ -1795,7 +1795,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         hash: alloy_core::primitives::BlockHash,
         seconds_to_wait: usize,
-    ) -> eyre::Result<reth::primitives::Block> {
+    ) -> eyre::Result<reth_ethereum_primitives::Block> {
         self.ensure_vdf_running_for_sync("wait_for_evm_block");
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
@@ -2348,7 +2348,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub fn gossip_eth_block_to_peers(
         &self,
-        block: &reth::primitives::SealedBlock<reth::primitives::Block>,
+        block: &reth::primitives::SealedBlock<reth_ethereum_primitives::Block>,
     ) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
