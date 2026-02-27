@@ -578,7 +578,7 @@ fn analyze_reclassifications(
         let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0; // as percentage
         if pct_above_allocation > exceedance_threshold {
             issues.push(format!(
-                "CPU exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
+                "CPU regularly exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
                 current.effective_threads,
                 pct_above_allocation,
                 exceedance_threshold,
