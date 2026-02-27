@@ -231,8 +231,8 @@ impl InternalPackingService {
                 PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
             // Try remote packing first if configured
-            if !self.packing_config.remotes.is_empty() {
-                if let Ok(()) = self
+            if !self.packing_config.remotes.is_empty()
+                && let Ok(()) = self
                     .remote_strategy
                     .pack(
                         &storage_module,
@@ -247,7 +247,6 @@ impl InternalPackingService {
                     sync_with_warning(&storage_module, "remote packing completion");
                     continue;
                 }
-            }
 
             // Fall back to local packing strategy
             if let Err(e) = self

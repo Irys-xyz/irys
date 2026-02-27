@@ -22,7 +22,6 @@ use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256,
 };
-use reth::payload::EthBuiltPayload;
 use reth::rpc::types::BlockNumberOrTag;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{

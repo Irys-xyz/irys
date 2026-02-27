@@ -19,7 +19,7 @@ use super::context::PdContext;
 /// Programmable Data precompile implementation.
 #[inline]
 fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
-    move |input: PrecompileInput<'_>| -> PrecompileResult {
+    (move |input: PrecompileInput<'_>| -> PrecompileResult {
         let data = input.data;
         let gas_limit = input.gas;
         debug!(
@@ -112,7 +112,7 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             bytes: res.bytes,
             reverted: false,
         })
-    }
+    })
     .into()
 }
 

@@ -224,8 +224,8 @@ where
         }
 
         // Reject PD transactions before Sprite hardfork is active
-        if !self.is_sprite_active() {
-            if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
+        if !self.is_sprite_active()
+            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
                 tracing::trace!(
                     sender = ?tx.sender(),
                     tx_hash = ?tx.hash(),
@@ -238,11 +238,10 @@ where
                     ),
                 ));
             }
-        }
 
         // Validate minimum PD transaction cost when Sprite is active
-        if self.is_sprite_active() {
-            if let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
+        if self.is_sprite_active()
+            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
                 // Count PD chunks from access list
                 let chunks = tx
                     .access_list()
@@ -275,7 +274,6 @@ where
                     ));
                 }
             }
-        }
 
         // once we support blobs, we can start accepting eip4844 txs
         if tx.is_eip4844() {
