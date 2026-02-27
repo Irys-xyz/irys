@@ -292,9 +292,7 @@ pub struct IrysNodeTest<T = ()> {
     restart_gossip_ports: bool,
     restart_reth_ports: bool,
     /// Dedicated multi-thread runtime for test isolation.
-    /// Created on start(), dropped on stop().
-    /// Held for its `Drop` impl — dropping the runtime shuts down all spawned tasks.
-    #[expect(dead_code, reason = "held for Drop: dropping shuts down spawned tasks")]
+    /// Created on start(), dropped on stop() via spawn_blocking.
     runtime: Option<tokio::runtime::Runtime>,
 }
 
@@ -2453,6 +2451,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
             .await;
+        // Runtime::drop() blocks (joins worker threads), which is not allowed
+        // inside an async context. Move it to a blocking thread.
+        if let Some(rt) = self.runtime {
+            tokio::task::spawn_blocking(move || drop(rt))
+                .await
+                .expect("runtime shutdown should not panic");
+        }
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),

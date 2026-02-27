@@ -1158,8 +1158,12 @@ impl IrysNode {
         service_set.graceful_shutdown().await;
         debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
 
-        // Graceful shutdown of reth tasks
-        reth_runtime.graceful_shutdown();
+        // Graceful shutdown of reth tasks — sync spin loop, so run on a blocking thread
+        // (mirrors master's dedicated OS thread behavior)
+        let reth_rt = reth_runtime.clone();
+        tokio::task::spawn_blocking(move || reth_rt.graceful_shutdown())
+            .await
+            .expect("reth graceful shutdown should not panic");
 
         // Close reth DB (MDBX close is sync, use spawn_blocking)
         let reth_node_for_close = node_handle.node;
