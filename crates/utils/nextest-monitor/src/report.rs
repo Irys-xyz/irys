@@ -13,6 +13,11 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+/// Default exceedance threshold: a test is considered to "need" N threads if it
+/// exceeds N threads for more than this fraction of its runtime.
+/// 0.20 = 20% — brief spikes up to 20% of runtime are tolerated.
+const DEFAULT_EXCEEDANCE_PCT: f64 = 0.20;
+
 // ============================================================================
 // Data structures for CPU stats (from wrapper)
 // ============================================================================
@@ -243,28 +248,61 @@ impl ClassificationConfig {
         }
     }
 
-    /// Determine what classification a test SHOULD have based on actual usage
-    /// Uses P90 (not peak) as the primary CPU metric for more stable recommendations
+    /// Determine what classification a test SHOULD have based on actual usage.
+    ///
+    /// Uses a **sustained exceedance** heuristic: for each thread bucket, check
+    /// what fraction of the test's runtime exceeds that allocation. If more than
+    /// `exceedance_pct` of the runtime is above the bucket, the bucket is too
+    /// small and we move to the next one. This avoids over-provisioning for
+    /// brief CPU spikes while still catching sustained high usage.
+    #[allow(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
-        p90_cpu: f64,
         avg_cpu: f64,
         duration_ms: u64,
+        time_above_1t_ms: u64,
+        time_above_2t_ms: u64,
+        time_above_3t_ms: u64,
+        time_above_4t_ms: u64,
+        exceedance_pct: f64,
     ) -> SuggestedClassification {
-        let effective_cpu = p90_cpu.max(avg_cpu);
-
         // Collect all thread thresholds
         let mut thread_options: Vec<u32> = vec![self.default_threads];
         thread_options.extend(self.rules.iter().filter_map(|r| r.threads_required));
         thread_options.sort();
         thread_options.dedup();
 
-        // Find minimum threads needed (smallest bucket that fits)
+        let duration = duration_ms.max(1) as f64;
+
+        // Find the smallest allocation where the test doesn't exceed it for
+        // more than exceedance_pct of its runtime. This is the key insight:
+        // brief spikes (e.g. 2% of runtime at 4x) don't warrant a higher
+        // allocation, but sustained exceedance (e.g. 30% of runtime at 3x)
+        // does.
         let suggested_threads = thread_options
             .iter()
-            .find(|&&t| (t as f64) >= effective_cpu)
+            .find(|&&t| {
+                let time_above = match t {
+                    1 => time_above_1t_ms,
+                    2 => time_above_2t_ms,
+                    3 => time_above_3t_ms,
+                    4 => time_above_4t_ms,
+                    _ => 0,
+                };
+                let pct = time_above as f64 / duration;
+                pct <= exceedance_pct
+            })
             .copied()
             .unwrap_or_else(|| *thread_options.last().unwrap_or(&self.default_threads));
+
+        // Sanity floor: if avg_cpu exceeds a bucket, don't use that bucket
+        // regardless of the time-above metric (avg > bucket means the test
+        // is continuously above, just with measurement noise).
+        let suggested_threads = thread_options
+            .iter()
+            .find(|&&t| t >= suggested_threads && (t as f64) >= avg_cpu)
+            .copied()
+            .unwrap_or(suggested_threads);
 
         // Collect all timeout thresholds
         let mut timeout_options: Vec<u64> = vec![self.default_timeout_ms];
@@ -498,11 +536,14 @@ fn analyze_reclassifications(
 
     for test in aggregated {
         let current = config.classify(&test.test_name);
-        // Use P90 for classification suggestions - it's more representative than peak
         let suggested = config.suggest_classification(
-            test.avg_p90_cpu, // Use P90 instead of peak for suggestions
             test.avg_avg_cpu,
             test.avg_duration_ms,
+            test.avg_time_above_1t_ms,
+            test.avg_time_above_2t_ms,
+            test.avg_time_above_3t_ms,
+            test.avg_time_above_4t_ms,
+            DEFAULT_EXCEEDANCE_PCT,
         );
 
         let mut issues = Vec::new();
@@ -532,45 +573,29 @@ fn analyze_reclassifications(
             0.0
         };
 
-        // Check CPU classification - use P90 as the primary metric
-        // If P90 exceeds allocation, test is regularly exceeding, not just spiking
-        if test.avg_p90_cpu > current.effective_threads as f64 {
-            if time_above_allocation_ms > 0 {
-                issues.push(format!(
-                    "CPU regularly exceeds {}T: P90={:.2}x, peak={:.2}x, above {}T for {:.1}s ({:.0}%)",
-                    current.effective_threads,
-                    test.avg_p90_cpu,
-                    test.avg_peak_cpu,
-                    allocation_threshold as u32,
-                    time_above_allocation_ms as f64 / 1000.0,
-                    pct_above_allocation
-                ));
-            } else {
-                issues.push(format!(
-                    "CPU regularly exceeds {}T: P90={:.2}x, peak={:.2}x",
-                    current.effective_threads, test.avg_p90_cpu, test.avg_peak_cpu
-                ));
-            }
-        } else if test.avg_peak_cpu > current.effective_threads as f64 {
-            // Peak exceeds but P90 doesn't - just occasional spikes
-            let pct_near_peak = if test.avg_duration_ms > 0 {
-                (test.avg_time_near_peak_ms as f64 / test.avg_duration_ms as f64) * 100.0
-            } else {
-                0.0
-            };
-            // Only warn if spikes are significant (near peak for >10% of time)
-            if pct_near_peak > 10.0 {
-                issues.push(format!(
-                    "CPU spikes above {}T: peak={:.2}x (near peak {:.0}% of time), P90={:.2}x",
-                    current.effective_threads, test.avg_peak_cpu, pct_near_peak, test.avg_p90_cpu
-                ));
-            }
+        // Check CPU classification using sustained exceedance
+        // A test needs more threads if it spends >20% of runtime above its allocation
+        let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0; // as percentage
+        if pct_above_allocation > exceedance_threshold {
+            issues.push(format!(
+                "CPU exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
+                current.effective_threads,
+                pct_above_allocation,
+                exceedance_threshold,
+                test.avg_avg_cpu,
+                test.avg_peak_cpu,
+                allocation_threshold as u32,
+                time_above_allocation_ms as f64 / 1000.0,
+            ));
         } else if suggested.threads_required < current.effective_threads
             && current.effective_threads > config.default_threads
         {
             issues.push(format!(
-                "CPU over-allocated: P90={:.2}x, peak={:.2}x but allocated {}T - could downgrade",
-                test.avg_p90_cpu, test.avg_peak_cpu, current.effective_threads
+                "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
+                test.avg_avg_cpu,
+                allocation_threshold as u32,
+                pct_above_allocation,
+                current.effective_threads,
             ));
         }
 
