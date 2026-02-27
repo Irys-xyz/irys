@@ -179,13 +179,18 @@ where
             ));
         }
 
+        let range_specifier = pd_chunk_message.range_specifier;
         let chunk = pd_chunk_message.chunk;
+        let chunk_size = chunk.bytes.0.len() as u64;
         let chunk_path_hash = chunk.chunk_path_hash();
 
+        record_gossip_chunk_received(chunk_size);
+
         match self.mempool.handle_chunk_ingress(chunk).await {
-            Ok(()) => self
-                .cache
-                .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash)),
+            Ok(()) => self.cache.record_seen(
+                source_peer_id,
+                GossipCacheKey::PdChunk(chunk_path_hash, range_specifier),
+            ),
             Err(error) => {
                 record_gossip_inbound_error(error.error_type(), error.is_advisory());
 

@@ -1016,9 +1016,10 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
+            let chunk_path_hash = pd_chunk_json.0.data.chunk.chunk_path_hash();
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring PD chunk",
-                node_id
+                "Node {}: Gossip reception is disabled, ignoring PD chunk {:?}",
+                node_id, chunk_path_hash
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -1068,6 +1069,19 @@ where
             Ok(peer) => peer,
             Err(error_response) => return error_response,
         };
+
+        if !server.data_handler.sync_state.is_gossip_reception_enabled()
+            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
+        {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            warn!(
+                "Node {}: Gossip reception/broadcast is disabled, ignoring VersionPD data request",
+                node_id
+            );
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
 
         match server
             .data_handler

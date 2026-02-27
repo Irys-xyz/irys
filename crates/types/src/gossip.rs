@@ -468,7 +468,7 @@ pub mod version_pd {
 
     impl From<PdChunkMessage> for GossipBroadcastMessageVersionPD {
         fn from(msg: PdChunkMessage) -> Self {
-            let key = GossipCacheKey::chunk(&msg.chunk);
+            let key = GossipCacheKey::pd_chunk(&msg.chunk, msg.range_specifier);
             Self::new(key, GossipDataVersionPD::PdChunk(msg))
         }
     }
@@ -577,6 +577,7 @@ pub enum GossipCacheKey {
     Block(BlockHash),
     ExecutionPayload(B256),
     IngressProof(H256),
+    PdChunk(ChunkPathHash, ChunkRangeSpecifier),
 }
 
 impl GossipCacheKey {
@@ -602,6 +603,10 @@ impl GossipCacheKey {
 
     pub fn ingress_proof(ingress_proof: &IngressProof) -> Self {
         Self::IngressProof(ingress_proof.proof)
+    }
+
+    pub fn pd_chunk(chunk: &UnpackedChunk, range_specifier: ChunkRangeSpecifier) -> Self {
+        Self::PdChunk(chunk.chunk_path_hash(), range_specifier)
     }
 }
 
