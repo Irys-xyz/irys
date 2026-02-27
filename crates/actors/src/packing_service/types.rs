@@ -1,12 +1,19 @@
-use std::sync::{Arc, atomic::AtomicUsize};
-use std::time::Duration;
-
 use dashmap::DashMap;
 use irys_domain::StorageModule;
 use irys_types::PartitionChunkRange;
+use irys_types::{PackedChunk, UnpackedChunk};
+use std::sync::{Arc, atomic::AtomicUsize};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
+use super::config::UnpackingConfig;
+use super::errors::UnpackingError;
 use super::{PackingError, PackingResult, config::PackingConfig};
+
+// ------------------------------------------------------------------------
+// PACKING
+// ------------------------------------------------------------------------
 
 /// A validated packing request for a specific storage module and chunk range
 #[derive(Debug, Clone)]
@@ -16,7 +23,6 @@ pub struct PackingRequest {
 }
 
 impl PackingRequest {
-    /// Create a new validated packing request
     pub fn new(
         storage_module: Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
@@ -43,12 +49,10 @@ impl PackingRequest {
         })
     }
 
-    /// Access storage module
     pub fn storage_module(&self) -> &Arc<StorageModule> {
         &self.storage_module
     }
 
-    /// Access chunk range
     pub fn chunk_range(&self) -> &PartitionChunkRange {
         &self.chunk_range
     }
@@ -63,20 +67,11 @@ pub(super) type PackingSMChannel = (
 /// Collection of per-storage-module packing queues
 pub type PackingQueues = Arc<DashMap<usize, PackingSMChannel>>;
 
-/// Semaphore for limiting concurrent packing operations
-pub type PackingSemaphore = Arc<Semaphore>;
-
-/// Channel for sending packing requests
-pub type PackingSender = mpsc::Sender<PackingRequest>;
-
-/// Channel for receiving packing requests
-pub type PackingReceiver = mpsc::Receiver<PackingRequest>;
-
 /// Internal state exposed for monitoring and testing
 #[derive(Debug, Clone)]
-pub struct Internals {
+pub struct PackingInternals {
     pub pending_jobs: PackingQueues,
-    pub semaphore: PackingSemaphore,
+    pub semaphore: Arc<Semaphore>,
     pub active_workers: Arc<AtomicUsize>,
     pub config: PackingConfig,
 }
@@ -124,15 +119,15 @@ impl PackingIdleWaiter {
 /// Handle for interacting with the packing service
 #[derive(Debug, Clone)]
 pub struct PackingHandle {
-    sender: PackingSender,
-    internals: Internals,
+    sender: mpsc::Sender<PackingRequest>,
+    internals: PackingInternals,
     packing_service_sender: mpsc::Sender<PackingServiceMessage>,
 }
 
 impl PackingHandle {
     pub(crate) fn new(
-        sender: PackingSender,
-        internals: Internals,
+        sender: mpsc::Sender<PackingRequest>,
+        internals: PackingInternals,
         packing_service_sender: mpsc::Sender<PackingServiceMessage>,
     ) -> Self {
         Self {
@@ -157,17 +152,109 @@ impl PackingHandle {
     }
 
     /// Access a clone of the internals snapshot
-    pub fn internals(&self) -> Internals {
+    pub fn internals(&self) -> PackingInternals {
         self.internals.clone()
     }
 
     /// Access a clone of the underlying sender
-    pub fn sender(&self) -> PackingSender {
+    pub fn sender(&self) -> mpsc::Sender<PackingRequest> {
         self.sender.clone()
     }
 
     /// Create a waiter for idle detection
     pub fn waiter(&self) -> PackingIdleWaiter {
         PackingIdleWaiter::new(self.packing_service_sender.clone())
+    }
+}
+
+// ------------------------------------------------------------------------
+// UNPACKING
+// ------------------------------------------------------------------------
+
+pub type UnpackingQueue = DashMap<Instant, UnpackingRequest>;
+/// Shared reference to packed chunks for concurrent unpacking operations.
+pub type PackedChunks = Arc<Vec<PackedChunk>>;
+
+/// Priority level for unpacking operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnpackingPriority {
+    High,       // PoA, PD (execution-blocking)
+    Background, // DataSync, EntropyPacking
+}
+
+/// A validated unpacking request
+#[derive(Debug)]
+pub struct UnpackingRequest {
+    pub packed_chunks: PackedChunks,
+    pub priority: UnpackingPriority,
+    pub response_tx: oneshot::Sender<Result<UnpackedChunk, UnpackingError>>,
+}
+
+impl UnpackingRequest {
+    /// Create a new unpacking request and return it with its response receiver
+    pub fn new(
+        packed_chunks: PackedChunks,
+        priority: UnpackingPriority,
+    ) -> (
+        Self,
+        oneshot::Receiver<Result<UnpackedChunk, UnpackingError>>,
+    ) {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Self {
+            packed_chunks,
+            priority,
+            response_tx,
+        };
+        (request, response_rx)
+    }
+
+    /// Helper to create an unpacking request from a single chunk
+    pub fn from_chunk(
+        packed_chunk: PackedChunk,
+        priority: UnpackingPriority,
+    ) -> (
+        Self,
+        oneshot::Receiver<Result<UnpackedChunk, UnpackingError>>,
+    ) {
+        Self::new(Arc::new(vec![packed_chunk]), priority)
+    }
+}
+
+/// Internal state exposed for monitoring and testing
+#[derive(Debug, Clone)]
+pub struct UnpackingInternals {
+    pub config: UnpackingConfig,
+}
+/// Handle for interacting with the unpacking service
+#[derive(Debug, Clone)]
+pub struct UnpackingHandle {
+    sender: mpsc::Sender<UnpackingRequest>,
+    internals: UnpackingInternals,
+}
+
+impl UnpackingHandle {
+    pub(crate) fn new(
+        sender: mpsc::Sender<UnpackingRequest>,
+        internals: UnpackingInternals,
+    ) -> Self {
+        Self { sender, internals }
+    }
+
+    /// Enqueue an unpacking request. Applies backpressure if the channel is full.
+    pub async fn send(
+        &self,
+        req: UnpackingRequest,
+    ) -> Result<(), mpsc::error::SendError<UnpackingRequest>> {
+        self.sender.send(req).await
+    }
+
+    /// Access a clone of the internals snapshot
+    pub fn internals(&self) -> UnpackingInternals {
+        self.internals.clone()
+    }
+
+    /// Access a clone of the underlying sender
+    pub fn sender(&self) -> mpsc::Sender<UnpackingRequest> {
+        self.sender.clone()
     }
 }

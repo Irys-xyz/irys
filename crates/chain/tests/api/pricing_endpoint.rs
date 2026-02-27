@@ -380,7 +380,10 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
 /// A single node is configured with a hardfork that activates ~5 seconds after genesis.
 #[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Result<()> {
-    use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
+    use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD, Sprite};
+    use irys_types::storage_pricing::Amount;
+    use irys_types::UnixTimestamp;
+    use rust_decimal_macros::dec;
 
     // Define our ingress proof values
     const FRONTIER_PROOFS: u64 = 2;
@@ -405,6 +408,13 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
             activation_timestamp: UnixTimestamp::from_secs(hardfork_activation),
             number_of_ingress_proofs_total: HARDFORK_PROOFS,
             number_of_ingress_proofs_from_assignees: 0,
+        }),
+        sprite: Some(Sprite {
+            activation_timestamp: UnixTimestamp::from_secs(0), // Active from genesis for tests
+            cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"),
+            base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"),
+            max_pd_chunks_per_block: 7_500,
+            min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
         }),
         aurora: None,
         borealis: None,

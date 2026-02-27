@@ -10,10 +10,12 @@ use tokio::sync::Semaphore;
 use tokio::task::yield_now;
 use tracing::{debug, warn};
 
+use super::common::PackingParams;
 use crate::packing_service::config::PackingConfig;
 
 /// CUDA/GPU-based packing strategy
 pub(crate) struct CudaPackingStrategy {
+    params: PackingParams,
     packing_config: PackingConfig,
     semaphore: Arc<Semaphore>,
     runtime_handle: tokio::runtime::Handle,
@@ -21,12 +23,13 @@ pub(crate) struct CudaPackingStrategy {
 
 impl CudaPackingStrategy {
     pub(crate) fn new(
-        _config: Arc<Config>,
+        config: Arc<Config>,
         packing_config: PackingConfig,
         semaphore: Arc<Semaphore>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
+            params: PackingParams::from_config(&config),
             packing_config,
             semaphore,
             runtime_handle,
@@ -46,9 +49,9 @@ impl super::PackingStrategy for CudaPackingStrategy {
         storage_module_id: usize,
         short_writes_before_sync: u32,
     ) -> Result<(), String> {
-        let chunk_size = storage_module.config.consensus.chunk_size;
+        let chunk_size = self.params.chunk_size as u32;
         assert_eq!(
-            chunk_size,
+            chunk_size as u64,
             irys_types::ConsensusConfig::CHUNK_SIZE,
             "Chunk size is not aligned with C code"
         );
@@ -56,10 +59,10 @@ impl super::PackingStrategy for CudaPackingStrategy {
         let mut handles = Vec::new();
 
         // Split range into batches
-        for chunk_range_split in split_interval(&chunk_range, self.packing_config.max_chunks)
-            .unwrap()
-            .iter()
-        {
+        let intervals = split_interval(&chunk_range, self.packing_config.max_chunks)
+            .map_err(|e| format!("Failed to split chunk range into GPU batches: {}", e))?;
+
+        for chunk_range_split in intervals.iter() {
             let start: u32 = *(*chunk_range_split).start();
             let end: u32 = *(*chunk_range_split).end();
             let num_chunks = end - start + 1;
@@ -75,20 +78,19 @@ impl super::PackingStrategy for CudaPackingStrategy {
                 .clone()
                 .acquire_owned()
                 .await
-                .expect("Failure acquiring a CUDA packing semaphore");
+                .map_err(|_| "Semaphore acquisition failed (channel closed)".to_string())?;
 
             let storage_module_clone = storage_module.clone();
-            let chain_id = self.packing_config.chain_id;
-            let entropy_iterations = storage_module.config.consensus.entropy_packing_iterations;
+            let chain_id = self.params.chain_id;
+            let entropy_iterations = self.params.entropy_iterations;
             let runtime_handle = self.runtime_handle.clone();
 
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
                 let out = runtime_handle
                     .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
-                        let mut out: Vec<u8> = Vec::with_capacity(
-                            (num_chunks * chunk_size as u32).try_into().unwrap(),
-                        );
+                        let mut out: Vec<u8> =
+                            Vec::with_capacity((num_chunks * chunk_size).try_into().unwrap());
                         capacity_pack_range_cuda_c(
                             num_chunks,
                             mining_address,
@@ -109,9 +111,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                 for i in 0..num_chunks {
                     storage_module_clone.write_chunk(
                         (start + i).into(),
-                        out[(i * chunk_size as u32) as usize
-                            ..((i + 1) * chunk_size as u32) as usize]
-                            .to_vec(),
+                        out[(i * chunk_size) as usize..((i + 1) * chunk_size) as usize].to_vec(),
                         ChunkType::Entropy,
                     );
 

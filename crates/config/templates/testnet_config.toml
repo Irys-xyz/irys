@@ -39,6 +39,7 @@ max_pending_chunk_requests = 100
 
 [packing.local]
 cpu_packing_concurrency = 4
+cpu_unpacking_concurrency = 4
 gpu_packing_batch_size = 1024
 
 [cache]
@@ -160,8 +161,16 @@ price_adjustment_interval = 10
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
 
-# To enable the next hardfork at a specific block, uncomment:
+# To enable the next_name_tbd hardfork at a specific timestamp, uncomment:
 # [consensus.Custom.hardforks.next_name_tbd]
-# activation_block = 1000000
+# activation_timestamp = 1000000
 # number_of_ingress_proofs_total = 4
 # number_of_ingress_proofs_from_assignees = 2
+
+# Sprite hardfork enables Programmable Data (PD) features.
+# To enable, uncomment and set activation_timestamp:
+# [consensus.Custom.hardforks.sprite]
+# activation_timestamp = 1000000
+# cost_per_mb = 0.01
+# base_fee_floor = 0.01
+# max_pd_chunks_per_block = 7500

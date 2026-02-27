@@ -77,7 +77,7 @@ impl MockedServices {
             internal_message_bus: None,
         };
         let (service_senders, service_receivers) =
-            irys_actors::test_helpers::build_test_service_senders();
+            crate::tests::test_helpers::build_test_service_senders();
         let _reth_service_tx = service_senders.reth_service.clone();
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
         let mut block_tree_receiver = service_receivers.block_tree;

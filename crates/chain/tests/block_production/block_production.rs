@@ -10,6 +10,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_domain::ChainState;
+use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
@@ -21,7 +22,6 @@ use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256,
 };
-use reth::payload::EthBuiltPayload;
 use reth::rpc::types::BlockNumberOrTag;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
@@ -384,8 +384,9 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .iter()
         .collect::<Vec<_>>();
 
-    // We expect 3 receipts: storage tx, evm tx, and block reward
-    assert_eq!(block_txs.len(), 3);
+    // We expect 6 receipts on first Sprite block:
+    // block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, storage tx, and evm tx
+    assert_eq!(block_txs.len(), 6);
     // Assert block reward (should be the first receipt)
     let block_reward_systx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(matches!(
@@ -393,8 +394,30 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         TransactionPacket::BlockReward(_)
     ));
 
-    // Assert storage tx is included in the receipts (should be the second receipt)
-    let storage_tx_systx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
+    // Assert TreasuryDeposit (should be the second receipt - only on first Sprite block)
+    let treasury_deposit_systx =
+        ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
+    assert!(matches!(
+        treasury_deposit_systx.as_v1().unwrap(),
+        TransactionPacket::TreasuryDeposit(_)
+    ));
+
+    // Assert PD base fee update (should be the third receipt)
+    let pd_base_fee_systx = ShadowTransaction::decode(&mut block_txs[2].input().as_ref()).unwrap();
+    assert!(matches!(
+        pd_base_fee_systx.as_v1().unwrap(),
+        TransactionPacket::PdBaseFeeUpdate(_)
+    ));
+
+    // Assert IrysUsdPriceUpdate (should be the fourth receipt)
+    let price_update_systx = ShadowTransaction::decode(&mut block_txs[3].input().as_ref()).unwrap();
+    assert!(matches!(
+        price_update_systx.as_v1().unwrap(),
+        TransactionPacket::IrysUsdPriceUpdate(_)
+    ));
+
+    // Assert storage tx is included in the receipts (should be the fifth receipt)
+    let storage_tx_systx = ShadowTransaction::decode(&mut block_txs[4].input().as_ref()).unwrap();
     assert!(matches!(
         storage_tx_systx.as_v1().unwrap(),
         TransactionPacket::StorageFees(_)
@@ -549,11 +572,11 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
     }
 
-    // Mine a block - should only contain block reward transaction
+    // Mine a block - should contain block reward, PD base fee update, and IrysUsdPriceUpdate
     let irys_block = node.mine_block().await?;
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward shadow transaction
+    // Verify block transactions - should contain block reward, PD base fee update, and IrysUsdPriceUpdate shadow transactions
     let block_txs = context
         .inner
         .provider
@@ -562,18 +585,38 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     assert_eq!(
         block_txs.len(),
-        1,
-        "Block should only contain one transaction (block reward)"
+        3,
+        "Block should contain three transactions (block reward, PD base fee update, and IrysUsdPriceUpdate)"
     );
 
-    // Verify it's a block reward shadow transaction
-    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
+    // Verify first transaction is block reward shadow transaction
+    let block_reward_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
-            shadow_tx.as_v1().unwrap(),
+            block_reward_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
-        "Single transaction should be a block reward"
+        "First transaction should be a block reward"
+    );
+
+    // Verify second transaction is PD base fee update
+    let pd_base_fee_tx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
+    assert!(
+        matches!(
+            pd_base_fee_tx.as_v1().unwrap(),
+            TransactionPacket::PdBaseFeeUpdate(_)
+        ),
+        "Second transaction should be PD base fee update"
+    );
+
+    // Verify third transaction is IrysUsdPriceUpdate
+    let price_update_tx = ShadowTransaction::decode(&mut block_txs[2].input().as_ref()).unwrap();
+    assert!(
+        matches!(
+            price_update_tx.as_v1().unwrap(),
+            TransactionPacket::IrysUsdPriceUpdate(_)
+        ),
+        "Third transaction should be IrysUsdPriceUpdate"
     );
 
     // Verify unfunded user's balance remains zero
@@ -633,11 +676,11 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
     }
 
-    // Mine a block - should only contain block reward transaction
+    // Mine a block - should contain block reward, PD base fee update, and IrysUsdPriceUpdate
     let irys_block = node.mine_block().await?;
     let context = node.node_ctx.reth_node_adapter.clone();
 
-    // Verify block transactions - should only contain block reward shadow transaction
+    // Verify block transactions - should contain block reward, PD base fee update, and IrysUsdPriceUpdate shadow transactions
     let block_txs = context
         .inner
         .provider
@@ -646,18 +689,38 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     assert_eq!(
         block_txs.len(),
-        1,
-        "Block should only contain one transaction (block reward)"
+        3,
+        "Block should contain three transactions (block reward, PD base fee update, and IrysUsdPriceUpdate)"
     );
 
-    // Verify it's a block reward shadow transaction
-    let shadow_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
+    // Verify first transaction is block reward shadow transaction
+    let block_reward_tx = ShadowTransaction::decode(&mut block_txs[0].input().as_ref()).unwrap();
     assert!(
         matches!(
-            shadow_tx.as_v1().unwrap(),
+            block_reward_tx.as_v1().unwrap(),
             TransactionPacket::BlockReward(_)
         ),
-        "Single transaction should be a block reward"
+        "First transaction should be a block reward"
+    );
+
+    // Verify second transaction is PD base fee update
+    let pd_base_fee_tx = ShadowTransaction::decode(&mut block_txs[1].input().as_ref()).unwrap();
+    assert!(
+        matches!(
+            pd_base_fee_tx.as_v1().unwrap(),
+            TransactionPacket::PdBaseFeeUpdate(_)
+        ),
+        "Second transaction should be PD base fee update"
+    );
+
+    // Verify third transaction is IrysUsdPriceUpdate
+    let price_update_tx = ShadowTransaction::decode(&mut block_txs[2].input().as_ref()).unwrap();
+    assert!(
+        matches!(
+            price_update_tx.as_v1().unwrap(),
+            TransactionPacket::IrysUsdPriceUpdate(_)
+        ),
+        "Third transaction should be IrysUsdPriceUpdate"
     );
 
     // Verify nonexistent user's balance is zero (account doesn't exist)
@@ -744,11 +807,13 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .receipts_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
 
-    // Should have 2 receipts: block reward and storage fees
+    // Should have 5 receipts on first Sprite block:
+    // block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, and storage fees
+    // (TreasuryDeposit is emitted on the first Sprite block to initialize EVM treasury from genesis)
     assert_eq!(
         reth_receipts.len(),
-        2,
-        "Block should contain block reward and storage fee transactions"
+        5,
+        "Block should contain block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, and storage fee transactions"
     );
 
     // Verify block reward receipt (first)
@@ -763,8 +828,44 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         "First transaction should be block reward"
     );
 
-    // Verify storage fee receipt (second)
-    let storage_fee_receipt = &reth_receipts[1];
+    // Verify TreasuryDeposit receipt (second - only on first Sprite block)
+    let treasury_deposit_receipt = &reth_receipts[1];
+    assert!(
+        treasury_deposit_receipt.success,
+        "TreasuryDeposit transaction should succeed"
+    );
+    assert_eq!(
+        treasury_deposit_receipt.logs[0].topics()[0],
+        *shadow_tx_topics::TREASURY_DEPOSIT,
+        "Second transaction should be TreasuryDeposit"
+    );
+
+    // Verify PD base fee update receipt (third)
+    let pd_base_fee_receipt = &reth_receipts[2];
+    assert!(
+        pd_base_fee_receipt.success,
+        "PD base fee update transaction should succeed"
+    );
+    assert_eq!(
+        pd_base_fee_receipt.logs[0].topics()[0],
+        *shadow_tx_topics::PD_BASE_FEE_UPDATE,
+        "Third transaction should be PD base fee update"
+    );
+
+    // Verify IrysUsdPriceUpdate receipt (fourth)
+    let price_update_receipt = &reth_receipts[3];
+    assert!(
+        price_update_receipt.success,
+        "IrysUsdPriceUpdate transaction should succeed"
+    );
+    assert_eq!(
+        price_update_receipt.logs[0].topics()[0],
+        *shadow_tx_topics::IRYS_USD_PRICE_UPDATE,
+        "Fourth transaction should be IrysUsdPriceUpdate"
+    );
+
+    // Verify storage fee receipt (fifth)
+    let storage_fee_receipt = &reth_receipts[4];
     assert!(
         storage_fee_receipt.success,
         "Storage fee transaction should succeed with exact funds"
@@ -772,7 +873,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     assert_eq!(
         storage_fee_receipt.logs[0].topics()[0],
         *shadow_tx_topics::STORAGE_FEES,
-        "Second transaction should be storage fees"
+        "Fifth transaction should be storage fees"
     );
     assert_eq!(
         storage_fee_receipt.logs[0].address,
@@ -879,10 +980,11 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Verify block contains all expected shadow transactions
     // Based on the logs, both stake and pledge are included in the same block
+    // On first Sprite block: 6 receipts (block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, stake, pledge)
     assert_eq!(
         receipts1.len(),
-        3,
-        "Block should contain exactly 3 receipts: block reward, stake, and pledge"
+        6,
+        "Block should contain exactly 6 receipts: block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, stake, and pledge"
     );
 
     // Find and verify the stake shadow transaction receipt
@@ -979,16 +1081,26 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .receipts_by_block(HashOrNumber::Hash(irys_block2.evm_block_hash))?
         .unwrap();
 
-    // Second block should only have block reward
+    // Second block should have block reward, PD base fee update, and IrysUsdPriceUpdate
     assert_eq!(
         receipts2.len(),
-        1,
-        "Second block should only contain block reward"
+        3,
+        "Second block should contain block reward, PD base fee update, and IrysUsdPriceUpdate"
     );
     assert_eq!(
         receipts2[0].logs[0].topics()[0],
         *shadow_tx_topics::BLOCK_REWARD,
-        "Second block should only have block reward shadow tx"
+        "First shadow tx should be block reward"
+    );
+    assert_eq!(
+        receipts2[1].logs[0].topics()[0],
+        *shadow_tx_topics::PD_BASE_FEE_UPDATE,
+        "Second shadow tx should be PD base fee update"
+    );
+    assert_eq!(
+        receipts2[2].logs[0].topics()[0],
+        *shadow_tx_topics::IRYS_USD_PRICE_UPDATE,
+        "Third shadow tx should be IrysUsdPriceUpdate"
     );
 
     // Get the genesis nodes view of the peers assignments
@@ -1004,11 +1116,12 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .transactions_by_block(HashOrNumber::Hash(irys_block1.evm_block_hash))?
         .unwrap();
 
-    // Block should contain exactly 3 transactions: block reward, stake, pledge (in that order)
+    // Block should contain exactly 6 transactions on first Sprite block:
+    // block reward, TreasuryDeposit, PD base fee update, IrysUsdPriceUpdate, stake, pledge (in that order)
     assert_eq!(
         block_txs1.len(),
-        3,
-        "Block should contain exactly 3 transactions"
+        6,
+        "Block should contain exactly 6 transactions"
     );
 
     // First transaction should be block reward
@@ -1022,9 +1135,42 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         "First transaction should be block reward"
     );
 
-    // Second transaction should be stake
-    let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
+    // Second transaction should be TreasuryDeposit (only on first Sprite block)
+    let treasury_deposit_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
         .expect("Second transaction should be decodable as shadow transaction");
+    assert!(
+        matches!(
+            treasury_deposit_tx.as_v1().unwrap(),
+            TransactionPacket::TreasuryDeposit(_)
+        ),
+        "Second transaction should be TreasuryDeposit"
+    );
+
+    // Third transaction should be PD base fee update
+    let pd_base_fee_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
+        .expect("Third transaction should be decodable as shadow transaction");
+    assert!(
+        matches!(
+            pd_base_fee_tx.as_v1().unwrap(),
+            TransactionPacket::PdBaseFeeUpdate(_)
+        ),
+        "Third transaction should be PD base fee update"
+    );
+
+    // Fourth transaction should be IrysUsdPriceUpdate
+    let price_update_tx = ShadowTransaction::decode(&mut block_txs1[3].input().as_ref())
+        .expect("Fourth transaction should be decodable as shadow transaction");
+    assert!(
+        matches!(
+            price_update_tx.as_v1().unwrap(),
+            TransactionPacket::IrysUsdPriceUpdate(_)
+        ),
+        "Fourth transaction should be IrysUsdPriceUpdate"
+    );
+
+    // Fifth transaction should be stake
+    let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[4].input().as_ref())
+        .expect("Fifth transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.alloy_address());
         let expected_stake_amount: U256 = stake_tx.value().into();
@@ -1033,12 +1179,12 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             "Stake amount should be fee + stake_fee.amount"
         );
     } else {
-        panic!("Second transaction should be stake");
+        panic!("Fifth transaction should be stake");
     }
 
-    // Third transaction should be pledge
-    let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
-        .expect("Third transaction should be decodable as shadow transaction");
+    // Sixth transaction should be pledge
+    let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[5].input().as_ref())
+        .expect("Sixth transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.alloy_address());
         let expected_pledge_amount: U256 = consensus_config.pledge_base_value.amount.into();
@@ -1047,7 +1193,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
             "Pledge amount should be fee + pledge_fee.amount"
         );
     } else {
-        panic!("Third transaction should be pledge");
+        panic!("Sixth transaction should be pledge");
     }
     genesis_node.stop().await;
     peer_node.stop().await;
@@ -1075,10 +1221,17 @@ async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<
-            (EthBuiltPayload, irys_types::U256),
+            (IrysBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
         > {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
@@ -1093,8 +1246,10 @@ async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()
                     prev_evm_block,
                     &tampered_mempool,
                     reward_amount,
+                    pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -1490,10 +1645,17 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<
-            (EthBuiltPayload, irys_types::U256),
+            (IrysBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
         > {
             // Deliberately use an incorrect solution hash (all zeros)
@@ -1505,8 +1667,10 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                     prev_evm_block,
                     mempool,
                     reward_amount,
+                    pd_base_fee,
                     timestamp_ms,
                     invalid_solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }

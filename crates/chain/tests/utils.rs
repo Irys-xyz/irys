@@ -8,8 +8,13 @@ use actix_web::{
     dev::{Service, ServiceResponse},
     Error,
 };
+use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
+use alloy_eips::Encodable2718 as _;
+use alloy_network::TxSignerSync as _;
+use alloy_primitives::Address;
+use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
@@ -40,11 +45,14 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
+use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
+use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -54,6 +62,10 @@ use irys_types::{
     SystemLedger, H256, U256,
 };
 use irys_types::{
+    storage_pricing::{
+        phantoms::{CostPerChunk, Irys},
+        Amount,
+    },
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
@@ -67,7 +79,6 @@ use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
-    payload::EthBuiltPayload,
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
@@ -1585,7 +1596,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_with_payload(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
         self.node_ctx
             .service_senders
@@ -1622,7 +1633,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         self.with_gossip_disabled(self.mine_block_with_payload())
             .await
     }
@@ -1631,7 +1642,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> eyre::Result<(
         Arc<IrysBlockHeader>,
-        EthBuiltPayload,
+        IrysBuiltPayload,
         BlockTransactions,
         BlockValidationOutcome,
     )> {
@@ -2432,6 +2443,158 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    /// Creates and injects a single PD transaction with a custom priority fee.
+    ///
+    /// # Returns
+    /// The transaction hash for the injected transaction
+    pub async fn create_and_inject_pd_transaction_with_priority_fee(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        priority_fee_per_chunk: u64,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        const LARGE_MAX_BASE_FEE: u64 = 100_000_000_000_u64;
+
+        self.create_and_inject_pd_transaction_with_custom_fees(
+            signer,
+            chunks_per_tx,
+            U256::from(priority_fee_per_chunk),
+            U256::from(LARGE_MAX_BASE_FEE),
+            nonce,
+            offset_base,
+        )
+        .await
+    }
+
+    /// Create and inject a PD transaction with fully customizable fees.
+    ///
+    /// This is similar to `create_and_inject_pd_transaction_with_priority_fee` but allows
+    /// setting both priority_fee and base_fee per chunk. Used for testing fee validation
+    /// scenarios like min_pd_transaction_cost enforcement.
+    ///
+    /// # Arguments
+    /// * `signer` - The IrysSigner to sign the transaction
+    /// * `chunks_per_tx` - Number of chunks for the PD transaction
+    /// * `priority_fee_per_chunk` - Priority fee per chunk in wei
+    /// * `base_fee_per_chunk` - Max base fee per chunk in wei
+    /// * `nonce` - Transaction nonce
+    /// * `offset_base` - Base offset for chunk range specifiers
+    pub async fn create_and_inject_pd_transaction_with_custom_fees(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        priority_fee_per_chunk: impl Into<U256>,
+        base_fee_per_chunk: impl Into<U256>,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        let priority_fee: U256 = priority_fee_per_chunk.into();
+        let base_fee: U256 = base_fee_per_chunk.into();
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let chain_id = self.node_ctx.config.consensus.chain_id;
+
+        // Build storage keys for the specified number of chunks
+        let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
+            partition_index: alloy_primitives::aliases::U200::from_le_bytes([0xff; 25]),
+            offset: offset_base + i as u32,
+            chunk_count: 1,
+        });
+        let access_list = build_pd_access_list(storage_keys);
+
+        // Build PD header with custom fees
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: priority_fee.into(),
+            max_base_fee_per_chunk: base_fee.into(),
+        };
+        let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+
+        // Create and sign EIP-1559 transaction
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: calldata,
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        // Inject transaction into mempool
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
+    }
+
+    /// Get current and predicted PD base fee per chunk in Irys tokens.
+    ///
+    /// Returns (current_block_fee, predicted_next_block_fee).
+    /// Uses the PdPricing service to query fee history and prediction.
+    pub fn get_pd_base_fee(
+        &self,
+    ) -> eyre::Result<(Amount<(CostPerChunk, Irys)>, Amount<(CostPerChunk, Irys)>)> {
+        let history = self.node_ctx.pd_pricing.get_fee_history(1, &[50])?;
+        let current = history.base_fee_per_chunk_irys[0];
+        let next = history.base_fee_per_chunk_irys[1];
+        Ok((current, next))
+    }
+
+    /// Create and inject a PD transaction using predicted network fees.
+    ///
+    /// This method queries the current network state to determine optimal fees:
+    /// - `max_base_fee`: predicted next block fee + 20% buffer
+    /// - `priority_fee`: 50th percentile (median) from recent blocks, or 10% of base fee as fallback
+    ///
+    /// # Returns
+    /// The transaction hash for the injected transaction
+    pub async fn create_and_inject_pd_transaction_with_optimal_fees(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        // Query fee history for base fee prediction and priority fee percentiles
+        let history = self.node_ctx.pd_pricing.get_fee_history(1, &[50])?;
+        let next_base_fee = history.base_fee_per_chunk_irys[1]; // Predicted next block fee
+
+        // Calculate optimal fees:
+        // - max_base_fee: predicted + 20% buffer to handle fee increases
+        // - priority_fee: 50th percentile from most recent block, or 10% of base fee as fallback
+        let max_base_fee = next_base_fee.amount * U256::from(120) / U256::from(100);
+        let priority_fee = history
+            .reward
+            .last()
+            .and_then(|r| r.percentiles.get(&50))
+            .map(|p| p.fee_irys.amount)
+            .unwrap_or_else(|| next_base_fee.amount / U256::from(10));
+
+        self.create_and_inject_pd_transaction_with_custom_fees(
+            signer,
+            chunks_per_tx,
+            priority_fee,
+            max_base_fee,
+            nonce,
+            offset_base,
+        )
+        .await
+    }
+
     #[diag_slow(state = "stop".to_string())]
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
@@ -2513,7 +2676,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
-        eth_payload: EthBuiltPayload,
+        eth_payload: IrysBuiltPayload,
         block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
         // Ingest data txs into peer's mempool

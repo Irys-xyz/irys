@@ -100,6 +100,7 @@ pub async fn run_node(
     node_config: irys_types::NodeConfig,
     latest_block: u64,
     random_ports: bool,
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -202,8 +203,20 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
+    // Get max PD chunks per block from Sprite hardfork config (if configured)
+    let hardfork_config = &node_config.consensus_config().hardforks;
+    let max_pd_chunks_per_block = hardfork_config
+        .sprite
+        .as_ref()
+        .map(|s| s.max_pd_chunks_per_block)
+        .unwrap_or(0); // Default to 0 if Sprite not configured
+
     let handle = builder
-        .node(IrysEthereumNode)
+        .node(IrysEthereumNode {
+            max_pd_chunks_per_block,
+            chunk_provider,
+            hardfork_config: std::sync::Arc::new(hardfork_config.clone()),
+        })
         .launch_with_debug_capabilities()
         .into_future()
         .in_current_span()

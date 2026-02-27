@@ -87,7 +87,9 @@ alloy-rpc-types-trace.workspace = true
 serde = { workspace = true, features = ["derive"] }
 irys-macros-diag-slow.workspace = true
 alloy-consensus.workspace = true
+alloy-signer.workspace = true
 alloy-primitives.workspace = true
+irys-reth.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]

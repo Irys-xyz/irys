@@ -12,12 +12,12 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
+use irys_reth::IrysBuiltPayload;
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
     DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, SendTraced as _,
     UnixTimestampMs, H256, U256,
 };
-use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
@@ -56,9 +56,16 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
+        ) -> Result<(IrysBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
             self.prod
@@ -68,8 +75,10 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
                     mempool,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
                     invalid_reward_amount,
+                    pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -232,9 +241,16 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
+        ) -> Result<(IrysBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let mut tampered_mempool = mempool.clone();
             tampered_mempool.submit_txs.push(self.extra_tx.clone());
@@ -244,8 +260,10 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     perv_evm_block,
                     &tampered_mempool,
                     reward_amount,
+                    pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -336,9 +354,16 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
+        ) -> Result<(IrysBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the
@@ -352,8 +377,10 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     perv_evm_block,
                     &tampered_mempool,
                     reward_amount,
+                    pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }

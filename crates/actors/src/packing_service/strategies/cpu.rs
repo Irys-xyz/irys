@@ -9,14 +9,14 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::yield_now;
 use tracing::{debug, trace, warn};
 
+use super::common::PackingParams;
+
 /// CPU-based packing strategy
 pub(crate) struct CpuPackingStrategy {
-    chunk_size: usize,
-    entropy_iterations: u32,
+    params: PackingParams,
     semaphore: Arc<Semaphore>,
     notify: Arc<Notify>,
     runtime_handle: tokio::runtime::Handle,
-    chain_id: u64,
 }
 
 impl CpuPackingStrategy {
@@ -25,15 +25,13 @@ impl CpuPackingStrategy {
         semaphore: Arc<Semaphore>,
         notify: Arc<Notify>,
         runtime_handle: tokio::runtime::Handle,
-        chain_id: u64,
+        _chain_id: u64,
     ) -> Self {
         Self {
-            chunk_size: config.consensus.chunk_size as usize,
-            entropy_iterations: config.consensus.entropy_packing_iterations,
+            params: PackingParams::from_config(&config),
             semaphore,
             notify,
             runtime_handle,
-            chain_id,
         }
     }
 }
@@ -68,12 +66,12 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 .clone()
                 .acquire_owned()
                 .await
-                .expect("Failure acquiring a CPU packing semaphore");
+                .map_err(|_| "Semaphore acquisition failed (channel closed)".to_string())?;
 
-            let chunk_size = self.chunk_size;
-            let entropy_iterations = self.entropy_iterations;
+            let chunk_size = self.params.chunk_size;
+            let entropy_iterations = self.params.entropy_iterations;
+            let chain_id = self.params.chain_id;
             let storage_module_clone = storage_module.clone();
-            let chain_id = self.chain_id;
             let notify = self.notify.clone();
 
             // Pack in blocking thread pool
@@ -141,7 +139,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
             &storage_module_id,
             &partition_hash,
             &mining_address,
-            self.entropy_iterations
+            self.params.entropy_iterations
         );
 
         Ok(())

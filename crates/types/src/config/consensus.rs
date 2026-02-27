@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig, Sprite};
 use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
     storage_pricing::{
@@ -639,6 +639,7 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
+                sprite: None,
                 aurora: None,
                 borealis: None,
             },
@@ -651,21 +652,20 @@ impl ConsensusConfig {
         const SHA1_DIFFICULTY: u64 = 70_000;
         const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
         const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
-
-        // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
         const INFLATION_CAP: u128 = 100_000_000;
+
         Self {
             chain_id: 1270,
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),
             safe_minimum_number_of_years: 200,
             genesis: GenesisConfig {
                 timestamp_millis: 0,
                 miner_address: IrysAddress::ZERO,
                 reward_address: IrysAddress::ZERO,
-                last_epoch_hash: H256::zero(),
+                last_epoch_hash: H256::zero(), // Critical: must be zero for deterministic tests
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
@@ -690,21 +690,17 @@ impl ConsensusConfig {
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
-                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
-                // With 12s target block time, this resets approximately every 10 minutes
                 reset_frequency: 50 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: SHA1_DIFFICULTY,
             },
-
             epoch: EpochConfig {
                 capacity_scalar: 100,
                 num_blocks_in_epoch: 100,
                 submit_ledger_epoch_length: 5,
                 num_capacity_partitions: None,
             },
-
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
                 difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
@@ -721,22 +717,16 @@ impl ConsensusConfig {
                 alloc: {
                     let mut map = BTreeMap::new();
                     map.insert(
-                        Address::from_slice(
-                            hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
-                                .unwrap()
-                                .as_slice(),
-                        ),
+                        Address::from_hex("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                            .expect("valid hex address"),
                         GenesisAccount {
                             balance: U256::from(99999000000000000000000_u128),
                             ..Default::default()
                         },
                     );
                     map.insert(
-                        Address::from_slice(
-                            hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                                .unwrap()
-                                .as_slice(),
-                        ),
+                        Address::from_hex("A93225CBf141438629f1bd906A31a1c5401CE924")
+                            .expect("valid hex address"),
                         GenesisAccount {
                             balance: U256::from(99999000000000000000000_u128),
                             ..Default::default()
@@ -751,15 +741,22 @@ impl ConsensusConfig {
             },
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
-            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"),
             enable_full_ingress_proof_validation: false,
             max_future_timestamp_drift_millis: 15_000,
-            // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
                 frontier: FrontierParams {
-                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_total: 1, // Only 1 proof needed in tests
                     number_of_ingress_proofs_from_assignees: 0,
                 },
+                sprite: Some(Sprite {
+                    // From feat/pd - enable PD from genesis for tests
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                    cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"),
+                    base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"),
+                    max_pd_chunks_per_block: 7_500,
+                    min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
+                }),
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
@@ -872,6 +869,7 @@ impl ConsensusConfig {
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
+                sprite: None,
                 // Borealis hardfork - disabled for testnet (controlled activation)
                 borealis: None,
             },
@@ -943,7 +941,7 @@ mod tests {
         // - The canonical JSON serialization implementation
         // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
+        let expected_hash = H256::from_base58("JAvW3YLPGQhoDcR4xdGyh6fssC6usQh7gGkh5fC2JPTM");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

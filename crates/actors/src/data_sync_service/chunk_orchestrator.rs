@@ -137,17 +137,28 @@ impl ChunkOrchestrator {
             .filter(|r| matches!(r.request_state, ChunkRequestState::Pending))
             .count();
 
-        let max_chunk_offset = self.get_max_chunk_offset();
         let pa = self.storage_module.partition_assignment().unwrap();
+
+        debug!(
+            "populate_request_queue: sm_id={}, ledger_id={:?}, slot_index={:?}, pending_count={}",
+            self.storage_module.id, pa.ledger_id, pa.slot_index, pending_count
+        );
+
+        let max_chunk_offset = self.get_max_chunk_offset();
 
         let Some((max_chunk_offset, _)) = max_chunk_offset else {
             // Not requests needed
             debug!(
-                "No chunk requests needed for ledger:{:?} slot_index:{:?}",
-                pa.ledger_id, pa.slot_index
+                "No chunk requests needed for sm_id={} ledger:{:?} slot_index:{:?}",
+                self.storage_module.id, pa.ledger_id, pa.slot_index
             );
             return;
         };
+
+        debug!(
+            "populate_request_queue: sm_id={}, max_chunk_offset={}",
+            self.storage_module.id, max_chunk_offset
+        );
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(pending_count);
@@ -249,6 +260,11 @@ impl ChunkOrchestrator {
             .get_storage_module_ledger_offsets()
             .expect("storage module should be assigned to a ledger");
 
+        debug!(
+            "get_max_chunk_offset: ledger_range={:?}, ledger_id={}, sm_id={}",
+            ledger_range, self.ledger_id, self.storage_module.id
+        );
+
         // Fetch the most recently migrated block
         // We only want to download migrated chunks from other peers
         let max_chunk_offset: Option<u64> = {
@@ -257,11 +273,22 @@ impl ChunkOrchestrator {
             let block_migration_depth =
                 self.config.consensus_config().block_migration_depth as usize;
 
+            debug!(
+                "get_max_chunk_offset: canonical.len()={}, block_migration_depth={}",
+                canonical.len(),
+                block_migration_depth
+            );
+
             if canonical.len() >= block_migration_depth {
                 let most_recent_migrated_block =
                     &canonical[canonical.len() - block_migration_depth];
 
                 let block = most_recent_migrated_block.header();
+
+                debug!(
+                    "get_max_chunk_offset: found migrated block, data_ledgers.len()={}",
+                    block.data_ledgers.len()
+                );
 
                 let data_ledger = block
                     .data_ledgers
@@ -269,28 +296,48 @@ impl ChunkOrchestrator {
                     .find(|dl| dl.ledger_id == self.ledger_id)
                     .expect("should be able to look up data_ledger by id");
 
-                // info!("block: {:#?}", block);
+                debug!(
+                    "get_max_chunk_offset: data_ledger.total_chunks={}",
+                    data_ledger.total_chunks
+                );
 
                 if data_ledger.total_chunks == 0 {
+                    debug!("get_max_chunk_offset: returning None (total_chunks=0)");
                     None
                 } else {
-                    Some(data_ledger.total_chunks.saturating_sub(1))
+                    let offset = data_ledger.total_chunks.saturating_sub(1);
+                    debug!("get_max_chunk_offset: max offset from block={}", offset);
+                    Some(offset)
                 }
             } else {
+                debug!(
+                    "get_max_chunk_offset: returning None (canonical.len() < block_migration_depth)"
+                );
                 None
             }
         };
 
         // If we couldn't find a valid max_chunk_offset return None
-        let max_chunk_offset = max_chunk_offset?;
+        let Some(max_chunk_offset) = max_chunk_offset else {
+            debug!("get_max_chunk_offset: returning None (no max_chunk_offset from block)");
+            return None;
+        };
+
+        debug!(
+            "get_max_chunk_offset: max_chunk_offset={}, ledger_range.start()={}, ledger_range.end()={}",
+            max_chunk_offset,
+            ledger_range.start(),
+            ledger_range.end()
+        );
 
         // is the max chunk offset before the start of this storage module (can happen at head of chain)
         if ledger_range.start() > max_chunk_offset.into() {
             // Ledger range of the partition starts after the max_chunk_offset meaning don't attempt to sync anything
+            debug!("get_max_chunk_offset: returning None (ledger_range.start > max_chunk_offset)");
             return None;
         }
 
-        if ledger_range.end() > max_chunk_offset.into() {
+        let result = if ledger_range.end() > max_chunk_offset.into() {
             let part_relative: u64 = max_chunk_offset.saturating_sub(ledger_range.start().into());
             Some((
                 PartitionChunkOffset::from(part_relative as u32),
@@ -303,7 +350,14 @@ impl ChunkOrchestrator {
                 PartitionChunkOffset::from(max),
                 LedgerChunkOffset::from(max_chunk_offset),
             ))
-        }
+        };
+
+        debug!(
+            "get_max_chunk_offset: returning {:?}",
+            result.as_ref().map(|(p, l)| (p.to_string(), l.to_string()))
+        );
+
+        result
     }
 
     fn find_best_peer(&self, excluding: Option<&ExcludedPeerAddresses>) -> Option<IrysAddress> {

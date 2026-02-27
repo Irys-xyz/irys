@@ -82,6 +82,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         packing: irys_types::PackingConfig {
             local: irys_types::LocalPackingConfig {
                 cpu_packing_concurrency: 0,
+                cpu_unpacking_concurrency: 0,
                 gpu_packing_batch_size: 0,
             },
             remote: vec![RemotePackingConfig {
@@ -122,9 +123,13 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     // Get the current Tokio runtime handle for this test context
     let runtime_handle =
         tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
-    let _packing_handles = packing.spawn_packing_controllers(runtime_handle.clone());
+    let _packing_handles = packing
+        .internal_packing_service
+        .spawn_packing_controllers(runtime_handle.clone());
 
-    let handle = packing.spawn_tokio_service(runtime_handle.clone());
+    let handle = packing
+        .internal_packing_service
+        .spawn_tokio_service(runtime_handle.clone());
 
     // action
     handle.send(request)?;

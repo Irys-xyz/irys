@@ -419,7 +419,8 @@ pub struct PackingConfig {
 pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
-
+    /// Number of CPU threads to use for data unpacking operations
+    pub cpu_unpacking_concurrency: u16,
     /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
 }
@@ -428,6 +429,7 @@ impl Default for LocalPackingConfig {
     fn default() -> Self {
         Self {
             cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
+            cpu_unpacking_concurrency: 4,
             gpu_packing_batch_size: 0,
         }
     }
@@ -865,6 +867,7 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
+                    cpu_unpacking_concurrency: 4,
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1011,6 +1014,7 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
+                    cpu_unpacking_concurrency: 4,
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),

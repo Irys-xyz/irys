@@ -5,8 +5,8 @@
 
 use std::convert::Infallible;
 
-use alloy_eips::{Encodable2718 as _, eip4895::Withdrawal};
-use alloy_primitives::B256;
+use alloy_eips::{Encodable2718 as _, eip4895::Withdrawal, eip7685::Requests};
+use alloy_primitives::{B256, U256};
 use alloy_rpc_types::Withdrawals;
 use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload};
 use reth::api::PayloadTypes;
@@ -15,8 +15,10 @@ use reth::primitives::{SealedBlock, SealedHeader};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
+use reth_ethereum_primitives::EthPrimitives;
 use reth_node_api::{BuiltPayload, NodePrimitives, PayloadAttributes, PayloadBuilderAttributes};
 use reth_payload_builder::PayloadId;
+use reth_payload_primitives::BuiltPayloadExecutedBlock;
 use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_transaction_pool::EthPooledTransaction;
 use revm_primitives::Address;
@@ -167,13 +169,82 @@ impl PayloadBuilderAttributes for IrysPayloadBuilderAttributes {
     }
 }
 
+/// Irys-specific built payload that includes treasury balance.
+///
+/// Treasury balance is extracted from EVM state after transaction execution,
+/// before the state is committed to the canonical chain. This allows us to
+/// pass the treasury balance to the block producer without waiting for the
+/// Fork Choice Update (FCU).
+#[derive(Debug, Clone)]
+pub struct IrysBuiltPayload {
+    /// The inner Ethereum built payload
+    inner: EthBuiltPayload,
+    /// Final treasury balance after all transactions in this block
+    treasury_balance: U256,
+}
+
+impl IrysBuiltPayload {
+    /// Create a new IrysBuiltPayload
+    pub fn new(inner: EthBuiltPayload, treasury_balance: U256) -> Self {
+        Self {
+            inner,
+            treasury_balance,
+        }
+    }
+
+    /// Get the inner EthBuiltPayload
+    pub fn inner(&self) -> &EthBuiltPayload {
+        &self.inner
+    }
+
+    /// Get the treasury balance
+    pub fn treasury_balance(&self) -> U256 {
+        self.treasury_balance
+    }
+
+    /// Consume self and return the inner EthBuiltPayload
+    pub fn into_inner(self) -> EthBuiltPayload {
+        self.inner
+    }
+
+    /// Get the block from the inner payload
+    pub fn block(&self) -> &SealedBlock<<EthPrimitives as NodePrimitives>::Block> {
+        self.inner.block()
+    }
+
+    /// Get the fees from the inner payload
+    pub fn fees(&self) -> U256 {
+        self.inner.fees()
+    }
+}
+
+impl BuiltPayload for IrysBuiltPayload {
+    type Primitives = EthPrimitives;
+
+    fn block(&self) -> &SealedBlock<<Self::Primitives as NodePrimitives>::Block> {
+        self.inner.block()
+    }
+
+    fn fees(&self) -> U256 {
+        self.inner.fees()
+    }
+
+    fn executed_block(&self) -> Option<BuiltPayloadExecutedBlock<Self::Primitives>> {
+        self.inner.executed_block()
+    }
+
+    fn requests(&self) -> Option<Requests> {
+        self.inner.requests()
+    }
+}
+
 /// A default payload type for [`IrysPayloadTypes`]
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct IrysPayloadTypes;
 
 impl PayloadTypes for IrysPayloadTypes {
-    type BuiltPayload = EthBuiltPayload;
+    type BuiltPayload = IrysBuiltPayload;
     type PayloadAttributes = IrysPayloadAttributes;
     type PayloadBuilderAttributes = IrysPayloadBuilderAttributes;
     type ExecutionData = ExecutionData;
@@ -202,5 +273,64 @@ where
             ),
             shadow_txs: vec![],
         }
+    }
+}
+
+// ==========================================
+// TryFrom implementations for ExecutionPayload types
+// ==========================================
+//
+// These implementations are required by EthEngineTypes<IrysPayloadTypes> to satisfy
+// the EngineTypes trait bounds (which require TryInto). We delegate to the inner EthBuiltPayload.
+
+use alloy_rpc_types_engine::{
+    ExecutionPayloadEnvelopeV2, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4,
+    ExecutionPayloadEnvelopeV5, ExecutionPayloadEnvelopeV6, ExecutionPayloadV1,
+};
+use reth_ethereum_engine_primitives::BuiltPayloadConversionError;
+
+// V1 and V2 use From since they can't fail
+impl From<IrysBuiltPayload> for ExecutionPayloadV1 {
+    fn from(value: IrysBuiltPayload) -> Self {
+        value.inner.into()
+    }
+}
+
+impl From<IrysBuiltPayload> for ExecutionPayloadEnvelopeV2 {
+    fn from(value: IrysBuiltPayload) -> Self {
+        value.inner.into()
+    }
+}
+
+// V3, V4, V5 use TryFrom since blob sidecar conversion can fail
+impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV3 {
+    type Error = BuiltPayloadConversionError;
+
+    fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV4 {
+    type Error = BuiltPayloadConversionError;
+
+    fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV5 {
+    type Error = BuiltPayloadConversionError;
+
+    fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+impl TryFrom<IrysBuiltPayload> for ExecutionPayloadEnvelopeV6 {
+    type Error = BuiltPayloadConversionError;
+
+    fn try_from(value: IrysBuiltPayload) -> Result<Self, Self::Error> {
+        value.inner.try_into()
     }
 }

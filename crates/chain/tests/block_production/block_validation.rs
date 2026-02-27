@@ -4,6 +4,7 @@ use irys_actors::block_validation::{prevalidate_block, PreValidationError};
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
+use irys_reth::IrysBuiltPayload;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     SealedBlock, SystemLedger, UnixTimestampMs, H256, U256,
@@ -124,7 +125,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     };
     use irys_types::{block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats};
-    use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
+    use reth::core::primitives::SealedBlock as RethSealedBlock;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -150,9 +151,16 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
+        ) -> Result<(IrysBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             self.prod
                 .create_evm_block(
@@ -160,8 +168,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     perv_evm_block,
                     mempool,
                     reward_amount,
+                    pd_base_fee,
                     self.invalid_timestamp,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -174,7 +184,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             _current_timestamp: UnixTimestampMs,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &RethSealedBlock<reth_ethereum_primitives::Block>,
-            prev_block_ema_snapshot: &EmaSnapshot,
+            ema_calculation: irys_domain::ExponentialMarketAvgCalculation,
             treasury: U256,
         ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
             self.prod
@@ -185,7 +195,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     self.invalid_timestamp,
                     block_reward,
                     eth_built_payload,
-                    prev_block_ema_snapshot,
+                    ema_calculation,
                     treasury,
                 )
                 .await

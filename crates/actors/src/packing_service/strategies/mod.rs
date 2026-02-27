@@ -1,3 +1,4 @@
+pub(super) mod common;
 pub(super) mod cpu;
 pub(super) mod remote;
 

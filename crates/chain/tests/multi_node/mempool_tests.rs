@@ -1572,18 +1572,8 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 // 3.) re-connecting the peers and ensuring that the correct fork was selected, and the account cannot afford the storage transaction (the funding tx was on the shorter fork)
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
-    // Turn on tracing even before the nodes start
-    // SAFETY: test code; env var set before other threads spawn.
-    unsafe {
-        std::env::set_var(
-            "RUST_LOG",
-            "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
-        );
-    }
-    initialize_tracing();
-
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -1747,7 +1737,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // mine a block
     let (_block, reth_exec_env, _block_txs) = genesis.mine_block_with_payload().await?;
 
-    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
+    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 3); // +3 for block reward, PD base fee moving, & IrysUsdPriceUpdate
 
     let _block_hash = peer1.wait_until_height(3, seconds_to_wait).await?;
     let _block_hash = peer2.wait_until_height(3, seconds_to_wait).await?;
@@ -2115,7 +2105,7 @@ async fn slow_heavy3_test_evm_gossip() -> eyre::Result<()> {
     let evm_block2 = peer1.get_evm_block_by_hash2(evm_block_hash).await?;
     assert_eq!(evm_block, evm_block2.into());
 
-    assert_eq!(evm_block.body.transactions.len(), 2);
+    assert_eq!(evm_block.body.transactions.len(), 4); // 1 user tx + 3 shadow txs (block reward, PD base fee, IrysUsdPriceUpdate)
 
     tokio::join!(genesis.stop(), peer1.stop(), peer2.stop());
 

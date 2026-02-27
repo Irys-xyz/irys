@@ -10,6 +10,7 @@ test-utils = ["irys-types/test-utils"]
 [dependencies]
 alloy-core.workspace = true
 atomic-write-file = "0.2"
+bytes.workspace = true
 derive_more.workspace = true
 eyre.workspace = true
 irys-types.workspace = true

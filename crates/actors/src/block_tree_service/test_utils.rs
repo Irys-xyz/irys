@@ -18,6 +18,7 @@ use rust_decimal::Decimal;
 use crate::{
     block_tree_service::ReorgEvent,
     services::{ServiceReceivers, ServiceSenders},
+    test_helpers::build_test_service_senders,
 };
 
 pub fn build_genesis_tree_with_n_blocks(
@@ -127,7 +128,7 @@ impl TestCtx {
         config: Config,
     ) -> (Self, ServiceReceivers) {
         let task_executor = TaskExecutor::test();
-        let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
+        let (service_senders, service_rx) = build_test_service_senders();
 
         (
             Self {

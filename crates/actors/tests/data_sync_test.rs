@@ -1,3 +1,5 @@
+mod common;
+
 use irys_actors::{
     DataSyncServiceInner, DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher},
@@ -62,7 +64,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     );
 
     debug!("Starting sync process...");
-    harness.start_sync().expect("Failed to start sync");
+    harness.start_sync().await.expect("Failed to start sync");
 
     debug!("Running controlled sync with message processing...");
 
@@ -90,6 +92,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     // Process any final pending messages
     harness
         .process_pending_messages()
+        .await
         .expect("Failed to process final messages");
 
     // Take final performance snapshot
@@ -101,6 +104,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
             &mock_fetchers,
             &storage_module_ref,
         )
+        .await
         .expect("Failed to take final snapshot");
 
     let _data_intervals = storage_module_ref.get_intervals(ChunkType::Data);
@@ -170,10 +174,10 @@ impl DataSyncServiceTestHarness {
     }
 
     /// Process all pending messages in the queue
-    fn process_pending_messages(&mut self) -> eyre::Result<usize> {
+    async fn process_pending_messages(&mut self) -> eyre::Result<usize> {
         let mut count = 0;
         while let Ok(traced) = self.msg_rx.try_recv() {
-            self.inner.handle_message(traced.inner)?;
+            self.inner.handle_message(traced.inner).await?;
             self.inner.storage_modules.read().unwrap()[0]
                 .sync_pending_chunks()
                 .expect("sync pending chunks to disk");
@@ -199,7 +203,7 @@ impl DataSyncServiceTestHarness {
             .await
             {
                 Ok(Some(traced)) => {
-                    self.inner.handle_message(traced.inner)?;
+                    self.inner.handle_message(traced.inner).await?;
                     self.inner.storage_modules.read().unwrap()[0]
                         .sync_pending_chunks()
                         .expect("sync pending chunks to disk");
@@ -239,27 +243,29 @@ impl DataSyncServiceTestHarness {
     }
 
     /// Handle a message directly
-    fn handle_message(&mut self, message: DataSyncServiceMessage) -> eyre::Result<()> {
-        self.inner.handle_message(message)
+    async fn handle_message(&mut self, message: DataSyncServiceMessage) -> eyre::Result<()> {
+        self.inner.handle_message(message).await
     }
 
     /// Convenience method to start syncing
-    fn start_sync(&mut self) -> eyre::Result<()> {
+    async fn start_sync(&mut self) -> eyre::Result<()> {
         self.handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
     }
 
     /// Get peers list
-    fn get_active_peers(
+    async fn get_active_peers(
         &mut self,
     ) -> eyre::Result<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>> {
         let (tx, mut rx) = oneshot::channel();
-        self.handle_message(DataSyncServiceMessage::GetActivePeersList(tx))?;
+        self.handle_message(DataSyncServiceMessage::GetActivePeersList(tx))
+            .await?;
         rx.try_recv()
             .map_err(|e| eyre::eyre!("Failed to receive peers: {}", e))
     }
 
     /// Take a performance snapshot and print results
-    fn take_performance_snapshot(
+    async fn take_performance_snapshot(
         &mut self,
         label: &str,
         peer_addresses: &(IrysAddress, IrysAddress, IrysAddress),
@@ -268,7 +274,7 @@ impl DataSyncServiceTestHarness {
     ) -> eyre::Result<()> {
         println!("\n=== {} Performance Snapshot ===", label);
 
-        let active_peers = self.get_active_peers()?;
+        let active_peers = self.get_active_peers().await?;
         let mut total_requests = 0;
         let active_peers = active_peers.read().unwrap();
 
@@ -329,7 +335,7 @@ impl DataSyncServiceTestHarness {
             debug!("=== Tick {}/{} ===", current_tick, num_ticks);
 
             // Process any pending messages first
-            self.process_pending_messages()?;
+            self.process_pending_messages().await?;
 
             // Run the tick
             debug!("Running tick...");
@@ -342,7 +348,8 @@ impl DataSyncServiceTestHarness {
                     peer_addresses,
                     mock_fetchers,
                     storage_module,
-                )?;
+                )
+                .await?;
             }
 
             if i < num_ticks - 1 {
@@ -403,14 +410,14 @@ impl TestSetup {
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 100,
-                max_storage_throughput_bps: 1000 * 1024 * 1024, // 100 MB/s as BPS
+                max_storage_throughput_bps: 1000 * 1024 * 1024, // Raised to 1000 from 100 due to throttling seen in test failures
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
             },
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = Arc::new(Config::new_with_random_peer_id(node_config));
 
         // Create mining addresses for all the mocked up peers
         let slow_peer_addr = IrysAddress::from([1_u8; 20]);
@@ -502,7 +509,7 @@ impl TestSetup {
 
         // Create service senders to finish initializing the PeerList
         let (service_senders, service_receivers) =
-            irys_actors::test_helpers::build_test_service_senders();
+            common::build_test_service_senders_with_config(config.clone());
 
         let peer_list = PeerList::from_peers(
             peers_data,
@@ -562,7 +569,7 @@ impl TestSetup {
             storage_module: Arc::new(storage_module),
             mock_fetchers,
             peer_list,
-            config,
+            config: Arc::unwrap_or_clone(config),
             service_senders,
             service_receivers,
             block_tree: block_tree_guard,

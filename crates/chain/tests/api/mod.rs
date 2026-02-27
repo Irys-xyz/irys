@@ -3,6 +3,7 @@ mod api;
 mod client;
 mod external_api;
 mod hardfork_tests;
+mod pd_pricing_endpoint;
 mod pricing_endpoint;
 mod supply_endpoint;
 mod tx;
@@ -42,6 +43,14 @@ pub async fn price_endpoint_request(
 ) -> reqwest::Response {
     let ledger = u32::from(ledger);
     client_request(&format!("{address:}/v1/price/{ledger:}/{data_size_bytes:}")).await
+}
+
+pub async fn pd_fee_history_request(address: &str, block_count: u64) -> reqwest::Response {
+    client_request(&format!(
+        "{}/v1/price/pd/fee-history?blockCount={}",
+        address, block_count
+    ))
+    .await
 }
 
 pub async fn network_config_endpoint_request(address: &str) -> reqwest::Response {

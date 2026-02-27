@@ -878,6 +878,26 @@ impl BlockTree {
             .map(|entry| Arc::clone(&entry.block))
     }
 
+    /// Get the N most recent blocks walking backwards from the tip.
+    #[must_use]
+    pub fn get_recent_blocks_from_tip(&self, count: usize) -> Vec<&IrysBlockHeader> {
+        let mut blocks = Vec::new();
+        let mut current_hash = self.tip;
+
+        while blocks.len() < count {
+            let block = match self.get_block(&current_hash) {
+                Some(b) => b,
+                None => break,
+            };
+
+            blocks.push(block);
+            current_hash = block.previous_block_hash;
+        }
+
+        blocks.reverse(); // oldest-first
+        blocks
+    }
+
     pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
         let head_entry = self
             .longest_chain_cache
