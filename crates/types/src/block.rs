@@ -1279,6 +1279,9 @@ pub struct BlockTransactions {
     pub system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>>,
     /// Data transactions organized by ledger type
     pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
+    /// Custody proofs included in this block
+    #[serde(default)]
+    pub custody_proofs: Vec<crate::custody::CustodyProof>,
 }
 
 impl BlockTransactions {
@@ -1314,6 +1317,8 @@ pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+    #[serde(default)]
+    pub custody_proofs: Vec<crate::custody::CustodyProof>,
 }
 
 /// Compare two [`BlockBody`] values for equality.
@@ -1347,7 +1352,7 @@ pub fn cmp_block_body(a: &BlockBody, b: &BlockBody) -> bool {
     let mut b_commit: Vec<_> = b.commitment_transactions.iter().collect();
     a_commit.sort_by_key(|tx| tx.id());
     b_commit.sort_by_key(|tx| tx.id());
-    a_commit == b_commit
+    a_commit == b_commit && a.custody_proofs == b.custody_proofs
 }
 
 impl BlockBody {
@@ -1429,6 +1434,7 @@ impl SealedBlock {
             &header,
             body.data_transactions,
             body.commitment_transactions,
+            body.custody_proofs,
         )?;
 
         Ok(Self {
@@ -1461,6 +1467,8 @@ impl SealedBlock {
             block_hash: self.header.block_hash,
             data_transactions: self.transactions.all_data_txs().cloned().collect(),
             commitment_transactions: self.transactions.all_system_txs().cloned().collect(),
+            // clone: BlockBody owns the proofs it serves
+            custody_proofs: self.transactions.custody_proofs.clone(),
         }
     }
 
@@ -1472,6 +1480,7 @@ impl SealedBlock {
         block_header: &IrysBlockHeader,
         data_txs: Vec<DataTransactionHeader>,
         commitment_txs: Vec<CommitmentTransaction>,
+        custody_proofs: Vec<crate::custody::CustodyProof>,
     ) -> eyre::Result<BlockTransactions> {
         // Single lookup map for all body data transactions
         let mut data_tx_map: HashMap<H256, DataTransactionHeader> =
@@ -1577,6 +1586,7 @@ impl SealedBlock {
         Ok(BlockTransactions {
             system_txs: result_system_txs,
             data_txs: result_data_txs,
+            custody_proofs,
         })
     }
 }
@@ -2087,7 +2097,7 @@ mod tests {
         extra_tx.id = extra_id;
 
         let result =
-            SealedBlock::order_transactions(&header, vec![referenced_tx, extra_tx], vec![]);
+            SealedBlock::order_transactions(&header, vec![referenced_tx, extra_tx], vec![], vec![]);
 
         assert!(
             result.is_err(),
@@ -2121,7 +2131,7 @@ mod tests {
         extra_tx.set_id(extra_id);
 
         let result =
-            SealedBlock::order_transactions(&header, vec![], vec![referenced_tx, extra_tx]);
+            SealedBlock::order_transactions(&header, vec![], vec![referenced_tx, extra_tx], vec![]);
 
         assert!(
             result.is_err(),

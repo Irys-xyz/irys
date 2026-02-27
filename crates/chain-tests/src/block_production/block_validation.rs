@@ -1002,6 +1002,7 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         block_hash: header.block_hash,
         data_transactions: vec![tx.clone()],
         commitment_transactions: Vec::new(),
+        custody_proofs: Vec::new(),
     };
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
@@ -1210,6 +1211,7 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         block_hash: header.block_hash,
         data_transactions: vec![tx.clone()],
         commitment_transactions: Vec::new(),
+        custody_proofs: Vec::new(),
     };
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
@@ -1452,6 +1454,7 @@ async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() ->
         block_hash: header.block_hash,
         data_transactions: vec![tx.clone()],
         commitment_transactions: Vec::new(),
+        custody_proofs: Vec::new(),
     };
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 

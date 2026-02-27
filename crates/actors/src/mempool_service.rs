@@ -224,6 +224,7 @@ pub enum MempoolServiceMessage {
         tx_header: DataTransactionHeader,
         ingress_proof: IngressProof,
         chunk_data: Vec<u8>,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
     },
 }
 
@@ -359,9 +360,15 @@ impl Inner {
                 tx_header,
                 ingress_proof,
                 chunk_data,
+                per_chunk_commitments,
             } => {
-                self.handle_ingest_blob_derived_tx(tx_header, ingress_proof, chunk_data)
-                    .await;
+                self.handle_ingest_blob_derived_tx(
+                    tx_header,
+                    ingress_proof,
+                    chunk_data,
+                    per_chunk_commitments,
+                )
+                .await;
             }
         }
         Ok(())
@@ -372,6 +379,7 @@ impl Inner {
         tx_header: DataTransactionHeader,
         ingress_proof: IngressProof,
         chunk_data: Vec<u8>,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
     ) {
         if let Err(reason) = ingress_proof.check_version_accepted(
             self.config.consensus.accept_kzg_ingress_proofs,
@@ -419,6 +427,27 @@ impl Inner {
 
         if let Err(e) = self.handle_ingest_ingress_proof(ingress_proof).await {
             warn!(data_root = %data_root, error = ?e, "Failed to store blob ingress proof");
+        }
+
+        if !per_chunk_commitments.is_empty() {
+            if let Err(e) = self
+                .irys_db
+                .update_scoped(|rw_tx| {
+                    irys_database::store_per_chunk_kzg_commitments(
+                        rw_tx,
+                        data_root,
+                        &per_chunk_commitments,
+                    )
+                    .map_err(|e| reth_db::DatabaseError::Other(e.to_string()))
+                })
+                .and_then(|result| result)
+            {
+                warn!(
+                    data_root = %data_root,
+                    error = %e,
+                    "Failed to store per-chunk KZG commitments for blob"
+                );
+            }
         }
     }
 

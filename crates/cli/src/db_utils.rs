@@ -120,6 +120,7 @@ Use an empty/reset database before importing.",
         block_hash: genesis_block.block_hash,
         data_transactions: vec![],
         commitment_transactions: commitments.clone(),
+        custody_proofs: Vec::new(),
     };
     let genesis_sealed = SealedBlock::new((*genesis_block).clone(), genesis_body)?;
 

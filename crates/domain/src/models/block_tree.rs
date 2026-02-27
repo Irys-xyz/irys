@@ -358,6 +358,7 @@ impl BlockTree {
             block_hash: start_block.block_hash,
             data_transactions: start_block_data_txs.into_values().flatten().collect(),
             commitment_transactions: start_block_commitment_txs,
+            custody_proofs: Vec::new(),
         };
         let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
 
@@ -472,6 +473,7 @@ impl BlockTree {
                 block_hash: block.block_hash,
                 data_transactions: data_txs.into_values().flatten().collect(),
                 commitment_transactions: commitment_txs.clone(),
+                custody_proofs: Vec::new(),
             };
             let sealed_block = Arc::new(SealedBlock::new(block.clone(), block_body)?);
 
@@ -1875,6 +1877,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: vec![],
+            custody_proofs: Vec::new(),
         };
         Arc::new(SealedBlock::new(header.clone(), body).expect("sealing block with txs"))
     }
