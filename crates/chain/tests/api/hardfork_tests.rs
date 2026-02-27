@@ -902,7 +902,7 @@ mod peer_sync_recovery {
     /// then blocks are mined with V1 commitments before activation and V2 after.
     /// After restart with Aurora enabled, verifies peer syncs correctly through the boundary.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
+    async fn slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
         initialize_tracing();
 
         // Step 1: Setup Configuration (Aurora disabled initially)
@@ -945,7 +945,7 @@ mod peer_sync_recovery {
         // Mine first epoch to get peer's partition assignments
         genesis_node.mine_blocks(NUM_BLOCKS_IN_EPOCH).await?;
         peer_node
-            .wait_until_height(NUM_BLOCKS_IN_EPOCH as u64, SECONDS_TO_WAIT)
+            .wait_for_block_at_height(NUM_BLOCKS_IN_EPOCH as u64, SECONDS_TO_WAIT)
             .await?;
 
         // Wait for peer to pack its storage module with partition data
@@ -1154,7 +1154,7 @@ mod peer_sync_recovery {
         // Step 6: Wait for Peer to Sync and Verify
         let peer_node = stopped_peer.start().await;
         peer_node
-            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_at_height(final_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!("Peer synced to height {}", final_height);
 
@@ -1257,7 +1257,7 @@ mod peer_sync_recovery {
 
         // Wait for peer to reach the same height after restart
         peer_node
-            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_at_height(final_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!("Peer synced to height {} after restart", final_height);
 

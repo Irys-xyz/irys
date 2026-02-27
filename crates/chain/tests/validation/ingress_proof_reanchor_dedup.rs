@@ -16,7 +16,7 @@ use irys_types::{DataLedger, NodeConfig};
 /// 2. Having the peer node mine a block (which triggers re-anchoring)
 /// 3. Asserting the peer's block contains exactly one ingress proof per signer
 #[test_log::test(tokio::test)]
-async fn heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
+async fn slow_heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     let seconds_to_wait = 30;
 
     // Configure consensus for short epochs and low expiry depth.
