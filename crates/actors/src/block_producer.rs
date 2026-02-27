@@ -1198,7 +1198,23 @@ pub trait BlockProdStrategy {
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
 
-        // Build BlockTransactions from the mempool bundle
+        let custody_proofs = if self.inner().config.consensus.enable_custody_proofs {
+            let (tx, rx) = oneshot::channel();
+            if let Err(e) = self
+                .inner()
+                .service_senders
+                .custody_proof
+                .send(crate::custody_proof_service::CustodyProofMessage::TakePendingProofs(tx))
+            {
+                warn!(error = %e, "Failed to request pending custody proofs");
+                Vec::new()
+            } else {
+                rx.await.unwrap_or_default()
+            }
+        } else {
+            Vec::new()
+        };
+
         let mut all_data_txs = Vec::new();
         all_data_txs.extend(mempool_bundle.submit_txs);
         all_data_txs.extend(mempool_bundle.publish_txs.txs);
@@ -1207,6 +1223,7 @@ pub trait BlockProdStrategy {
             block_hash: irys_block.block_hash,
             commitment_transactions: mempool_bundle.commitment_txs,
             data_transactions: all_data_txs,
+            custody_proofs,
         };
 
         let sealed_block = IrysSealedBlock::new(irys_block, block_body)?;
