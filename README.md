@@ -42,10 +42,49 @@ Testing code examples in comments
 cargo test --doc
 ```
 
-re-run only failing tests
+Re-run only failing tests:
 ```cli
-cargo xtask test --rereun-failures
+cargo xtask test --rerun-failures
 ```
+
+Run a single package:
+```cli
+cargo xtask test -- -p irys-actors
+```
+
+### Test resource monitoring
+
+`cargo xtask test` always tracks pass/fail results per test (via the `nextest-wrapper` binary). Add `--monitor` to also sample CPU and memory usage at 50 ms intervals:
+
+```cli
+# Run tests with CPU + memory monitoring
+cargo xtask test --monitor
+
+# Run three times for better averages, then analyze
+cargo xtask test --monitor
+cargo xtask test --monitor
+cargo xtask test --monitor
+
+# See which tests are heaviest
+cargo run --bin nextest-report -- summary --sort peak --top 10
+
+# See which tests use the most memory
+cargo run --bin nextest-report -- summary --sort peak_rss --top 10
+
+# Find tests that need reclassification (e.g. missing heavy_ prefix)
+cargo run --bin nextest-report -- analyze
+```
+
+Tests are classified by naming convention in `.config/nextest.toml`:
+- `serial_*` — run serially
+- `slow_*` — 90 s timeout
+- `heavy_*` — 2 threads required
+- `heavy3_*` — 3 threads required
+- `heavy4_*` — 4 threads required
+
+The `analyze` command identifies tests whose actual CPU usage doesn't match their classification and suggests the correct prefix.
+
+See [`crates/utils/nextest-monitor/README.md`](crates/utils/nextest-monitor/README.md) for full documentation.
 
 ## Debugging
 If you're debugging and noticing any issues (i.e unable to inspect local variables)\

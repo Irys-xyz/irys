@@ -1,22 +1,21 @@
 //! Shared types and logic for tracking test failures across runs.
 
+use nextest_monitor::types::AggregatedStats;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
-/// Subdirectory within target for failure tracking files
-const FAILURES_SUBDIR: &str = "nextest-failure-tracking";
+/// Subdirectory within target for all nextest-monitor files
+const MONITOR_SUBDIR: &str = "nextest-monitor";
 
 /// Filename for the list of failed tests from previous runs
 const FAILURES_FILENAME: &str = "failures.json";
 
-/// Filename where the wrapper writes test results during a run
-const RESULTS_FILENAME: &str = "results.jsonl";
+/// Filename for the unified stats JSONL (written by nextest-wrapper)
+const STATS_FILENAME: &str = "stats.jsonl";
 
 /// Walk up the directory tree to find the workspace root (contains Cargo.lock)
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
@@ -68,19 +67,19 @@ fn get_target_dir() -> PathBuf {
     PathBuf::from("target")
 }
 
-/// Get the failures tracking directory path
-pub fn get_failures_dir() -> PathBuf {
-    get_target_dir().join(FAILURES_SUBDIR)
+/// Get the nextest-monitor directory path (contains both failures and stats)
+pub fn get_monitor_dir() -> PathBuf {
+    get_target_dir().join(MONITOR_SUBDIR)
 }
 
 /// Get the failures file path
 pub fn get_failures_file_path() -> PathBuf {
-    get_failures_dir().join(FAILURES_FILENAME)
+    get_monitor_dir().join(FAILURES_FILENAME)
 }
 
-/// Get the results file path (used during test runs)
-pub fn get_results_file_path() -> PathBuf {
-    get_failures_dir().join(RESULTS_FILENAME)
+/// Get the unified stats file path (used by nextest-wrapper during test runs)
+pub fn get_stats_file_path() -> PathBuf {
+    get_monitor_dir().join(STATS_FILENAME)
 }
 
 /// Represents the stored test failures (persisted between runs)
@@ -142,135 +141,46 @@ impl FailuresFile {
     }
 }
 
-/// Result of a single test execution (written by wrapper)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestResult {
-    /// Full test name
-    pub name: String,
-    /// Whether the test passed
-    pub passed: bool,
-}
-
-/// Collection of test results from a single run
+/// Collection of test results from a single run, loaded from the stats JSONL
 #[derive(Debug, Default)]
 pub struct RunResults {
-    pub results: Vec<TestResult>,
+    pub passed: HashSet<String>,
+    pub failed: HashSet<String>,
 }
 
 impl RunResults {
-    /// Load results from the JSONL file
+    /// Load results from the stats JSONL file
     pub fn load() -> Self {
-        Self::load_from(&get_results_file_path())
+        Self::load_from(&get_stats_file_path())
     }
 
     pub fn load_from(path: &Path) -> Self {
-        let mut results = Vec::new();
+        let stats = AggregatedStats::load_or_default(path);
+        let mut passed = HashSet::new();
+        let mut failed = HashSet::new();
 
-        if path.exists() {
-            if let Ok(contents) = fs::read_to_string(path) {
-                for line in contents.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<TestResult>(line) {
-                        Ok(result) => results.push(result),
-                        Err(e) => {
-                            eprintln!("Warning: Failed to parse result line: {}", e);
-                        }
-                    }
+        for test in &stats.tests {
+            if let Some(ref name) = test.test_name {
+                if test.passed {
+                    passed.insert(name.clone());
+                } else {
+                    failed.insert(name.clone());
                 }
             }
         }
 
-        Self { results }
-    }
-
-    /// Clear the results file (call before a new run)
-    pub fn clear() -> std::io::Result<()> {
-        let path = get_results_file_path();
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-        // Also remove any stale lock file
-        let lock_path = path.with_extension("jsonl.lock");
-        if lock_path.exists() {
-            let _ = fs::remove_file(lock_path);
-        }
-        Ok(())
+        Self { passed, failed }
     }
 
     /// Get sets of passed and failed tests
     pub fn into_sets(self) -> (HashSet<String>, HashSet<String>) {
-        let mut passed = HashSet::new();
-        let mut failed = HashSet::new();
-
-        for result in self.results {
-            if result.passed {
-                passed.insert(result.name);
-            } else {
-                failed.insert(result.name);
-            }
-        }
-
-        (passed, failed)
+        (self.passed, self.failed)
     }
 }
 
-/// Append a test result to the results file with locking
-pub fn append_result(result: &TestResult) -> std::io::Result<()> {
-    append_result_to(&get_results_file_path(), result)
-}
-
-pub fn append_result_to(path: &Path, result: &TestResult) -> std::io::Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Use a lock file for concurrent access
-    let lock_path = path.with_extension("jsonl.lock");
-
-    // Simple spin-lock with file
-    let mut attempts = 0;
-    while attempts < 100 {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_lock_file) => {
-                // We have the lock - append the result
-                let line = serde_json::to_string(result).map_err(std::io::Error::other)?;
-
-                let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
-                writeln!(file, "{}", line)?;
-
-                // Release lock
-                let _ = fs::remove_file(&lock_path);
-                return Ok(());
-            }
-            Err(_) => {
-                // Lock held by another process
-                thread::sleep(Duration::from_millis(10));
-                attempts += 1;
-            }
-        }
-    }
-
-    // Fallback: just try to write anyway
-    eprintln!("Warning: Could not acquire lock for results file, writing anyway");
-    let line = serde_json::to_string(result).map_err(std::io::Error::other)?;
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
-    use std::io::Write as _;
-    writeln!(file, "{}", line)
-}
-
-/// Ensure the failures directory exists
+/// Ensure the nextest-monitor directory exists
 pub fn ensure_dir() -> std::io::Result<()> {
-    fs::create_dir_all(get_failures_dir())
+    fs::create_dir_all(get_monitor_dir())
 }
 
 /// Path to the default nextest config file
@@ -305,8 +215,9 @@ pub fn generate_nextest_config(
         eprintln!("Warning: existing config has 'experimental' key - you may need to add 'wrapper-scripts' manually");
     }
 
-    // Add wrapper script definition
-    config_content.push_str("[scripts.wrapper.failure-tracker]\n");
+    // Add wrapper script definition — use a distinct name to avoid collisions
+    // with any manually-configured wrapper in the base nextest.toml
+    config_content.push_str("[scripts.wrapper.xtask-monitor]\n");
     config_content.push_str(&format!("command = '{}'\n\n", wrapper_path));
 
     // Add filter if we're rerunning specific tests
@@ -318,12 +229,12 @@ pub fn generate_nextest_config(
 
         config_content.push_str("[[profile.xtask-rerun-failures.scripts]]\n");
         config_content.push_str("filter = 'all()'\n");
-        config_content.push_str("run-wrapper = 'failure-tracker'\n");
+        config_content.push_str("run-wrapper = 'xtask-monitor'\n");
     } else {
         // Add script rule for the default profile
         config_content.push_str("[[profile.default.scripts]]\n");
         config_content.push_str("filter = 'all()'\n");
-        config_content.push_str("run-wrapper = 'failure-tracker'\n");
+        config_content.push_str("run-wrapper = 'xtask-monitor'\n");
     }
 
     temp_file.write_all(config_content.as_bytes())?;
@@ -344,7 +255,38 @@ pub fn build_failure_filter(failed_tests: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nextest_monitor::types::{append_stats, TestStats};
     use tempfile::TempDir;
+
+    fn make_stats(name: &str, passed: bool) -> TestStats {
+        TestStats {
+            binary: "bin".to_string(),
+            test_name: Some(name.to_string()),
+            passed,
+            started_at: chrono::Utc::now(),
+            duration_ms: 100,
+            exit_code: if passed { Some(0) } else { Some(1) },
+            peak_cpu: None,
+            avg_cpu: None,
+            p50_cpu: None,
+            p90_cpu: None,
+            time_at_p90_ms: None,
+            time_near_peak_ms: None,
+            time_above_1t_ms: None,
+            time_above_2t_ms: None,
+            time_above_3t_ms: None,
+            time_above_4t_ms: None,
+            cpu_samples: None,
+            peak_rss_bytes: None,
+            avg_rss_bytes: None,
+            p50_rss_bytes: None,
+            p90_rss_bytes: None,
+            time_above_100mb_ms: None,
+            time_above_500mb_ms: None,
+            time_above_1gb_ms: None,
+            memory_samples: None,
+        }
+    }
 
     #[test]
     fn test_failures_file_roundtrip() {
@@ -362,33 +304,18 @@ mod tests {
     }
 
     #[test]
-    fn test_run_results_roundtrip() {
+    fn test_run_results_from_stats() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("results.jsonl");
+        let path = temp_dir.path().join("stats.jsonl");
 
-        let results = vec![
-            TestResult {
-                name: "test::one".to_string(),
-                passed: true,
-            },
-            TestResult {
-                name: "test::two".to_string(),
-                passed: false,
-            },
-            TestResult {
-                name: "test::three".to_string(),
-                passed: true,
-            },
-        ];
-
-        for result in &results {
-            append_result_to(&path, result).unwrap();
-        }
+        append_stats(&path, make_stats("test::one", true)).unwrap();
+        append_stats(&path, make_stats("test::two", false)).unwrap();
+        append_stats(&path, make_stats("test::three", true)).unwrap();
 
         let loaded = RunResults::load_from(&path);
-        assert_eq!(loaded.results.len(), 3);
-
         let (passed, failed) = loaded.into_sets();
+        assert_eq!(passed.len(), 2);
+        assert_eq!(failed.len(), 1);
         assert!(passed.contains("test::one"));
         assert!(passed.contains("test::three"));
         assert!(failed.contains("test::two"));

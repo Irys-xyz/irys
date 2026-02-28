@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use xshell::{cmd, Cmd, Shell};
 
 use xtask::failures::{
-    self, generate_nextest_config, get_failures_file_path, FailuresFile, RunResults,
+    self, generate_nextest_config, get_failures_file_path, get_stats_file_path, FailuresFile,
+    RunResults,
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
@@ -29,12 +30,15 @@ enum Commands {
         /// Only run tests that failed in the previous run
         #[clap(long, default_value_t = false)]
         rerun_failures: bool,
-        /// Clear the failures file and run all tests fresh
+        /// Clear the failures file and run all tests clean
         #[clap(long, default_value_t = false)]
-        fresh: bool,
+        clean: bool,
         /// Don't update the failures file after the run
         #[clap(long, default_value_t = false)]
         no_update_failures: bool,
+        /// Enable CPU and memory resource monitoring
+        #[clap(long, default_value_t = false)]
+        monitor: bool,
         /// Arbitrary passthrough args
         #[clap(last = true)]
         args: Vec<String>,
@@ -91,19 +95,19 @@ enum Commands {
     },
 }
 
-/// Build the nextest-failure-tracker binary
+/// Build the nextest-wrapper binary
 fn build_wrapper(sh: &Shell) -> eyre::Result<PathBuf> {
-    println!("Building nextest-failure-tracker...");
+    println!("Building nextest-wrapper...");
     cmd!(
         sh,
-        "cargo build --package xtask --bin nextest-failure-tracker"
+        "cargo build --package nextest-monitor --bin nextest-wrapper"
     )
     .remove_and_run()?;
 
     // Get the target directory
     let metadata = MetadataCommand::new().exec()?;
     let target_dir = metadata.target_directory.as_std_path();
-    let wrapper_path = target_dir.join("debug").join("nextest-failure-tracker");
+    let wrapper_path = target_dir.join("debug").join("nextest-wrapper");
 
     if !wrapper_path.exists() {
         return Err(eyre::eyre!(
@@ -121,8 +125,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             args,
             coverage,
             rerun_failures,
-            fresh,
+            clean,
             no_update_failures,
+            monitor,
         } => {
             println!("cargo test");
             let _ = cmd!(
@@ -145,20 +150,22 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             // this is needed otherwise some tests will fail (that assert panic messages)
             sh.set_var("RUST_BACKTRACE", "1");
 
-            // Handle --fresh: clear the failures file
-            if fresh {
-                println!("Clearing failures file...");
+            // Handle --clean: clear failures and stats
+            if clean {
+                println!("Clearing failures and stats...");
                 FailuresFile::clear()?;
+                let stats_path = get_stats_file_path();
+                if stats_path.exists() {
+                    fs::remove_file(&stats_path)?;
+                }
             }
 
-            // Clear the results file from any previous run
             if !no_update_failures {
                 failures::ensure_dir()?;
-                RunResults::clear()?;
             }
 
             // Determine which tests to run
-            let failed_tests_filter: Option<Vec<String>> = if rerun_failures && !fresh {
+            let failed_tests_filter: Option<Vec<String>> = if rerun_failures && !clean {
                 let failures = FailuresFile::load();
 
                 if failures.is_empty() {
@@ -178,6 +185,18 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 None
             };
 
+            // Set env vars for the nextest-wrapper
+            let stats_path = get_stats_file_path();
+            sh.set_var(
+                "NEXTEST_MONITOR_OUTPUT",
+                stats_path.to_string_lossy().as_ref(),
+            );
+            if monitor {
+                sh.set_var("NEXTEST_MONITOR_CPU", "1");
+                sh.set_var("NEXTEST_MONITOR_MEMORY", "1");
+                println!("Monitoring CPU and memory usage...");
+            }
+
             // Build the wrapper binary and generate config
             let config_file = {
                 let wrapper_path = build_wrapper(sh)?;
@@ -196,7 +215,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             ];
 
             // Validate passthrough args don't conflict with xtask-injected flags.
-            // (Avoid duplicate --config-file/--profile ambiguity.)
             let user_has_config_file = args
                 .iter()
                 .any(|a| a == "--config-file" || a.starts_with("--config-file="));
@@ -204,8 +222,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             let user_has_profile = args
                 .iter()
                 .any(|a| a == "--profile" || a.starts_with("--profile="));
-
-            // Add config file
 
             let config_path = config_file.path().to_string_lossy().to_string();
             if user_has_config_file {
@@ -241,11 +257,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let run_results = RunResults::load();
                 let (passed, new_failed) = run_results.into_sets();
 
-                let mut failures = if rerun_failures && !fresh {
+                let mut failures = if rerun_failures && !clean {
                     // When rerunning, start with existing failures
                     FailuresFile::load()
                 } else {
-                    // When running all tests, start fresh
+                    // When running all tests, start clean
                     FailuresFile::default()
                 };
 
@@ -390,8 +406,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     Commands::Test {
                         coverage: false,
                         rerun_failures: false,
-                        fresh: false,
+                        clean: false,
                         no_update_failures: false,
+                        monitor: false,
                         args: vec![],
                     },
                     sh,

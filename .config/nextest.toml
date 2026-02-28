@@ -39,9 +39,9 @@ filter = 'test(/.*heavy4_.*/)'
 threads-required = 4
 priority = 70
 
-# Define the CPU monitoring wrapper script
-[scripts.wrapper.cpu-monitor]
-command = 'nextest-cpu-wrapper'
+# Define the monitoring wrapper script
+[scripts.wrapper.nextest-monitor]
+command = 'nextest-wrapper'
 
 [profile.cpu-profile]
 # test-threads = 1
@@ -50,4 +50,4 @@ test-threads = 12
 # Apply wrapper to all tests in cpu-profile
 [[profile.cpu-profile.scripts]]
 filter = 'all()'
-run-wrapper = 'cpu-monitor'
+run-wrapper = 'nextest-monitor'
