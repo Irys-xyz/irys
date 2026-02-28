@@ -3,11 +3,13 @@ use alloy_primitives::Address;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
-use irys_types::NetworkConfigWithDefaults as _;
+use irys_types::{
+    config::node::{RethConfig, RethEngineConfig, RethRpcConfig, RethTxPoolConfig},
+    NetworkConfigWithDefaults as _,
+};
 use reth::{
-    args::{DatabaseArgs, MetricArgs},
+    args::{DatabaseArgs, EngineArgs, MetricArgs, RpcServerArgs, TxPoolArgs},
     revm::primitives::B256,
-    rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
@@ -20,8 +22,8 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::future::IntoFuture as _;
 use std::net::SocketAddr;
-use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
+use std::{fmt::Formatter, sync::Arc};
 use tracing::{warn, Instrument as _};
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
@@ -94,6 +96,94 @@ impl From<RethNodeProvider> for RethNode {
     }
 }
 
+/// Build Reth's `RpcServerArgs` from our TOML-serializable config.
+///
+/// Starts from Reth's defaults (preserving fields we don't expose in our config)
+/// and overrides only the fields we manage. The `bind_ip` is used for both HTTP
+/// and WS bind addresses.
+fn build_rpc_args(rpc: &RethRpcConfig, bind_ip: &str) -> eyre::Result<RpcServerArgs> {
+    let mut args = RpcServerArgs::default();
+
+    // HTTP
+    args.http = rpc.http;
+    args.http_addr = bind_ip.parse()?;
+    args.http_port = rpc.http_port;
+    args.http_api =
+        Some(rpc.http_api.parse().map_err(|e| {
+            eyre::eyre!("invalid reth.rpc.http_api modules {:?}: {e}", rpc.http_api)
+        })?);
+    args.http_corsdomain = Some(rpc.http_corsdomain.clone());
+
+    // WebSocket
+    args.ws = rpc.ws;
+    args.ws_addr = bind_ip.parse()?;
+    args.ws_port = rpc.ws_port;
+    if rpc.ws {
+        args.ws_api =
+            Some(rpc.ws_api.parse().map_err(|e| {
+                eyre::eyre!("invalid reth.rpc.ws_api modules {:?}: {e}", rpc.ws_api)
+            })?);
+    }
+
+    // Limits
+    args.rpc_max_request_size.0 = rpc.max_request_size_mb;
+    args.rpc_max_response_size.0 = rpc.max_response_size_mb;
+    args.rpc_max_connections.0 = rpc.max_connections;
+    args.rpc_gas_cap = rpc.gas_cap;
+    args.rpc_tx_fee_cap = rpc.tx_fee_cap as u128;
+
+    Ok(args)
+}
+
+/// Build Reth's `TxPoolArgs` from our TOML-serializable config.
+///
+/// Starts from Reth's defaults and overrides the subset we expose.
+/// Always disables blob support — Irys doesn't use EIP-4844 blobs.
+fn build_txpool_args(txpool: &RethTxPoolConfig) -> TxPoolArgs {
+    TxPoolArgs {
+        pending_max_count: txpool.pending_max_count,
+        pending_max_size: txpool.pending_max_size_mb,
+        basefee_max_count: txpool.basefee_max_count,
+        basefee_max_size: txpool.basefee_max_size_mb,
+        queued_max_count: txpool.queued_max_count,
+        queued_max_size: txpool.queued_max_size_mb,
+        additional_validation_tasks: txpool.additional_validation_tasks,
+        max_account_slots: txpool.max_account_slots,
+        price_bump: txpool.price_bump as u128,
+        // Important: Irys doesn't use EIP-4844 blobs
+        disable_blobs_support: true,
+        ..Default::default()
+    }
+}
+
+/// Build Reth's `EngineArgs` from our TOML-serializable config.
+///
+/// Only overrides persistence threshold and memory buffer target;
+/// all other engine settings use Reth's defaults.
+fn build_engine_args(engine: &RethEngineConfig) -> EngineArgs {
+    EngineArgs {
+        persistence_threshold: engine.persistence_threshold,
+        memory_block_buffer_target: engine.memory_block_buffer_target,
+        ..Default::default()
+    }
+}
+
+/// Build Reth's `MetricArgs` from our config.
+///
+/// When `random_ports` is true (tests), uses port 0 so the OS picks a free port.
+fn build_metric_args(
+    reth: &RethConfig,
+    bind_ip: &str,
+    random_ports: bool,
+) -> eyre::Result<MetricArgs> {
+    let port = if random_ports { 0 } else { reth.metrics.port };
+    let addr: SocketAddr = format!("{bind_ip}:{port}").parse()?;
+    Ok(MetricArgs {
+        prometheus: Some(addr),
+        ..Default::default()
+    })
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -125,61 +215,25 @@ pub async fn run_node(
         }
     }
 
+    let irys_reth = &node_config.reth;
+    let bind_ip = irys_reth.network.bind_ip(&node_config.network_defaults);
+
+    // -- Network (no Reth NetworkArgs equivalent we'd want to wholesale-assign;
+    //    we only set port/addr and always disable discovery) --
     reth_config.network.discovery.disable_discovery = true;
-    reth_config.rpc.http = true;
-    reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
-        RethRpcModule::Eth,
-        RethRpcModule::Debug,
-    ])));
+    reth_config.network.port = irys_reth.network.bind_port;
+    reth_config.network.addr = bind_ip.parse()?;
 
-    reth_config.rpc.http_addr = node_config
-        .reth
-        .network
-        .bind_ip(&node_config.network_defaults)
-        .parse()?;
-    reth_config.network.port = node_config.reth.network.bind_port;
-    reth_config.network.addr = node_config
-        .reth
-        .network
-        .bind_ip(&node_config.network_defaults)
-        .parse()?;
-
+    // -- Datadir --
     reth_config.datadir.datadir = node_config.reth_data_dir().into();
-    reth_config.rpc.http_corsdomain = Some("*".to_string());
-    reth_config.engine.persistence_threshold = 0;
-    reth_config.engine.memory_block_buffer_target = 0;
 
-    let subpool_max_tx_count = 1_000_000;
-    let subpool_max_size_mb = 1000;
-
-    reth_config.txpool.pending_max_count = subpool_max_tx_count;
-    reth_config.txpool.pending_max_size = subpool_max_size_mb;
-
-    reth_config.txpool.basefee_max_count = subpool_max_tx_count;
-    reth_config.txpool.basefee_max_size = subpool_max_size_mb;
-
-    reth_config.txpool.queued_max_count = subpool_max_tx_count;
-    reth_config.txpool.queued_max_size = subpool_max_size_mb;
-    // important: keep blobs disabled in our mempool
-    reth_config.txpool.disable_blobs_support = true;
-
-    reth_config.txpool.additional_validation_tasks = 2;
-
-    // Enable Prometheus metrics endpoint for local scraping by OTEL collector sidecar.
-    let metrics_port = if random_ports { "0" } else { "9001" };
-    let metrics_addr: SocketAddr = format!(
-        "{}:{}",
-        node_config
-            .reth
-            .network
-            .bind_ip(&node_config.network_defaults),
-        metrics_port
-    )
-    .parse()?;
-    reth_config.metrics = MetricArgs {
-        prometheus: Some(metrics_addr),
-        ..Default::default()
-    };
+    // Build Reth arg structs from our TOML-serializable config.
+    // This reuses Reth's own types (RpcServerArgs, TxPoolArgs, EngineArgs),
+    // replacing the field-by-field mapping that was here before.
+    reth_config.rpc = build_rpc_args(&irys_reth.rpc, bind_ip)?;
+    reth_config.txpool = build_txpool_args(&irys_reth.txpool);
+    reth_config.engine = build_engine_args(&irys_reth.engine);
+    reth_config.metrics = build_metric_args(irys_reth, bind_ip, random_ports)?;
 
     let db_args = DatabaseArgs::default();
     // TODO: figure out if we shouldn't use smaller growth steps in production

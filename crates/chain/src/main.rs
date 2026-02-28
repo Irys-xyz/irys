@@ -1,7 +1,13 @@
-use irys_chain::{utils::load_config, IrysNode};
+use clap::{CommandFactory as _, FromArgMatches as _};
+use irys_chain::{
+    cli::{merge::apply_cli_overrides, Commands, IrysCli, NodeCommand},
+    utils::{load_config, load_config_from_path},
+    IrysNode,
+};
 use irys_testing_utils::setup_panic_hook;
-use irys_types::ShutdownReason;
+use irys_types::{NodeConfig, ShutdownReason};
 use irys_utils::shutdown::spawn_shutdown_watchdog;
+use std::path::PathBuf;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -49,10 +55,44 @@ async fn main() -> eyre::Result<()> {
 
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
-    // load the config
-    let config = load_config()?;
 
-    // start the node
+    // Parse CLI — get both typed struct and raw ArgMatches for value_source() checks
+    let matches = IrysCli::command().get_matches();
+    let cli = IrysCli::from_arg_matches(&matches)?;
+
+    let config = match cli.command {
+        Some(Commands::Node(cmd)) => {
+            // Extract the "node" subcommand matches for value_source() checks
+            let node_matches = matches
+                .subcommand_matches("node")
+                .expect("Node subcommand must have matches");
+            run_node_config(*cmd, node_matches)?
+        }
+        None => load_config()?,
+    };
+
+    start_node(config).await
+}
+
+/// Resolve config for the `irys node` subcommand: load TOML then apply CLI overrides.
+fn run_node_config(cmd: NodeCommand, matches: &clap::ArgMatches) -> eyre::Result<NodeConfig> {
+    let config_path = cmd
+        .config
+        .clone()
+        .or_else(|| std::env::var("CONFIG").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("config.toml"));
+
+    if cmd.generate_config {
+        load_config_from_path(&config_path, true)?;
+        unreachable!("load_config_from_path with generate=true always returns Err");
+    }
+
+    let config = load_config_from_path(&config_path, false)?;
+    apply_cli_overrides(config, &cmd, matches)
+}
+
+/// Start the node with a fully resolved config.
+async fn start_node(config: NodeConfig) -> eyre::Result<()> {
     info!("starting the node, mode: {:?}", &config.node_mode);
     let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
