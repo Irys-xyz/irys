@@ -240,7 +240,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy4_mine_ten_blocks() -> eyre::Result<()> {
+async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining()?;
@@ -806,7 +806,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
+async fn heavy3_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -1057,7 +1057,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
 // This test produces a block with invalid tx ordering.
 #[test_log::test(tokio::test)]
-async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -1326,7 +1326,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 }
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
+async fn heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let mut config = NodeConfig::testing_with_epochs(2);
     config.consensus.get_mut().chunk_size = 32;
     let signer = config.new_random_signer();
@@ -1575,7 +1575,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
 /// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2
 /// epoch blocks should include any new txs
 /// epoch blocks should contain a copy of all commitment txs from blocks in the epoch block range
-async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
+async fn heavy_commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let seconds_to_wait = 10;
     let max_commitment_txs_per_block: u64 = 2;
     let num_blocks_in_epoch = 5;

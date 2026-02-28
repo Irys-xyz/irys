@@ -58,7 +58,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn heavy3_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -180,7 +180,7 @@ async fn slow_heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// then generate the solution on node1 — guaranteeing the solution's VDF
 /// step is strictly greater. The gossiped block triggers the parent change.
 #[test_log::test(tokio::test)]
-async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn heavy3_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup

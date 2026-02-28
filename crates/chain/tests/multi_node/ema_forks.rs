@@ -15,7 +15,7 @@ use tracing::warn;
 // Assert: EMA snapshots differ after the price adjustment interval during the fork.
 // Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
 #[test_log::test(tokio::test)]
-async fn heavy3_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
+async fn heavy4_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // setup
     const PRICE_ADJUSTMENT_INTERVAL: u64 = 2;
     let num_blocks_in_epoch = 13;

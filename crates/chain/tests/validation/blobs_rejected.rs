@@ -236,7 +236,7 @@ async fn heavy_evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
+async fn heavy3_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);

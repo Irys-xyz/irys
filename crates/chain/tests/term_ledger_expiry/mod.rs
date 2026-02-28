@@ -90,7 +90,7 @@ async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
 //         Slot 1 remains active
 //
 #[test_log::test(tokio::test)]
-async fn slow_heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
+async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
     info!("Testing ledger expiry with multiple transactions per block");
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,

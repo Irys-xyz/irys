@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 // Validate that gossip ingress rejects commitments with wrong value and marks them invalid.
 #[test_log::test(tokio::test)]
-async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Result<()> {
+async fn heavy_gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Result<()> {
     // Setup a single node
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -59,7 +59,7 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
 
 // Validate that gossip ingress rejects commitments with insufficient fee and marks them invalid.
 #[test_log::test(tokio::test)]
-async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result<()> {
+async fn heavy_gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result<()> {
     // Setup a single node
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();

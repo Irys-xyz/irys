@@ -172,7 +172,7 @@ async fn api_client_wait_for_promotion_errors_for_missing_tx() {
 /// Ensures wait_for_promotion succeeds for a properly posted tx after uploading chunks and mining.
 /// Guards against regressions in /tx/{id}/promotion_status and client polling behavior.
 #[test_log::test(tokio::test)]
-async fn api_client_wait_for_promotion_happy_path() {
+async fn heavy_api_client_wait_for_promotion_happy_path() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -218,7 +218,7 @@ async fn api_client_wait_for_promotion_happy_path() {
 
 /// Tests the transaction status API lifecycle: PENDING -> CONFIRMED -> FINALIZED
 #[test_log::test(tokio::test)]
-async fn api_tx_status_lifecycle() {
+async fn heavy_api_tx_status_lifecycle() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -324,7 +324,7 @@ async fn api_tx_status_lifecycle() {
 /// After blocks are fully migrated to the block index, restarting the node should
 /// produce the exact same status response (FINALIZED with identical block_height).
 #[test_log::test(tokio::test)]
-async fn heavy_api_tx_status_finalized_survives_restart() {
+async fn api_tx_status_finalized_survives_restart() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -427,7 +427,7 @@ async fn heavy_api_tx_status_finalized_survives_restart() {
 /// migration. After restart, the status endpoint must still return CONFIRMED with
 /// the correct block_height.
 #[test_log::test(tokio::test)]
-async fn heavy_api_tx_status_confirmed_survives_restart() {
+async fn api_tx_status_confirmed_survives_restart() {
     let mut config = NodeConfig::testing();
     // Use a larger migration depth so we can capture CONFIRMED state without risking migration.
     // Must stay <= tx_anchor_expiry_depth (20 in testing config).
@@ -516,7 +516,7 @@ async fn heavy_api_tx_status_confirmed_survives_restart() {
 
 /// Tests transaction status for commitment transactions
 #[test_log::test(tokio::test)]
-async fn api_tx_status_commitment_tx() {
+async fn heavy_api_tx_status_commitment_tx() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -595,7 +595,7 @@ async fn api_tx_status_commitment_tx() {
 /// Regression test for the double-promotion bug caused by `#[serde(skip)]` on metadata
 /// which loses `promoted_height` when the mempool persists to disk.
 #[test_log::test(tokio::test)]
-async fn api_double_promotion_after_restart() {
+async fn heavy_api_double_promotion_after_restart() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
