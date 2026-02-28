@@ -198,6 +198,10 @@ pub enum PreValidationError {
         block_hash: BlockHash,
     },
     #[error(
+        "Transaction {tx_id} appears in multiple ledgers within the same block"
+    )]
+    TxInMultipleLedgers { tx_id: H256 },
+    #[error(
         "Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs"
     )]
     PublishTxProofLengthMismatch,
@@ -2067,6 +2071,140 @@ pub fn calculate_term_storage_base_network_fee(
     )
 }
 
+/// Validates pricing for a transaction targeting the Publish ledger (Submit→Publish promotion path).
+/// Checks both term_fee and perm_fee meet minimums, and that fee distribution structures are valid.
+fn validate_publish_price(
+    tx: &DataTransactionHeader,
+    block_height: u64,
+    timestamp_secs: UnixTimestamp,
+    block_ema: &EmaSnapshot,
+    config: &Config,
+) -> Result<(), PreValidationError> {
+    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+        block_height,
+        config.consensus.epoch.num_blocks_in_epoch,
+        config.consensus.epoch.submit_ledger_epoch_length,
+    );
+
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
+    let expected_term_fee = calculate_term_storage_base_network_fee(
+        tx.data_size,
+        epochs_for_storage,
+        block_ema,
+        config,
+        number_of_ingress_proofs_total,
+        timestamp_secs,
+    )
+    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_perm_fee = calculate_perm_storage_total_fee(
+        tx.data_size,
+        expected_term_fee,
+        block_ema,
+        config,
+        timestamp_secs,
+    )
+    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+    // Validate perm_fee is at least the expected amount
+    let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
+    if actual_perm_fee < expected_perm_fee.amount {
+        return Err(PreValidationError::InsufficientPermFee {
+            tx_id: tx.id,
+            expected: expected_perm_fee.amount,
+            actual: actual_perm_fee.get(),
+        });
+    }
+
+    // Validate term_fee is at least the expected amount
+    let actual_term_fee = tx.term_fee;
+    if actual_term_fee < expected_term_fee {
+        return Err(PreValidationError::InsufficientTermFee {
+            tx_id: tx.id,
+            expected: expected_term_fee,
+            actual: actual_term_fee.get(),
+        });
+    }
+
+    // Validate fee distribution structures can be created successfully
+    TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+        PreValidationError::InvalidTermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        }
+    })?;
+
+    PublishFeeCharges::new(
+        actual_perm_fee,
+        actual_term_fee,
+        &config.consensus,
+        number_of_ingress_proofs_total,
+    )
+    .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+        tx_id: tx.id,
+        reason: e.to_string(),
+    })?;
+    Ok(())
+}
+
+/// Validates pricing for a term-only ledger transaction (OneYear/ThirtyDay).
+/// Term-only txs must not carry a perm_fee and must meet the minimum term_fee.
+fn validate_term_only_price(
+    tx: &DataTransactionHeader,
+    ledger: DataLedger,
+    block_height: u64,
+    timestamp_secs: UnixTimestamp,
+    block_ema: &EmaSnapshot,
+    config: &Config,
+) -> Result<(), PreValidationError> {
+    if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+        return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
+    }
+
+    let cascade = config
+        .consensus
+        .hardforks
+        .cascade
+        .as_ref()
+        .ok_or(PreValidationError::CascadeNotConfigured { tx_id: tx.id })?;
+    let epoch_length = match ledger {
+        DataLedger::OneYear => cascade.one_year_epoch_length,
+        DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+        _ => unreachable!(),
+    };
+    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+        block_height,
+        config.consensus.epoch.num_blocks_in_epoch,
+        epoch_length,
+    );
+
+    let expected_term_fee = calculate_term_storage_base_network_fee(
+        tx.data_size,
+        epochs_for_storage,
+        block_ema,
+        config,
+        1, // no ingress proofs for term-only ledgers
+        timestamp_secs,
+    )
+    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+    let actual_term_fee = tx.term_fee;
+    if actual_term_fee < expected_term_fee {
+        return Err(PreValidationError::InsufficientTermFee {
+            tx_id: tx.id,
+            expected: expected_term_fee,
+            actual: actual_term_fee.get(),
+        });
+    }
+
+    TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+        PreValidationError::InvalidTermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(())
+}
+
 /// Validates the `expires` field on each data ledger in the block.
 /// - Publish: must have `expires == None`
 /// - Submit: must have `expires == Some(submit_ledger_epoch_length)`
@@ -2124,10 +2262,38 @@ pub async fn data_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
-    submit_txs: &[DataTransactionHeader],
-    publish_txs: &[DataTransactionHeader],
-    term_txs: &[DataTransactionHeader],
+    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
+    // Extract transaction slices from BlockTransactions
+    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+    let one_year_txs = transactions.get_ledger_txs(DataLedger::OneYear);
+    let thirty_day_txs = transactions.get_ledger_txs(DataLedger::ThirtyDay);
+
+    // Structural pre-pass: validate all Submit txs unconditionally
+    for tx in submit_txs {
+        if tx.ledger_id != DataLedger::Publish as u32 {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
+                tx_id: tx.id,
+                expected: DataLedger::Publish as u32,
+                actual: tx.ledger_id,
+            });
+        }
+        if tx.promoted_height().is_some() {
+            tracing::error!(
+                "Transaction {} in Submit ledger should not have a promoted_height",
+                tx.id
+            );
+        }
+    }
+
+    // Structural pre-pass: validate term-only ledger txs have no perm_fee
+    for tx in one_year_txs.iter().chain(thirty_day_txs) {
+        if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+            return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
+        }
+    }
+
     // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
         .read()
@@ -2160,23 +2326,51 @@ pub async fn data_txs_are_valid(
         );
     }
     // Collect all tx_ids we need to check for previous inclusions
-    let mut txs_to_check = publish_txs
+    let mut txs_to_check: HashMap<H256, (&DataTransactionHeader, TxInclusionState)> =
+        HashMap::new();
+
+    // Insert publish + submit txs (with same-block promotion handling)
+    for (tx, ledger) in publish_txs
         .iter()
         .map(|x| (x, DataLedger::Publish))
         .chain(submit_txs.iter().map(|x| (x, DataLedger::Submit)))
-        .map(|(tx, ledger_current)| {
-            let state = if same_block_promotions.contains(&tx.id) {
-                TxInclusionState::Found {
-                    // Same block promotion: both ledgers are in the current block
-                    ledger_current: (DataLedger::Publish, block.block_hash),
-                    ledger_historical: (DataLedger::Submit, block.block_hash),
-                }
-            } else {
-                TxInclusionState::Searching { ledger_current }
-            };
-            (tx.id, (tx, state))
-        })
-        .collect::<HashMap<_, _>>();
+    {
+        let state = if same_block_promotions.contains(&tx.id) {
+            TxInclusionState::Found {
+                // Same block promotion: both ledgers are in the current block
+                ledger_current: (DataLedger::Publish, block.block_hash),
+                ledger_historical: (DataLedger::Submit, block.block_hash),
+            }
+        } else {
+            TxInclusionState::Searching {
+                ledger_current: ledger,
+            }
+        };
+        txs_to_check.insert(tx.id, (tx, state));
+    }
+
+    // Insert term txs with collision detection.
+    // A signed tx cannot appear in a term ledger AND Submit/Publish in the same block
+    // (ledger_id is part of the signed payload), but we check as defense-in-depth.
+    // Note: Submit→Publish same-block promotions are valid and handled above.
+    for (tx, ledger) in one_year_txs
+        .iter()
+        .map(|x| (x, DataLedger::OneYear))
+        .chain(thirty_day_txs.iter().map(|x| (x, DataLedger::ThirtyDay)))
+    {
+        if txs_to_check.contains_key(&tx.id) {
+            return Err(PreValidationError::TxInMultipleLedgers { tx_id: tx.id });
+        }
+        txs_to_check.insert(
+            tx.id,
+            (
+                tx,
+                TxInclusionState::Searching {
+                    ledger_current: ledger,
+                },
+            ),
+        );
+    }
 
     // Step 3: Check past inclusions only for non-promoted txs
     get_previous_tx_inclusions(
@@ -2193,136 +2387,9 @@ pub async fn data_txs_are_valid(
         error: e.to_string(),
     })?;
 
-    let validate_price = |tx: &&DataTransactionHeader| {
-        // Calculate expected fees based on data size using block's EMA
-        // Calculate term fee first as it's needed for perm fee calculation
-        // Calculate epochs for storage using the same method as mempool
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            block.height,
-            config.consensus.epoch.num_blocks_in_epoch,
-            config.consensus.epoch.submit_ledger_epoch_length,
-        );
+    let timestamp_secs = block.timestamp_secs();
 
-        // Convert block timestamp from millis to seconds for hardfork params
-        let timestamp_secs = block.timestamp_secs();
-        let number_of_ingress_proofs_total =
-            config.number_of_ingress_proofs_total_at(timestamp_secs);
-        let expected_term_fee = calculate_term_storage_base_network_fee(
-            tx.data_size,
-            epochs_for_storage,
-            &block_ema,
-            config,
-            number_of_ingress_proofs_total,
-            timestamp_secs,
-        )
-        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-        let expected_perm_fee = calculate_perm_storage_total_fee(
-            tx.data_size,
-            expected_term_fee,
-            &block_ema,
-            config,
-            timestamp_secs,
-        )
-        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-
-        // Validate perm_fee is at least the expected amount
-        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
-        if actual_perm_fee < expected_perm_fee.amount {
-            return Err(PreValidationError::InsufficientPermFee {
-                tx_id: tx.id,
-                expected: expected_perm_fee.amount,
-                actual: actual_perm_fee.get(),
-            });
-        }
-
-        // Validate term_fee is at least the expected amount
-        let actual_term_fee = tx.term_fee;
-        if actual_term_fee < expected_term_fee {
-            return Err(PreValidationError::InsufficientTermFee {
-                tx_id: tx.id,
-                expected: expected_term_fee,
-                actual: actual_term_fee.get(),
-            });
-        }
-
-        // Validate fee distribution structures can be created successfully
-        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
-        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-            PreValidationError::InvalidTermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            }
-        })?;
-
-        let number_of_ingress_proofs_total =
-            config.number_of_ingress_proofs_total_at(timestamp_secs);
-        PublishFeeCharges::new(
-            actual_perm_fee,
-            actual_term_fee,
-            &config.consensus,
-            number_of_ingress_proofs_total,
-        )
-        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
-            tx_id: tx.id,
-            reason: e.to_string(),
-        })?;
-        Ok(())
-    };
-
-    // Term-only fee validation for OneYear/ThirtyDay (no perm_fee, replica_count = 1)
-    let validate_term_price =
-        |tx: &&DataTransactionHeader, ledger: DataLedger| -> Result<(), PreValidationError> {
-            // Term-only ledgers must not carry a perm_fee
-            if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
-                return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
-            }
-
-            let cascade = config
-                .consensus
-                .hardforks
-                .cascade
-                .as_ref()
-                .ok_or(PreValidationError::CascadeNotConfigured { tx_id: tx.id })?;
-            let epoch_length = match ledger {
-                DataLedger::OneYear => cascade.one_year_epoch_length,
-                DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                _ => unreachable!(),
-            };
-            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                block.height,
-                config.consensus.epoch.num_blocks_in_epoch,
-                epoch_length,
-            );
-
-            let expected_term_fee = calculate_term_storage_base_network_fee(
-                tx.data_size,
-                epochs_for_storage,
-                &block_ema,
-                config,
-                1, // no ingress proofs for term-only ledgers
-                block.timestamp_secs(),
-            )
-            .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-
-            let actual_term_fee = tx.term_fee;
-            if actual_term_fee < expected_term_fee {
-                return Err(PreValidationError::InsufficientTermFee {
-                    tx_id: tx.id,
-                    expected: expected_term_fee,
-                    actual: actual_term_fee.get(),
-                });
-            }
-
-            TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-                PreValidationError::InvalidTermFeeStructure {
-                    tx_id: tx.id,
-                    reason: e.to_string(),
-                }
-            })?;
-            Ok(())
-        };
-
-    // Step 4: Validate based on ledger rules
+    // Validate based on ledger rules and past inclusions
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
             // no past inclusions
@@ -2344,26 +2411,25 @@ pub async fn data_txs_are_valid(
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
-                        validate_price(tx)?;
-
-                        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
-                        // (they're waiting for proofs to arrive)
-                        if tx.promoted_height().is_some() {
-                            // TODO: This should be a hard error, but the test infrastructure currently
-                            // creates transactions with ingress proofs that get placed in Submit ledger.
-                            // This needs to be fixed in the block production logic to properly place
-                            // transactions with proofs in the Publish ledger.
-                            tracing::error!(
-                                "Transaction {} in Submit ledger should not have a promoted_height",
-                                tx.id
-                            );
-                        }
-
+                        validate_publish_price(
+                            tx,
+                            block.height,
+                            timestamp_secs,
+                            &block_ema,
+                            config,
+                        )?;
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
                     DataLedger::OneYear | DataLedger::ThirtyDay => {
                         // Term-only ledger: validate term fee, no promotion
-                        validate_term_price(tx, *ledger_current)?;
+                        validate_term_only_price(
+                            tx,
+                            *ledger_current,
+                            block.height,
+                            timestamp_secs,
+                            &block_ema,
+                            config,
+                        )?;
                         debug!(
                             "Transaction {} is new in {:?} ledger",
                             tx.id, ledger_current
@@ -2383,7 +2449,13 @@ pub async fn data_txs_are_valid(
                                     && current_block_hash == &block.block_hash
                                 {
                                     // tx was included & promoted within the same block
-                                    validate_price(tx)?;
+                                    validate_publish_price(
+                                        tx,
+                                        block.height,
+                                        timestamp_secs,
+                                        &block_ema,
+                                        config,
+                                    )?;
                                 }
 
                                 // OK: Transaction promoted from past Submit to current Publish
@@ -2435,46 +2507,6 @@ pub async fn data_txs_are_valid(
                 });
             }
         }
-    }
-
-    // Step 5: Validate all SUBMIT tx (including same-block promotions)
-    let all_txs = submit_txs.iter().map(|tx| (tx, DataLedger::Submit));
-
-    // DO NOT INCLUDE ANY LOGIC OTHER THAN PRICING VALIDATION HERE
-    // IT ONLY RUNS FOR NON-PROMOTED TXS
-    for (tx, current_ledger) in all_txs {
-        debug_assert_eq!(current_ledger, DataLedger::Submit);
-        // Submit ledger only accepts Publish-targeted txs (promotion pipeline)
-        if tx.ledger_id != DataLedger::Publish as u32 {
-            return Err(PreValidationError::InvalidLedgerIdForTx {
-                tx_id: tx.id,
-                expected: DataLedger::Publish as u32,
-                actual: tx.ledger_id,
-            });
-        }
-
-        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
-        // (they're waiting for proofs to arrive)
-        if tx.promoted_height().is_some() {
-            // TODO: This should be a hard error, but the test infrastructure currently
-            // creates transactions with ingress proofs that get placed in Submit ledger.
-            // This needs to be fixed in the block production logic to properly place
-            // transactions with proofs in the Publish ledger.
-            tracing::warn!(
-                "Transaction {} in Submit ledger should not have a promoted_height",
-                tx.id
-            );
-        }
-    }
-
-    // Step 6: Validate term ledger transactions (OneYear/ThirtyDay)
-    for tx in term_txs {
-        let ledger = DataLedger::try_from(tx.ledger_id).map_err(|_| {
-            PreValidationError::LedgerIdInvalid {
-                ledger_id: tx.ledger_id,
-            }
-        })?;
-        validate_term_price(&tx, ledger)?;
     }
 
     if publish_txs.is_empty()

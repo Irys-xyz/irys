@@ -417,8 +417,6 @@ async fn heavy_test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     });
 
     let transactions = bad_block.transactions();
-    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
-    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
     // Use a config override to limit anchor expiry depth for this test.
     let mut consensus = ctx.config.consensus_config();
@@ -433,9 +431,7 @@ async fn heavy_test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
         bad_block.header(),
         &ctx.node.node_ctx.db,
         &ctx.node.node_ctx.block_tree_guard,
-        submit_txs,
-        publish_txs,
-        &[], // no term txs in this test
+        transactions,
     )
     .await;
 
