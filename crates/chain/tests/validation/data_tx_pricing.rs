@@ -387,7 +387,7 @@ async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre:
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
-        0,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
@@ -396,7 +396,7 @@ async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre:
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
-        0,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(
@@ -515,7 +515,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
-        0,
+        UnixTimestamp::from_secs(0),
     )?
     .checked_div(U256::from(2))
     .unwrap();
@@ -526,7 +526,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
-        0,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(

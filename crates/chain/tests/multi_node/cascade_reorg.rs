@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_types::{hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig};
+use irys_types::{hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig, UnixTimestamp};
 use std::sync::Arc;
 
 /// Verify that when a reorg occurs, OneYear and ThirtyDay term ledger transactions
@@ -10,15 +10,14 @@ use std::sync::Arc;
 async fn slow_heavy_cascade_reorg_reinjects_term_ledger_txs() -> eyre::Result<()> {
     let seconds_to_wait = 20_usize;
     // Use epoch size 10 (matching fork_recovery tests) to avoid epoch boundary
-    // issues when mining isolated forks. activation_height must be a multiple
-    // of num_blocks_in_epoch.
+    // issues when mining isolated forks.
     let num_blocks_in_epoch = 10_u64;
     let activation_height = num_blocks_in_epoch;
 
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
-        activation_height,
+        activation_timestamp: UnixTimestamp::from_secs(0),
         one_year_epoch_length: 365,
         thirty_day_epoch_length: 30,
         annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),

@@ -861,7 +861,7 @@ pub enum DataLedger {
     /// The permanent publish ledger
     #[default]
     Publish = 0,
-    /// An expiring term ledger used for submitting to the publish ledger
+    /// Internal staging ledger for Publish; never user-targetable
     Submit = 1,
     // Add more term ledgers as they exist
     OneYear = 10,
@@ -913,6 +913,21 @@ impl DataLedger {
     /// get the associated numeric ID
     pub const fn get_id(&self) -> u32 {
         *self as u32
+    }
+
+    /// Ledgers that users are allowed to target directly in tx headers.
+    pub fn is_user_targetable(&self) -> bool {
+        matches!(self, Self::Publish | Self::OneYear | Self::ThirtyDay)
+    }
+
+    /// Term ledgers share expiry/lifecycle mechanics.
+    pub fn is_term_ledger(&self) -> bool {
+        matches!(self, Self::Submit | Self::OneYear | Self::ThirtyDay)
+    }
+
+    /// Submit is the internal staging ledger for Publish.
+    pub fn is_staging_submit(&self) -> bool {
+        matches!(self, Self::Submit)
     }
 
     fn from_u32(value: u32) -> Option<Self> {

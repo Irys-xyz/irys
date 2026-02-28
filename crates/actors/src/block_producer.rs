@@ -1078,7 +1078,7 @@ pub trait BlockProdStrategy {
             .hardforks
             .cascade
             .as_ref()
-            .filter(|c| block_height >= c.activation_height);
+            .filter(|c| current_timestamp.to_secs() >= c.activation_timestamp);
 
         let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
             let mut txids = H256List::new();
@@ -1686,7 +1686,7 @@ pub trait BlockProdStrategy {
             .config
             .consensus
             .hardforks
-            .is_cascade_active(block_height);
+            .is_cascade_active_for_epoch(parent_epoch_snapshot);
         if cascade_active {
             for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
                 let delta = ledger_expiry::calculate_expired_ledger_fees(

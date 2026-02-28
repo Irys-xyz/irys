@@ -32,31 +32,30 @@ impl Inner {
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
         // Fast-fail if this tx targets an unsupported ledger
-        match DataLedger::try_from(tx.ledger_id) {
-            Ok(DataLedger::Publish) => {
-                // Always valid
+        let ledger = DataLedger::try_from(tx.ledger_id)
+            .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;
+        if !ledger.is_user_targetable() {
+            return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+        }
+        if matches!(ledger, DataLedger::OneYear | DataLedger::ThirtyDay) {
+            // Valid only when Cascade hardfork is active
+            let cascade_active = {
+                let tree = self.block_tree_read_guard.read();
+                let (canonical, _) = tree.get_canonical_chain();
+                canonical
+                    .last()
+                    .map(|entry| {
+                        self.config
+                            .node_config
+                            .consensus_config()
+                            .hardforks
+                            .is_cascade_active_at(entry.header().timestamp_secs())
+                    })
+                    .unwrap_or(false)
+            };
+            if !cascade_active {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
-            Ok(DataLedger::OneYear | DataLedger::ThirtyDay) => {
-                // Valid only when Cascade hardfork is active
-                let cascade_active = {
-                    let tree = self.block_tree_read_guard.read();
-                    let (canonical, _) = tree.get_canonical_chain();
-                    canonical
-                        .last()
-                        .map(|entry| {
-                            self.config
-                                .node_config
-                                .consensus_config()
-                                .hardforks
-                                .is_cascade_active(entry.height())
-                        })
-                        .unwrap_or(false)
-                };
-                if !cascade_active {
-                    return Err(TxIngressError::InvalidLedger(tx.ledger_id));
-                }
-            }
-            _ => return Err(TxIngressError::InvalidLedger(tx.ledger_id)),
         }
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
@@ -215,12 +214,25 @@ impl Inner {
                 // Gossip path: skip API-only checks here
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
-                // Term ledgers: skip fee checks for gossip (may come from different fork)
+                // Term ledgers: validate perm_fee rejection and fee structure
+                // (skip EMA pricing check since gossip may come from different fork)
+                if tx
+                    .perm_fee
+                    .is_some_and(|f| f > irys_types::BoundedFee::zero())
+                {
+                    return Err(TxIngressError::FundMisalignment(
+                        "Term-only ledger transactions must not have a perm_fee".to_string(),
+                    ));
+                }
+                irys_types::transaction::fee_distribution::TermFeeCharges::new(
+                    tx.term_fee,
+                    &self.config.consensus,
+                )
+                .map_err(|e| {
+                    TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e))
+                })?;
             }
-            DataLedger::Submit => {
-                // Submit is not a valid target — data moves through it internally
-                return Err(TxIngressError::InvalidLedger(ledger as u32));
-            }
+            DataLedger::Submit => unreachable!("submit is not user-targetable"),
         }
 
         // Shared post-processing
@@ -284,10 +296,7 @@ impl Inner {
                         ))
                     })?;
             }
-            DataLedger::Submit => {
-                // Submit is not a valid target — data moves through it internally
-                return Err(TxIngressError::InvalidLedger(ledger as u32));
-            }
+            DataLedger::Submit => unreachable!("submit is not user-targetable"),
         }
 
         // Shared post-processing
@@ -383,8 +392,18 @@ impl Inner {
             DataLedger::Publish | DataLedger::Submit => {
                 self.config.consensus.epoch.submit_ledger_epoch_length
             }
-            DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).unwrap_or(365),
-            DataLedger::ThirtyDay => cascade.map(|c| c.thirty_day_epoch_length).unwrap_or(30),
+            DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).ok_or_else(|| {
+                TxIngressError::FundMisalignment(
+                    "Cascade hardfork not configured for OneYear ledger".to_string(),
+                )
+            })?,
+            DataLedger::ThirtyDay => {
+                cascade.map(|c| c.thirty_day_epoch_length).ok_or_else(|| {
+                    TxIngressError::FundMisalignment(
+                        "Cascade hardfork not configured for ThirtyDay ledger".to_string(),
+                    )
+                })?
+            }
         };
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
             next_block_height,
@@ -406,7 +425,7 @@ impl Inner {
             &self.config.consensus,
             replica_count,
             pricing_ema,
-            next_block_height,
+            latest_block_timestamp_secs,
         )
         .map_err(|e| {
             TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
@@ -440,7 +459,7 @@ impl Inner {
                 replica_count,
                 pricing_ema,
                 expected_term_fee,
-                next_block_height,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| {
                 TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))

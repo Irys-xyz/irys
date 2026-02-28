@@ -1,21 +1,18 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{DataLedger, NodeConfig};
+use irys_types::{DataLedger, NodeConfig, UnixTimestamp};
 
-/// Verify that block headers have the correct data_ledgers shape before and after
-/// Cascade hardfork activation.
-/// Pre-Cascade: 2 ledgers (Publish + Submit).
-/// Post-Cascade: 4 ledgers (Publish + Submit + OneYear + ThirtyDay) with correct metadata.
+/// Verify that block headers have the correct data_ledgers shape when Cascade is active.
+/// With activation_timestamp=0 (active from genesis): all blocks have 4 ledgers
+/// (Publish + Submit + OneYear + ThirtyDay) with correct metadata.
 #[test_log::test(tokio::test)]
 async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::Result<()> {
     use irys_types::hardfork_config::Cascade;
-
-    let activation_height = 4_u64;
 
     let num_blocks_in_epoch = 4_u64;
     let config = NodeConfig::testing().with_consensus(|c| {
         c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
         c.hardforks.cascade = Some(Cascade {
-            activation_height,
+            activation_timestamp: UnixTimestamp::from_secs(0),
             one_year_epoch_length: 365,
             thirty_day_epoch_length: 30,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -24,46 +21,40 @@ async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::
 
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
-    for _ in 0..activation_height {
+    // Mine a few blocks
+    for _ in 0..num_blocks_in_epoch {
         ctx.mine_block().await?;
     }
 
-    // Pre-Cascade blocks (1..3): exactly 2 data ledgers
-    for h in 1..=3_u64 {
+    // With activation_timestamp=0, Cascade is active from genesis.
+    // All blocks should have 4 data ledgers.
+    for h in 1..=num_blocks_in_epoch {
         let block = ctx.get_block_by_height(h).await?;
         let ledgers = &block.data_ledgers;
 
-        assert_eq!(ledgers.len(), 2, "block {} should have 2 data ledgers", h);
+        assert_eq!(
+            ledgers.len(),
+            4,
+            "block {} should have 4 data ledgers with cascade active from genesis",
+            h
+        );
         let ledger_ids: Vec<u32> = ledgers.iter().map(|l| l.ledger_id).collect();
         assert_eq!(
             ledger_ids,
-            vec![DataLedger::Publish as u32, DataLedger::Submit as u32],
-            "block {} pre-cascade ledger ids mismatch",
+            vec![
+                DataLedger::Publish as u32,
+                DataLedger::Submit as u32,
+                DataLedger::OneYear as u32,
+                DataLedger::ThirtyDay as u32,
+            ],
+            "block {} ledger ids mismatch",
             h
         );
     }
 
-    // Post-Cascade block (at activation_height): exactly 4 data ledgers
-    let block = ctx.get_block_by_height(activation_height).await?;
+    // Verify metadata on the last mined block
+    let block = ctx.get_block_by_height(num_blocks_in_epoch).await?;
     let ledgers = &block.data_ledgers;
-
-    assert_eq!(
-        ledgers.len(),
-        4,
-        "block {} should have 4 data ledgers at/after cascade",
-        activation_height
-    );
-    let ledger_ids: Vec<u32> = ledgers.iter().map(|l| l.ledger_id).collect();
-    assert_eq!(
-        ledger_ids,
-        vec![
-            DataLedger::Publish as u32,
-            DataLedger::Submit as u32,
-            DataLedger::OneYear as u32,
-            DataLedger::ThirtyDay as u32,
-        ],
-        "post-cascade ledger ids mismatch"
-    );
 
     // OneYear ledger: no ingress proofs, correct expiry
     let one_year = ledgers

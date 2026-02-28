@@ -1,8 +1,8 @@
 use alloy_primitives::B256;
 use irys_types::{
     DataLedger, DataTransactionLedger, GenesisConfig, H256, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestampMs, VDFLimiterInfo,
-    hardfork_config::Cascade, partition::PartitionHash,
+    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestamp, UnixTimestampMs,
+    VDFLimiterInfo, hardfork_config::Cascade, partition::PartitionHash,
 };
 
 pub fn build_unsigned_irys_genesis_block(
@@ -31,8 +31,9 @@ pub fn build_unsigned_irys_genesis_block(
             required_proof_count: None,
         },
     ];
-    // Only include OneYear/ThirtyDay ledgers if Cascade activates at genesis (height 0)
-    if let Some(cascade) = cascade.filter(|c| c.activation_height == 0) {
+    // Only include OneYear/ThirtyDay ledgers if Cascade activates at genesis (timestamp 0)
+    if let Some(cascade) = cascade.filter(|c| c.activation_timestamp == UnixTimestamp::from_secs(0))
+    {
         data_ledgers.push(DataTransactionLedger {
             ledger_id: DataLedger::OneYear.into(),
             tx_root: H256::zero(),
@@ -109,7 +110,7 @@ mod tests {
     #[test]
     fn test_genesis_block_with_cascade_at_genesis_has_four_ledgers() {
         let cascade = Cascade {
-            activation_height: 0,
+            activation_timestamp: UnixTimestamp::from_secs(0),
             one_year_epoch_length: 365,
             thirty_day_epoch_length: 30,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -133,7 +134,7 @@ mod tests {
     #[test]
     fn test_genesis_block_with_cascade_not_at_genesis_has_two_ledgers() {
         let cascade = Cascade {
-            activation_height: 100,
+            activation_timestamp: UnixTimestamp::from_secs(1000),
             one_year_epoch_length: 365,
             thirty_day_epoch_length: 30,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),

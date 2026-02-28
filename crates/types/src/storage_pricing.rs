@@ -5,8 +5,8 @@
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
-use crate::ConsensusConfig;
 pub use crate::U256;
+use crate::{ConsensusConfig, UnixTimestamp};
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use core::{fmt::Debug, marker::PhantomData};
@@ -507,9 +507,9 @@ pub fn calculate_term_fee(
     config: &ConsensusConfig,
     number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
-    height: u64,
+    timestamp: UnixTimestamp,
 ) -> Result<U256> {
-    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch_at(height)?;
+    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch_at(timestamp)?;
 
     // Apply duration (no decay for short-term storage)
     let zero_decay = Amount::percentage(Decimal::ZERO)?;
@@ -549,7 +549,7 @@ pub fn calculate_term_fee_from_config(
     config: &ConsensusConfig,
     number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
-    height: u64,
+    timestamp: UnixTimestamp,
 ) -> Result<U256> {
     calculate_term_fee(
         bytes_to_store,
@@ -557,7 +557,7 @@ pub fn calculate_term_fee_from_config(
         config,
         number_of_ingress_proofs_total,
         ema_price,
-        height,
+        timestamp,
     )
 }
 
@@ -568,9 +568,9 @@ pub fn calculate_perm_fee_from_config(
     number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
     term_fee: U256,
-    height: u64,
+    timestamp: UnixTimestamp,
 ) -> Result<Amount<(NetworkFee, Irys)>> {
-    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch_at(height)?;
+    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch_at(timestamp)?;
 
     // Calculate epochs for storage duration
     let epochs_for_storage = config.safe_minimum_number_of_years * config.epochs_per_year();
@@ -1324,7 +1324,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Convert to decimal for verification
@@ -1367,7 +1367,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Convert to decimal for verification
@@ -1422,7 +1422,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Convert to decimal
@@ -1466,7 +1466,7 @@ mod tests {
                     &config,
                     number_of_ingress_proofs_total,
                     irys_price,
-                    0,
+                    UnixTimestamp::from_secs(0),
                 )?;
                 let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
@@ -1506,7 +1506,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
@@ -1552,7 +1552,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
@@ -1602,7 +1602,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let fee_10m_dec = Amount::<Irys>::new(fee_10m).token_to_decimal()?;
 
@@ -1613,7 +1613,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let fee_10m_plus_dec = Amount::<Irys>::new(fee_10m_plus).token_to_decimal()?;
 
@@ -1660,7 +1660,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 cheap_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let cheap_fee_dec = Amount::<Irys>::new(cheap_fee).token_to_decimal()?;
 
@@ -1671,7 +1671,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 expensive_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let expensive_fee_dec = Amount::<Irys>::new(expensive_fee).token_to_decimal()?;
 
@@ -1802,7 +1802,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
@@ -1978,7 +1978,7 @@ mod tests {
                     &config,
                     number_of_ingress_proofs_total,
                     irys_price,
-                    0,
+                    UnixTimestamp::from_secs(0),
                 )?;
 
                 // Fee should increase with more epochs
@@ -1999,7 +1999,7 @@ mod tests {
                         &config,
                         number_of_ingress_proofs_total,
                         irys_price,
-                        0,
+                        UnixTimestamp::from_secs(0),
                     )?;
                     let fee_10_epochs = calculate_term_fee(
                         bytes_to_store,
@@ -2007,7 +2007,7 @@ mod tests {
                         &config,
                         number_of_ingress_proofs_total,
                         irys_price,
-                        0,
+                        UnixTimestamp::from_secs(0),
                     )?;
 
                     // With no decay, 5 epochs should cost ~5x one epoch
@@ -2055,7 +2055,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Calculate using the new function with same epoch count
@@ -2065,7 +2065,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Should be exactly the same
@@ -2099,7 +2099,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
 
@@ -2137,7 +2137,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
 
@@ -2166,7 +2166,7 @@ mod tests {
             // Disable minimum fee floor so we see the raw cost difference
             config.minimum_term_fee_usd = Amount::token(dec!(0))?;
             config.hardforks.cascade = Some(Cascade {
-                activation_height: 100,
+                activation_timestamp: UnixTimestamp::from_secs(1000),
                 one_year_epoch_length: 365,
                 thirty_day_epoch_length: 30,
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -2175,8 +2175,10 @@ mod tests {
             let bytes = 100_000 * config.chunk_size;
             let irys_price = Amount::token(dec!(1.0))?;
 
-            let fee_pre = calculate_term_fee(bytes, 5, &config, 1, irys_price, 99)?;
-            let fee_post = calculate_term_fee(bytes, 5, &config, 1, irys_price, 100)?;
+            let pre_ts = UnixTimestamp::from_secs(999);
+            let post_ts = UnixTimestamp::from_secs(1000);
+            let fee_pre = calculate_term_fee(bytes, 5, &config, 1, irys_price, pre_ts)?;
+            let fee_post = calculate_term_fee(bytes, 5, &config, 1, irys_price, post_ts)?;
 
             // Cascade default $0.028 vs base $0.01 → 2.8x increase
             let pre_dec = Amount::<Irys>::new(fee_pre).token_to_decimal()?;
@@ -2219,7 +2221,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Calculate permanent fee
@@ -2229,7 +2231,7 @@ mod tests {
                 number_of_ingress_proofs_total,
                 irys_price,
                 term_fee,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
@@ -2278,7 +2280,7 @@ mod tests {
                 &config,
                 number_of_ingress_proofs_total,
                 irys_price,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
 
             // Calculate permanent fee
@@ -2288,7 +2290,7 @@ mod tests {
                 number_of_ingress_proofs_total,
                 irys_price,
                 term_fee,
-                0,
+                UnixTimestamp::from_secs(0),
             )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
@@ -2321,7 +2323,7 @@ mod tests {
             config.minimum_term_fee_usd = Amount::token(dec!(0)).unwrap();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             config.hardforks.cascade = Some(Cascade {
-                activation_height: 100,
+                activation_timestamp: UnixTimestamp::from_secs(1000),
                 one_year_epoch_length: 365,
                 thirty_day_epoch_length: 30,
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -2332,14 +2334,20 @@ mod tests {
             let bytes = 100_000 * config.chunk_size;
             let irys_price = Amount::token(dec!(1.0))?;
 
-            let term_pre = calculate_term_fee_from_config(bytes, &config, proofs, irys_price, 99)?;
-            let perm_pre =
-                calculate_perm_fee_from_config(bytes, &config, proofs, irys_price, term_pre, 99)?;
+            let pre_ts = UnixTimestamp::from_secs(999);
+            let post_ts = UnixTimestamp::from_secs(1000);
+
+            let term_pre =
+                calculate_term_fee_from_config(bytes, &config, proofs, irys_price, pre_ts)?;
+            let perm_pre = calculate_perm_fee_from_config(
+                bytes, &config, proofs, irys_price, term_pre, pre_ts,
+            )?;
 
             let term_post =
-                calculate_term_fee_from_config(bytes, &config, proofs, irys_price, 100)?;
-            let perm_post =
-                calculate_perm_fee_from_config(bytes, &config, proofs, irys_price, term_post, 100)?;
+                calculate_term_fee_from_config(bytes, &config, proofs, irys_price, post_ts)?;
+            let perm_post = calculate_perm_fee_from_config(
+                bytes, &config, proofs, irys_price, term_post, post_ts,
+            )?;
 
             assert!(
                 perm_post.amount > perm_pre.amount,

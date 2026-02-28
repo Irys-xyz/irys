@@ -32,8 +32,8 @@ pub struct IrysHardforkConfig {
     pub borealis: Option<Borealis>,
 
     /// Cascade hardfork - enables OneYear and ThirtyDay term data ledgers.
-    /// Activation is height-based: enabled for all blocks at or above activation_height.
-    /// Must be set to an epoch boundary block height. None means disabled.
+    /// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch block's
+    /// timestamp >= activation_timestamp. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
 }
@@ -88,12 +88,15 @@ pub struct Borealis {
 
 /// Cascade hardfork - enables OneYear and ThirtyDay term data ledgers.
 ///
-/// Activation is height-based: the feature is enabled for all blocks at or above
-/// `activation_height`. This should be set to an epoch boundary block height.
+/// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch block's
+/// timestamp >= activation_timestamp. None means disabled.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cascade {
-    /// Block height at which this hardfork activates (should be an epoch boundary).
-    pub activation_height: u64,
+    /// Timestamp (seconds since epoch) at which this hardfork activates.
+    /// The actual activation happens at the first epoch boundary where the
+    /// epoch block's timestamp meets or exceeds this value.
+    #[serde(with = "unix_timestamp_string_serde")]
+    pub activation_timestamp: UnixTimestamp,
     /// Epoch length for the OneYear term ledger (default: 365 epochs).
     #[serde(default = "Cascade::default_one_year_epoch_length")]
     pub one_year_epoch_length: u64,
@@ -178,11 +181,12 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
-    /// Check if the Cascade hardfork is active at a given block height.
-    pub fn is_cascade_active(&self, height: u64) -> bool {
+    /// Check if the Cascade hardfork is active at a given timestamp (in seconds).
+    /// For non-epoch-aligned checks (pricing, fee calculation).
+    pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
         self.cascade
             .as_ref()
-            .is_some_and(|f| height >= f.activation_height)
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
     }
 
     /// Retain only commitment transactions that meet the minimum version requirement.
@@ -568,50 +572,50 @@ mod tests {
         }
 
         #[test]
-        fn test_is_cascade_active_boundary() {
+        fn test_is_cascade_active_at_boundary() {
             let config = IrysHardforkConfig {
                 cascade: Some(Cascade {
-                    activation_height: 100,
+                    activation_timestamp: UnixTimestamp::from_secs(1000),
                     one_year_epoch_length: 365,
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 ..base_config()
             };
-            assert!(!config.is_cascade_active(0));
-            assert!(!config.is_cascade_active(99));
-            assert!(config.is_cascade_active(100));
-            assert!(config.is_cascade_active(101));
-            assert!(config.is_cascade_active(u64::MAX));
+            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
+            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(999)));
+            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1000)));
+            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1001)));
+            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(u64::MAX)));
         }
 
         #[test]
-        fn test_is_cascade_active_disabled() {
+        fn test_is_cascade_active_at_disabled() {
             let config = base_config();
-            assert!(!config.is_cascade_active(0));
-            assert!(!config.is_cascade_active(u64::MAX));
+            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
+            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(u64::MAX)));
         }
 
         #[test]
-        fn test_is_cascade_active_from_genesis() {
+        fn test_is_cascade_active_at_from_genesis() {
             let config = IrysHardforkConfig {
                 cascade: Some(Cascade {
-                    activation_height: 0,
+                    activation_timestamp: UnixTimestamp::from_secs(0),
                     one_year_epoch_length: 365,
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 ..base_config()
             };
-            assert!(config.is_cascade_active(0));
-            assert!(config.is_cascade_active(1));
+            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
+            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1)));
         }
 
         #[test]
         fn test_cascade_serde_toml_roundtrip() {
             let config = IrysHardforkConfig {
                 cascade: Some(Cascade {
-                    activation_height: 300,
+                    activation_timestamp: UnixTimestamp::from_secs(5000),
                     one_year_epoch_length: 365,
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -620,7 +624,7 @@ mod tests {
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();
             assert!(toml_str.contains("[cascade]"));
-            assert!(toml_str.contains("activation_height = 300"));
+            assert!(toml_str.contains("activation_timestamp"));
 
             let deserialized: IrysHardforkConfig = toml::from_str(&toml_str).unwrap();
             assert_eq!(deserialized, config);
@@ -628,17 +632,17 @@ mod tests {
 
         #[test]
         fn test_cascade_serde_default_epoch_lengths() {
-            let toml_str = "
+            let toml_str = r#"
                 [frontier]
                 number_of_ingress_proofs_total = 1
                 number_of_ingress_proofs_from_assignees = 0
 
                 [cascade]
-                activation_height = 100
-            ";
+                activation_timestamp = "1970-01-01T00:16:40+00:00"
+            "#;
             let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
             let cascade = config.cascade.unwrap();
-            assert_eq!(cascade.activation_height, 100);
+            assert_eq!(cascade.activation_timestamp, UnixTimestamp::from_secs(1000));
             assert_eq!(cascade.one_year_epoch_length, 365);
             assert_eq!(cascade.thirty_day_epoch_length, 30);
             // Default annual_cost_per_gb should be $0.028
@@ -648,18 +652,18 @@ mod tests {
 
         #[test]
         fn test_cascade_serde_custom_annual_cost() {
-            let toml_str = "
+            let toml_str = r#"
                 [frontier]
                 number_of_ingress_proofs_total = 1
                 number_of_ingress_proofs_from_assignees = 0
 
                 [cascade]
-                activation_height = 200
+                activation_timestamp = "1970-01-01T00:33:20+00:00"
                 annual_cost_per_gb = 0.05
-            ";
+            "#;
             let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
             let cascade = config.cascade.as_ref().unwrap();
-            assert_eq!(cascade.activation_height, 200);
+            assert_eq!(cascade.activation_timestamp, UnixTimestamp::from_secs(2000));
             let expected = Amount::token(dec!(0.05)).unwrap();
             assert_eq!(cascade.annual_cost_per_gb, expected);
 

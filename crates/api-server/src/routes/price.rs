@@ -113,7 +113,7 @@ pub async fn get_price(
                 &state.config.consensus,
                 number_of_ingress_proofs_total,
                 pricing_ema,
-                next_block_height,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| {
                 (
@@ -137,7 +137,7 @@ pub async fn get_price(
                 number_of_ingress_proofs_total,
                 pricing_ema,
                 term_fee,
-                next_block_height,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
 
@@ -148,24 +148,29 @@ pub async fn get_price(
                 bytes: bytes_to_store,
             }))
         }
-        DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay => {
+        DataLedger::Submit => Err((
+            "Submit ledger is not user-targetable",
+            StatusCode::BAD_REQUEST,
+        )
+            .into()),
+        DataLedger::OneYear | DataLedger::ThirtyDay => {
             // Term ledger pricing — term-fee only, no perm_fee
             let cascade = state.config.consensus.hardforks.cascade.as_ref();
 
             // OneYear/ThirtyDay require Cascade to be active
-            if matches!(data_ledger, DataLedger::OneYear | DataLedger::ThirtyDay) {
+            {
                 let tree = state.block_tree.read();
                 let (canonical, _) = tree.get_canonical_chain();
-                let tip_height = canonical
+                let tip_timestamp = canonical
                     .last()
-                    .map(irys_domain::BlockTreeEntry::height)
-                    .unwrap_or(0);
+                    .map(|entry| entry.header().timestamp_secs())
+                    .unwrap_or(irys_types::UnixTimestamp::from_secs(0));
                 drop(tree);
                 if !state
                     .config
                     .consensus
                     .hardforks
-                    .is_cascade_active(tip_height)
+                    .is_cascade_active_at(tip_timestamp)
                 {
                     return Err((
                         format!(
@@ -178,10 +183,13 @@ pub async fn get_price(
                 }
             }
 
+            let cascade = cascade.ok_or((
+                "Cascade hardfork not configured",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))?;
             let epoch_length = match data_ledger {
-                DataLedger::Submit => state.config.consensus.epoch.submit_ledger_epoch_length,
-                DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).unwrap_or(365),
-                DataLedger::ThirtyDay => cascade.map(|c| c.thirty_day_epoch_length).unwrap_or(30),
+                DataLedger::OneYear => cascade.one_year_epoch_length,
+                DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
                 _ => unreachable!(),
             };
 
@@ -220,14 +228,8 @@ pub async fn get_price(
                 ema.ema_for_public_pricing()
             };
 
-            // Submit uses the full ingress proof replica count (part of perm pipeline).
             // OneYear/ThirtyDay have no ingress proofs — replica count is 1.
-            let replica_count = match data_ledger {
-                DataLedger::Submit => state
-                    .config
-                    .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
-                _ => 1,
-            };
+            let replica_count = 1;
 
             let term_fee = calculate_term_fee(
                 bytes_to_store,
@@ -235,7 +237,7 @@ pub async fn get_price(
                 &state.config.consensus,
                 replica_count,
                 pricing_ema,
-                next_block_height,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| {
                 (

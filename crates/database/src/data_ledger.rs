@@ -490,12 +490,14 @@ impl IndexMut<DataLedger> for Ledgers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{DataLedger, config::consensus::ConsensusConfig, hardfork_config::Cascade};
+    use irys_types::{
+        DataLedger, UnixTimestamp, config::consensus::ConsensusConfig, hardfork_config::Cascade,
+    };
 
     fn config_with_cascade() -> ConsensusConfig {
         let mut config = ConsensusConfig::testing();
         config.hardforks.cascade = Some(Cascade {
-            activation_height: 0,
+            activation_timestamp: UnixTimestamp::from_secs(0),
             one_year_epoch_length: 365,
             thirty_day_epoch_length: 30,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),

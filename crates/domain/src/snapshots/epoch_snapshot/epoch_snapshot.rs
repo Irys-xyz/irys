@@ -121,7 +121,7 @@ impl EpochSnapshot {
         let cascade_active = config
             .consensus
             .hardforks
-            .is_cascade_active(genesis_block.height);
+            .is_cascade_active_at(genesis_block.timestamp_secs());
         let mut new_self = Self {
             ledgers: Ledgers::new(&config.consensus, cascade_active),
             partition_assignments: PartitionAssignments::new(),
@@ -310,7 +310,7 @@ impl EpochSnapshot {
             .config
             .consensus
             .hardforks
-            .is_cascade_active(new_epoch_block.height)
+            .is_cascade_active_at(new_epoch_block.timestamp_secs())
         {
             self.ledgers.activate_cascade(&self.config.consensus);
         }

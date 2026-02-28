@@ -1,12 +1,15 @@
 use crate::utils::{solution_context, IrysNodeTest};
 use eyre::Result;
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::{prevalidate_block, PreValidationError};
+use irys_actors::test_helpers::build_test_service_senders;
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    SealedBlock, SystemLedger, UnixTimestampMs, H256, U256,
+    BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger, DataTransactionHeader,
+    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemLedger,
+    UnixTimestampMs, H256, U256,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -336,6 +339,120 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
             assert_eq!(got, max + 1);
         }
         other => panic!("expected TooManyDataTxs, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn heavy_test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // Create a tx that incorrectly targets Submit (otherwise valid + well-funded)
+    let mut bad_tx = DataTransactionHeader::new(&ctx.config.consensus_config());
+    bad_tx.data_root = H256::from_low_u64_be(42);
+    bad_tx.data_size = 0;
+    bad_tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
+    bad_tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
+    bad_tx.ledger_id = DataLedger::Submit as u32;
+    bad_tx = bad_tx
+        .sign(&ctx.config.signer())
+        .expect("Failed to sign test transaction");
+
+    // Build a block that is otherwise valid, but includes the Submit-targeted tx
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![bad_tx.clone()];
+
+    let mut header = (**ctx.block.header()).clone();
+    use irys_types::H256List;
+
+    let publish_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    publish_ledger.tx_ids = H256List(Vec::new());
+
+    let submit_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    submit_ledger.tx_ids = H256List(vec![bad_tx.id]);
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+    {
+        let mut tree = ctx.node.node_ctx.block_tree_guard.write();
+        let parent_hash = bad_block.header().previous_block_hash;
+        let commitment_snapshot = tree
+            .get_commitment_snapshot(&parent_hash)
+            .expect("parent commitment snapshot");
+        let epoch_snapshot = tree
+            .get_epoch_snapshot(&parent_hash)
+            .expect("parent epoch snapshot");
+        let ema_snapshot = tree
+            .get_ema_snapshot(&parent_hash)
+            .expect("parent ema snapshot");
+        tree.add_block(
+            &bad_block,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+        )?;
+    }
+
+    let (service_senders, mut service_receivers) = build_test_service_senders();
+    let block_tree_guard = ctx.node.node_ctx.block_tree_guard.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = service_receivers.block_tree.recv().await {
+            let BlockTreeServiceMessage::GetBlockTreeReadGuard { response } = msg.inner else {
+                continue;
+            };
+            let _ = response.send(block_tree_guard.clone());
+        }
+    });
+
+    let transactions = bad_block.transactions();
+    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+
+    // Use a config override to limit anchor expiry depth for this test.
+    let mut consensus = ctx.config.consensus_config();
+    consensus.mempool.tx_anchor_expiry_depth = 0;
+    let mut node_config = ctx.config.clone();
+    node_config.consensus = ConsensusOptions::Custom(consensus);
+    let config_override = Config::new_with_random_peer_id(node_config);
+
+    let result = irys_actors::block_validation::data_txs_are_valid(
+        &config_override,
+        &service_senders,
+        bad_block.header(),
+        &ctx.node.node_ctx.db,
+        &ctx.node.node_ctx.block_tree_guard,
+        submit_txs,
+        publish_txs,
+        &[], // no term txs in this test
+    )
+    .await;
+
+    match result {
+        Err(PreValidationError::InvalidLedgerIdForTx {
+            tx_id,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(tx_id, bad_tx.id);
+            assert_eq!(expected, DataLedger::Publish as u32);
+            assert_eq!(actual, DataLedger::Submit as u32);
+        }
+        other => panic!(
+            "expected InvalidLedgerIdForTx for Submit-targeted tx, got {:?}",
+            other
+        ),
     }
 
     ctx.stop().await;

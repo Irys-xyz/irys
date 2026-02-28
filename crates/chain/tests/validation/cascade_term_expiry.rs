@@ -1,21 +1,21 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_types::{hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig};
+use irys_types::{hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig, UnixTimestamp};
 
 /// Verify that OneYear and ThirtyDay term ledgers expire at different rates
 /// based on their distinct epoch_length values from the Cascade hardfork config.
 ///
-/// With one_year_epoch_length=4 and thirty_day_epoch_length=2 (both using 2-block epochs):
+/// With one_year_epoch_length=8 and thirty_day_epoch_length=2 (both using 2-block epochs):
 /// - ThirtyDay data expires after 2×2 = 4 blocks
-/// - OneYear data expires after 4×2 = 8 blocks
+/// - OneYear data expires after 8×2 = 16 blocks
 ///
 /// At the mid-point boundary, ThirtyDay slots should be expiring while OneYear slots
 /// remain active. At the late boundary, OneYear slots should also expire.
 #[test_log::test(tokio::test)]
 async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2_u64;
-    let activation_height = num_blocks_in_epoch; // epoch boundary
-    let one_year_epoch_length = 4_u64; // expires after 4×2 = 8 blocks
+    let activation_height = num_blocks_in_epoch; // used as mining target
+    let one_year_epoch_length = 8_u64; // expires after 8×2 = 16 blocks
     let thirty_day_epoch_length = 2_u64; // expires after 2×2 = 4 blocks
     let chunk_size = 32_u64;
     let num_chunks_in_partition = 10_u64;
@@ -26,7 +26,7 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = num_chunks_in_partition;
         c.hardforks.cascade = Some(Cascade {
-            activation_height,
+            activation_timestamp: UnixTimestamp::from_secs(0),
             one_year_epoch_length,
             thirty_day_epoch_length,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),

@@ -491,18 +491,23 @@ impl BlockValidationTask {
         // Data transaction fee validation
         let sealed_block_for_data = self.sealed_block.clone();
         let data_txs_validation_task = async move {
+            let txs = sealed_block_for_data.transactions();
+            let mut term_txs: Vec<irys_types::DataTransactionHeader> = Vec::new();
+            for ledger in [
+                irys_types::DataLedger::OneYear,
+                irys_types::DataLedger::ThirtyDay,
+            ] {
+                term_txs.extend_from_slice(txs.get_ledger_txs(ledger));
+            }
             data_txs_are_valid(
                 config,
                 service_senders,
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,
-                sealed_block_for_data
-                    .transactions()
-                    .get_ledger_txs(irys_types::DataLedger::Submit),
-                sealed_block_for_data
-                    .transactions()
-                    .get_ledger_txs(irys_types::DataLedger::Publish),
+                txs.get_ledger_txs(irys_types::DataLedger::Submit),
+                txs.get_ledger_txs(irys_types::DataLedger::Publish),
+                &term_txs,
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",
