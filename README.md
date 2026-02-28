@@ -43,11 +43,13 @@ cargo test --doc
 ```
 
 Re-run only failing tests:
+
 ```cli
 cargo xtask test --rerun-failures
 ```
 
 Run a single package:
+
 ```cli
 cargo xtask test -- -p irys-actors
 ```

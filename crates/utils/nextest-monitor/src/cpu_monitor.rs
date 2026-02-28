@@ -13,21 +13,17 @@ mod platform {
         // Find the end of comm field (it's in parentheses and may contain spaces)
         let comm_end = content.find(')')?;
         let after_comm = &content[comm_end + 2..];
-        let fields: Vec<&str> = after_comm.split_whitespace().collect();
-
         // utime is field index 11, stime is field index 12
-        if fields.len() > 12 {
-            let utime: u64 = fields[11].parse().ok()?;
-            let stime: u64 = fields[12].parse().ok()?;
-            Some(utime + stime)
-        } else {
-            None
-        }
+        let mut iter = after_comm.split_whitespace();
+        let utime: u64 = iter.nth(11)?.parse().ok()?;
+        let stime: u64 = iter.next()?.parse().ok()?;
+        Some(utime + stime)
     }
 
-    /// Get clock ticks per second
+    /// Get clock ticks per second (falls back to 100 if sysconf fails).
     fn get_clk_tck() -> u64 {
-        unsafe { libc::sysconf(libc::_SC_CLK_TCK) as u64 }
+        let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if raw < 1 { 100 } else { raw as u64 }
     }
 
     pub struct CpuMonitor {

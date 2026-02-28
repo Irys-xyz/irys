@@ -4,9 +4,10 @@
 mod platform {
     use std::fs;
 
-    /// Get the page size in bytes
+    /// Get the page size in bytes (falls back to 4096 if sysconf fails).
     fn get_page_size() -> u64 {
-        unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
+        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if raw < 1 { 4096 } else { raw as u64 }
     }
 
     pub struct MemoryMonitor {

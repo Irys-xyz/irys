@@ -84,8 +84,8 @@ fn env_is_enabled(name: &str) -> bool {
 fn get_sample_interval() -> Duration {
     env::var("NEXTEST_MONITOR_INTERVAL_MS")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_millis)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.max(1)))
         .unwrap_or(Duration::from_millis(50))
 }
 

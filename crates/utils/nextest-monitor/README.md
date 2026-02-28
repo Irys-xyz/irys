@@ -67,7 +67,7 @@ cargo run --bin nextest-report -- summary --top 15
 
 Example summary output (with `--monitor`):
 
-```
+```text
 Test Name                                     Alloc    P90   Peak    Avg Duration   ≥P90   NrPk PeakRSS  AvgRSS Runs
 ------------------------------------------------------------------------------------------------------------------------------
 actors::block_producer::test_produce_block       1T  2.31x  3.05x  1.72x     4.2s    12%    8%   245M    180M    3
@@ -77,7 +77,7 @@ actors::mempool::test_add_transaction            1T  0.45x  0.62x  0.30x     0.3
 
 Example summary output (without `--monitor` — no PeakRSS/AvgRSS columns):
 
-```
+```text
 Test Name                                     Alloc    P90   Peak    Avg Duration   ≥P90   NrPk Runs
 --------------------------------------------------------------------------------------------------------------
 actors::block_producer::test_produce_block       1T  0.00x  0.00x  0.00x     4.2s     0%    0%    3
@@ -90,7 +90,7 @@ cargo run --bin nextest-report -- analyze
 
 Example analyze output:
 
-```
+```text
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                     TESTS NEEDING RECLASSIFICATION                          ║
 ╚══════════════════════════════════════════════════════════════════════════════╝

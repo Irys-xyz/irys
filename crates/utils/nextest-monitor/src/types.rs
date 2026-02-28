@@ -92,6 +92,26 @@ pub struct AggregatedStats {
 }
 
 impl AggregatedStats {
+    /// Load stats from a JSONL file, propagating IO errors.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = fs::read_to_string(path)?;
+
+        let mut tests = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<TestStats>(line) {
+                Ok(stats) => tests.push(stats),
+                Err(e) => {
+                    eprintln!("Warning: skipping malformed stats line: {e}");
+                }
+            }
+        }
+        Ok(AggregatedStats { tests })
+    }
+
     /// Load stats from a JSONL file (one TestStats per line).
     pub fn load_or_default(path: &Path) -> Self {
         if !path.exists() {

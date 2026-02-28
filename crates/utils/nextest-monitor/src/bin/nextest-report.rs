@@ -767,12 +767,16 @@ fn main() -> std::io::Result<()> {
 
 fn load_stats(path: &std::path::Path) -> std::io::Result<AggregatedStats> {
     if !path.exists() {
-        eprintln!("Stats file not found: {}", path.display());
-        eprintln!("Run your tests with nextest-wrapper first.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Stats file not found: {}. Run your tests with nextest-wrapper first.",
+                path.display()
+            ),
+        ));
     }
 
-    Ok(AggregatedStats::load_or_default(path))
+    AggregatedStats::load(path)
 }
 
 fn cmd_config(config: &ClassificationConfig) {
