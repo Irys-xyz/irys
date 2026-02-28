@@ -30,28 +30,19 @@ impl Inner {
         let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
         let commitment_txids = block.commitment_tx_ids();
 
-        for txid in submit_txids.iter().chain(publish_txids.iter()) {
-            self.mempool_state
-                .set_data_tx_included_height_overwrite(*txid, block.height)
-                .await;
-        }
-
-        for txid in commitment_txids.iter() {
-            self.mempool_state
-                .set_commitment_tx_included_height(*txid, block.height)
-                .await;
-        }
-
-        for txid in publish_txids.iter() {
-            if self
-                .mempool_state
-                .set_promoted_height(*txid, block.height)
-                .await
-                .is_some()
-            {
-                debug!(tx.id = %txid, promoted_height = block.height, "Promoted tx in mempool");
-            }
-        }
+        let submit_and_publish: Vec<H256> = submit_txids
+            .iter()
+            .chain(publish_txids.iter())
+            .copied()
+            .collect();
+        self.mempool_state
+            .apply_block_confirmed_updates(
+                &submit_and_publish,
+                commitment_txids,
+                publish_txids,
+                block.height,
+            )
+            .await;
 
         // Update `CachedDataRoots` so that this block_hash is cached for each data_root
         for submit_tx in sealed_block
@@ -92,41 +83,50 @@ impl Inner {
         );
         let new_tip = event.new_tip;
 
+        // Re-submit orphaned txs from old fork back to mempool (normal gossip ingress)
         self.handle_confirmed_data_tx_reorg(&event).await?;
-
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
+        // Revalidate all mempool txs against new canonical chain (in-place, under write lock)
         self.reprocess_all_txs().await?;
 
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
     }
 
-    /// Re-process all currently valid mempool txs
-    /// all this does is take all valid submit & commitment txs, and passes them back through ingress
+    /// Re-validates all mempool txs in-place against the current canonical chain.
+    /// Holds a single write lock for the duration — concurrent readers (select_best_txs)
+    /// see either the pre- or post-revalidation state, never a partial/empty state.
+    ///
+    /// Scope: anchor validity and commitment snapshot status only. Signature, fee,
+    /// value, and funding checks are not repeated — those were verified on ingress
+    /// and are block-height-independent.
     #[instrument(skip_all)]
     pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
-        // re-process all valid txs
-        let (valid_submit_ledger_tx, valid_commitment_tx) =
-            self.mempool_state.take_all_valid_txs().await;
-        for (id, tx) in valid_submit_ledger_tx {
-            match self.handle_data_tx_ingress_message_gossip(tx).await {
-                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
-                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
-            }
-        }
-        for (_address, txs) in valid_commitment_tx {
-            for tx in txs {
-                let id = tx.id();
-                match self.handle_ingress_commitment_tx_message_gossip(tx).await {
-                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
-                    Err(err) => debug!(
-                        "failed to resubmit commitment tx {} to mempool: {:?}",
-                        &id, &err
-                    ),
-                }
-            }
-        }
+        let current_height =
+            crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
+
+        // Pre-fetch commitment snapshot (sync block tree read, before acquiring mempool lock)
+        let (commitment_snapshot, epoch_snapshot) = {
+            let tree = self.block_tree_read_guard.read();
+            (
+                tree.canonical_commitment_snapshot(),
+                tree.canonical_epoch_snapshot(),
+            )
+        };
+
+        // Hold write lock for the entire revalidation
+        let mut state = self.mempool_state.write_for_reorg().await;
+
+        // Revalidate data txs — uses same prune method as prune_pending_txs
+        state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+
+        // Revalidate commitment txs — uses same prune + cache methods as ingress
+        state.revalidate_commitment_txs(
+            |tx| self.should_prune_tx(current_height, tx),
+            |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
+            self.config.node_config.mempool.max_pending_pledge_items,
+        );
 
         Ok(())
     }
@@ -151,9 +151,12 @@ impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height
     ))]
     pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
-        let anchor_height = match self
-            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
-        {
+        let anchor_height = match crate::anchor_validation::get_anchor_height(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            tx.anchor(),
+            false, /* does not need to be canonical */
+        ) {
             Ok(Some(h)) => h,
             // if we don't know about the anchor, we should prune
             // note: this can happen, i.e if we did a block rollback.
@@ -185,9 +188,16 @@ impl Inner {
 
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
     /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
+    ///
+    /// Uses a 3-phase approach to minimize lock acquisitions:
+    /// 1. Single read lock: snapshot all txs
+    /// 2. Outside the lock: evaluate which txs should be pruned (reads block tree + DB, not mempool)
+    /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
-        let current_height = match self.get_latest_block_height() {
+        let current_height = match crate::anchor_validation::get_latest_block_height(
+            &self.block_tree_read_guard,
+        ) {
             Ok(height) => height,
             Err(e) => {
                 error!(
@@ -197,49 +207,36 @@ impl Inner {
                 return;
             }
         };
-        // re-process all valid data txs
-        let tx_ids = self.mempool_state.all_valid_submit_ledger_ids().await;
-        for tx_id in tx_ids {
-            let tx = {
-                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
-                self.mempool_state
-                    .valid_submit_ledger_tx_cloned(&tx_id)
-                    .await
-            };
 
-            if let Some(tx) = tx
-                && self.should_prune_tx(current_height, &tx)
-            {
-                self.mempool_state
-                    .remove_valid_submit_ledger_tx(&tx_id)
-                    .await;
-                self.mempool_state
-                    .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
-                    .await;
+        // Phase 1: Snapshot all txs under a single read lock each
+        let data_txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
+        let commitment_txs_by_addr = self.mempool_state.all_valid_commitment_txs_cloned().await;
+
+        // Phase 2: Evaluate expiry
+        let mut expired_data: Vec<(H256, H256)> = Vec::new();
+        for tx in data_txs.values() {
+            if self.should_prune_tx(current_height, tx) {
+                expired_data.push((tx.id, tx.anchor));
             }
         }
 
-        // re-process all valid commitment txs
-        let addresses = self
-            .mempool_state
-            .all_valid_commitment_ledger_addresses()
-            .await;
-        for address in addresses {
-            let txs = self
-                .mempool_state
-                .valid_commitment_txs_cloned(&address)
-                .await;
-
-            if let Some(txs) = txs {
-                for tx in txs {
-                    if self.should_prune_tx(current_height, &tx) {
-                        self.mempool_state.remove_commitment_tx(&tx.id()).await;
-                        self.mempool_state
-                            .mark_tx_as_invalid(tx.id(), TxIngressError::InvalidAnchor(tx.anchor()))
-                            .await;
-                    }
+        let mut expired_commits: Vec<(H256, H256)> = Vec::new();
+        for txs in commitment_txs_by_addr.values() {
+            for tx in txs {
+                if self.should_prune_tx(current_height, tx) {
+                    expired_commits.push((tx.id(), tx.anchor()));
                 }
             }
+        }
+
+        // Phase 3: Batch-remove under a single write lock each
+        if !expired_data.is_empty() {
+            self.mempool_state.batch_prune_data_txs(&expired_data).await;
+        }
+        if !expired_commits.is_empty() {
+            self.mempool_state
+                .batch_prune_commitment_txs(&expired_commits)
+                .await;
         }
     }
 
@@ -581,12 +578,14 @@ impl Inner {
         // Update in-memory mempool state for txs promoted in both forks:
         // ensure they have the ingress proofs from the new canonical fork.
         // DB metadata is already handled by BlockMigrationService (clear old fork + write new fork).
-        let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
+        let publish_tx_block_map = new_fork_tx_block_map
+            .get(&DataLedger::Publish)
+            .ok_or_else(|| eyre::eyre!("new fork tx block map missing Publish ledger"))?;
         for txid in published_in_both.iter() {
             if let Some(mut tx) = published_tx_from_blocks.remove(txid) {
-                let promoted_in_block = publish_tx_block_map
-                    .get(txid)
-                    .unwrap_or_else(|| panic!("new fork publish_tx_block_map missing tx {}", txid));
+                let promoted_in_block = publish_tx_block_map.get(txid).ok_or_else(|| {
+                    eyre::eyre!("new fork publish_tx_block_map missing tx {}", txid)
+                })?;
 
                 let header = promoted_in_block.header();
                 let publish_ledger = &header.data_ledgers[DataLedger::Publish];

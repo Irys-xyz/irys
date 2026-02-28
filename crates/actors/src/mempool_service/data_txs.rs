@@ -1,12 +1,10 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::TxIngressError;
+use crate::mempool_service::validate_tx_signature;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
 use eyre::eyre;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
-};
-use irys_domain::get_optimistic_chain;
+use irys_database::{db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
@@ -16,10 +14,9 @@ use irys_types::{
     SendTraced as _, U256,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
-use reth_db::Database as _;
 use reth_db::transaction::DbTxMut as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.
@@ -65,7 +62,12 @@ impl Inner {
         }
 
         // Validate signature
-        self.validate_signature(tx).await?;
+        if let Err(e) = validate_tx_signature(tx) {
+            self.mempool_state
+                .mark_fingerprint_as_invalid(tx.fingerprint())
+                .await;
+            return Err(e);
+        }
 
         // Validate anchor and compute expiry
         let anchor_height = self.validate_tx_anchor(tx).await?;
@@ -104,58 +106,6 @@ impl Inner {
         metrics::record_data_tx_ingested();
         Ok(())
     }
-    /// Check the mempool and mdbx for data transactions.
-    /// Uses batch mempool lookup (single READ lock) then falls back to DB for missing txs.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.count = txs.len()))]
-    pub async fn handle_get_data_tx_message(
-        &self,
-        txs: Vec<H256>,
-    ) -> Vec<Option<DataTransactionHeader>> {
-        // Batch mempool lookup: single READ lock for all txids
-        let mempool_results = self
-            .mempool_state
-            .batch_valid_submit_ledger_tx_cloned(&txs)
-            .await;
-
-        let mut found_txs = Vec::with_capacity(txs.len());
-
-        for (tx_id, mempool_result) in txs.iter().zip(mempool_results) {
-            if let Some(tx_header) = mempool_result {
-                trace!("Got tx {} from mempool", tx_id);
-                found_txs.push(Some(tx_header));
-                continue;
-            }
-
-            // Fall back to DB for txs not in mempool
-            let db_result = self
-                .irys_db
-                .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
-                .map_err(|e| {
-                    warn!("Failed to open DB read transaction: {}", e);
-                    e
-                })
-                .ok()
-                .and_then(|result| match result {
-                    Ok(Some(tx_header)) => {
-                        trace!("Got tx {} from DB", tx_id);
-                        Some(tx_header)
-                    }
-                    Ok(None) => {
-                        debug!("Tx {} not found in DB", tx_id);
-                        None
-                    }
-                    Err(e) => {
-                        warn!("DB error reading tx {}: {}", tx_id, e);
-                        None
-                    }
-                });
-
-            found_txs.push(db_result);
-        }
-
-        found_txs
-    }
-
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
     pub async fn handle_data_tx_ingress_message_gossip(
         &self,
@@ -330,7 +280,8 @@ impl Inner {
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
 
         // Calculate expected fees using the authoritative EMA price
-        let latest_height = self.get_latest_block_height()?;
+        let latest_height =
+            crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
         let next_block_height = latest_height + 1;
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
             next_block_height,
@@ -533,121 +484,5 @@ impl Inner {
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),
         }
-    }
-
-    /// Returns all Submit ledger transactions that are pending inclusion in future blocks.
-    ///
-    /// This function specifically filters the Submit ledger mempool to exclude transactions
-    /// that have already been included in recent canonical blocks within the anchor expiry
-    /// window. Unlike the general mempool filter, this focuses solely on Submit transactions.
-    ///
-    /// # Algorithm
-    /// 1. Starts with all valid Submit ledger transactions from mempool
-    /// 2. Walks backwards through canonical chain within anchor expiry depth
-    /// 3. Removes Submit transactions that already exist in historical blocks
-    /// 4. Returns remaining pending Submit transactions
-    ///
-    /// # Returns
-    /// A vector of `DataTransactionHeader` representing Submit ledger transactions
-    /// that are pending inclusion and have not been processed in recent blocks.
-    ///
-    /// # Notes
-    /// - Only considers Submit ledger transactions (filters out Publish, etc.)
-    /// - Only examines blocks within the configured `anchor_expiry_depth`
-    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<DataTransactionHeader> {
-        // Get the current canonical chain head to establish our starting point for block traversal
-        // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
-        let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
-            .await
-            .unwrap();
-        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
-        let canonical_head_entry = canonical.last().unwrap();
-
-        // This is just here to catch any oddities in the debug log. The optimistic
-        // and canonical should always have the same results from my reading of the code.
-        // if the tests are stable and this hasn't come up it can be removed.
-        if optimistic.last().unwrap().0 != canonical_head_entry.block_hash() {
-            debug!("Optimistic and Canonical have different heads");
-        }
-
-        let block_hash = canonical_head_entry.block_hash();
-        let block_height = canonical_head_entry.height();
-
-        // retrieve block from mempool or database
-        // be aware that genesis starts its life immediately in the database
-        let mut block = match self
-            .handle_get_block_header_message(block_hash, false)
-            .await
-        {
-            Some(b) => b,
-            None => match self
-                .irys_db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
-            {
-                Ok(Some(header)) => Ok(header),
-                Ok(None) => Err(eyre!(
-                    "No block header found for hash {} ({})",
-                    block_hash,
-                    block_height
-                )),
-                Err(e) => Err(eyre!(
-                    "Failed to get previous block ({}) header: {}",
-                    block_height,
-                    e
-                )),
-            }
-            .expect("to find the block header in the db"),
-        };
-
-        // Calculate the minimum block height we need to check for transaction conflicts
-        // Only transactions anchored within this depth window are considered valid
-        let anchor_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u64;
-        let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
-
-        // Start with all valid Submit ledger transactions - we'll filter out already-included ones
-        let mut pending_valid_submit_ledger_tx =
-            self.mempool_state.all_valid_submit_ledgers_cloned().await;
-
-        // Walk backwards through the canonical chain, removing Submit transactions
-        // that have already been included in recent blocks within the anchor expiry window
-        while block.height >= min_anchor_height {
-            let block_data_tx_ids = block.get_data_ledger_tx_ids();
-
-            // Check if this block contains any Submit ledger transactions
-            if let Some(submit_txids) = block_data_tx_ids.get(&DataLedger::Submit) {
-                // Remove Submit transactions that already exist in this historical block
-                // This prevents double-inclusion and ensures we only return truly pending transactions
-                for txid in submit_txids.iter() {
-                    pending_valid_submit_ledger_tx.remove(txid);
-                }
-            }
-
-            // Stop if we've reached the genesis block
-            if block.height == 0 {
-                break;
-            }
-
-            // Move to the parent block and continue the traversal backwards
-            let parent_block = match self
-                .handle_get_block_header_message(block.previous_block_hash, false)
-                .await
-            {
-                Some(h) => h,
-                None => self
-                    .irys_db
-                    .view(|tx| {
-                        irys_database::block_header_by_hash(tx, &block.previous_block_hash, false)
-                    })
-                    .unwrap()
-                    .unwrap()
-                    .expect("to find the parent block header in the database"),
-            };
-
-            block = parent_block;
-        }
-
-        // Return all remaining Submit transactions by consuming the map
-        // These represent Submit transactions that are pending and haven't been included in any recent block
-        pending_valid_submit_ledger_tx.into_values().collect()
     }
 }

@@ -1,7 +1,8 @@
 use crate::mempool_service::AtomicMempoolState;
+use irys_database::{db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
-    DataTransactionMetadata, IrysTransactionId,
+    DataTransactionMetadata, IrysTransactionId, app_state::DatabaseProvider,
 };
 use std::collections::HashMap;
 
@@ -63,6 +64,13 @@ impl MempoolReadGuard {
         self.mempool_state.get_data_txs(data_tx_ids).await
     }
 
+    /// Returns a reference to the underlying `AtomicMempoolState`.
+    /// This is primarily used by the block producer to construct a `TxSelectionContext`
+    /// for direct tx selection without going through the mempool message queue.
+    pub fn atomic_state(&self) -> &AtomicMempoolState {
+        &self.mempool_state
+    }
+
     /// Check if a transaction ID is in the recent valid transactions cache.
     pub async fn is_recent_valid_tx(&self, tx_id: &IrysTransactionId) -> bool {
         self.mempool_state.is_recent_valid_tx(tx_id).await
@@ -96,4 +104,36 @@ impl TxMetadata {
             Self::Data(m) => m.promoted_height,
         }
     }
+}
+
+/// Best-effort fetch: mempool first, DB fallback for missing txs.
+/// Preserves the semantics of the old `GetDataTxs` message handler.
+/// Kept as a free function to avoid mixing DB concerns into `MempoolReadGuard`.
+pub async fn get_data_txs_best_effort(
+    guard: &MempoolReadGuard,
+    tx_ids: &[IrysTransactionId],
+    db: &DatabaseProvider,
+) -> Vec<Option<DataTransactionHeader>> {
+    let mempool_results = guard
+        .atomic_state()
+        .batch_valid_submit_ledger_tx_cloned(tx_ids)
+        .await;
+
+    tx_ids
+        .iter()
+        .zip(mempool_results)
+        .map(|(tx_id, mempool_result)| {
+            mempool_result.or_else(|| {
+                match db.view_eyre(|read_tx| {
+                    tx_header_by_txid(read_tx, tx_id).map_err(|e| eyre::eyre!("{:?}", e))
+                }) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::warn!(tx.id = %tx_id, error = %e, "DB fallback failed in get_data_txs_best_effort");
+                        None
+                    }
+                }
+            })
+        })
+        .collect()
 }

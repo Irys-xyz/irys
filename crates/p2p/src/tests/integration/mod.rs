@@ -267,7 +267,7 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     // Set up the mock API client to return the transactions
     fixture1.add_tx_to_mempool(tx1.clone()).await;
     fixture1.add_tx_to_mempool(tx2.clone()).await;
-    fixture1.add_block_header_to_mempool(block_header.clone());
+    fixture1.persist_block_header_to_db(&block_header);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
@@ -395,7 +395,7 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
         .await;
-    fixture1.add_block_header_to_mempool(block.clone());
+    fixture1.persist_block_header_to_db(&block);
 
     let execution_payload_provider2 = fixture2.execution_payload_provider.clone();
     let mut sync_rx = fixture2._sync_rx.take().expect("expect to have a sync rx");

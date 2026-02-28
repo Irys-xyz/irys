@@ -1398,13 +1398,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
-            let headers = {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                self.node_ctx.service_senders.mempool.send_traced(
-                    MempoolServiceMessage::GetDataTxs(to_check.clone(), oneshot_tx),
-                )?;
-                oneshot_rx.await.unwrap()
-            };
+            let headers = irys_actors::mempool_guard::get_data_txs_best_effort(
+                &self.node_ctx.mempool_guard,
+                &to_check,
+                &self.node_ctx.db,
+            )
+            .await;
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
@@ -2009,19 +2008,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_ids: Vec<H256>,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
-        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let max_retries = seconds_to_wait * 5; // 200ms per retry
         let mut tx_ids: HashSet<H256> = tx_ids.clone().into_iter().collect();
 
         for retry in 0..max_retries {
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             let to_fetch = tx_ids.iter().copied().collect_vec();
             debug!("Fetching {:?}", &to_fetch);
-            mempool_service.send_traced(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: to_fetch,
-                response: oneshot_tx,
-            })?;
-            let fetched = oneshot_rx.await?;
+            let fetched = self
+                .node_ctx
+                .mempool_guard
+                .get_commitment_txs(&to_fetch)
+                .await;
 
             for found in fetched.keys() {
                 debug!("Fetched tx {} from mempool in {} retries", &found, &retry);
@@ -2054,7 +2051,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         PublishLedgerWithTxs,
         Vec<CommitmentTransaction>,
     )> {
-        let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
         debug!(
@@ -2065,13 +2061,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
             let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash();
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send_traced(MempoolServiceMessage::GetBestMempoolTxs(
-                canonical_tip,
-                oneshot_tx,
-            ))?;
-
-            let txs: MempoolTxs = oneshot_rx.await??;
+            let txs: MempoolTxs = self.get_best_mempool_tx(canonical_tip).await?;
             let MempoolTxs {
                 commitment_tx,
                 submit_tx,
@@ -2101,16 +2091,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.node_ctx
-            .service_senders
-            .mempool
-            .send_traced(MempoolServiceMessage::GetBestMempoolTxs(
-                parent_block_hash,
-                tx,
-            ))
-            .expect("to send MempoolServiceMessage");
-        rx.await.expect("to receive best transactions from mempool")
+        let ctx = irys_actors::tx_selector::TxSelectionContext {
+            block_tree: &self.node_ctx.block_tree_guard,
+            db: &self.node_ctx.db,
+            reth_adapter: &self.node_ctx.reth_node_adapter,
+            config: &self.node_ctx.config,
+            mempool_state: self.node_ctx.mempool_guard.atomic_state(),
+            chunk_ingress_state: &self.node_ctx.chunk_ingress_state,
+        };
+        irys_actors::tx_selector::select_best_txs(parent_block_hash, &ctx).await
     }
 
     // get account reth balance at specific block
@@ -2221,23 +2210,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
-        let mempool_sender = &self.node_ctx.service_senders.mempool;
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(e) =
-            mempool_sender.send_traced(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx))
-        {
-            tracing::info!("Unable to send mempool message: {}", e);
-        } else {
-            match oneshot_rx.await {
-                Ok(txs) => {
-                    if let Some(tx_header) = &txs[0] {
-                        return Ok(tx_header.promoted_height().is_some());
-                    }
-                }
-                Err(e) => tracing::info!("receive error for mempool {}", e),
-            }
+        // Check mempool metadata first
+        if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
+            return Ok(meta.promoted_height().is_some());
         }
 
+        // Fall back to DB
         match self
             .node_ctx
             .db
@@ -2252,32 +2230,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    /// read storage tx from mempool
+    /// read storage tx from mempool (with DB fallback)
     pub async fn get_storage_tx_header_from_mempool(
         &self,
         tx_id: &H256,
     ) -> eyre::Result<DataTransactionHeader> {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
-        if let Err(err) = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send_traced(tx_ingress_msg)
-        {
-            tracing::error!(
-                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
-                err
-            );
-        }
-        let mempool_response = oneshot_rx.await.expect(
-            "to receive IrysTransactionResponse from MempoolServiceMessage::GetDataTxs message",
-        );
-        let maybe_mempool_tx = mempool_response.first();
-        if let Some(Some(tx)) = maybe_mempool_tx {
-            return Ok(tx.clone());
-        }
-        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+        let results = irys_actors::mempool_guard::get_data_txs_best_effort(
+            &self.node_ctx.mempool_guard,
+            &[*tx_id],
+            &self.node_ctx.db,
+        )
+        .await;
+        results
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
     /// Polls the mempool until the transaction's `included_height` is set.
@@ -2310,31 +2278,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         tx_id: &H256,
     ) -> eyre::Result<CommitmentTransaction> {
-        // try to get commitment tx from mempool
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
-            commitment_tx_ids: vec![*tx_id],
-            response: oneshot_tx,
-        };
-        if let Err(err) = self
+        let fetched = self
             .node_ctx
-            .service_senders
-            .mempool
-            .send_traced(tx_ingress_msg)
-        {
-            tracing::error!(
-                "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
-                err
-            );
-        }
-        let mempool_response = oneshot_rx.await.expect(
-            "to receive IrysTransactionResponse from MempoolServiceMessage::GetCommitmentTxs message",
-        );
-        let maybe_mempool_tx = mempool_response.get(tx_id);
-        if let Some(tx) = maybe_mempool_tx {
-            return Ok(tx.clone());
-        }
-        Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+            .mempool_guard
+            .get_commitment_txs(&[*tx_id])
+            .await;
+        fetched
+            .get(tx_id)
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
     pub fn get_block_by_height_from_index(

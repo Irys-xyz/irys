@@ -1,21 +1,15 @@
-use crate::mempool_service::MempoolServiceMessage;
 use crate::metrics::record_reth_fcu_head_height;
 use eyre::eyre;
-use irys_database::{database, db::IrysDatabaseExt as _};
+use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{
-    BlockHash, DatabaseProvider, H256, RethPeerInfo, SendTraced as _, TokioServiceHandle, Traced,
-};
+use irys_types::{BlockHash, DatabaseProvider, H256, RethPeerInfo, TokioServiceHandle, Traced};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot,
-};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{Instrument as _, debug, error, info};
 
 #[derive(Debug)]
@@ -24,7 +18,7 @@ pub struct RethService {
     cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
-    mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
+    block_tree: BlockTreeReadGuard,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,34 +56,15 @@ pub struct ForkChoiceUpdate {
 
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn evm_block_hash_from_block_hash(
-    mempool_service: &UnboundedSender<Traced<MempoolServiceMessage>>,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
     debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
-    let irys_header = {
-        let (tx, rx) = oneshot::channel();
-        mempool_service
-            .send_traced(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx))
-            .expect("expected send to mempool to succeed");
-        let mempool_response = rx.await?;
-        match mempool_response {
-            Some(h) => {
-                debug!(block.hash = %irys_hash, "Found block in mempool");
-                h
-            }
-            None => {
-                debug!(block.hash = %irys_hash, "Block not in mempool, checking database");
-                db
-                    .view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?
-                    .ok_or_else(|| {
-                        error!(block.hash = %irys_hash, "Irys block not found in mempool or database");
-                        eyre!("Missing irys block {} in DB!", irys_hash)
-                    })?
-            }
-        }
-    };
+    let irys_header =
+        crate::block_header_lookup::get_block_header(block_tree, db, irys_hash, true)?
+            .ok_or_else(|| eyre!("Block header not found for hash {}", irys_hash))?;
     debug!(
         block.hash = %irys_hash,
         block.evm_block_hash = %irys_header.evm_block_hash,
@@ -103,7 +78,7 @@ impl RethService {
     pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
-        mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
+        block_tree: BlockTreeReadGuard,
         cmd_rx: UnboundedReceiver<Traced<RethServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -114,7 +89,7 @@ impl RethService {
             cmd_rx,
             handle,
             db: database_provider,
-            mempool,
+            block_tree,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -209,13 +184,13 @@ impl RethService {
         } = new_fcu;
 
         let evm_head_hash =
-            evm_block_hash_from_block_hash(&self.mempool, &self.db, head_hash).await?;
+            evm_block_hash_from_block_hash(&self.block_tree, &self.db, head_hash).await?;
 
         let evm_confirmed_hash =
-            evm_block_hash_from_block_hash(&self.mempool, &self.db, confirmed_hash).await?;
+            evm_block_hash_from_block_hash(&self.block_tree, &self.db, confirmed_hash).await?;
 
         let evm_finalized_hash =
-            evm_block_hash_from_block_hash(&self.mempool, &self.db, finalized_hash).await?;
+            evm_block_hash_from_block_hash(&self.block_tree, &self.db, finalized_hash).await?;
 
         Ok(ForkChoiceUpdate {
             head_hash: evm_head_hash,

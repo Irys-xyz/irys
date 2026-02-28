@@ -1,5 +1,4 @@
 use crate::{
-    MempoolServiceMessage,
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{PreValidationError, prevalidate_block},
     mempool_guard::MempoolReadGuard,
@@ -316,7 +315,6 @@ impl BlockDiscoveryServiceInner {
         let db = self.db.clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
-        let mempool_sender = self.service_senders.mempool.clone();
         let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
 
         let is_epoch_block =
@@ -338,30 +336,16 @@ impl BlockDiscoveryServiceInner {
         let reward_curve = Arc::clone(&self.reward_curve);
         let mempool_config = self.config.consensus.mempool.clone();
 
-        let previous_block_header = {
-            let (tx_prev, rx_prev) = oneshot::channel();
-            mempool_sender
-                .send_traced(MempoolServiceMessage::GetBlockHeader(
-                    parent_block_hash,
-                    false,
-                    tx_prev,
-                ))
-                .map_err(|channel_error| {
-                    BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                })?;
-            match rx_prev
-                .await
-                .map_err(|e| BlockDiscoveryInternalError::MempoolRequestFailed(e.to_string()))?
-            {
-                Some(hdr) => hdr,
-                None => db
-                    .view_eyre(|tx| block_header_by_hash(tx, &parent_block_hash, false))
-                    .map_err(BlockDiscoveryInternalError::DatabaseError)?
-                    .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
-                        previous_block_hash: parent_block_hash,
-                    })?,
-            }
-        };
+        let previous_block_header = crate::block_header_lookup::get_block_header(
+            &block_tree_guard,
+            &db,
+            parent_block_hash,
+            false,
+        )
+        .map_err(BlockDiscoveryInternalError::DatabaseError)?
+        .ok_or_else(|| BlockDiscoveryError::PreviousBlockNotFound {
+            previous_block_hash: parent_block_hash,
+        })?;
 
         //====================================
         // Submit ledger TX validation

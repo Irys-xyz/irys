@@ -5,13 +5,11 @@ use actix_web::{
     Result,
 };
 use base58::{FromBase58 as _, ToBase58 as _};
-use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{CombinedBlockHeader, ExecutionHeader, SendTraced as _, H256};
+use irys_actors::block_header_lookup;
+use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
-use tokio::sync::oneshot;
 
 pub async fn get_block_with_poa(
     state: web::Data<ApiState>,
@@ -27,6 +25,7 @@ pub async fn get_block_without_poa(
     get_block(state, path, false).await
 }
 
+#[expect(clippy::unused_async, reason = "actix-web handlers must be async")]
 pub async fn get_block(
     state: web::Data<ApiState>,
     path: web::Path<String>,
@@ -73,48 +72,29 @@ pub async fn get_block(
         }
         BlockParam::Hash(hash) => hash,
     };
-    get_block_by_hash(&state, block_hash, with_poa).await
+    get_block_by_hash(&state, block_hash, with_poa)
 }
 
-async fn get_block_by_hash(
+fn get_block_by_hash(
     state: &web::Data<ApiState>,
     block_hash: H256,
     with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
-    let irys_header = {
-        let (tx, rx) = oneshot::channel();
-        state
-            .mempool_service
-            .send_traced(MempoolServiceMessage::GetBlockHeader(
-                block_hash, with_poa, tx,
-            ))
-            .expect("expected send to mempool to succeed");
-        let mempool_response = rx.await.map_err(|e| {
-            tracing::error!("Mempool response error: {}", e);
-            ApiError::Internal {
-                err: "mempool response error".to_string(),
-            }
-        })?;
-        match mempool_response {
-            Some(h) => h,
-            None => state
-                .db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, with_poa))
-                .map_err(|e| {
-                    tracing::error!("DB error when reading block header: {}", e);
-                    ApiError::Internal {
-                        err: "DB error".to_string(),
-                    }
-                })?
-                .ok_or_else(|| {
-                    tracing::warn!("No block header found for hash {}", block_hash);
-                    ApiError::ErrNoId {
-                        id: block_hash.to_string(),
-                        err: "block hash not found".to_string(),
-                    }
-                })?,
-        }
-    };
+    let irys_header =
+        block_header_lookup::get_block_header(&state.block_tree, &state.db, block_hash, with_poa)
+            .map_err(|e| {
+                tracing::error!("Error looking up block header: {}", e);
+                ApiError::Internal {
+                    err: "DB error".to_string(),
+                }
+            })?
+            .ok_or_else(|| {
+                tracing::warn!("No block header found for hash {}", block_hash);
+                ApiError::ErrNoId {
+                    id: block_hash.to_string(),
+                    err: "block hash not found".to_string(),
+                }
+            })?;
 
     let reth_block = match state
         .reth_provider

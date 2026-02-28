@@ -5,8 +5,6 @@ use alloy_primitives::Address;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_types::SendTraced as _;
 
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
@@ -134,15 +132,8 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let recv_tx = loop {
         let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash();
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let response = node.node_ctx.service_senders.mempool.send_traced(
-            MempoolServiceMessage::GetBestMempoolTxs(canonical_tip, oneshot_tx),
-        );
-        if let Err(e) = response {
-            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
-        }
-        match oneshot_rx.await {
-            Ok(Ok(mempool_tx)) if !mempool_tx.submit_tx.is_empty() => {
+        match node.get_best_mempool_tx(canonical_tip).await {
+            Ok(mempool_tx) if !mempool_tx.submit_tx.is_empty() => {
                 break mempool_tx.submit_tx[0].clone();
             }
             _ => {

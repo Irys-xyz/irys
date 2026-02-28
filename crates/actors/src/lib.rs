@@ -1,4 +1,6 @@
+pub mod anchor_validation;
 pub mod block_discovery;
+pub mod block_header_lookup;
 pub mod block_migration_service;
 pub mod block_producer;
 pub mod block_tree_service;
@@ -22,6 +24,7 @@ pub mod storage_module_service;
 pub mod supply_state_calculator;
 pub mod test_helpers;
 pub mod transaction_status;
+pub mod tx_selector;
 pub mod validation_service;
 
 pub use block_producer::*;

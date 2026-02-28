@@ -118,6 +118,8 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                 reth_provider: genesis_block_prod.reth_provider.clone(),
                 consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
+                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
+                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
             }),
         },
     };
@@ -239,6 +241,8 @@ async fn heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
                 reth_provider: genesis_block_prod.reth_provider.clone(),
                 consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
+                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
+                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
             }),
         },
     };

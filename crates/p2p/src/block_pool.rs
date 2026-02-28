@@ -7,8 +7,6 @@ use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
-use irys_database::block_header_by_hash;
-use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 
 #[cfg(test)]
@@ -1121,33 +1119,14 @@ where
             return Ok(Some(Arc::clone(sealed.header())));
         }
 
-        if let Some(sealed) = self
-            .block_status_provider
-            .block_tree_read_guard()
-            .read()
-            .get_sealed_block(block_hash)
-        {
-            return Ok(Some(Arc::clone(sealed.header())));
-        }
-
-        match self.mempool.get_block_header(*block_hash, true).await {
-            Ok(Some(header)) => return Ok(Some(Arc::new(header))),
-            Ok(None) => {}
-            Err(err) => {
-                return Err(CriticalBlockPoolError::MempoolError(format!(
-                    "Mempool error: {:?}",
-                    err
-                ))
-                .into());
-            }
-        }
-
-        self.db
-            .view_eyre(|tx| block_header_by_hash(tx, block_hash, true))
-            .map_err(|db_error| {
-                CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into()
-            })
-            .map(|block| block.map(Arc::new))
+        irys_actors::block_header_lookup::get_block_header(
+            self.block_status_provider.block_tree_read_guard(),
+            &self.db,
+            *block_hash,
+            true,
+        )
+        .map_err(|db_error| CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into())
+        .map(|block| block.map(Arc::new))
     }
 
     pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {

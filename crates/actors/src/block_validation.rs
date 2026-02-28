@@ -2,15 +2,13 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
-    mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -47,7 +45,6 @@ use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
-use std::future::Future;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1314,7 +1311,6 @@ pub fn poa_is_valid(
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
@@ -1440,7 +1436,6 @@ pub async fn shadow_transactions_are_valid(
     // 3. Generate expected shadow transactions
     let expected_txs = generate_expected_shadow_transactions(
         config,
-        service_senders,
         block_tree_guard,
         mempool_guard,
         block,
@@ -1565,7 +1560,6 @@ pub async fn submit_payload_to_reth(
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions(
     config: &Config,
-    service_senders: &ServiceSenders,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
@@ -1576,22 +1570,13 @@ async fn generate_expected_shadow_transactions(
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = {
-        let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
-        service_senders
-            .mempool
-            .send_traced(MempoolServiceMessage::GetBlockHeader(
-                block.previous_block_hash,
-                false,
-                tx_prev,
-            ))?;
-        match rx_prev.await? {
-            Some(h) => h,
-            None => db
-                .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
-                .ok_or_eyre("Previous block not found")?,
-        }
-    };
+    let prev_block = crate::block_header_lookup::get_block_header(
+        block_tree_guard,
+        db,
+        block.previous_block_hash,
+        false,
+    )?
+    .ok_or_eyre("Previous block not found")?;
 
     // Calculate is_epoch_block early since it's needed for multiple checks
     let is_epoch_block = block
@@ -2362,15 +2347,9 @@ pub async fn data_txs_are_valid(
             })?;
 
             // Validate assigned ingress proofs and get counts
-            let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
-                &tx_proofs,
-                tx_header,
-                |hash| mempool_block_retriever(hash, service_senders),
-                block_tree_guard,
-                db,
-                config,
-            )
-            .await?;
+            let (assigned_proofs, assigned_miners) =
+                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config)
+                    .await?;
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
@@ -2865,30 +2844,13 @@ fn process_block_ledgers_with_states(
     Ok(())
 }
 
-async fn mempool_block_retriever(
-    hash: H256,
-    service_senders: &ServiceSenders,
-) -> Option<IrysBlockHeader> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    service_senders
-        .mempool
-        .send_traced(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
-        .expect("MempoolServiceMessage should be delivered");
-    rx.await.expect("mempool service message should succeed")
-}
-
-pub async fn get_assigned_ingress_proofs<F, Fut>(
+pub async fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
-    mempool_block_retriever: F,
-    block_tree_guard: &BlockTreeReadGuard,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
-) -> Result<(Vec<IngressProof>, usize), PreValidationError>
-where
-    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
+) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
@@ -2921,15 +2883,20 @@ where
         //  b) Get the submit ledger offset intervals for each of the blocks
         let mut block_ranges = Vec::new();
         for block_hash in block_hashes.iter() {
-            if let Some(block_range) =
-                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await
-            {
-                block_ranges.push(block_range);
+            match get_ledger_range(block_hash, block_tree, db) {
+                Ok(Some(block_range)) => block_ranges.push(block_range),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(PreValidationError::BlockBoundsLookupError(format!(
+                        "Failed to get ledger range for block {}: {}",
+                        block_hash, e
+                    )));
+                }
             }
         }
 
         //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree_guard);
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree);
 
         // d) Get the ledger ranges of the slot indexes
         let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
@@ -2947,7 +2914,7 @@ where
             .collect();
 
         // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree_guard);
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree);
 
         //  f) are there any intersections of block and slot ranges?
         let mut is_intersected = false;
@@ -2969,51 +2936,40 @@ where
     Ok((assigned_proofs, assigned_miners))
 }
 
-async fn get_ledger_range<F, Fut>(
+fn get_ledger_range(
     hash: &H256,
-    mempool_block_retriever: F,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-) -> Option<LedgerChunkRange>
-where
-    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
-    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await?;
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    let block = match get_block_by_hash(hash, block_tree, db)? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
     let prev_block_hash = block.previous_block_hash;
 
     if block.height == 0 {
-        Some(LedgerChunkRange(ii(
+        Ok(Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(0),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        )))
+        ))))
     } else {
-        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await?;
-        Some(LedgerChunkRange(ii(
+        let prev_block = match get_block_by_hash(&prev_block_hash, block_tree, db)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        Ok(Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        )))
+        ))))
     }
 }
 
-async fn get_block_by_hash<F, Fut>(
+fn get_block_by_hash(
     hash: &H256,
-    mempool_block_retriever: F,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-) -> Option<IrysBlockHeader>
-where
-    F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
-    let block = mempool_block_retriever(*hash).await;
-
-    // Return the block if we found it in the mempool, otherwise get it from the db
-    if let Some(block) = block {
-        Some(block)
-    } else {
-        db.view(|tx| block_header_by_hash(tx, hash, false))
-            .expect("creating a read tx should succeed")
-            .expect("creating a read tx should succeed")
-    }
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    crate::block_header_lookup::get_block_header(block_tree, db, *hash, false)
 }
 
 fn get_submit_ledger_slot_assignments(
@@ -3060,6 +3016,7 @@ mod tests {
 
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
+    use irys_database::db::IrysDatabaseExt as _;
     use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{

@@ -49,7 +49,6 @@ pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
-    pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub mempool_state: AtomicMempoolState,
 }
 
@@ -63,7 +62,6 @@ impl MempoolStub {
             txs: Arc::default(),
             chunks: Arc::default(),
             internal_message_bus,
-            blocks: Arc::new(RwLock::new(Vec::new())),
             mempool_state,
         }
     }
@@ -154,15 +152,6 @@ impl MempoolFacade for MempoolStub {
         } else {
             Ok(TxKnownStatus::Unknown)
         }
-    }
-
-    async fn get_block_header(
-        &self,
-        block_hash: H256,
-        _include_chunk: bool,
-    ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
-        let blocks = self.blocks.read().expect("to unlock blocks");
-        Ok(blocks.iter().find(|b| b.block_hash == block_hash).cloned())
     }
 
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
@@ -500,12 +489,14 @@ impl GossipServiceTestFixture {
             .expect("to insert tx");
     }
 
-    pub(crate) fn add_block_header_to_mempool(&self, block: IrysBlockHeader) {
-        self.mempool_stub
-            .blocks
-            .write()
-            .expect("to unlock mempool blocks")
-            .push(block);
+    /// Persist a block header to the fixture's MDBX database so that
+    /// `block_header_lookup::get_block_header` (block tree → DB fallback) can find it.
+    pub(crate) fn persist_block_header_to_db(&self, block: &IrysBlockHeader) {
+        use irys_database::{db::IrysDatabaseExt as _, insert_block_header};
+        self.db
+            .0
+            .update_eyre(|tx| insert_block_header(tx, block))
+            .expect("to persist block header to DB");
     }
 }
 

@@ -10,8 +10,10 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{
-    chunk_ingress_service::ChunkIngressMessage, mempool_guard::MempoolReadGuard,
-    mempool_service::MempoolServiceMessage, pledge_provider::MempoolPledgeProvider,
+    chunk_ingress_service::{ChunkIngressMessage, ChunkIngressState},
+    mempool_guard::MempoolReadGuard,
+    mempool_service::MempoolServiceMessage,
+    pledge_provider::MempoolPledgeProvider,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -54,6 +56,7 @@ pub struct ApiState {
     pub supply_state: Option<SupplyStateReadGuard>,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub chunk_ingress_state: ChunkIngressState,
     pub started_at: Instant,
     pub mining_address: IrysAddress,
 }
