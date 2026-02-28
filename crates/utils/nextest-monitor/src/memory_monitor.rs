@@ -7,7 +7,11 @@ mod platform {
     /// Get the page size in bytes (falls back to 4096 if sysconf fails).
     fn get_page_size() -> u64 {
         let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if raw < 1 { 4096 } else { raw as u64 }
+        if raw < 1 {
+            4096
+        } else {
+            raw as u64
+        }
     }
 
     pub struct MemoryMonitor {

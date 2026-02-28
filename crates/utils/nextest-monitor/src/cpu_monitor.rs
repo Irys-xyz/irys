@@ -23,7 +23,11 @@ mod platform {
     /// Get clock ticks per second (falls back to 100 if sysconf fails).
     fn get_clk_tck() -> u64 {
         let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if raw < 1 { 100 } else { raw as u64 }
+        if raw < 1 {
+            100
+        } else {
+            raw as u64
+        }
     }
 
     pub struct CpuMonitor {
