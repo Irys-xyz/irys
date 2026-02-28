@@ -22,7 +22,7 @@ use crate::utils::IrysNodeTest;
 // 10. Start the two peers and let them sync with the network, but not mine
 // 11. Validate that they are syncing data chunks to their assigned partitions
 #[tokio::test]
-async fn slow_heavy3_sync_partition_data_between_peers_test() -> eyre::Result<()> {
+async fn slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();

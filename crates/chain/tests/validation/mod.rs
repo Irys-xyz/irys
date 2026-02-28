@@ -414,7 +414,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 // The evil block swaps the order (low fee before high fee), violating the
 // canonical fee-descending ordering.
 #[test_log::test(tokio::test)]
-async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
+async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -675,7 +675,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 // Firstly verify rejection of malformed/incorrect last_epoch_hash
 // Secondly verify the first-after-epoch rule
 #[test_log::test(tokio::test)]
-async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -1141,7 +1141,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 ///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
-async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+async fn heavy3_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);

@@ -7,7 +7,7 @@ use tracing::info;
 use crate::utils::IrysNodeTest;
 
 #[tokio::test]
-async fn test_overlapping_data_sizes() -> eyre::Result<()> {
+async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();

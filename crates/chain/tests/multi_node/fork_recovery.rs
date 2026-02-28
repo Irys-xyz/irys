@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy3_fork_recovery_submit_tx_test() -> eyre::Result<()> {
+async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 15;
@@ -350,7 +350,7 @@ async fn slow_heavy3_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 /// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
 /// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
 #[test_log::test(tokio::test)]
-async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
+async fn heavy3_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let num_blocks_in_epoch = 3;
     let block_tree_depth: u64 = 6;
@@ -602,7 +602,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - TODO: new balance changes are applied based on the new canonical branch
 #[test_log::test(tokio::test)]
-async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
+async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
@@ -933,7 +933,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
+async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     //
@@ -1655,7 +1655,7 @@ async fn heavy3_reorg_tip_moves_across_nodes_publish_txs(
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
 #[test_log::test(tokio::test)]
-async fn slow_heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
+async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
     let num_blocks_in_epoch = 10;

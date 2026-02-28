@@ -21,7 +21,7 @@ use reth_db::Database as _;
 /// signed by an unstaked signer, and asserts that block validation fails with
 /// PreValidationError::UnstakedIngressProofSigner.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()> {
+async fn heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub data_tx: DataTransactionHeader,
@@ -170,7 +170,7 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
 /// 5. Unstake signer B and mine to next epoch (B is no longer staked)
 /// 6. Query mempool's proof collection and verify only 1 proof is returned
 #[test_log::test(tokio::test)]
-async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
+async fn heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
 
@@ -368,7 +368,7 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
 /// This test verifies that the mempool rejects ingress proofs from completely unstaked
 /// signers (spam protection), but accepts proofs from signers with pending stake commitments.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs(
+async fn heavy3_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs(
 ) -> eyre::Result<()> {
     // 1. Setup: genesis node + two funded signers
     let mut genesis_config = NodeConfig::testing();

@@ -15,7 +15,7 @@ use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
-async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
+async fn heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unpledge: CommitmentTransaction,
@@ -375,7 +375,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
+async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
     struct EvilEpochStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,

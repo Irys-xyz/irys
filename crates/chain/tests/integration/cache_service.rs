@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::info;
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_cache_pruning() -> eyre::Result<()> {
+async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;

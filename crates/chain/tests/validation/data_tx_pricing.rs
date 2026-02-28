@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 // This test ensures that during full block validation, data transaction pricing validates the perm fee
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub malicious_tx: DataTransactionHeader,
@@ -146,7 +146,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
 // This test ensures that during full block validation, data transaction pricing validates the term fee
 #[test_log::test(actix_web::test)]
-async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub malicious_tx: DataTransactionHeader,
@@ -270,7 +270,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
 // Happy path: adjust EMA interval, mine enough blocks so pricing EMA differs from genesis,
 // submit a valid data tx priced via API, and expect the block to be fully validated.
 #[test_log::test(actix_web::test)]
-async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
+async fn heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with small EMA interval so pricing EMA diverges from genesis quickly
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -338,7 +338,7 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
 // The test deliberately proomotes the tx in a future EMA interval, meaning that
 // future price validations will always be invalid
 #[test_log::test(tokio::test)]
-async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -465,8 +465,7 @@ async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre:
 // This is done by crafting a tx with invalid price fields -
 // if we skip validation then the block won't be rejected.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()>
-{
+async fn heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
