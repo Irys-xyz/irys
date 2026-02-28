@@ -14,7 +14,7 @@ use crate::{
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage, Traced};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
@@ -100,7 +100,7 @@ pub struct ServiceReceivers {
     pub vdf_fast_forward: UnboundedReceiver<Traced<VdfStep>>,
     pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
-    pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+    pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageVersionPD>>,
     pub block_tree: UnboundedReceiver<Traced<BlockTreeServiceMessage>>,
     pub validation_service: UnboundedReceiver<Traced<ValidationServiceMessage>>,
     pub block_producer: UnboundedReceiver<Traced<BlockProducerCommand>>,
@@ -122,7 +122,7 @@ pub struct ServiceSendersInner {
     pub vdf_fast_forward: UnboundedSender<Traced<VdfStep>>,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
-    pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
     pub block_tree: UnboundedSender<Traced<BlockTreeServiceMessage>>,
     pub validation_service: UnboundedSender<Traced<ValidationServiceMessage>>,
     pub block_producer: UnboundedSender<Traced<BlockProducerCommand>>,
@@ -155,7 +155,7 @@ impl ServiceSendersInner {
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
         let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
-            unbounded_channel::<Traced<GossipBroadcastMessageV2>>();
+            unbounded_channel::<Traced<GossipBroadcastMessageVersionPD>>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<Traced<BlockTreeServiceMessage>>();
         let (validation_sender, validation_receiver) =

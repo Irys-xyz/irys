@@ -5,7 +5,10 @@
 )]
 use crate::types::GossipResult;
 use core::time::Duration;
-use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, IrysPeerId, IrysTransactionId, H256};
+use irys_types::{
+    range_specifier::ChunkRangeSpecifier, BlockHash, ChunkPathHash, GossipCacheKey, IrysPeerId,
+    IrysTransactionId, H256,
+};
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -23,6 +26,7 @@ pub struct GossipCache {
     blocks: Cache<BlockHash, Arc<RwLock<HashSet<IrysPeerId>>>>,
     payloads: Cache<B256, Arc<RwLock<HashSet<IrysPeerId>>>>,
     ingress_proofs: Cache<H256, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    pd_chunks: Cache<(ChunkPathHash, ChunkRangeSpecifier), Arc<RwLock<HashSet<IrysPeerId>>>>,
 }
 
 impl Default for GossipCache {
@@ -40,6 +44,7 @@ impl GossipCache {
             blocks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             payloads: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             ingress_proofs: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
+            pd_chunks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
         }
     }
 
@@ -119,6 +124,15 @@ impl GossipCache {
                 });
                 peer_set.write().unwrap().insert(peer_id);
             }
+            GossipCacheKey::PdChunk(chunk_path_hash, range_specifier) => {
+                let key = (chunk_path_hash, range_specifier);
+                let peer_set = self.pd_chunks.get(&key).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.pd_chunks.insert(key, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(peer_id);
+            }
         }
         Ok(())
     }
@@ -151,6 +165,11 @@ impl GossipCache {
             GossipCacheKey::IngressProof(proof_hash) => self
                 .ingress_proofs
                 .get(proof_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::PdChunk(chunk_path_hash, range_specifier) => self
+                .pd_chunks
+                .get(&(*chunk_path_hash, *range_specifier))
                 .map(|arc| arc.read().unwrap().clone())
                 .unwrap_or_default(),
         };

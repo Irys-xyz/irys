@@ -100,7 +100,7 @@ pub trait PdAccessListArgSerde {
         Self: Sized;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ChunkRangeSpecifier {
     pub partition_index: U200, // 3 64-bit words + 1 8 bit word, 25 bytes
     pub offset: u32,           // offset within the partition (chunks)

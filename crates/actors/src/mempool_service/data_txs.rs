@@ -10,7 +10,7 @@ use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
     SendTraced as _, U256,
@@ -452,7 +452,7 @@ impl Inner {
 
     /// Broadcasts the transaction over gossip, with error logging.
     fn broadcast_tx_gossip(&self, tx: &DataTransactionHeader) {
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(tx.clone());
+        let gossip_broadcast_message = GossipBroadcastMessageVersionPD::from(tx.clone());
         if let Err(error) = self
             .service_senders
             .gossip_broadcast

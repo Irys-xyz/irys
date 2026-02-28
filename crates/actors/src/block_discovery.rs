@@ -17,7 +17,7 @@ use irys_domain::{
     BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
 };
 use irys_reward_curve::HalvingCurve;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
     BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
     DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
@@ -808,7 +808,7 @@ impl BlockDiscoveryServiceInner {
                 // Send the block to the gossip bus
                 tracing::trace!("sending block to bus: block height {:?}", &block_height);
                 if let Err(error) =
-                    gossip_sender.send_traced(GossipBroadcastMessageV2::from(header_for_broadcast))
+                    gossip_sender.send_traced(GossipBroadcastMessageVersionPD::from(header_for_broadcast))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",
