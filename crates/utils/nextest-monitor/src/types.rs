@@ -91,7 +91,6 @@ pub struct AggregatedStats {
     pub tests: Vec<TestStats>,
 }
 
-
 impl AggregatedStats {
     /// Load stats from a JSONL file (one TestStats per line).
     pub fn load_or_default(path: &Path) -> Self {
