@@ -6,10 +6,13 @@ use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig};
 
 #[tokio::test]
 async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
-    std::env::set_var(
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     initialize_tracing();
 
     let seconds_to_wait = 30;

@@ -3,7 +3,7 @@ use alloy_primitives::{bytes, U256 as RethU256};
 use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
-use reth_primitives::transaction::recover_signer;
+use reth_primitives_traits::crypto::secp256k1::recover_signer;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 //==============================================================================

@@ -1,7 +1,7 @@
-use crate::ingress_proofs::{
-    generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
+use crate::chunk_ingress_service::ChunkIngressServiceInner;
+use crate::chunk_ingress_service::ingress_proofs::{
+    RegenAction, generate_and_store_ingress_proof, reanchor_and_store_ingress_proof,
 };
-use crate::mempool_service::Inner;
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
@@ -15,8 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, IngressProof, LedgerChunkOffset,
-    TokioServiceHandle, UnixTimestamp, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, IngressProof, LedgerChunkOffset,
+    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -30,7 +30,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, error, info, trace, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, trace, warn};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -114,7 +114,7 @@ pub struct InnerCacheTask {
     pub block_tree_guard: BlockTreeReadGuard,
     pub block_index_guard: BlockIndexReadGuard,
     pub config: Config,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageVersionPD>,
+    pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
     pub cache_sender: CacheServiceSender,
 }
@@ -408,9 +408,7 @@ impl InnerCacheTask {
 
             trace!(
                 "Processing data root {} max height: {}, prune height: {}",
-                &data_root,
-                &max_height,
-                &prune_height
+                &data_root, &max_height, &prune_height
             );
 
             if max_height < prune_height {
@@ -500,7 +498,7 @@ impl InnerCacheTask {
                 continue;
             };
 
-            let check_result = Inner::is_ingress_proof_expired_static(
+            let check_result = ChunkIngressServiceInner::is_ingress_proof_expired_static(
                 &self.block_tree_guard,
                 &self.db,
                 &self.config,
@@ -511,12 +509,12 @@ impl InnerCacheTask {
             }
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
-                if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
-                    if tx_header.promoted_height().is_none() {
-                        any_unpromoted = true;
-                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
-                        break;
-                    }
+                if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                    && tx_header.promoted_height().is_none()
+                {
+                    any_unpromoted = true;
+                    debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                    break;
                 }
             }
 
@@ -537,7 +535,10 @@ impl InnerCacheTask {
                         debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
                     }
                     RegenAction::DoNotRegenerate => {
-                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
+                        error!(
+                            "We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.",
+                            &data_root
+                        );
                     }
                 }
             } else {
@@ -550,7 +551,7 @@ impl InnerCacheTask {
         // Delete expired proofs using a proper removal function
         if !to_delete.is_empty() {
             for root in to_delete.iter() {
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
+                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof(&self.db, *root) {
                     warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -583,7 +584,9 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                if let Err(e) =
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                {
                     warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -611,7 +614,9 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Regeneration disabled, removing ingress proof for data root"
                 );
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                if let Err(e) =
+                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
+                {
                     warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -639,15 +644,15 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender {
-                if let Err(error) = sender.send(res) {
-                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-                }
+            if let Some(sender) = response_sender
+                && let Err(error) = sender.send(res)
+            {
+                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
             }
             // Notify service that pruning finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
-                .send(CacheServiceAction::PruneCompleted(completion))
+                .send_traced(CacheServiceAction::PruneCompleted(completion))
             {
                 warn!(custom.error = ?e, "Failed to notify PruneCompleted");
             }
@@ -666,15 +671,15 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender {
-                if let Err(e) = sender.send(res) {
-                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
-                }
+            if let Some(sender) = response_sender
+                && let Err(e) = sender.send(res)
+            {
+                warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
             }
             // Notify service that epoch processing finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
-                .send(CacheServiceAction::EpochProcessingCompleted(completion))
+                .send_traced(CacheServiceAction::EpochProcessingCompleted(completion))
             {
                 warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
             }
@@ -682,11 +687,11 @@ impl InnerCacheTask {
     }
 }
 
-pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
+pub type CacheServiceSender = UnboundedSender<Traced<CacheServiceAction>>;
 
 #[derive(Debug)]
 pub struct ChunkCacheService {
-    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
+    pub msg_rx: UnboundedReceiver<Traced<CacheServiceAction>>,
     pub shutdown: Shutdown,
     pub cache_task: InnerCacheTask,
     // Serialized execution for each task type
@@ -723,9 +728,9 @@ impl ChunkCacheService {
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
         db: DatabaseProvider,
-        rx: UnboundedReceiver<CacheServiceAction>,
+        rx: UnboundedReceiver<Traced<CacheServiceAction>>,
         config: Config,
-        gossip_broadcast: UnboundedSender<GossipBroadcastMessageVersionPD>,
+        gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
         cache_sender: CacheServiceSender,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -765,7 +770,7 @@ impl ChunkCacheService {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
+    #[tracing::instrument(name = "cache_service_start", level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting chunk cache service");
 
@@ -779,7 +784,8 @@ impl ChunkCacheService {
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => {
+                        Some(traced) => {
+                            let (msg, _entered) = traced.into_inner();
                             self.on_handle_message(msg);
                         }
                         None => {
@@ -792,7 +798,8 @@ impl ChunkCacheService {
         }
 
         debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
+        while let Ok(traced) = self.msg_rx.try_recv() {
+            let (msg, _entered) = traced.into_inner();
             self.on_handle_message(msg);
         }
 
@@ -805,7 +812,6 @@ impl ChunkCacheService {
     /// Handles two message types:
     /// - `OnBlockMigrated`: Triggers cache pruning based on block height
     /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
-    #[tracing::instrument(level = "trace", skip_all)]
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         debug!(
             queue.pruning_running = ?self.pruning_running,
@@ -818,21 +824,21 @@ impl ChunkCacheService {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
                 // Enqueue pruning; start if idle
                 self.pruning_queue.push_back((migration_height, sender));
-                if !self.pruning_running {
-                    if let Some((h, s)) = self.pruning_queue.pop_front() {
-                        self.pruning_running = true;
-                        self.cache_task.spawn_pruning_task(h, s);
-                    }
+                if !self.pruning_running
+                    && let Some((h, s)) = self.pruning_queue.pop_front()
+                {
+                    self.pruning_running = true;
+                    self.cache_task.spawn_pruning_task(h, s);
                 }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
                 // Enqueue epoch processing; start if idle
                 self.epoch_queue.push_back((epoch_snapshot, sender));
-                if !self.epoch_running {
-                    if let Some((e, s)) = self.epoch_queue.pop_front() {
-                        self.epoch_running = true;
-                        self.cache_task.spawn_epoch_processing(e, s);
-                    }
+                if !self.epoch_running
+                    && let Some((e, s)) = self.epoch_queue.pop_front()
+                {
+                    self.epoch_running = true;
+                    self.cache_task.spawn_epoch_processing(e, s);
                 }
             }
             CacheServiceAction::PruneCompleted(_res) => {
@@ -887,9 +893,9 @@ mod tests {
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
     use irys_types::{
-        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
-        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        NodeConfig, TxChunkOffset, UnpackedChunk,
+        Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, NodeConfig, TxChunkOffset,
+        UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};

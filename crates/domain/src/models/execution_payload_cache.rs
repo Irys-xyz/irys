@@ -4,16 +4,16 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::core::primitives::SealedBlock;
-use reth::primitives::Block;
 use reth::providers::BlockReader as _;
 use reth::revm::primitives::B256;
+use reth_ethereum_primitives::Block;
 #[cfg(feature = "test-utils")]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot::Receiver;
 use tokio::sync::RwLock;
+use tokio::sync::oneshot::Receiver;
 use tracing::{debug, error, instrument, warn};
 
 const PAYLOAD_CACHE_CAPACITY: usize = 1000;

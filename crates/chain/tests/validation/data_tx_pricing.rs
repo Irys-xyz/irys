@@ -1,7 +1,7 @@
-use super::send_block_to_block_tree;
+use super::send_block_and_read_state;
 use crate::utils::{
-    assert_validation_error, gossip_data_tx_to_node, read_block_from_state, solution_context,
-    BlockValidationOutcome, IrysNodeTest,
+    assert_validation_error, gossip_data_tx_to_node, solution_context, BlockValidationOutcome,
+    IrysNodeTest,
 };
 use irys_actors::{
     async_trait,
@@ -129,9 +129,8 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
     // Send block directly to block tree service for validation
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -251,9 +250,8 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
 
     // Validate the block directly via block tree service
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -317,11 +315,10 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
         data_transactions: txs.all_data_txs().cloned().collect(),
         commitment_transactions: txs.all_system_txs().cloned().collect(),
     };
-    let block = Arc::new(irys_types::SealedBlock::new(header.as_ref().clone(), body).unwrap());
+    let block = Arc::new(irys_types::SealedBlock::new(Arc::clone(&header), body).unwrap());
 
     // Send for validation and expect the block to be stored (accepted)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert!(matches!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -609,11 +606,9 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         .unwrap();
 
     // Validate by sending block directly to the block tree
-    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), false).await?;
-
     // Expect the block to be rejected for insufficient perm_fee during prevalidation
     let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &promote_block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, promote_block.clone(), false).await?;
     assert_validation_error(
         outcome,
         |e| {

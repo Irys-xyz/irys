@@ -22,7 +22,8 @@ use tracing::{debug, warn};
 #[tokio::test]
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
     let max_seconds = 20;
     let reset_frequency = 48; // Reset every 48 VDF steps

@@ -5,7 +5,7 @@ use irys_utils::shutdown::spawn_shutdown_watchdog;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
+    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
 };
 
 #[cfg(feature = "telemetry")]
@@ -54,24 +54,31 @@ async fn main() -> eyre::Result<()> {
 
     // start the node
     info!("starting the node, mode: {:?}", &config.node_mode);
-    let handle = IrysNode::new(config)?.start().await?;
+    let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
+    let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
+        .start()
+        .await?;
     handle.start_mining()?;
-    let reth_thread_handle = handle.reth_thread_handle.clone();
-    // wait for the node to be shut down
-    let shutdown_reason = tokio::task::spawn_blocking(move || match reth_thread_handle {
-        Some(handle) => match handle.join() {
+
+    // Await reth thread completion asynchronously
+    // Brief non-contended lock to extract the oneshot receiver.
+    // std::sync::Mutex is intentional: held only for .take(), no contention.
+    let reth_done_rx = handle.reth_done_rx.lock().unwrap().take();
+    let shutdown_reason = match reth_done_rx {
+        Some(rx) => match rx.await {
             Ok(reason) => reason,
-            Err(e) => {
-                error!("Reth thread panicked: {:?}", e);
-                ShutdownReason::FatalError("Reth thread panicked".to_string())
+            Err(_) => {
+                error!("Reth completion sender dropped without sending (thread may have panicked)");
+                ShutdownReason::FatalError(
+                    "Reth completion sender dropped without sending".to_string(),
+                )
             }
         },
         None => {
-            error!("Reth thread handle was None");
-            ShutdownReason::FatalError("Reth thread handle was None".to_string())
+            error!("Reth completion receiver was None");
+            ShutdownReason::FatalError("Reth completion receiver was None".to_string())
         }
-    })
-    .await?;
+    };
 
     // Spawn watchdog thread to force exit if graceful shutdown hangs
     spawn_shutdown_watchdog(shutdown_reason.clone());
@@ -82,29 +89,15 @@ async fn main() -> eyre::Result<()> {
 }
 
 fn init_tracing() -> eyre::Result<()> {
-    let subscriber = Registry::default();
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env()?;
 
-    let output_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(true)
-        .with_file(true)
-        .with_writer(std::io::stdout);
-
-    // use json logging for release builds
-    let subscriber = subscriber.with(filter).with(ErrorLayer::default());
-    // TODO: re-enable with config options
-
-    // let subscriber = if cfg!(debug_assertions) {
-    //     subscriber.with(output_layer.boxed())
-    // } else {
-    //     subscriber.with(output_layer.json().with_current_span(true).boxed())
-    // };
-    let subscriber = subscriber.with(output_layer.boxed());
-
-    subscriber.init();
+    Registry::default()
+        .with(filter)
+        .with(ErrorLayer::default())
+        .with(irys_utils::make_fmt_layer())
+        .init();
 
     Ok(())
 }

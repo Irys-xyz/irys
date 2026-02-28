@@ -10,17 +10,17 @@ use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256, keccak256};
 use std::sync::LazyLock;
 
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
-use reth::revm::context::result::ExecutionResult;
 use reth::revm::context::TxEnv;
+use reth::revm::context::result::ExecutionResult;
 use reth::revm::primitives::hardfork::SpecId;
 use reth::revm::{Inspector, State};
 use reth_ethereum_primitives::Receipt;
-use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, CommitChanges};
+use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor};
 use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm::precompiles::PrecompilesMap;
@@ -97,13 +97,14 @@ impl<'db, DB, E> BlockExecutor for IrysBlockExecutor<'_, E>
 where
     DB: Database + 'db,
     E: Evm<
-        DB = &'db mut State<DB>,
-        Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-    >,
+            DB = &'db mut State<DB>,
+            Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
+        >,
 {
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
     type Evm = E;
+    type Result = alloy_evm::eth::EthTxResult<E::HaltReason, alloy_consensus::TxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()
@@ -114,22 +115,7 @@ where
         tx: impl ExecutableTx<Self>,
         f: impl FnOnce(&ExecutionResult<<Self::Evm as Evm>::HaltReason>),
     ) -> Result<u64, BlockExecutionError> {
-        self.execute_transaction_with_commit_condition(tx, |res| {
-            f(res);
-            CommitChanges::Yes
-        })
-        .map(Option::unwrap_or_default)
-    }
-
-    fn execute_transaction_with_commit_condition(
-        &mut self,
-        tx: impl ExecutableTx<Self>,
-        on_result_f: impl FnOnce(
-            &ExecutionResult<<Self::Evm as Evm>::HaltReason>,
-        ) -> reth_evm::block::CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
-        self.inner
-            .execute_transaction_with_commit_condition(tx, on_result_f)
+        self.inner.execute_transaction_with_result_closure(tx, f)
     }
 
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
@@ -151,23 +137,16 @@ where
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
-    ) -> Result<
-        revm::context_interface::result::ExecResultAndState<
-            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
-        >,
-        BlockExecutionError,
-    > {
+    ) -> Result<Self::Result, BlockExecutionError> {
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(
-        &mut self,
-        result: revm::context_interface::result::ExecResultAndState<
-            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
-        >,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        self.inner.commit_transaction(result, tx)
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(output)
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        self.inner.receipts()
     }
 }
 
@@ -192,10 +171,10 @@ impl<ChainSpec> IrysBlockAssembler<ChainSpec> {
 impl<F, ChainSpec> BlockAssembler<F> for IrysBlockAssembler<ChainSpec>
 where
     F: for<'a> BlockExecutorFactory<
-        ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
-        Transaction = TransactionSigned,
-        Receipt = Receipt,
-    >,
+            ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
+            Transaction = TransactionSigned,
+            Receipt = Receipt,
+        >,
     ChainSpec: EthChainSpec + EthereumHardforks,
 {
     type Block = Block<TransactionSigned>;
@@ -484,11 +463,11 @@ impl EvmFactory for IrysEvmFactory {
 }
 
 use revm::{
+    Context, ExecuteEvm as _, InspectEvm as _,
     context::Evm as RevmEvm,
     context_interface::result::ResultAndState,
-    handler::{instructions::EthInstructions, EthPrecompiles, PrecompileProvider},
-    interpreter::{interpreter::EthInterpreter, InterpreterResult},
-    Context, ExecuteEvm as _, InspectEvm as _,
+    handler::{EthPrecompiles, PrecompileProvider, instructions::EthInstructions},
+    interpreter::{InterpreterResult, interpreter::EthInterpreter},
 };
 
 use core::{
@@ -1036,6 +1015,7 @@ where
         let execution_result = match new_account_state {
             Ok((account, execution_result, _account_existed)) => {
                 self.commit_account_change(target, account);
+
                 execution_result
             }
             Err(execution_result) => execution_result,
@@ -1343,9 +1323,7 @@ where
             );
             return Err(Self::create_internal_error(format!(
                 "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
-                target,
-                fee,
-                account.info.balance
+                target, fee, account.info.balance
             )));
         }
 
@@ -1781,13 +1759,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use crate::pd_tx::{PdHeaderV1, prepend_pd_header_v1_to_calldata};
     use crate::shadow_tx::{
         IrysUsdPriceUpdate, PdBaseFeeUpdate, ShadowTransaction, TransactionPacket,
     };
     use crate::test_utils::{
-        advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
-        DEFAULT_PRIORITY_FEE,
+        DEFAULT_PRIORITY_FEE, TestContext, advance_block, get_balance, get_nonce, sign_shadow_tx,
+        sign_tx,
     };
     use alloy_consensus::TxEip1559;
     use alloy_eips::eip2930::AccessListItem as AlItem;

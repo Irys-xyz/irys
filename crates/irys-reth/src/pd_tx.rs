@@ -1,7 +1,7 @@
 //! Utilities to construct and decode Programmable Data (PD) access list entries and transactions.
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
-use alloy_primitives::{Bytes, B256, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{PdAccessListArg, PdAccessListArgSerde as _};

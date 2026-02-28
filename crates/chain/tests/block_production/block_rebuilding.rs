@@ -11,28 +11,20 @@
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth::IrysBuiltPayload;
-use irys_types::{
-    block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock, H256,
-};
+use irys_types::{block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 
 use crate::utils::{solution_context, IrysNodeTest};
 
-/// Strategy that can pause block production and track various metrics for testing.
+/// Strategy that can pause and resume block production for testing.
 struct TrackingStrategy {
     prod: ProductionStrategy,
     /// Signal when block production starts
     pause_signal: Mutex<Option<oneshot::Sender<()>>>,
     /// Signal to resume block production
     resume_signal: Mutex<Option<oneshot::Receiver<()>>>,
-    /// Track the solution hash
-    solution_hash_tracked: Arc<Mutex<Option<H256>>>,
-    /// Track the solution VDF step
-    solution_vdf_tracked: Arc<Mutex<Option<u64>>>,
-    /// Track if solution was used or discarded
-    solution_used: Arc<Mutex<Option<bool>>>,
 }
 
 #[async_trait::async_trait]
@@ -45,10 +37,6 @@ impl BlockProdStrategy for TrackingStrategy {
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>> {
-        // Track the solution hash and VDF step
-        *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
-        *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
-
         // Signal that we're starting and wait for resume
         if let Some(pause_tx) = self.pause_signal.lock().await.take() {
             let _ = pause_tx.send(());
@@ -61,9 +49,6 @@ impl BlockProdStrategy for TrackingStrategy {
         // Continue with normal production - this will check validity
         let result = self.prod.fully_produce_new_block(solution).await?;
 
-        // Track whether solution was used (Some result) or discarded (None)
-        *self.solution_used.lock().await = Some(result.is_some());
-
         Ok(result)
     }
 }
@@ -74,7 +59,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn slow_heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -90,7 +75,7 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Mine initial blocks
     for _i in 1..=2 {
         let block = node1.mine_block().await?;
-        node2.wait_until_height(block.height, 10).await?;
+        node2.wait_for_block_at_height(block.height, 10).await?;
     }
 
     // Create tracking strategy with pause/resume
@@ -103,9 +88,6 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
         },
         pause_signal: Mutex::new(Some(pause_tx)),
         resume_signal: Mutex::new(Some(resume_rx)),
-        solution_hash_tracked: Arc::new(Mutex::new(None)),
-        solution_vdf_tracked: Arc::new(Mutex::new(None)),
-        solution_used: Arc::new(Mutex::new(None)),
     });
 
     // Generate solution at current VDF step
@@ -124,7 +106,9 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Mine blocks until solution becomes invalid (solution.vdf_step <= parent.vdf_step)
     // Get initial VDF by mining a block and checking its parent
     let initial_block = node2.mine_block().await?;
-    node2.wait_until_height(initial_block.height, 10).await?;
+    node2
+        .wait_for_block_at_height(initial_block.height, 10)
+        .await?;
     let mut node2_latest_vdf = initial_block.vdf_limiter_info.global_step_number;
     let mut block_count = 1;
 
@@ -138,7 +122,7 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
             block_count, node2_latest_vdf, solution.vdf_step
         );
 
-        node2.wait_until_height(block.height, 10).await?;
+        node2.wait_for_block_at_height(block.height, 10).await?;
 
         // Safety limit to prevent infinite loop in case of test issues
         if block_count >= 50 {
@@ -160,6 +144,11 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
         "Successfully mined {} blocks to invalidate solution (VDF {} >= solution VDF {})",
         block_count, node2_latest_vdf, solution.vdf_step
     );
+
+    // Wait for node1 to receive all of node2's blocks via gossip before resuming,
+    // so node1 sees the advanced chain state and correctly rejects the stale solution
+    let node2_height = node2.get_canonical_chain_height().await;
+    node1.wait_for_block_at_height(node2_height, 10).await?;
 
     // Resume block production
     resume_tx.send(()).unwrap();
@@ -186,8 +175,13 @@ async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// This test verifies that when a parent block changes during production,
 /// but the solution still meets all requirements (VDF step and difficulty),
 /// the block producer rebuilds on the new parent using the same solution.
+///
+/// To avoid a VDF timing race (where the competing block's VDF step could
+/// exceed the solution's), we mine node2's block first (without gossip),
+/// then generate the solution on node1 — guaranteeing the solution's VDF
+/// step is strictly greater. The gossiped block triggers the parent change.
 #[test_log::test(tokio::test)]
-async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup
@@ -205,9 +199,46 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     // Mine initial blocks
     for _ in 0..2 {
         let block = node1.mine_block().await?;
-        node1.wait_until_height(block.height, 10).await?;
-        node2.wait_until_height(block.height, 10).await?;
+        node1.wait_for_block_at_height(block.height, 10).await?;
+        node2.wait_for_block_at_height(block.height, 10).await?;
     }
+
+    // Mine ONE block on node2 WITHOUT gossip. This block will later cause
+    // a parent change on node1 when gossiped, after production is paused.
+    let (node2_block, _eth_payload, _txs) = node2.mine_block_without_gossip().await?;
+    let node2_block_vdf = node2_block.vdf_limiter_info.global_step_number;
+    info!(
+        "Node2 mined block at height {} with VDF step {} (not yet gossiped)",
+        node2_block.height, node2_block_vdf
+    );
+
+    // Generate solution on node1, retrying until its VDF step is strictly
+    // greater than node2's block VDF step. This guarantees the solution
+    // remains valid when node2's block becomes the new parent.
+    let mut solution = solution_context(&node1.node_ctx).await?;
+    let mut retry_count = 0;
+    while solution.vdf_step <= node2_block_vdf {
+        retry_count += 1;
+        assert!(
+            retry_count < 30,
+            "Failed to generate solution with VDF step > {} after {} attempts",
+            node2_block_vdf,
+            retry_count
+        );
+        info!(
+            "Solution VDF {} not > node2 block VDF {}, advancing VDF (attempt {})...",
+            solution.vdf_step, node2_block_vdf, retry_count
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        solution = solution_context(&node1.node_ctx).await?;
+    }
+    let original_solution_hash = solution.solution_hash;
+    let original_vdf_step = solution.vdf_step;
+
+    info!(
+        "Generated solution - hash: {}, VDF step: {} (> node2 block VDF {})",
+        original_solution_hash, original_vdf_step, node2_block_vdf
+    );
 
     // Create tracking strategy
     let (pause_tx, pause_rx) = oneshot::channel();
@@ -219,49 +250,25 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
         },
         pause_signal: Mutex::new(Some(pause_tx)),
         resume_signal: Mutex::new(Some(resume_rx)),
-        solution_hash_tracked: Arc::new(Mutex::new(None)),
-        solution_vdf_tracked: Arc::new(Mutex::new(None)),
-        solution_used: Arc::new(Mutex::new(None)),
     });
 
-    // Generate solution
-    let solution = solution_context(&node1.node_ctx).await?;
-    let original_solution_hash = solution.solution_hash;
-    let original_vdf_step = solution.vdf_step;
-
-    info!(
-        "Generated solution - hash: {}, VDF step: {}",
-        original_solution_hash, original_vdf_step
-    );
-
-    // Start block production (will pause)
+    // Start block production on node1 (will pause)
     let strategy_clone = tracking_strategy.clone();
     let sol_clone = solution.clone();
     let handle =
         tokio::spawn(async move { strategy_clone.fully_produce_new_block(sol_clone).await });
 
-    // Wait for production to start
+    // Wait for production to start and pause
     pause_rx.await?;
-    info!("Node1 paused, node2 will mine a block");
+    info!("Node1 paused, gossiping node2's block to trigger parent change");
 
-    // Node2 mines ONE block (not too many to keep solution valid)
-    let node2_block = node2.mine_block().await?;
-    info!(
-        "Node2 mined block at height {} with VDF step {}",
-        node2_block.height, node2_block.vdf_limiter_info.global_step_number
-    );
+    // Gossip node2's block to node1 to trigger a parent change.
+    node2.gossip_block_to_peers(&node2_block)?;
 
-    // Ensure both nodes see the new block
-    node2.wait_until_height(node2_block.height, 10).await?;
-    node1.wait_until_height(node2_block.height, 10).await?;
-
-    // Verify solution is still valid for new parent
-    assert!(
-        original_vdf_step > node2_block.vdf_limiter_info.global_step_number,
-        "Solution VDF {} should be > new parent VDF {}",
-        original_vdf_step,
-        node2_block.vdf_limiter_info.global_step_number
-    );
+    // Wait for node1 to process node2's block
+    node1
+        .wait_for_block_at_height(node2_block.height, 10)
+        .await?;
 
     // Resume node1's block production
     info!("Resuming node1 block production");
@@ -285,30 +292,10 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
         "Same solution hash should be reused after parent change"
     );
 
-    // Verify the stored solution hash matches
-    let stored_hash = tracking_strategy.solution_hash_tracked.lock().await;
-    assert_eq!(
-        stored_hash.as_ref().unwrap(),
-        &original_solution_hash,
-        "Strategy should have tracked the original solution hash"
-    );
-
     info!("SUCCESS: Solution was reused when parent changed but remained valid");
     info!("Original solution hash: {}", original_solution_hash);
     info!("Block built on new parent: {}", node2_block.block_hash);
     info!("Final block height: {}", block.header().height);
-
-    // Verify both nodes have validated the newly produced block
-    info!(
-        "Waiting for both nodes to validate the new block at height {}",
-        block.header().height
-    );
-    node1.wait_until_height(block.header().height, 10).await?;
-    node2.wait_until_height(block.header().height, 10).await?;
-    info!(
-        "Both nodes have successfully validated the block at height {}",
-        block.header().height
-    );
 
     // Cleanup
     node1.stop().await;

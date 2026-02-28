@@ -3,13 +3,55 @@
   "template": {
     "settings": {
       "index.lifecycle.name": "logs-retention",
+      "index.lifecycle.rollover_alias": "irys-logs",
       "index.highlight.max_analyzed_offset": 10000000,
+      "index.default_pipeline": "add-flat-traceid",
+      "index.mapping.ignore_malformed": true,
       "number_of_shards": 1,
       "number_of_replicas": __ES_REPLICAS__
     },
     "mappings": {
       "properties": {
-        "log.level": {
+        "Attributes": {
+          "type": "flattened"
+        },
+        "SeverityText": {
+          "type": "keyword"
+        },
+        "traceID": {
+          "type": "keyword"
+        },
+        "TraceId": {
+          "type": "keyword"
+        },
+        "SpanId": {
+          "type": "keyword"
+        },
+        "from": {
+          "type": "keyword"
+        },
+        "to": {
+          "type": "keyword"
+        },
+        "hash": {
+          "type": "keyword"
+        },
+        "height": {
+          "type": "keyword"
+        },
+        "number": {
+          "type": "keyword"
+        },
+        "sequence": {
+          "type": "keyword"
+        },
+        "len": {
+          "type": "long"
+        },
+        "blocks": {
+          "type": "keyword"
+        },
+        "peers": {
           "type": "keyword"
         }
       }

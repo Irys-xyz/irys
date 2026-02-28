@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use super::send_block_to_block_tree;
-use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
-};
+use super::send_block_and_read_state;
+use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
@@ -16,7 +14,7 @@ use irys_reth::IrysBuiltPayload;
 use irys_types::{BlockBody, NodeConfig, SealedBlock as IrysSealedBlock};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
-use reth::primitives::Block;
+use reth_ethereum_primitives::Block;
 
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
@@ -54,7 +52,7 @@ async fn inject_payload_into_cache(node_ctx: &IrysNodeCtx, sealed: SealedBlock<B
 }
 
 #[test_log::test(tokio::test)]
-async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
+async fn heavy_evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -96,10 +94,8 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
-
     let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -111,7 +107,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
+async fn heavy_evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -153,10 +149,8 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     };
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
-
     let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -168,7 +162,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
+async fn heavy_evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -222,10 +216,8 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
-
     let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -237,7 +229,7 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
+async fn heavy_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -300,10 +292,8 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
-
     let outcome =
-        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),

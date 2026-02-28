@@ -54,7 +54,9 @@ pub enum PdPrecompileError {
         available: usize,
     },
 
-    #[error("calculated offset out of range (usize overflow): chunk_offset={chunk_offset}, chunk_size={chunk_size}, byte_offset={byte_offset}")]
+    #[error(
+        "calculated offset out of range (usize overflow): chunk_offset={chunk_offset}, chunk_size={chunk_size}, byte_offset={byte_offset}"
+    )]
     OffsetOutOfRange {
         chunk_offset: u16,
         chunk_size: u64,

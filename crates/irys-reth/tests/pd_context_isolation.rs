@@ -5,7 +5,7 @@
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_evm::Evm as _;
-use alloy_primitives::{aliases::U200, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256, aliases::U200};
 use irys_reth::evm::IrysEvmFactory;
 use irys_types::chunk_provider::MockChunkProvider;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;

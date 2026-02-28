@@ -35,7 +35,7 @@ services:
       - NET_ADMIN
     networks:
       irys-test:
-        ipv4_address: 172.23.0.2
+        ipv4_address: 172.24.0.2
 
   test-irys-2:
     image: ${IMAGE_NAME:-localhost/irys-test:latest}
@@ -67,7 +67,7 @@ services:
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
     networks:
       irys-test:
-        ipv4_address: 172.23.0.3
+        ipv4_address: 172.24.0.3
 
   test-irys-3:
     image: ${IMAGE_NAME:-localhost/irys-test:latest}
@@ -99,7 +99,7 @@ services:
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
     networks:
       irys-test:
-        ipv4_address: 172.23.0.4
+        ipv4_address: 172.24.0.4
 
   # ==========================================================================
   # OTEL Collector Sidecars (for Reth metrics)
@@ -110,62 +110,56 @@ services:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-1
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-1:
         condition: service_started
     environment:
       - OTEL_SERVICE_NAME=irys-node-1
-      - RETH_METRICS_HOST=172.23.0.2
+      - RETH_METRICS_HOST=172.24.0.2
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
       irys-test:
-        ipv4_address: 172.23.0.12
+        ipv4_address: 172.24.0.12
 
   otel-sidecar-2:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-2
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-2:
         condition: service_started
     environment:
       - OTEL_SERVICE_NAME=irys-node-2
-      - RETH_METRICS_HOST=172.23.0.3
+      - RETH_METRICS_HOST=172.24.0.3
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
       irys-test:
-        ipv4_address: 172.23.0.13
+        ipv4_address: 172.24.0.13
 
   otel-sidecar-3:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-3
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-3:
         condition: service_started
     environment:
       - OTEL_SERVICE_NAME=irys-node-3
-      - RETH_METRICS_HOST=172.23.0.4
+      - RETH_METRICS_HOST=172.24.0.4
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
       irys-test:
-        ipv4_address: 172.23.0.14
+        ipv4_address: 172.24.0.14
 
 networks:
   irys-test:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.23.0.0/24
+        - subnet: 172.24.0.0/24

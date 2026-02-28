@@ -17,7 +17,6 @@ use irys_macros_integer_tagged::IntegerTagged;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 use thiserror::Error;
-use tracing::error;
 
 pub mod bounded_fee;
 pub mod fee_distribution;

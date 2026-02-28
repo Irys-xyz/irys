@@ -21,11 +21,10 @@ pub use reth::primitives::EthPrimitives;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
-        components::{ComponentsBuilder, ExecutorBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
-        PayloadBuilderConfig as _,
+        components::{ComponentsBuilder, ExecutorBuilder},
     },
-    providers::{providers::ProviderFactoryBuilder, EthStorage},
+    providers::{EthStorage, providers::ProviderFactoryBuilder},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
@@ -36,11 +35,11 @@ use reth_evm_ethereum::RethReceiptBuilder;
 use reth_node_builder::rpc::RpcAddOns;
 pub use reth_node_ethereum;
 use reth_node_ethereum::{
-    node::{EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
+    node::{EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder},
 };
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
-pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
+pub use reth_provider::{BlockReaderIdExt, providers::BlockchainProvider};
 use reth_tracing::tracing;
 use shadow_tx::ShadowTransaction;
 
@@ -132,10 +131,10 @@ impl IrysEthereumNode {
     where
         Node: FullNodeTypes<Types = Self>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
-            BuiltPayload = IrysBuiltPayload,
-            PayloadAttributes = IrysPayloadAttributes,
-            PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
-        >,
+                BuiltPayload = IrysBuiltPayload,
+                PayloadAttributes = IrysPayloadAttributes,
+                PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
+            >,
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
@@ -242,8 +241,7 @@ where
     type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let evm_config = EthEvmConfig::new(ctx.chain_spec())
-            .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
+        let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
         let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
@@ -266,14 +264,14 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::shadow_tx::{
-        BalanceDecrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
-        BLOCK_REWARD_ID, UNSTAKE_ID,
+        BLOCK_REWARD_ID, BalanceDecrement, BlockRewardIncrement, ShadowTransaction,
+        TransactionPacket, UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
-        advance_block, advance_blocks, block_reward, eth_payload_attributes_with_parent,
-        get_balance, pledge, sign_shadow_tx, sign_tx, stake, storage_fees, treasury_deposit,
-        unpledge, unstake, DEFAULT_PRIORITY_FEE,
+        DEFAULT_PRIORITY_FEE, advance_block, advance_blocks, block_reward,
+        eth_payload_attributes_with_parent, get_balance, pledge, sign_shadow_tx, sign_tx, stake,
+        storage_fees, treasury_deposit, unpledge, unstake,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
@@ -1073,7 +1071,7 @@ mod tests {
         // Phase 4: Build new fork block on rolled-back state
         tracing::info!("Phase 4: Building new fork block on rolled-back state");
         let fork_block_number = 2; // Building block 2 on top of block 1
-                                   // Update parent tracker for payload attributes
+        // Update parent tracker for payload attributes
         *parent_tracker.lock().unwrap() = rollback_target;
         let fork_reward_tx = block_reward();
         let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
@@ -1255,7 +1253,7 @@ mod tests {
         // Phase 4: Build new fork block on rolled-back state
         tracing::info!("Phase 4: Building new fork block on rolled-back state");
         let fork_block_number = 2; // Building block 2 on top of block 1
-                                   // Update parent tracker for payload attributes
+        // Update parent tracker for payload attributes
         *parent_tracker.lock().unwrap() = rollback_target;
         let fork_reward_tx = block_reward();
         let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
@@ -2038,7 +2036,7 @@ mod tests {
 
         // Create shadow transaction with significant priority fee
         let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
-                                                        // Use unstake instead of block_reward so there's a target for priority fee
+        // Use unstake instead of block_reward so there's a target for priority fee
         let shadow_tx = unstake(target_address);
         let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
         let expected_priority_fee = U256::from(priority_fee_per_gas);
@@ -2179,7 +2177,7 @@ mod tests {
 
         // Create shadow transaction with priority fee
         let priority_fee_per_gas = 20_000_000_000_u128; // 20 Gwei
-                                                        // Use stake transaction which has a target
+        // Use stake transaction which has a target
         let target_address = ctx.block_producer_a.address(); // Producer A is the target
         let shadow_tx = stake(target_address);
         let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
@@ -2504,7 +2502,7 @@ pub mod test_utils {
     use alloy_network::EthereumWallet;
     use alloy_network::TxSigner;
     use alloy_primitives::Address;
-    use alloy_primitives::{FixedBytes, Signature, B256};
+    use alloy_primitives::{B256, FixedBytes, Signature};
     use alloy_primitives::{TxKind, U256};
     use alloy_rpc_types::engine::PayloadAttributes;
     use reth::providers::CanonStateSubscriptions;
@@ -2517,18 +2515,18 @@ pub mod test_utils {
     use reth::{
         api::PayloadAttributesBuilder,
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
-        builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
+        builder::{FullNode, NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns},
         providers::{AccountReader as _, BlockHashReader as _},
         rpc::api::eth::helpers::EthTransactions,
-        tasks::TaskManager,
+        tasks::Runtime,
     };
-    use reth_e2e_test_utils::{node::NodeTestContext, wallet::Wallet, NodeHelperType};
+    use reth_e2e_test_utils::{NodeHelperType, node::NodeTestContext, wallet::Wallet};
     use reth_engine_local::LocalPayloadAttributesBuilder;
     use reth_primitives_traits::SignedTransaction as _;
     use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::collections::HashSet;
     use std::sync::Arc;
-    use tracing::{span, Level};
+    use tracing::{Level, span};
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
@@ -2538,7 +2536,7 @@ pub mod test_utils {
         pub normal_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
-        pub tasks: TaskManager,
+        pub tasks: Runtime,
     }
 
     impl std::fmt::Debug for TestContext {
@@ -2554,10 +2552,10 @@ pub mod test_utils {
 
         pub async fn new_with_custom_attributes(
             payload_attributes: impl Fn(u64, Address) -> IrysPayloadBuilderAttributes
-                + Send
-                + Sync
-                + Clone
-                + 'static,
+            + Send
+            + Sync
+            + Clone
+            + 'static,
         ) -> eyre::Result<Self> {
             let wallets = Wallet::new(4).wallet_gen();
             let block_producer_a = EthereumWallet::from(wallets[0].clone()).default_signer();
@@ -3291,7 +3289,7 @@ pub mod test_utils {
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
-    /// - `TaskManager`: Task manager for async tasks
+    /// - `Runtime`: Runtime for async tasks
     /// - `Wallet`: Default wallet for test accounts
     pub async fn setup_irys_reth(
         num_nodes: &[Address],
@@ -3299,15 +3297,14 @@ pub mod test_utils {
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
         chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
+    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, Runtime, Wallet)>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
                 <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadAttributes,
             >,
     {
-        let tasks = TaskManager::current();
-        let exec = tasks.executor();
+        let tasks = Runtime::test();
 
         let network_config = NetworkArgs {
             discovery: DiscoveryArgs {
@@ -3334,7 +3331,7 @@ pub mod test_utils {
                 node,
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
-                .testing_node(exec.clone())
+                .testing_node(tasks.clone())
                 .node(IrysEthereumNode {
                     // Use default value for tests
                     max_pd_chunks_per_block: 7_500,
@@ -3364,10 +3361,11 @@ pub mod test_utils {
             }
 
             // Connect last node with the first if there are more than two
-            if idx + 1 == num_nodes.len() && num_nodes.len() > 2 {
-                if let Some(first_node) = nodes.first_mut() {
-                    node.connect(first_node).await;
-                }
+            if idx + 1 == num_nodes.len()
+                && num_nodes.len() > 2
+                && let Some(first_node) = nodes.first_mut()
+            {
+                node.connect(first_node).await;
             }
 
             nodes.push(node);

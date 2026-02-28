@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_types::{
-    ii, partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
-    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
+    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig, ii,
+    partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
 };
 use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
@@ -13,7 +13,7 @@ use tracing::{debug, error};
 
 use super::common::PackingParams;
 use crate::packing_service::{
-    client_pool::HttpClientPool, config::PackingConfig, REMOTE_STREAM_BUFFER_MULTIPLIER,
+    REMOTE_STREAM_BUFFER_MULTIPLIER, client_pool::HttpClientPool, config::PackingConfig,
 };
 
 /// Remote packing strategy that delegates to external services

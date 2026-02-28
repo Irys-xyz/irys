@@ -1,5 +1,4 @@
 use crate::utils::*;
-use alloy_eips::HashOrNumber;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use assert_matches::assert_matches;
 use eyre::eyre;
@@ -12,7 +11,6 @@ use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     IrysAddress, NodeConfig, H256, U256,
 };
-use reth::providers::TransactionsProvider as _;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -29,7 +27,10 @@ macro_rules! assert_ok {
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off")
+    };
     initialize_tracing();
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
@@ -92,7 +93,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         debug!(
             "\nGenesis Block Commitments:\n{:#?}\nStake: {:#?}\nPledges:\n{:#?}",
-            genesis_block.get_commitment_ledger_tx_ids(),
+            genesis_block.commitment_tx_ids(),
             stakes.unwrap().id,
             pledges.unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
         );
@@ -124,7 +125,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Block height: 1 should have two stake and two pledge commitments
         let expected_ids = [stake_tx1.id(), stake_tx2.id(), pledge1.id(), pledge2.id()];
         let block_1 = node.get_block_by_height(1).await.unwrap();
-        let commitments_1 = block_1.get_commitment_ledger_tx_ids();
+        let commitments_1 = block_1.commitment_tx_ids();
         debug!(
             "Block commitments - height: {:?}\n{:#?}",
             block_1.height, commitments_1,
@@ -134,7 +135,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Block height: 2 is an epoch block and should have the same commitments and no more
         let block_2 = node.get_block_by_height(2).await.unwrap();
-        let commitments_2 = block_2.get_commitment_ledger_tx_ids();
+        let commitments_2 = block_2.commitment_tx_ids();
         debug!(
             "Block commitments - height: {:?}\n{:#?}",
             block_2.height, commitments_2
@@ -218,7 +219,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         node.mine_blocks(num_blocks_in_epoch + 2).await?;
 
         let block_3 = node.get_block_by_height(3).await.unwrap();
-        let commitments_3 = block_3.get_commitment_ledger_tx_ids();
+        let commitments_3 = block_3.commitment_tx_ids();
         debug!("Block - height: {:?}\n{:#?}", block_3.height, commitments_3);
 
         // Block height: 3 should have 1 pledge commitment
@@ -340,10 +341,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "irys_actors::epoch_service::epoch_service=debug",
-    );
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
+            "RUST_LOG",
+            "irys_actors::epoch_service::epoch_service=debug",
+        );
+    }
     initialize_tracing();
 
     let span = debug_span!("TEST");
@@ -801,7 +805,7 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     node.wait_for_mempool(update_tx_mid_fee.id(), 5).await?;
 
     let block = node.mine_block().await?;
-    let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+    let commitment_tx_ids = block.commitment_tx_ids();
 
     // Verify fee-ascending order: idx 0=low fee, idx 1=mid fee, idx 2=high fee
     assert_eq!(commitment_tx_ids[0], update_tx_low_fee.id());
@@ -984,17 +988,21 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
     );
 
     // Verify TermFeeReward shadow transaction at expiry epoch block
-    let reth_ctx = node.node_ctx.reth_node_adapter.clone();
     let expiry_block = node.get_block_by_height(expiry_height).await?;
-    let block_txs = reth_ctx
-        .inner
-        .provider
-        .transactions_by_block(HashOrNumber::Hash(expiry_block.evm_block_hash))?
-        .unwrap_or_default();
+    let expiry_evm_block = node
+        .wait_for_evm_block(expiry_block.evm_block_hash, 20)
+        .await?;
+    let block_txs = expiry_evm_block.body.transactions;
+    let block_tx_count = block_txs.len();
+    info!(
+        "Expiry block {} has {} EVM txs",
+        expiry_height, block_tx_count
+    );
 
     let mut found_term_fee_reward = false;
-    for tx in &block_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+    for tx in block_txs {
+        let mut input = tx.input().as_ref();
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut input) {
             if let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
                 info!(
                     "Found TermFeeReward at height {}: target={}, amount={}",
@@ -1013,8 +1021,8 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     assert!(
         found_term_fee_reward,
-        "Expected TermFeeReward at expiry epoch block height {}",
-        expiry_height
+        "Expected TermFeeReward at expiry epoch block height {} (evm_txs={})",
+        expiry_height, block_tx_count
     );
 
     info!("TermFeeReward found and correctly sent to custom reward_address");

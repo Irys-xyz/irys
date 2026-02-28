@@ -3,22 +3,26 @@ use std::time::SystemTime;
 
 use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
-use irys_types::hardfork_config::IrysHardforkConfig;
 use irys_types::UnixTimestamp;
+use irys_types::hardfork_config::IrysHardforkConfig;
 use reth::{
     api::FullNodeTypes,
-    builder::{components::PoolBuilder, BuilderContext},
-    primitives::{InvalidTransactionError, SealedBlock},
+    builder::{BuilderContext, components::PoolBuilder},
+    primitives::SealedBlock,
     providers::StateProviderFactory,
     transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_chainspec::{ChainSpecProvider, EthChainSpec as _, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_ethereum_primitives::EthPrimitives;
+use reth_evm::ConfigureEvm;
+use reth_primitives_traits::BlockTy;
+use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use reth_provider::CanonStateSubscriptions as _;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator,
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
 use std::marker::PhantomData;
@@ -49,19 +53,24 @@ impl IrysPoolBuilder {
 /// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
 ///
 /// Notable changes from the original: we reject all shadow txs, as they are not allowed to land in a the pool.
-impl<Node> PoolBuilder<Node> for IrysPoolBuilder
+impl<Node, Evm> PoolBuilder<Node, Evm> for IrysPoolBuilder
 where
     Node: FullNodeTypes<Types = IrysEthereumNode>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives> + 'static,
 {
     type Pool = Pool<
         TransactionValidationTaskExecutor<
-            IrysShadowTxValidator<Node::Provider, EthPooledTransaction>,
+            IrysShadowTxValidator<Node::Provider, EthPooledTransaction, Evm>,
         >,
         PdAwareCoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
         let data_dir = ctx.config().datadir();
         let pool_config = ctx.pool_config();
 
@@ -92,17 +101,17 @@ where
 
         let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
         let hardfork_config = self.hardfork_config;
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
-            .kzg_settings(ctx.kzg_settings()?)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
-            .map(|eth_validator| IrysShadowTxValidator {
-                eth_tx_validator: eth_validator,
-                hardfork_config: hardfork_config.clone(),
-            });
+        let validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .kzg_settings(ctx.kzg_settings()?)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
+                .map(|eth_validator| IrysShadowTxValidator {
+                    eth_tx_validator: eth_validator,
+                    hardfork_config: hardfork_config.clone(),
+                });
 
         let ordering = PdAwareCoinbaseTipOrdering::new(hardfork_config);
         let transaction_pool =
@@ -147,7 +156,7 @@ where
             }
 
             // spawn the maintenance task
-            ctx.task_executor().spawn_critical(
+            ctx.task_executor().spawn_critical_task(
                 "txpool maintenance task",
                 reth_transaction_pool::maintain::maintain_transaction_pool_future(
                     client.clone(),
@@ -168,13 +177,13 @@ where
 }
 
 #[derive(Debug)]
-pub struct IrysShadowTxValidator<Client, T> {
-    eth_tx_validator: EthTransactionValidator<Client, T>,
+pub struct IrysShadowTxValidator<Client, T, Evm> {
+    eth_tx_validator: EthTransactionValidator<Client, T, Evm>,
     /// Hardfork configuration for checking Sprite activation.
     hardfork_config: Arc<IrysHardforkConfig>,
 }
 
-impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
+impl<Client, Tx, Evm> IrysShadowTxValidator<Client, Tx, Evm>
 where
     Tx: EthPoolTransaction,
 {
@@ -215,8 +224,8 @@ where
         }
 
         // Reject PD transactions before Sprite hardfork is active
-        if !self.is_sprite_active() {
-            if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
+        if !self.is_sprite_active()
+            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
                 tracing::trace!(
                     sender = ?tx.sender(),
                     tx_hash = ?tx.hash(),
@@ -229,11 +238,10 @@ where
                     ),
                 ));
             }
-        }
 
         // Validate minimum PD transaction cost when Sprite is active
-        if self.is_sprite_active() {
-            if let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
+        if self.is_sprite_active()
+            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
                 // Count PD chunks from access list
                 let chunks = tx
                     .access_list()
@@ -266,7 +274,6 @@ where
                     ));
                 }
             }
-        }
 
         // once we support blobs, we can start accepting eip4844 txs
         if tx.is_eip4844() {
@@ -282,12 +289,14 @@ where
     }
 }
 
-impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
+impl<Client, Tx, Ev> TransactionValidator for IrysShadowTxValidator<Client, Tx, Ev>
 where
-    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
+    Client: ChainSpecProvider<ChainSpec: EthChainSpec + EthereumHardforks> + StateProviderFactory,
     Tx: EthPoolTransaction,
+    Ev: ConfigureEvm,
 {
     type Transaction = Tx;
+    type Block = BlockTy<Ev::Primitives>;
 
     async fn validate_transaction(
         &self,
@@ -303,23 +312,7 @@ where
         self.eth_tx_validator.validate_one(origin, transaction)
     }
 
-    async fn validate_transactions(
-        &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        transactions
-            .into_iter()
-            .map(|(origin, tx)| match self.prefilter_tx(tx) {
-                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
-                Err(outcome) => outcome,
-            })
-            .collect()
-    }
-
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: reth_primitives_traits::Block,
-    {
+    fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
         self.eth_tx_validator.on_new_head_block(new_tip_block);
     }
 }

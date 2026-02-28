@@ -7,16 +7,20 @@ use irys_actors::{
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
+    db::IrysDatabaseExt as _,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
-use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
+use irys_types::irys::IrysSigner;
 use irys_types::{
-    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
+    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
+use irys_types::{
+    ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset, partition_chunk_offset_ie,
+};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
@@ -253,7 +257,8 @@ async fn add_slots_test() {
 
 #[tokio::test]
 async fn unique_addresses_per_slot_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
 
     let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -482,7 +487,8 @@ async fn partition_expiration_and_repacking_test() {
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {
-        while let Some(cmd) = receivers.block_producer.recv().await {
+        while let Some(traced_cmd) = receivers.block_producer.recv().await {
+            let (cmd, _parent_span) = traced_cmd.into_parts();
             if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
                 // Return Ok(None) for the test
                 response
@@ -519,15 +525,13 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     let assign_submit_partition_hash = {
-        let partition_hash = epoch_snapshot
+        epoch_snapshot
             .partition_assignments
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
             .map(|(hash, _)| *hash)
-            .expect("There should be a partition assigned to submit ledger");
-
-        partition_hash
+            .expect("There should be a partition assigned to submit ledger")
     };
 
     let (publish_partition_hash, submit_partition_hash) = {
@@ -631,7 +635,11 @@ async fn partition_expiration_and_repacking_test() {
         );
         debug!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 
-        assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
+        assert_eq!(
+            sub_slots.len(),
+            3,
+            "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!"
+        );
         assert!(
             sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"
@@ -764,18 +772,11 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
     let db_env =
         irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
             .expect("to create DB");
     let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
-    let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
-        block_index_rx,
-        BlockIndex::new_for_testing(db),
-        None, // No supply state needed for tests
-        &config.consensus,
-        tokio::runtime::Handle::current(),
-    );
+    let block_index = BlockIndex::new_for_testing(db);
 
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -801,18 +802,13 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    block_index_tx
-        .send(
-            irys_actors::block_index_service::BlockIndexServiceMessage::MigrateBlock {
-                block_header: Arc::new(genesis_block.clone()),
-                all_txs: Arc::new(vec![]),
-                response: tx,
-            },
-        )
-        .expect("send migrate block");
-    rx.await
-        .expect("Failed to receive migration result")
+    let genesis_sealed = SealedBlock::new_unchecked(
+        Arc::new(genesis_block.clone()),
+        BlockTransactions::default(),
+    );
+    block_index
+        .db()
+        .update_eyre(|tx| BlockIndex::push_block(tx, &genesis_sealed, config.consensus.chunk_size))
         .expect("Failed to index genesis block");
 
     {
@@ -902,15 +898,8 @@ async fn epoch_blocks_reinitialization_test() {
 
     // partitions_guard.read().print_assignments();
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    block_index_tx
-        .send(
-            irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard {
-                response: tx,
-            },
-        )
-        .expect("send get block index guard");
-    let block_index_guard = rx.await.unwrap();
+    let block_index_guard =
+        irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index.clone());
 
     debug!(
         "num blocks in block_index: {}",
@@ -949,7 +938,8 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[tokio::test]
 async fn partitions_assignment_determinism_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;

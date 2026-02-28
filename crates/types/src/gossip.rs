@@ -5,7 +5,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
-use reth_primitives::Block;
+use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -23,7 +23,7 @@ pub mod v1 {
         IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
-    use reth_primitives::Block;
+    use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
     use std::fmt::Debug;
@@ -173,7 +173,7 @@ pub mod v2 {
         GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
-    use reth_primitives::Block;
+    use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
     use std::fmt::Debug;
@@ -205,6 +205,12 @@ pub mod v2 {
 
     impl From<UnpackedChunk> for GossipBroadcastMessageV2 {
         fn from(chunk: UnpackedChunk) -> Self {
+            Self::from(Arc::new(chunk))
+        }
+    }
+
+    impl From<Arc<UnpackedChunk>> for GossipBroadcastMessageV2 {
+        fn from(chunk: Arc<UnpackedChunk>) -> Self {
             let key = GossipCacheKey::chunk(&chunk);
             let value = GossipDataV2::Chunk(chunk);
             Self::new(key, value)
@@ -245,7 +251,7 @@ pub mod v2 {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum GossipDataV2 {
-        Chunk(UnpackedChunk),
+        Chunk(Arc<UnpackedChunk>),
         Transaction(DataTransactionHeader),
         CommitmentTransaction(CommitmentTransaction),
         BlockHeader(Arc<IrysBlockHeader>),
@@ -263,7 +269,7 @@ pub mod v2 {
     impl From<super::v1::GossipDataV1> for GossipDataV2 {
         fn from(v1: super::v1::GossipDataV1) -> Self {
             match v1 {
-                super::v1::GossipDataV1::Chunk(chunk) => Self::Chunk(chunk),
+                super::v1::GossipDataV1::Chunk(chunk) => Self::Chunk(Arc::new(chunk)),
                 super::v1::GossipDataV1::Transaction(tx) => Self::Transaction(tx),
                 super::v1::GossipDataV1::CommitmentTransaction(tx) => {
                     Self::CommitmentTransaction(tx)
@@ -280,7 +286,9 @@ pub mod v2 {
     impl GossipDataV2 {
         pub fn to_v1(&self) -> Option<super::v1::GossipDataV1> {
             match self {
-                Self::Chunk(chunk) => Some(super::v1::GossipDataV1::Chunk(chunk.clone())),
+                Self::Chunk(chunk) => {
+                    Some(super::v1::GossipDataV1::Chunk(UnpackedChunk::clone(chunk)))
+                }
                 Self::Transaction(tx) => Some(super::v1::GossipDataV1::Transaction(tx.clone())),
                 Self::CommitmentTransaction(commitment_tx) => Some(
                     super::v1::GossipDataV1::CommitmentTransaction(commitment_tx.clone()),
@@ -399,7 +407,7 @@ pub mod version_pd {
         BlockBody, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, IngressProof,
         IrysBlockHeader, UnpackedChunk,
     };
-    use reth_primitives::Block;
+    use reth_ethereum_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
@@ -432,6 +440,14 @@ pub mod version_pd {
         fn from(chunk: UnpackedChunk) -> Self {
             let key = GossipCacheKey::chunk(&chunk);
             Self::new(key, GossipDataVersionPD::Chunk(chunk))
+        }
+    }
+
+    impl From<Arc<UnpackedChunk>> for GossipBroadcastMessageVersionPD {
+        fn from(chunk: Arc<UnpackedChunk>) -> Self {
+            let key = GossipCacheKey::chunk(&chunk);
+            let value = GossipDataVersionPD::Chunk(UnpackedChunk::clone(&chunk));
+            Self::new(key, value)
         }
     }
 
@@ -494,7 +510,7 @@ pub mod version_pd {
     impl GossipDataVersionPD {
         pub fn to_v2(&self) -> Option<super::v2::GossipDataV2> {
             match self {
-                Self::Chunk(chunk) => Some(super::v2::GossipDataV2::Chunk(chunk.clone())),
+                Self::Chunk(chunk) => Some(super::v2::GossipDataV2::Chunk(Arc::new(chunk.clone()))),
                 Self::Transaction(tx) => Some(super::v2::GossipDataV2::Transaction(tx.clone())),
                 Self::CommitmentTransaction(tx) => {
                     Some(super::v2::GossipDataV2::CommitmentTransaction(tx.clone()))
@@ -624,6 +640,16 @@ pub struct GossipRequestV2<T> {
     /// Miner address still included for staking checks and verification
     pub miner_address: IrysAddress,
     pub data: T,
+}
+
+impl<T> GossipRequestV1<T> {
+    pub fn into_v2(self, peer_id: IrysPeerId) -> GossipRequestV2<T> {
+        GossipRequestV2 {
+            peer_id,
+            miner_address: self.miner_address,
+            data: self.data,
+        }
+    }
 }
 
 /// VersionPD GossipRequest

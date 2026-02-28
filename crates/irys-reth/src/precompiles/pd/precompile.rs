@@ -19,7 +19,7 @@ use super::context::PdContext;
 /// Programmable Data precompile implementation.
 #[inline]
 fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
-    move |input: PrecompileInput<'_>| -> PrecompileResult {
+    (move |input: PrecompileInput<'_>| -> PrecompileResult {
         let data = input.data;
         let gas_limit = input.gas;
         debug!(
@@ -112,7 +112,7 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             bytes: res.bytes,
             reverted: false,
         })
-    }
+    })
     .into()
 }
 
@@ -141,7 +141,7 @@ mod tests {
     use reth_evm::EvmEnv;
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
-    use revm::primitives::{hardfork::SpecId, TxKind, U256};
+    use revm::primitives::{TxKind, U256, hardfork::SpecId};
     use std::sync::Arc;
 
     /// Creates a default TxEnv for testing PD precompile.
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn pd_precompile_read_full_byte_range() {
         use alloy_eips::eip2930::AccessListItem;
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
@@ -267,7 +267,7 @@ mod tests {
     fn test_read_partial_byte_range() {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
@@ -347,7 +347,7 @@ mod tests {
     fn test_invalid_function_id() {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
@@ -393,7 +393,7 @@ mod tests {
     fn test_moderate_chunks() {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
@@ -449,7 +449,7 @@ mod tests {
     fn test_zero_chunks() {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
@@ -504,7 +504,7 @@ mod tests {
     fn test_large_chunks_no_overflow() {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{aliases::U200, B256};
+        use alloy_primitives::{B256, aliases::U200};
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };

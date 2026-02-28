@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
-};
-use crate::validation::send_block_to_block_tree;
+use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
+use crate::validation::send_block_and_read_state;
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
@@ -12,6 +10,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
+use irys_types::SendTraced as _;
 use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -21,7 +20,7 @@ async fn gossip_commitment_to_node(
     commitment: &CommitmentTransaction,
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx.service_senders.mempool.send(
+    node.node_ctx.service_senders.mempool.send_traced(
         MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
     )?;
 
@@ -148,9 +147,8 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     }
 
     // Send block to genesis node for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     let genesis_outcome =
-        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         genesis_outcome,
         |e| {
@@ -166,8 +164,8 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     );
 
     // Send block to peer node for validation
-    send_block_to_block_tree(&peer_node.node_ctx, Arc::clone(&block), false).await?;
-    let peer_outcome = read_block_from_state(&peer_node.node_ctx, &block.header().block_hash).await;
+    let peer_outcome =
+        send_block_and_read_state(&peer_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         peer_outcome,
         |e| {
@@ -193,7 +191,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
 /// Expected behavior: Block validation must reject the block because unstake commitments
 /// are invalid when the account has no stake in the epoch snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unstake: CommitmentTransaction,
@@ -291,8 +289,8 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     gossip_commitment_to_node(&genesis_node, &invalid_unstake).await?;
 
     // Send block to genesis node for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     assert_validation_error(
         outcome,
         |e| {

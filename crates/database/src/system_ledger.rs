@@ -1,7 +1,7 @@
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Config, H256List,
-    IrysBlockHeader, SystemLedger, SystemTransactionLedger, H256, U256,
+    CommitmentTransaction, Config, H256, H256List, IrysBlockHeader, SystemLedger,
+    SystemTransactionLedger, U256, irys::IrysSigner, transaction::PledgeDataProvider,
 };
 
 /// Creates a signed pledge commitment transaction
@@ -118,13 +118,11 @@ fn get_or_create_commitment_ledger(
     }
 
     // Get a mutable reference to the commitment ledger
-    let commitment_ledger = genesis_block
+    genesis_block
         .system_ledgers
         .iter_mut()
         .find(|e| e.ledger_id == SystemLedger::Commitment)
-        .expect("Commitment ledger should exist at this point");
-
-    commitment_ledger
+        .expect("Commitment ledger should exist at this point")
 }
 
 /// Adds genesis commitment transaction IDs to the block header

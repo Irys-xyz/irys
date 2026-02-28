@@ -1,6 +1,9 @@
-use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
-use crate::mempool_service::metrics::{record_chunk_duplicate, record_chunk_ingested};
-use crate::mempool_service::Inner;
+use super::ChunkIngressServiceInner;
+use super::ingress_proofs::generate_and_store_ingress_proof;
+use super::metrics::{
+    record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
+    record_validation_duration,
+};
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,
@@ -10,16 +13,20 @@ use irys_database::{
 };
 use irys_types::gossip::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
-    chunk::{max_chunk_offset, UnpackedChunk},
+    DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
+    chunk::{UnpackedChunk, max_chunk_offset},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, H256,
+    validate_path,
 };
+use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
+use reth_db::{Database as _, cursor::DbDupCursorRO as _, transaction::DbTx as _};
+use std::sync::Arc;
+use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 /// Represents data_size information and if it comes from the publish ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,13 +73,13 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
-impl Inner {
+impl ChunkIngressServiceInner {
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
-    pub async fn handle_chunk_ingress_message(
+    pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
-        let mempool_state = &self.mempool_state;
+        let chunk = Arc::new(chunk);
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
@@ -87,9 +94,11 @@ impl Inner {
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
 
-        if mempool_state
-            .is_a_recent_valid_chunk(&chunk_path_hash)
+        if self
+            .recent_valid_chunks
+            .read()
             .await
+            .contains(&chunk_path_hash)
         {
             debug!(
                 "Chunk {} already processed recently, skipping re-gossip",
@@ -100,6 +109,7 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
+        let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
         let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
@@ -164,6 +174,8 @@ impl Inner {
             }
         };
 
+        drop(_fetch_size_span);
+
         let data_size = match data_size {
             Some(ds) => ds,
             None => {
@@ -216,10 +228,15 @@ impl Inner {
 
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                let current_chunk_count = self
-                    .mempool_state
-                    .pending_chunk_count_for_data_root(&chunk.data_root)
-                    .await;
+
+                // Acquire a single write lock so the count check and the insert are
+                // atomic with respect to concurrent ingress calls, eliminating the
+                // TOCTOU race that could allow the per-item cap to be exceeded.
+                let mut pending_chunks_guard = self.pending_chunks.write().await;
+                let current_chunk_count = pending_chunks_guard
+                    .get(&chunk.data_root)
+                    .map(lru::LruCache::len)
+                    .unwrap_or(0);
                 if current_chunk_count >= preheader_chunks_per_item {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
@@ -231,7 +248,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state.put_chunk(chunk.clone()).await;
+                pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
                 return Ok(());
             }
         };
@@ -254,13 +271,17 @@ impl Inner {
                     "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
                     chunk.data_size, data_size, chunk.data_root
                 );
-                self.mempool_state.put_chunk(chunk.clone()).await;
+                self.pending_chunks
+                    .write()
+                    .await
+                    .put(Arc::unwrap_or_clone(chunk));
                 return Ok(());
             }
         }
 
         // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
+        let _proof_span = info_span!("chunk.validate_proof").entered();
 
         let Some(max_valid_offset) = max_chunk_offset(data_size, chunk_size) else {
             error!(
@@ -307,6 +328,7 @@ impl Inner {
             chunk.tx_offset, chunk.data_size, target_offset
         );
 
+        let validation_start = Instant::now();
         let path_result = match validate_path(root_hash, path_buff, target_offset)
             .map_err(|_| CriticalChunkIngressError::InvalidProof)
         {
@@ -381,31 +403,47 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-        if let Err(e) = self
-            .irys_db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|e| {
+        record_validation_duration(validation_start.elapsed_ms());
+
+        drop(_proof_span);
+
+        // Write-behind: defers MDBX write for throughput
+        let storage_start = Instant::now();
+        match self
+            .chunk_data_writer
+            .queue_write(Arc::clone(&chunk))
+            .instrument(info_span!("chunk.cache_write"))
+            .await
+        {
+            Ok(true) => {
+                record_chunk_duplicate();
+            }
+            Ok(false) => {}
+            Err(e) => {
                 error!(
-                    "Database error caching chunk data_root {:?} tx_offset {}: {:?}",
+                    "Write-behind queue error for chunk data_root {:?} tx_offset {}: {:?}",
                     chunk.data_root, chunk.tx_offset, e
                 );
-                CriticalChunkIngressError::DatabaseError
-            })
-        {
-            return Err(e.into());
+                return Err(CriticalChunkIngressError::Other(format!(
+                    "Write-behind channel closed: {e:?}"
+                ))
+                .into());
+            }
         }
+        record_enqueue_duration(storage_start.elapsed_ms());
 
         // Add to recent valid chunks cache to prevent re-processing
-        mempool_state
-            .record_recent_valid_chunk(chunk_path_hash)
-            .await;
+        self.recent_valid_chunks
+            .write()
+            .await
+            .put(chunk_path_hash, ());
 
         record_chunk_ingested(chunk_len);
 
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
+        let _sm_span = info_span!("chunk.write_storage_modules").entered();
         for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)
@@ -430,6 +468,8 @@ impl Inner {
             }
         }
 
+        drop(_sm_span);
+
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
@@ -438,7 +478,7 @@ impl Inner {
         if let Err(error) = self
             .service_senders
             .gossip_broadcast
-            .send(gossip_broadcast_message)
+            .send_traced(gossip_broadcast_message)
         {
             tracing::error!(
                 "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
@@ -448,7 +488,16 @@ impl Inner {
             );
         }
 
-        // ==== INGRESS PROOFS ====
+        // Flush to ensure chunks are committed before ingress proof check.
+        if let Err(e) = self.chunk_data_writer.flush().await {
+            error!(
+                "Failed to flush chunk data writer before ingress proof check: {:?}",
+                e
+            );
+            record_flush_failure();
+            return Ok(());
+        }
+
         let root_hash: H256 = root_hash.into();
         let cached_data_root = self
             .irys_db
@@ -523,7 +572,7 @@ impl Inner {
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
             let cache_sender = self.service_senders.chunk_cache.clone();
-            let _fut = self.exec.clone().spawn_blocking(async move {
+            let _fut = self.exec.clone().spawn_blocking(move || {
                 if let Err(error) = generate_and_store_ingress_proof(
                     &block_tree_read_guard,
                     &db,
@@ -582,10 +631,9 @@ impl Inner {
                     .filter(|(dr, _)| *dr == data_root)?;
 
                 if let Ok(result) = validate_path(chunk_data_root.0, &data_path, target_byte_offset)
+                    && result.is_rightmost_chunk
                 {
-                    if result.is_rightmost_chunk {
-                        return Some(result.max_byte_range as u64);
-                    }
+                    return Some(result.max_byte_range as u64);
                 }
             }
             None

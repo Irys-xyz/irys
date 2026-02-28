@@ -2,14 +2,14 @@ use dashmap::DashMap;
 use irys_domain::StorageModule;
 use irys_types::PartitionChunkRange;
 use irys_types::{PackedChunk, UnpackedChunk};
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 use std::time::Duration;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use super::config::UnpackingConfig;
 use super::errors::UnpackingError;
-use super::{config::PackingConfig, PackingError, PackingResult};
+use super::{PackingError, PackingResult, config::PackingConfig};
 
 // ------------------------------------------------------------------------
 // PACKING

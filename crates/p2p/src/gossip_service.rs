@@ -26,15 +26,18 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::version_pd::GossipBroadcastMessageVersionPD;
-use irys_types::{Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig};
-use reth_tasks::{TaskExecutor, TaskManager};
+use irys_types::Traced;
+use irys_types::{
+    Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
+};
+use reth_tasks::TaskExecutor;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn, Instrument as _};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -53,7 +56,7 @@ impl ServiceHandleWithShutdownSignal {
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = channel(1);
-        let handle = task_executor.spawn(task(shutdown_rx));
+        let handle = task_executor.spawn_task(task(shutdown_rx));
         Self {
             handle,
             shutdown_tx,
@@ -102,7 +105,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageVersionPD>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<Traced<GossipBroadcastMessageVersionPD>>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
@@ -125,7 +128,7 @@ impl P2PService {
     pub fn new(
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
-        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageVersionPD>,
+        broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageVersionPD>>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -178,6 +181,11 @@ impl P2PService {
     {
         debug!("Starting the gossip service");
 
+        let chunk_ingress =
+            irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(
+                &service_senders,
+            );
+
         let block_pool = BlockPool::new(
             db,
             block_discovery,
@@ -196,6 +204,7 @@ impl P2PService {
         let consensus_config_hash = config.consensus.keccak256_hash();
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
+            chunk_ingress,
             block_pool: Arc::clone(&arc_pool),
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
@@ -209,7 +218,11 @@ impl P2PService {
             started_at,
             consensus_config_hash,
         });
-        let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
+        let server = GossipServer::new(
+            Arc::clone(&gossip_data_handler),
+            peer_list.clone(),
+            config.node_config.p2p_gossip.max_concurrent_gossip_chunks,
+        );
 
         let server = server.run(listener)?;
         let server_handle = server.handle();
@@ -245,6 +258,7 @@ impl P2PService {
         ))
     }
 
+    #[instrument(name = "broadcast_data", skip_all)]
     async fn broadcast_data(
         &self,
         broadcast_message: GossipBroadcastMessageVersionPD,
@@ -259,6 +273,12 @@ impl P2PService {
         let message_type_and_id = broadcast_message.data_type_and_id();
         let GossipBroadcastMessageVersionPD { key, data } = broadcast_message;
         let broadcast_data = Arc::new(data);
+
+        // Pre-serialize once for all V2 peers (O(1) clone per peer instead of N serializations)
+        let preserialized = broadcast_data
+            .to_v2()
+            .as_ref()
+            .and_then(|v2_data| self.client.pre_serialize_for_broadcast(v2_data));
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
@@ -298,6 +318,20 @@ impl P2PService {
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
+                if peer_entry.protocol_version == ProtocolVersion::V2 {
+                    if let Some((route, ref body)) = preserialized {
+                        self.client.send_preserialized_detached(
+                            (&peer_miner_address, &peer_entry),
+                            route,
+                            body.clone(),
+                            peer_list,
+                            Arc::clone(&self.cache),
+                            key,
+                        );
+                        continue;
+                    }
+                }
+                // V1 peers or preserialization failure: fall back to existing path
                 self.client.send_data_and_update_the_score_detached(
                     (&peer_miner_address, &peer_entry),
                     Arc::clone(&broadcast_data),
@@ -319,7 +353,7 @@ impl P2PService {
 }
 
 fn spawn_broadcast_task(
-    mut broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageVersionPD>,
+    mut broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageVersionPD>>,
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
@@ -332,15 +366,17 @@ fn spawn_broadcast_task(
                 tokio::select! {
                     maybe_data = broadcast_data_receiver.recv() => {
                         match maybe_data {
-                            Some(broadcast_message) => {
+                            Some(traced) => {
+                                let (broadcast_message, parent_span) = traced.into_parts();
+                                let span = tracing::info_span!(parent: &parent_span, "gossip_broadcast");
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
-                                let peer_list = peer_list.clone();
+                                let peer_list = peer_list.clone(); // clone: shared across spawned tasks
                                 tokio::spawn(async move {
                                     if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                         warn!("Failed to broadcast data: {}", error);
                                     }
-                                });
+                                }.instrument(span));
                             },
                             None => break, // channel closed
                         }
@@ -363,20 +399,23 @@ pub fn spawn_p2p_server_watcher_task(
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
+    let task_executor_clone = task_executor.clone();
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
         move |mut task_shutdown_signal| async move {
             debug!("Starting gossip service watch thread");
 
-            let tasks_shutdown_handle = TaskManager::current()
-                .executor()
-                .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
+            let tasks_shutdown_handle = task_executor_clone.spawn_critical_with_shutdown_signal(
+                "server shutdown task",
+                |_| async move {
+                    let mut early_exit_result: Option<TaskExecutionResult> = None;
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
                             debug!("Gossip service shutdown signal received");
                         }
                         broadcast_res = broadcast_task_handle.wait_for_exit() => {
                             warn!("Gossip broadcast exited because: {:?}", broadcast_res);
+                            early_exit_result = Some(broadcast_res);
                         }
                     }
 
@@ -396,8 +435,13 @@ pub fn spawn_p2p_server_watcher_task(
                         )),
                     };
 
-                    info!("Stopping gossip broadcast");
-                    handle_result(broadcast_task_handle.stop().await);
+                    if let Some(res) = early_exit_result {
+                        info!("Gossip broadcast already exited");
+                        handle_result(res);
+                    } else {
+                        info!("Stopping gossip broadcast");
+                        handle_result(broadcast_task_handle.stop().await);
+                    }
 
                     if errors.is_empty() {
                         info!("Gossip main task finished without errors");
@@ -407,7 +451,8 @@ pub fn spawn_p2p_server_watcher_task(
                             warn!("Error: {}", error);
                         }
                     };
-                });
+                },
+            );
 
             match server.await {
                 Ok(()) => {

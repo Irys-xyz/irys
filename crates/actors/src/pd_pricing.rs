@@ -5,12 +5,11 @@ use eyre::OptionExt as _;
 use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{
-    storage_pricing::{
-        mul_div,
-        phantoms::{CostPerChunk, Irys, Percentage, Usd},
-        Amount, PRECISION_SCALE,
-    },
     Config, IrysTokenPrice,
+    storage_pricing::{
+        Amount, PRECISION_SCALE, mul_div,
+        phantoms::{CostPerChunk, Irys, Percentage, Usd},
+    },
 };
 use reth::providers::BlockReader as _;
 use serde::{Deserialize, Serialize};

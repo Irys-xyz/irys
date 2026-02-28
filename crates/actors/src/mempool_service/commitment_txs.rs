@@ -1,10 +1,10 @@
-use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
+use crate::mempool_service::{Inner, TxIngressError, TxReadError, validate_commitment_transaction};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
-    CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
-    IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, UnixTimestamp,
-    VersionDiscriminant as _, H256,
+    CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, H256, IrysAddress,
+    IrysTransactionCommon as _, IrysTransactionId, SendTraced as _, TxKnownStatus, UnixTimestamp,
+    VersionDiscriminant as _,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::version_pd::GossipBroadcastMessageVersionPD;
@@ -336,7 +336,7 @@ impl Inner {
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
         self.service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessageVersionPD::from(tx.clone()))
+            .send_traced(GossipBroadcastMessageVersionPD::from(tx.clone()))
             .expect("Failed to send gossip data");
     }
 
@@ -411,7 +411,7 @@ impl Inner {
         // Reject unsupported or invalid commitment types/targets
         match cache_status {
             CommitmentSnapshotStatus::Unknown | CommitmentSnapshotStatus::Accepted => {
-                return cache_status
+                return cache_status;
             }
             CommitmentSnapshotStatus::UnstakePending
             | CommitmentSnapshotStatus::HasActivePledges

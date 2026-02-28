@@ -4,19 +4,24 @@
 //! enabling Reth's internal metrics to be exported via OTLP alongside Irys metrics.
 
 use eyre::Result;
-use opentelemetry::{trace::TracerProvider as _, KeyValue};
+use opentelemetry::{
+    KeyValue,
+    trace::{SpanId, TraceId, TracerProvider as _},
+};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{
-    logs::SdkLoggerProvider, metrics::SdkMeterProvider, resource::Resource,
-    trace::SdkTracerProvider,
+    logs::SdkLoggerProvider,
+    metrics::SdkMeterProvider,
+    propagation::TraceContextPropagator,
+    resource::Resource,
+    trace::{IdGenerator, SdkTracerProvider},
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    fmt::format::FmtSpan, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter,
-    Layer as _, Registry,
+    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -118,6 +123,69 @@ fn build_metrics_exporter(
         })
 }
 
+/// OTEL [`IdGenerator`] producing UUID v7 trace IDs (RFC 9562).
+///
+/// Embeds a 48-bit millisecond timestamp in the high bytes of every trace ID
+/// so that IDs are roughly time-ordered when viewed in Tempo/Grafana.
+/// Span IDs are random 8-byte values.
+///
+/// Uses a thread-local [`SmallRng`](rand::rngs::SmallRng) (Xoshiro256++) seeded
+/// once from OS entropy — avoiding the periodic reseeding overhead of `ThreadRng`.
+/// (same approach as the default ID generator used by Otel - very hot, so perf does matter)
+
+#[derive(Debug)]
+struct UuidV7IdGenerator;
+
+thread_local! {
+    static ID_RNG: std::cell::RefCell<rand::rngs::SmallRng> =
+        std::cell::RefCell::new(<rand::rngs::SmallRng as rand::SeedableRng>::from_entropy());
+}
+
+/// warning: both functions here are *very hot*
+impl IdGenerator for UuidV7IdGenerator {
+    // UUIDv7 for globally unique tracing IDs
+    fn new_trace_id(&self) -> TraceId {
+        use rand::Rng as _;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let ts_ms = d.as_secs() * 1000 + d.subsec_millis() as u64;
+
+        ID_RNG.with(|rng| {
+            let mut rng = rng.borrow_mut();
+            let r0: u64 = rng.r#gen();
+            let r1: u64 = rng.r#gen();
+
+            // High u64: 48-bit timestamp | version 7 nibble | 12 random bits
+            let hi = (ts_ms << 16) | 0x7000 | (r0 & 0x0FFF);
+            // Low u64: variant bits (0b10) | 62 random bits
+            let lo = (r1 & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000;
+
+            let mut bytes = [0_u8; 16];
+            bytes[..8].copy_from_slice(&hi.to_be_bytes());
+            bytes[8..].copy_from_slice(&lo.to_be_bytes());
+            TraceId::from_bytes(bytes)
+        })
+    }
+
+    // u64s for local spans
+    fn new_span_id(&self) -> SpanId {
+        use rand::Rng as _;
+        ID_RNG.with(|rng| {
+            let mut rng = rng.borrow_mut();
+            loop {
+                let v: u64 = rng.r#gen();
+                // zero span ID = no span (spec requirement)
+                if v != 0 {
+                    return SpanId::from_bytes(v.to_be_bytes());
+                }
+            }
+        })
+    }
+}
+
 fn build_tracer_provider(
     trace_exporter: opentelemetry_otlp::SpanExporter,
     resource: Resource,
@@ -128,6 +196,7 @@ fn build_tracer_provider(
     opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_resource(resource)
         .with_span_processor(span_processor)
+        .with_id_generator(UuidV7IdGenerator)
         .build()
 }
 
@@ -169,17 +238,10 @@ fn setup_tracing_subscriber(
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
 
-    let output_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(true)
-        .with_file(true)
-        .with_writer(std::io::stdout)
-        .with_span_events(FmtSpan::NONE);
-
     let subscriber = subscriber
         .with(filter)
         .with(ErrorLayer::default())
-        .with(output_layer.boxed());
+        .with(crate::make_fmt_layer());
 
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -266,6 +328,9 @@ pub fn init_telemetry() -> Result<()> {
     let _ = TRACER_PROVIDER.set(tracer_provider.clone());
     let _ = METER_PROVIDER.set(meter_provider.clone());
 
+    opentelemetry::global::set_meter_provider(meter_provider);
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
     // NOTE: We do NOT install a metrics recorder here because Reth's internal
     // EngineNodeLauncher calls install_prometheus_recorder() and will panic
     // if a recorder is already set. Reth metrics will need to be exposed via
@@ -283,7 +348,6 @@ pub fn init_telemetry() -> Result<()> {
         "OpenTelemetry telemetry initialized - logs, traces, metrics, and Reth metrics will be exported"
     );
 
-    opentelemetry::global::set_meter_provider(meter_provider);
     let _ = INIT_GUARD.set(());
 
     Ok(())
@@ -311,28 +375,28 @@ pub fn init_telemetry() -> Result<()> {
 pub fn flush_telemetry() -> Result<()> {
     let mut errors = Vec::new();
 
-    if let Some(logger) = LOGGER_PROVIDER.get() {
-        if let Err(e) = logger.force_flush() {
-            let err_msg = format!("Logger provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(logger) = LOGGER_PROVIDER.get()
+        && let Err(e) = logger.force_flush()
+    {
+        let err_msg = format!("Logger provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(tracer) = TRACER_PROVIDER.get() {
-        if let Err(e) = tracer.force_flush() {
-            let err_msg = format!("Tracer provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(tracer) = TRACER_PROVIDER.get()
+        && let Err(e) = tracer.force_flush()
+    {
+        let err_msg = format!("Tracer provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(meter) = METER_PROVIDER.get() {
-        if let Err(e) = meter.force_flush() {
-            let err_msg = format!("Meter provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(meter) = METER_PROVIDER.get()
+        && let Err(e) = meter.force_flush()
+    {
+        let err_msg = format!("Meter provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
     if errors.is_empty() {
@@ -343,5 +407,44 @@ pub fn flush_telemetry() -> Result<()> {
             errors.len(),
             errors.join("; ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_v7_trace_id_has_correct_version_and_variant() {
+        let id_gen = UuidV7IdGenerator;
+        let trace_id = id_gen.new_trace_id();
+        let bytes = trace_id.to_bytes();
+
+        assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
+        assert_eq!(bytes[8] >> 6, 0b10, "variant bits must be 0b10");
+    }
+
+    #[test]
+    fn uuid_v7_trace_ids_are_time_ordered() {
+        let id_gen = UuidV7IdGenerator;
+        let id1 = id_gen.new_trace_id();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let id2 = id_gen.new_trace_id();
+
+        assert!(
+            id1.to_bytes() < id2.to_bytes(),
+            "later trace ID must sort after earlier one"
+        );
+    }
+
+    #[test]
+    fn uuid_v7_span_id_is_nonzero() {
+        let id_gen = UuidV7IdGenerator;
+        let span_id = id_gen.new_span_id();
+        assert_ne!(
+            span_id.to_bytes(),
+            [0_u8; 8],
+            "span ID must not be all zeros"
+        );
     }
 }

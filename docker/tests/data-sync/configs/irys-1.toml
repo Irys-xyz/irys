@@ -3,7 +3,6 @@ sync_mode = "Trusted"
 base_directory = "/app/data"
 mining_key = "53142d3c5a4a3f49715490456c26df7926d45586179d19afce68d799c08ea8c6"
 reward_address = "0x10605A299777D44BE5373D120d5479f07860325d"
-peer_id = "0xAA00000000000000000000000000000000000001"
 stake_pledge_drives = true
 genesis_peer_discovery_timeout_millis = 10000
 
@@ -16,23 +15,23 @@ initial_stake_and_pledge_whitelist = [
 
 # irys-2
 [[trusted_peers]]
-gossip = "172.23.0.3:9009"
-api = "172.23.0.3:8080"
+gossip = "172.24.0.3:9009"
+api = "172.24.0.3:8080"
 
 [trusted_peers.execution]
-peering_tcp_addr = "172.23.0.3:9010"
+peering_tcp_addr = "172.24.0.3:9010"
 
 # irys-3
 [[trusted_peers]]
-gossip = "172.23.0.4:9009"
-api = "172.23.0.4:8080"
+gossip = "172.24.0.4:9009"
+api = "172.24.0.4:8080"
 
 [trusted_peers.execution]
-peering_tcp_addr = "172.23.0.4:9010"
+peering_tcp_addr = "172.24.0.4:9010"
 
 # Default network configuration - all services use this public_ip unless overridden
 [network_defaults]
-public_ip = "172.23.0.2"
+public_ip = "172.24.0.2"
 bind_ip = "0.0.0.0"
 
 [gossip]

@@ -9,7 +9,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_domain::{BlockState, ChainState};
+use irys_domain::ChainState;
 use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
@@ -22,6 +22,7 @@ use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256,
 };
+use reth::rpc::types::BlockNumberOrTag;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
@@ -34,8 +35,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    new_stake_tx, read_block_from_state, solution_context, AddTxError, BlockValidationOutcome,
-    IrysNodeTest,
+    new_stake_tx, read_block_from_state, solution_context, wait_for_block_event, AddTxError,
+    BlockValidationOutcome, IrysNodeTest,
 };
 
 // EVM test constants
@@ -185,10 +186,15 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     // Collect block hashes as we mine
     let mut block_hashes = Vec::new();
+
+    // Subscribe before mining so the receiver accumulates events during block production
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
 
     for i in 1..10 {
         info!("manually producing block {}", i);
@@ -196,19 +202,18 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         let block_hash = node.wait_until_height(i, 10).await?;
         let block = node.get_block_by_hash(&block_hash)?;
 
-        //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
-            .unwrap()
-            .unwrap();
-        assert_eq!(i, reth_block.header.number);
-        assert_eq!(reth_block.number, block.height);
+        // Wait until reth has indexed this block number with the expected EVM hash.
+        // This avoids a race where Irys canonical height is visible before reth
+        // provider lookup by hash is populated.
+        let reth_hash = node
+            .wait_for_reth_marker(BlockNumberOrTag::Number(i), block.evm_block_hash, 10)
+            .await?;
+        assert_eq!(reth_hash, block.evm_block_hash);
+        assert_eq!(i, block.height);
 
         // check irys DB for built block
         let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
-        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+        assert_eq!(db_irys_block.evm_block_hash, reth_hash);
 
         // Collect block hash for later verification
         block_hashes.push(block.block_hash);
@@ -216,7 +221,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
     // Verify all collected blocks are on-chain
     for (idx, hash) in block_hashes.iter().enumerate() {
-        let state = read_block_from_state(&node.node_ctx, hash).await;
+        let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(
             state,
             BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
@@ -235,7 +240,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
+async fn slow_heavy4_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining()?;
@@ -244,8 +249,14 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     // Collect block hashes as we mine
     let mut block_hashes = Vec::new();
 
+    // Subscribe before mining loop so the receiver accumulates events during block production
+    let event_rx = node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+
     for i in 1..10 {
-        let _block_hash = node.wait_until_height(i + 1, 10).await?;
+        let _block_hash = node.wait_for_block_at_height(i + 1, 30).await?;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
@@ -262,7 +273,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
     // Verify all collected blocks are on-chain
     for (idx, hash) in block_hashes.iter().enumerate() {
-        let state = read_block_from_state(&node.node_ctx, hash).await;
+        let state = read_block_from_state(&node.node_ctx, hash, event_rx.resubscribe()).await;
         assert_eq!(
             state,
             BlockValidationOutcome::StoredOnNode(ChainState::Onchain),
@@ -290,14 +301,8 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
     );
 
-    let reth_context = node.node_ctx.reth_node_adapter.clone();
-
-    //check reth for built block
-    let reth_block = reth_context
-        .inner
-        .provider
-        .block_by_hash(block.evm_block_hash)?
-        .unwrap();
+    // Wait until reth indexes the block by hash.
+    let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
 
     // height is hardcoded at 42 right now
     assert_eq!(reth_block.number, block.height);
@@ -506,13 +511,8 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         // mine a single block
         let block = node.mine_block().await?;
 
-        // obtain the EVM timestamp for this block from Reth
-        let reth_block = reth_context
-            .inner
-            .provider
-            .find_block_by_hash(block.evm_block_hash, reth::providers::BlockSource::Any)
-            .unwrap()
-            .unwrap();
+        // obtain the EVM timestamp for this block from Reth once indexed
+        let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
         let new_ts = reth_block.header.timestamp as u128;
 
         // update baseline timestamp and ensure the next block gets a later one
@@ -1203,7 +1203,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
 // This test produces a block with invalid tx ordering.
 #[test_log::test(tokio::test)]
-async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+async fn heavy3_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -1324,16 +1324,11 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         evil_block.header().height,
         "we have created a fork because we don't want to build on the evil block"
     );
-    loop {
-        // wait for the block to be validated
-        let res = sub.recv().await.unwrap();
-        if res.block_hash == new_block.header().block_hash
-            // if we get anything other than Unknown, proceed processing
-            && res.state != ChainState::NotOnchain(BlockState::Unknown)
-        {
-            break;
-        }
-    }
+    let new_block_hash = new_block.header().block_hash;
+    wait_for_block_event(&mut sub, 30, |ev| {
+        ev.block_hash == new_block_hash && ev.state == ChainState::Onchain
+    })
+    .await?;
 
     let latest_block_hash = node
         .node_ctx

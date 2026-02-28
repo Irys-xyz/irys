@@ -534,6 +534,9 @@ pub struct P2PGossipConfig {
     /// Enable scoring of peers based on their behavior. Disabling this might help with reducing
     /// noise during debug, otherwise it's recommended to keep it enabled.
     pub enable_scoring: bool,
+    /// Maximum concurrent chunk handler tasks on the gossip receiver.
+    /// Limits memory and CPU pressure from inbound chunk processing.
+    pub max_concurrent_gossip_chunks: usize,
 }
 
 impl Default for P2PGossipConfig {
@@ -542,6 +545,7 @@ impl Default for P2PGossipConfig {
             broadcast_batch_size: 50,
             broadcast_batch_throttle_interval: 100,
             enable_scoring: true,
+            max_concurrent_gossip_chunks: 50,
         }
     }
 }
@@ -694,6 +698,13 @@ pub struct MempoolNodeConfig {
 
     /// Maximum number of concurrent handlers for the mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent handlers for chunk ingress messages
+    pub max_concurrent_chunk_ingress_tasks: usize,
+
+    /// Backpressure channel capacity for the async chunk write-behind buffer.
+    /// Controls how many chunk writes can be queued before the sender blocks.
+    pub chunk_writer_buffer_size: usize,
 }
 
 impl Default for MempoolNodeConfig {
@@ -712,6 +723,8 @@ impl Default for MempoolNodeConfig {
             max_valid_commitment_addresses: 1_000,
             max_commitments_per_address: 5,
             max_concurrent_mempool_tasks: 30,
+            max_concurrent_chunk_ingress_tasks: 30,
+            chunk_writer_buffer_size: 4096,
         }
     }
 }
@@ -884,6 +897,8 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_chunk_ingress_tasks: 30,
+                chunk_writer_buffer_size: 4096,
             },
 
             vdf: VdfNodeConfig {
@@ -1030,6 +1045,8 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_chunk_ingress_tasks: 30,
+                chunk_writer_buffer_size: 4096,
             },
 
             vdf: VdfNodeConfig {

@@ -16,20 +16,20 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionId, LedgerIndexItem, PeerListItem, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, H256, MEGABYTE,
+    DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
+    IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
+use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
 use reth_db::table::{Table, TableInfo};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
-use reth_db::TableSet;
 use reth_db::{
-    cursor::*,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
+    cursor::*,
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration, SyncMode},
 };
 use reth_db_api::Database as _;
 use tracing::{debug, warn};
@@ -66,12 +66,18 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
             .with_growth_step((50 * MEGABYTE).into())
-            .with_shrink_threshold((100 * MEGABYTE).try_into()?),
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
+            // Cache data is non-authoritative and can be rebuilt from chain state,
+            // so trade durability for write throughput by skipping fsync operations.
+            // SafeNoSync preserves DB integrity on crash (rolls back to last steady
+            // commit) — only recent uncommitted transactions are lost.
+            .with_sync_mode(Some(SyncMode::SafeNoSync)),
     );
     open_or_create_db(path, tables, Some(args))
 }
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
+#[tracing::instrument(level = "debug", skip_all, fields(block_hash = ?block.block_hash))]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
@@ -95,12 +101,10 @@ pub fn block_header_by_hash<T: DbTx>(
         .get::<IrysBlockHeaders>(*block_hash)?
         .map(IrysBlockHeader::from);
 
-    if include_chunk {
-        if let Some(ref mut b) = block {
-            b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
-            if b.poa.chunk.is_none() && b.height != 0 {
-                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
-            }
+    if include_chunk && let Some(ref mut b) = block {
+        b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
+        if b.poa.chunk.is_none() && b.height != 0 {
+            tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
         }
     }
 
@@ -239,16 +243,35 @@ type IsDuplicate = bool;
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_root;
-    // Check if the data root exists
-    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+    if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            data_root
+            chunk.data_root
         ));
     }
 
+    cache_chunk_verified(tx, chunk)
+}
+
+/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
+///
+/// # SAFETY REQUIREMENT
+///
+/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
+/// calling this function. Failure to do so will leave orphaned chunk data in the cache
+/// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
+///
+/// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
+/// callers (e.g. the write-behind writer) that have already validated the data root.
+/// Returns `true` if the chunk was a duplicate and was not inserted.
+#[tracing::instrument(level = "trace", skip_all)]
+pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: &UnpackedChunk,
+) -> eyre::Result<IsDuplicate> {
+    let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
+
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
@@ -256,6 +279,7 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
         );
         return Ok(true);
     }
+
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
         meta: CachedChunkIndexMetadata {
@@ -703,7 +727,7 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 #[cfg(test)]
 mod tests {
     use arbitrary::Arbitrary as _;
-    use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
     use rand::Rng as _;
     use reth_db::Database as _;
     use tempfile::tempdir;
@@ -724,7 +748,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let (min, max) = irys_types::DataTransactionMetadata::size_hint(0);
         let length = max.unwrap_or(min.saturating_mul(4).max(256));
-        let bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..length).map(|_| rng.r#gen()).collect();
         let mut u = arbitrary::Unstructured::new(&bytes);
 
         let tx_header =

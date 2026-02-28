@@ -43,6 +43,20 @@ fi
 echo "ILM policy created successfully"
 echo ""
 
+# Create ingest pipeline to flatten TraceId for Grafana data links
+echo "Creating ingest pipeline 'add-flat-traceid'..."
+response=$(curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/_ingest/pipeline/add-flat-traceid" \
+  -H 'Content-Type: application/json' \
+  -d '{"description":"Copy TraceId to flat traceID for Grafana data links","processors":[{"set":{"field":"traceID","copy_from":"TraceId","if":"ctx.TraceId != null && ctx.TraceId.length() > 0"}}]}')
+http_code=$(echo "$response" | tail -n1)
+body=$(echo "$response" | sed '$d')
+if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "Failed to create ingest pipeline (HTTP $http_code): $body"
+    exit 1
+fi
+echo "Ingest pipeline created successfully"
+echo ""
+
 # Create index template that applies the ILM policy to Irys logs indices
 echo "Creating index template 'irys-logs-template'..."
 response=$(sed "s/__ES_REPLICAS__/$ES_REPLICAS/g" "$CONFIG_DIR/index-template.json" | \
@@ -58,10 +72,10 @@ fi
 echo "Index template created successfully"
 echo ""
 
-# Create the initial irys-logs index
-echo "Creating initial 'irys-logs' index..."
+# Create the initial irys-logs-000001 index with write alias
+echo "Creating initial 'irys-logs-000001' index with 'irys-logs' write alias..."
 response=$(sed "s/__ES_REPLICAS__/$ES_REPLICAS/g" "$CONFIG_DIR/index-settings.json" | \
-  curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs" \
+  curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs-000001" \
     -H 'Content-Type: application/json' \
     -d @-)
 http_code=$(echo "$response" | tail -n1)

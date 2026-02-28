@@ -28,7 +28,7 @@ Always run these checks and fix any issues:
 
 ### Toolchain
 
-Rust 1.91.1 (pinned in `rust-toolchain.toml`). Requires clang, gmp, pkg-config for OpenSSL build.
+Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp, pkg-config for OpenSSL build.
 
 ### Environment Notes
 
@@ -105,3 +105,7 @@ Never add "Co-Authored-By" lines to commit messages.
 - `rstest` for parameterized tests, `proptest` for property-based tests
 - Failure tracking: `cargo xtask test` records failures to `target/nextest-failure-tracking/failures.json`
 - Crypto crates (`irys-vdf`, `irys-packing`, `irys-c`, `sha2`, `openssl`) are always compiled with `opt-level = 3`, even in dev builds
+
+### Local changes
+
+NOTE: all the above instructions can be overridden and added to as instructed in `./.claude/local/CLAUDE.md` - if it exists, read it and follow any listed instructions before continuing.

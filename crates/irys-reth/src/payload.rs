@@ -28,8 +28,8 @@
 //! transaction now fits within the freed capacity it becomes the next candidate. This ensures the
 //! builder respects mempool ordering while still honoring the PD limit.
 
-use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use crate::IrysPayloadBuilderAttributes;
+use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use alloy_consensus::Transaction as _;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
@@ -43,10 +43,10 @@ use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadBuilderAttributes as _;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
-    error::InvalidPoolTransactionError,
-    identifier::{SenderId, TransactionId},
     BestTransactions, BestTransactionsAttributes, EthPooledTransaction, TransactionOrigin,
     TransactionPool, ValidPoolTransaction,
+    error::InvalidPoolTransactionError,
+    identifier::{SenderId, TransactionId},
 };
 use revm_primitives::FixedBytes;
 use std::{
@@ -58,8 +58,8 @@ use std::{
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 
 // Additional imports for irys_ethereum_payload
-use crate::evm::TREASURY_ACCOUNT;
 use crate::IrysBuiltPayload;
+use crate::evm::TREASURY_ACCOUNT;
 use alloy_evm::Evm as _;
 use alloy_primitives::U256;
 use alloy_rlp::Encodable as _;
@@ -130,6 +130,7 @@ where
                 gas_limit: builder_config.gas_limit(parent_header.gas_limit),
                 parent_beacon_block_root: attributes.parent_beacon_block_root(),
                 withdrawals: Some(attributes.withdrawals().clone()),
+                extra_data: builder_config.extra_data.clone(),
             },
         )
         .map_err(PayloadBuilderError::other)?;
@@ -177,7 +178,7 @@ where
         if cumulative_gas_used + pool_tx.gas_limit() > block_gas_limit {
             best_txs.mark_invalid(
                 &pool_tx,
-                InvalidPoolTransactionError::ExceedsGasLimit(pool_tx.gas_limit(), block_gas_limit),
+                &InvalidPoolTransactionError::ExceedsGasLimit(pool_tx.gas_limit(), block_gas_limit),
             );
             continue;
         }
@@ -196,7 +197,7 @@ where
         if is_osaka && estimated_block_size_with_tx > MAX_RLP_BLOCK_SIZE {
             best_txs.mark_invalid(
                 &pool_tx,
-                InvalidPoolTransactionError::OversizedData {
+                &InvalidPoolTransactionError::OversizedData {
                     size: estimated_block_size_with_tx,
                     limit: MAX_RLP_BLOCK_SIZE,
                 },
@@ -212,7 +213,7 @@ where
                 trace!(target: "payload_builder", tx=?tx.hash(), ?block_blob_count, "skipping blob transaction because it would exceed the max blob count per block");
                 best_txs.mark_invalid(
                     &pool_tx,
-                    InvalidPoolTransactionError::Eip4844(
+                    &InvalidPoolTransactionError::Eip4844(
                         Eip4844PoolTransactionError::TooManyEip4844Blobs {
                             have: block_blob_count + tx_blob_count,
                             permitted: max_blob_count,
@@ -235,7 +236,7 @@ where
                     trace!(target: "payload_builder", %error, ?tx, "skipping invalid transaction and its descendants");
                     best_txs.mark_invalid(
                         &pool_tx,
-                        InvalidPoolTransactionError::Consensus(
+                        &InvalidPoolTransactionError::Consensus(
                             InvalidTransactionError::TxTypeNotSupported,
                         ),
                     );
@@ -535,7 +536,7 @@ impl Iterator for CombinedTransactionIterator {
 }
 
 impl BestTransactions for CombinedTransactionIterator {
-    fn mark_invalid(&mut self, transaction: &Self::Item, kind: InvalidPoolTransactionError) {
+    fn mark_invalid(&mut self, transaction: &Self::Item, kind: &InvalidPoolTransactionError) {
         if self.shadow.contains_hash(transaction.hash()) {
             // Shadow txs are already removed from the queue, so we don't need to do anything
             // NOTE FOR READER: if you refactor the code here, ensure that we *never*
@@ -725,13 +726,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
-    use alloy_primitives::aliases::U200;
+    use crate::pd_tx::{PdHeaderV1, build_pd_access_list, prepend_pd_header_v1_to_calldata};
     use alloy_primitives::U256;
+    use alloy_primitives::aliases::U200;
     use irys_types::range_specifier::ChunkRangeSpecifier;
-    use rand09::{rngs::StdRng, SeedableRng as _};
+    use rand09::{SeedableRng as _, rngs::StdRng};
     use reth_primitives_traits::SignedTransaction;
-    use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction as _};
+    use reth_transaction_pool::{PoolTransaction as _, test_utils::TransactionGenerator};
     use std::collections::VecDeque;
 
     fn pd_pooled_transaction(
@@ -802,7 +803,8 @@ mod tests {
     }
 
     impl BestTransactions for StubBestTxIter {
-        fn mark_invalid(&mut self, _transaction: &Self::Item, _kind: InvalidPoolTransactionError) {}
+        fn mark_invalid(&mut self, _transaction: &Self::Item, _kind: &InvalidPoolTransactionError) {
+        }
 
         fn no_updates(&mut self) {}
 

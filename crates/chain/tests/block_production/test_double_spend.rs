@@ -127,7 +127,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     let final_block = node
         .get_block_by_height(config.consensus.get_mut().block_migration_depth as u64 + 2)
         .await?;
-    let commitment_ids = final_block.get_commitment_ledger_tx_ids();
+    let commitment_ids = final_block.commitment_tx_ids();
     assert_eq!(commitment_ids, vec![pledge_for_mempool.id()]);
 
     //

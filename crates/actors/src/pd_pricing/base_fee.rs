@@ -1,12 +1,11 @@
 use irys_domain::EmaSnapshot;
 use irys_types::{
+    Config, IrysBlockHeader, U256, UnixTimestamp,
     hardfork_config::Sprite,
     storage_pricing::{
-        mul_div,
+        Amount, PRECISION_SCALE, mul_div,
         phantoms::{CostPerChunk, Irys, Percentage, Usd},
-        Amount, PRECISION_SCALE,
     },
-    Config, IrysBlockHeader, UnixTimestamp, U256,
 };
 
 const MB_SIZE: u64 = 1024 * 1024;
@@ -179,8 +178,8 @@ pub fn extract_pd_base_fee_from_block(
     sprite_config: &Sprite,
     chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-    use eyre::{eyre, OptionExt as _};
-    use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
+    use eyre::{OptionExt as _, eyre};
+    use irys_reth::shadow_tx::{TransactionPacket, detect_and_decode};
 
     // Special case: Genesis block (height 0) should use the minimum base fee
     // The genesis block doesn't have the standard transaction structure

@@ -2,9 +2,11 @@ use alloy_core::primitives::{TxHash, U256};
 use alloy_genesis::GenesisAccount;
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, IrysAddress, NodeConfig};
+use irys_types::{
+    block_production::SolutionContext, irys::IrysSigner, IrysAddress, NodeConfig, SendTraced as _,
+};
 use k256::ecdsa::SigningKey;
-use reth::{providers::BlockReader as _, transaction_pool::TransactionPool as _};
+use reth::transaction_pool::TransactionPool as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -81,19 +83,17 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
         node.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SolutionFound {
+            .send_traced(BlockProducerCommand::SolutionFound {
                 solution: SolutionContext::default(),
                 response: response_tx,
             })
             .unwrap();
         let (sealed_block, _) = response_rx.await??.unwrap();
 
-        //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .block_by_hash(sealed_block.header().evm_block_hash)?
-            .unwrap();
+        // Wait until reth indexes the produced block by hash.
+        let reth_block = node
+            .wait_for_evm_block(sealed_block.header().evm_block_hash, 10)
+            .await?;
 
         // check irys DB for built block
         let db_irys_block = &node
