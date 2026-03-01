@@ -471,13 +471,48 @@ impl ConsensusConfig {
 
     /// Compute cost per chunk per epoch from annual cost per GB
     pub fn cost_per_chunk_per_epoch(&self) -> Result<Amount<(CostPerChunk, Usd)>> {
+        Self::compute_cost_per_chunk_per_epoch(
+            self.annual_cost_per_gb,
+            self.chunk_size,
+            self.epochs_per_year(),
+        )
+    }
+
+    /// Compute cost per chunk per epoch using the effective annual cost at a given timestamp.
+    /// Returns the Cascade override if active, otherwise uses the base value.
+    pub fn cost_per_chunk_per_epoch_at(
+        &self,
+        timestamp: UnixTimestamp,
+    ) -> Result<Amount<(CostPerChunk, Usd)>> {
+        let annual_cost = self.effective_annual_cost_per_gb(timestamp);
+        Self::compute_cost_per_chunk_per_epoch(annual_cost, self.chunk_size, self.epochs_per_year())
+    }
+
+    /// Returns the effective annual cost per GB at a given timestamp.
+    /// If Cascade is active at this timestamp, returns the Cascade override; otherwise the base value.
+    pub fn effective_annual_cost_per_gb(
+        &self,
+        timestamp: UnixTimestamp,
+    ) -> Amount<(CostPerGb, Usd)> {
+        if let Some(cascade) = self.hardforks.cascade.as_ref() {
+            if timestamp >= cascade.activation_timestamp {
+                return cascade.annual_cost_per_gb;
+            }
+        }
+        self.annual_cost_per_gb
+    }
+
+    fn compute_cost_per_chunk_per_epoch(
+        annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
+        chunk_size: u64,
+        epochs_per_year: u64,
+    ) -> Result<Amount<(CostPerChunk, Usd)>> {
         const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
-        let chunks_per_gb = BYTES_PER_GB / self.chunk_size;
-        let epochs_per_year = self.epochs_per_year();
+        let chunks_per_gb = BYTES_PER_GB / chunk_size;
 
         // Convert annual_cost_per_gb to cost_per_chunk_per_epoch
         // annual_cost_per_gb / chunks_per_gb / epochs_per_year
-        let annual_decimal = self.annual_cost_per_gb.token_to_decimal()?;
+        let annual_decimal = annual_cost_per_gb.token_to_decimal()?;
         let cost_per_chunk_per_year = annual_decimal / Decimal::from(chunks_per_gb);
         let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
 
@@ -641,6 +676,7 @@ impl ConsensusConfig {
                 next_name_tbd: None,
                 aurora: None,
                 borealis: None,
+                cascade: None,
             },
         }
     }
@@ -769,6 +805,9 @@ impl ConsensusConfig {
                 borealis: Some(Borealis {
                     activation_timestamp: UnixTimestamp::from_secs(0),
                 }),
+                // Cascade hardfork - not active by default in testing;
+                // tests that need it should override via with_consensus()
+                cascade: None,
             },
         }
     }
@@ -874,6 +913,7 @@ impl ConsensusConfig {
                 next_name_tbd: None,
                 // Borealis hardfork - disabled for testnet (controlled activation)
                 borealis: None,
+                cascade: None,
             },
         }
     }
@@ -933,6 +973,114 @@ mod tests {
             peer_config.keccak256_hash(),
             "Genesis and Peer nodes with same expected_genesis_hash must have matching consensus hashes"
         );
+    }
+
+    #[test]
+    fn test_effective_annual_cost_pre_cascade() {
+        let config = ConsensusConfig::testing();
+        // No Cascade configured — should return base value at any timestamp
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(0)),
+            config.annual_cost_per_gb
+        );
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(u64::MAX)),
+            config.annual_cost_per_gb
+        );
+    }
+
+    #[test]
+    fn test_effective_annual_cost_post_cascade() {
+        use crate::hardfork_config::Cascade;
+
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(1000),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+
+        // Before activation — base value
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(999)),
+            config.annual_cost_per_gb
+        );
+
+        // At and after activation — Cascade override
+        let cascade_cost = config
+            .hardforks
+            .cascade
+            .as_ref()
+            .unwrap()
+            .annual_cost_per_gb;
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(1000)),
+            cascade_cost
+        );
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(1001)),
+            cascade_cost
+        );
+        assert_ne!(
+            cascade_cost, config.annual_cost_per_gb,
+            "Cascade should differ from base"
+        );
+    }
+
+    #[test]
+    fn test_effective_annual_cost_custom_value() {
+        use crate::hardfork_config::Cascade;
+
+        let mut config = ConsensusConfig::testing();
+        let custom_cost = Amount::token(dec!(0.05)).unwrap();
+        config.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(500),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: custom_cost,
+        });
+
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(499)),
+            config.annual_cost_per_gb
+        );
+        assert_eq!(
+            config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(500)),
+            custom_cost
+        );
+    }
+
+    #[test]
+    fn test_cost_per_chunk_per_epoch_at_differs_with_cascade() {
+        use crate::hardfork_config::Cascade;
+
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(1000),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+
+        let pre = config
+            .cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(999))
+            .unwrap();
+        let post = config
+            .cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(1000))
+            .unwrap();
+
+        // Cascade default ($0.028) is 2.8x the base ($0.01), so post > pre
+        assert!(
+            post.amount > pre.amount,
+            "post-Cascade cost ({}) should exceed pre-Cascade cost ({})",
+            post.amount,
+            pre.amount
+        );
+
+        // Verify pre-Cascade matches the non-height-aware method
+        let base = config.cost_per_chunk_per_epoch().unwrap();
+        assert_eq!(pre, base);
     }
 
     #[test]

@@ -24,7 +24,10 @@ use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_domain::{
+    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, HardforkConfigExt as _,
+    get_atomic_file,
+};
 use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
@@ -865,6 +868,8 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
+        let mut one_year_tx = Vec::new();
+        let mut thirty_day_tx = Vec::new();
         let max_data_txs: usize = self
             .config
             .node_config
@@ -888,13 +893,27 @@ impl Inner {
         for tx in submit_ledger_txs {
             // Validate fees based on ledger type
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
-                debug!(
+                warn!(
                     tx.id = ?tx.id,
                     tx.ledger_id = tx.ledger_id,
-                    "Skipping tx: invalid ledger ID"
+                    "Dropping tx: invalid ledger ID"
                 );
+                self.mempool_state
+                    .remove_valid_submit_ledger_tx(&tx.id)
+                    .await;
                 continue;
             };
+            if !ledger.is_user_targetable() {
+                warn!(
+                    tx.id = ?tx.id,
+                    tx.ledger = ?ledger,
+                    "Dropping tx: ledger is not user-targetable"
+                );
+                self.mempool_state
+                    .remove_valid_submit_ledger_tx(&tx.id)
+                    .await;
+                continue;
+            }
             match ledger {
                 irys_types::DataLedger::Publish => {
                     // For Publish ledger, validate both term and perm fees
@@ -991,22 +1010,92 @@ impl Inner {
                         continue;
                     }
                 }
-                irys_types::DataLedger::Submit => {
-                    // todo: add to list of invalid txs because we don't support Submit txs
-                    debug!(
-                        tx.id = ?tx.id,
-                        tx.signer = ?tx.signer(),
-                        "Not promoting data tx - Submit ledger not eligible for promotion"
-                    );
-                    continue;
+                DataLedger::Submit => {
+                    unreachable!("submit is not user-targetable");
                 }
                 DataLedger::OneYear | DataLedger::ThirtyDay => {
-                    warn!(
-                        tx.id = ?tx.id,
-                        tx.ledger = ?ledger,
-                        "Skipping unsupported term ledger"
-                    );
-                    continue;
+                    // Term-only ledgers: validate cascade is active, term fee, and fee structure
+                    let consensus = self.config.node_config.consensus_config();
+                    if !consensus
+                        .hardforks
+                        .is_cascade_active_for_epoch(&epoch_snapshot)
+                    {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.ledger = ?ledger,
+                            "Skipping term ledger tx - Cascade hardfork not active"
+                        );
+                        continue;
+                    }
+
+                    // Term-only ledgers must not carry a perm_fee
+                    if tx
+                        .perm_fee
+                        .is_some_and(|f| f > irys_types::BoundedFee::zero())
+                    {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.ledger = ?ledger,
+                            "Skipping term ledger tx: has perm_fee"
+                        );
+                        continue;
+                    }
+
+                    // Validate term fee structure
+                    if irys_types::transaction::fee_distribution::TermFeeCharges::new(
+                        tx.term_fee,
+                        &consensus,
+                    )
+                    .is_err()
+                    {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.term_fee = ?tx.term_fee,
+                            "Skipping term ledger tx: invalid term fee structure"
+                        );
+                        continue;
+                    }
+
+                    // Validate term fee amount against EMA pricing
+                    let cascade = consensus
+                        .hardforks
+                        .cascade
+                        .as_ref()
+                        .expect("cascade config must exist when cascade is active");
+                    let epoch_length = match ledger {
+                        DataLedger::OneYear => cascade.one_year_epoch_length,
+                        DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+                        _ => unreachable!(),
+                    };
+                    let epochs_for_storage =
+                        irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                            next_block_height,
+                            consensus.epoch.num_blocks_in_epoch,
+                            epoch_length,
+                        );
+                    let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
+                        tx.data_size,
+                        epochs_for_storage,
+                        &consensus,
+                        1, // no ingress proofs for term-only ledgers
+                        ema_snapshot.ema_for_public_pricing(),
+                        current_timestamp,
+                    ) else {
+                        debug!(
+                            tx.id = ?tx.id,
+                            "Skipping term ledger tx: failed to calculate expected term fee"
+                        );
+                        continue;
+                    };
+                    if tx.term_fee < expected_term_fee {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.actual_term_fee = ?tx.term_fee,
+                            tx.expected_term_fee = ?expected_term_fee,
+                            "Skipping term ledger tx: insufficient term_fee"
+                        );
+                        continue;
+                    }
                 }
             }
 
@@ -1037,16 +1126,21 @@ impl Inner {
                 &mut unfunded_address,
                 &mut fees_spent_per_address,
             ) {
+                let total_selected = submit_tx.len() + one_year_tx.len() + thirty_day_tx.len();
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
-                    tx.selected_count = submit_tx.len() + 1,
+                    tx.selected_count = total_selected + 1,
                     tx.max_data_txs = max_data_txs,
                     "Data transaction passed funding check"
                 );
-                submit_tx.push(tx);
-                if submit_tx.len() >= max_data_txs {
+                match ledger {
+                    DataLedger::Publish | DataLedger::Submit => submit_tx.push(tx),
+                    DataLedger::OneYear => one_year_tx.push(tx),
+                    DataLedger::ThirtyDay => thirty_day_tx.push(tx),
+                }
+                if submit_tx.len() + one_year_tx.len() + thirty_day_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
@@ -1113,6 +1207,8 @@ impl Inner {
         Ok(MempoolTxs {
             commitment_tx,
             submit_tx,
+            one_year_tx,
+            thirty_day_tx,
             publish_tx: publish_txs_and_proofs,
         })
     }
@@ -1801,6 +1897,7 @@ impl Inner {
             &self.config.consensus,
             number_of_ingress_proofs_total,
             ema.ema_for_public_pricing(),
+            timestamp,
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
@@ -2950,6 +3047,8 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
+    pub one_year_tx: Vec<DataTransactionHeader>,
+    pub thirty_day_tx: Vec<DataTransactionHeader>,
     pub publish_tx: PublishLedgerWithTxs,
 }
 

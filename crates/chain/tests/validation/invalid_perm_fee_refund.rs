@@ -41,6 +41,8 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -168,6 +170,8 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,

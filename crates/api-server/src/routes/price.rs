@@ -10,6 +10,8 @@ use irys_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use irys_domain::HardforkConfigExt as _;
+
 use crate::{error::ApiError, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -113,6 +115,7 @@ pub async fn get_price(
                 &state.config.consensus,
                 number_of_ingress_proofs_total,
                 pricing_ema,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| {
                 (
@@ -136,6 +139,7 @@ pub async fn get_price(
                 number_of_ingress_proofs_total,
                 pricing_ema,
                 term_fee,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
 
@@ -146,18 +150,103 @@ pub async fn get_price(
                 bytes: bytes_to_store,
             }))
         }
-        // TODO: support other term ledgers here
-        DataLedger::Submit => Err(("Term ledger not supported", StatusCode::BAD_REQUEST).into()),
-        DataLedger::OneYear => Err((
-            "OneYear term ledger pricing not implemented",
+        DataLedger::Submit => Err((
+            "Submit ledger is not user-targetable",
             StatusCode::BAD_REQUEST,
         )
             .into()),
-        DataLedger::ThirtyDay => Err((
-            "ThirtyDay term ledger pricing not implemented",
-            StatusCode::BAD_REQUEST,
-        )
-            .into()),
+        DataLedger::OneYear | DataLedger::ThirtyDay => {
+            // Term ledger pricing — term-fee only, no perm_fee
+            let cascade = state.config.consensus.hardforks.cascade.as_ref();
+
+            // Single lock scope: cascade gating + fee/pricing inputs from same snapshot
+            let tree = state.block_tree.read();
+            let epoch_snapshot = tree.canonical_epoch_snapshot();
+            let cascade_active = state
+                .config
+                .consensus
+                .hardforks
+                .is_cascade_active_for_epoch(&epoch_snapshot);
+            if !cascade_active {
+                return Err((
+                    format!(
+                        "{:?} ledger not available: Cascade hardfork not active",
+                        data_ledger
+                    ),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into());
+            }
+
+            let cascade = cascade.ok_or((
+                "Cascade hardfork not configured",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))?;
+            let epoch_length = match data_ledger {
+                DataLedger::OneYear => cascade.one_year_epoch_length,
+                DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+                _ => unreachable!(),
+            };
+
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block_entry = canonical
+                .last()
+                .ok_or(("Empty canonical chain", StatusCode::BAD_REQUEST))?;
+            let ema = tree
+                .get_ema_snapshot(&last_block_entry.block_hash())
+                .ok_or(("EMA snapshot not available", StatusCode::BAD_REQUEST))?;
+            let latest_block_timestamp_secs = last_block_entry.header().timestamp_secs();
+            let tip_height = last_block_entry.height();
+            drop(tree);
+
+            let next_block_height = tip_height + 1;
+            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                next_block_height,
+                state.config.consensus.epoch.num_blocks_in_epoch,
+                epoch_length,
+            );
+
+            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
+            let position_in_interval = next_block_height % price_adjustment_interval;
+            let last_quarter_start =
+                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
+            let in_last_quarter = position_in_interval >= last_quarter_start;
+
+            let pricing_ema = if in_last_quarter {
+                if ema.ema_price_1_interval_ago.amount < ema.ema_price_2_intervals_ago.amount {
+                    ema.ema_price_1_interval_ago
+                } else {
+                    ema.ema_price_2_intervals_ago
+                }
+            } else {
+                ema.ema_for_public_pricing()
+            };
+
+            // OneYear/ThirtyDay have no ingress proofs — replica count is 1.
+            let replica_count = 1;
+
+            let term_fee = calculate_term_fee(
+                bytes_to_store,
+                epochs_for_storage,
+                &state.config.consensus,
+                replica_count,
+                pricing_ema,
+                latest_block_timestamp_secs,
+            )
+            .map_err(|e| {
+                (
+                    format!("Failed to calculate term fee: {e:?}"),
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
+
+            Ok(HttpResponse::Ok().json(PriceInfo {
+                perm_fee: U256::from(0),
+                term_fee,
+                ledger,
+                bytes: bytes_to_store,
+            }))
+        }
     }
 }
 

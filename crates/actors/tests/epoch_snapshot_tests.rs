@@ -59,7 +59,7 @@ async fn genesis_test() {
     // This allows us to inspect the actor's state after processing
     {
         // Verify the correct number of ledgers have been added
-        let expected_ledger_count = DataLedger::ALL.len();
+        let expected_ledger_count = epoch_snapshot.ledgers.active_ledgers().len();
         assert_eq!(epoch_snapshot.ledgers.len(), expected_ledger_count);
 
         // Verify each ledger has one slot and the correct number of partitions
@@ -134,7 +134,11 @@ async fn genesis_test() {
         let pa = &epoch_snapshot.partition_assignments;
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
-            + EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config.consensus);
+            + EpochSnapshot::get_num_capacity_partitions(
+                data_partition_count,
+                &config.consensus,
+                epoch_snapshot.ledgers.active_ledgers().len() as u64,
+            );
         assert_eq!(
             epoch_snapshot.all_active_partitions.len(),
             expected_partitions as usize
@@ -367,7 +371,7 @@ async fn capacity_projection_tests() {
     for i in (0..max_data_parts).step_by(10) {
         let data_partition_count = i;
         let capacity_count =
-            EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config);
+            EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config, 4);
         let total = data_partition_count + capacity_count;
         println!(
             "data:{}, capacity:{}, total:{}",

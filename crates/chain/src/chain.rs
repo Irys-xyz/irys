@@ -612,6 +612,7 @@ impl IrysNode {
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
             number_of_ingress_proofs_total,
+            self.config.consensus.hardforks.cascade.as_ref(),
         );
 
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)

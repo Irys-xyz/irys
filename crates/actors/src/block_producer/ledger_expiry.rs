@@ -626,6 +626,23 @@ pub struct LedgerExpiryBalanceDelta {
     pub user_perm_fee_refunds: Vec<(IrysTransactionId, U256, IrysAddress)>,
 }
 
+impl LedgerExpiryBalanceDelta {
+    /// Merge another delta into this one, combining reward increments and refund lists.
+    pub fn merge(&mut self, other: Self) {
+        for (addr, (fee, hash)) in other.reward_balance_increment {
+            self.reward_balance_increment
+                .entry(addr)
+                .and_modify(|(current_fee, current_hash)| {
+                    *current_fee = current_fee.saturating_add(fee);
+                    current_hash.xor_assign(hash.0);
+                })
+                .or_insert((fee, hash));
+        }
+        self.user_perm_fee_refunds
+            .extend(other.user_perm_fee_refunds);
+    }
+}
+
 /// Calculates and aggregates fees for each miner
 ///
 /// # Parameters
@@ -910,5 +927,61 @@ mod tests {
             result.reward_balance_increment.get(&miner3).unwrap().0,
             U256::from(950)
         );
+    }
+
+    #[test]
+    fn test_ledger_expiry_balance_delta_merge_combines_rewards() {
+        use crate::shadow_tx_generator::RollingHash;
+
+        let addr1 = IrysAddress::random();
+        let addr2 = IrysAddress::random();
+
+        let mut delta1 = LedgerExpiryBalanceDelta::default();
+        delta1
+            .reward_balance_increment
+            .insert(addr1, (U256::from(100), RollingHash(U256::from(1))));
+
+        let mut delta2 = LedgerExpiryBalanceDelta::default();
+        delta2
+            .reward_balance_increment
+            .insert(addr1, (U256::from(50), RollingHash(U256::from(2))));
+        delta2
+            .reward_balance_increment
+            .insert(addr2, (U256::from(200), RollingHash(U256::from(3))));
+
+        delta1.merge(delta2);
+
+        // addr1: fees are summed
+        let (fee, _) = delta1.reward_balance_increment.get(&addr1).unwrap();
+        assert_eq!(*fee, U256::from(150));
+
+        // addr2: added from delta2
+        let (fee, _) = delta1.reward_balance_increment.get(&addr2).unwrap();
+        assert_eq!(*fee, U256::from(200));
+    }
+
+    #[test]
+    fn test_ledger_expiry_balance_delta_merge_extends_refunds() {
+        let mut delta1 = LedgerExpiryBalanceDelta::default();
+        delta1
+            .user_perm_fee_refunds
+            .push((H256::random(), U256::from(1), IrysAddress::random()));
+
+        let mut delta2 = LedgerExpiryBalanceDelta::default();
+        delta2
+            .user_perm_fee_refunds
+            .push((H256::random(), U256::from(2), IrysAddress::random()));
+
+        delta1.merge(delta2);
+        assert_eq!(delta1.user_perm_fee_refunds.len(), 2);
+    }
+
+    #[test]
+    fn test_ledger_expiry_balance_delta_merge_empty() {
+        let mut delta1 = LedgerExpiryBalanceDelta::default();
+        let delta2 = LedgerExpiryBalanceDelta::default();
+        delta1.merge(delta2);
+        assert!(delta1.reward_balance_increment.is_empty());
+        assert!(delta1.user_perm_fee_refunds.is_empty());
     }
 }

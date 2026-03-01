@@ -63,11 +63,17 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());
 
+        // Temporarily override any global panic hook that aborts the process.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
         let result = std::panic::catch_unwind(|| {
             let _guard = ActiveWorkerGuard::new(counter.clone(), notify.clone());
             assert_eq!(counter.load(Ordering::Relaxed), 1);
             panic!("Simulated panic");
         });
+
+        std::panic::set_hook(prev_hook);
 
         assert!(result.is_err());
         assert_eq!(counter.load(Ordering::Relaxed), 0);

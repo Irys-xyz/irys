@@ -861,7 +861,7 @@ pub enum DataLedger {
     /// The permanent publish ledger
     #[default]
     Publish = 0,
-    /// An expiring term ledger used for submitting to the publish ledger
+    /// Internal staging ledger for Publish; never user-targetable
     Submit = 1,
     // Add more term ledgers as they exist
     OneYear = 10,
@@ -904,13 +904,7 @@ impl Encode for DataLedger {
 
 impl DataLedger {
     /// An array of all the Ledger numbers in order
-    pub const ALL: [Self; 2] = [
-        Self::Publish,
-        Self::Submit,
-        // Only add these when ready to populate them with partitions
-        //Self::OneYear,
-        //Self::ThirtyDay
-    ];
+    pub const ALL: [Self; 4] = [Self::Publish, Self::Submit, Self::OneYear, Self::ThirtyDay];
 
     /// Make it possible to iterate over all the data ledgers in order
     pub fn iter() -> impl Iterator<Item = Self> {
@@ -919,6 +913,21 @@ impl DataLedger {
     /// get the associated numeric ID
     pub const fn get_id(&self) -> u32 {
         *self as u32
+    }
+
+    /// Ledgers that users are allowed to target directly in tx headers.
+    pub fn is_user_targetable(&self) -> bool {
+        matches!(self, Self::Publish | Self::OneYear | Self::ThirtyDay)
+    }
+
+    /// Term ledgers share expiry/lifecycle mechanics.
+    pub fn is_term_ledger(&self) -> bool {
+        matches!(self, Self::Submit | Self::OneYear | Self::ThirtyDay)
+    }
+
+    /// Submit is the internal staging ledger for Publish.
+    pub fn is_staging_submit(&self) -> bool {
+        matches!(self, Self::Submit)
     }
 
     fn from_u32(value: u32) -> Option<Self> {
@@ -1041,13 +1050,17 @@ impl Index<DataLedger> for Vec<LedgerIndexItem> {
     type Output = LedgerIndexItem;
 
     fn index(&self, ledger: DataLedger) -> &Self::Output {
-        &self[ledger as usize]
+        self.iter()
+            .find(|item| item.ledger == ledger)
+            .expect("No ledger index item found for given ledger type")
     }
 }
 
 impl IndexMut<DataLedger> for Vec<LedgerIndexItem> {
     fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
-        &mut self[ledger as usize]
+        self.iter_mut()
+            .find(|item| item.ledger == ledger)
+            .expect("No ledger index item found for given ledger type")
     }
 }
 
@@ -1367,6 +1380,10 @@ impl SealedBlock {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::useless_vec,
+    reason = "Tests need Vec to exercise Index<DataLedger> for Vec<T> impls"
+)]
 mod tests {
     use crate::ingress::{IngressProof, IngressProofV1};
     use crate::{validate_path, Config, NodeConfig};
@@ -1798,5 +1815,202 @@ mod tests {
             err_msg.contains(&format!("{extra_id:?}")),
             "Error should mention the extra commitment tx id, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn test_vec_data_transaction_ledger_index_non_contiguous_discriminants() {
+        let ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                total_chunks: 100,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Submit.into(),
+                total_chunks: 200,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::OneYear.into(),
+                total_chunks: 300,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::ThirtyDay.into(),
+                total_chunks: 400,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(ledgers[DataLedger::Publish].total_chunks, 100);
+        assert_eq!(ledgers[DataLedger::Submit].total_chunks, 200);
+        assert_eq!(ledgers[DataLedger::OneYear].total_chunks, 300);
+        assert_eq!(ledgers[DataLedger::ThirtyDay].total_chunks, 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "No transaction ledger found")]
+    fn test_vec_data_transaction_ledger_index_missing_ledger_panics() {
+        let ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Submit.into(),
+                ..Default::default()
+            },
+        ];
+        let _ = &ledgers[DataLedger::OneYear];
+    }
+
+    #[test]
+    fn test_vec_data_transaction_ledger_index_mut_non_contiguous() {
+        let mut ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                total_chunks: 100,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Submit.into(),
+                total_chunks: 200,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::OneYear.into(),
+                total_chunks: 300,
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::ThirtyDay.into(),
+                total_chunks: 400,
+                ..Default::default()
+            },
+        ];
+        ledgers[DataLedger::OneYear].total_chunks = 999;
+        assert_eq!(ledgers[DataLedger::OneYear].total_chunks, 999);
+    }
+
+    #[test]
+    fn test_vec_ledger_index_item_index_non_contiguous_discriminants() {
+        let items = vec![
+            LedgerIndexItem {
+                ledger: DataLedger::Publish,
+                total_chunks: 10,
+                tx_root: H256::random(),
+            },
+            LedgerIndexItem {
+                ledger: DataLedger::Submit,
+                total_chunks: 20,
+                tx_root: H256::random(),
+            },
+            LedgerIndexItem {
+                ledger: DataLedger::OneYear,
+                total_chunks: 30,
+                tx_root: H256::random(),
+            },
+            LedgerIndexItem {
+                ledger: DataLedger::ThirtyDay,
+                total_chunks: 40,
+                tx_root: H256::random(),
+            },
+        ];
+        assert_eq!(items[DataLedger::Publish].total_chunks, 10);
+        assert_eq!(items[DataLedger::Submit].total_chunks, 20);
+        assert_eq!(items[DataLedger::OneYear].total_chunks, 30);
+        assert_eq!(items[DataLedger::ThirtyDay].total_chunks, 40);
+    }
+
+    #[test]
+    #[should_panic(expected = "No ledger index item found")]
+    fn test_vec_ledger_index_item_missing_ledger_panics() {
+        let items = vec![
+            LedgerIndexItem {
+                ledger: DataLedger::Publish,
+                total_chunks: 10,
+                tx_root: H256::zero(),
+            },
+            LedgerIndexItem {
+                ledger: DataLedger::Submit,
+                total_chunks: 20,
+                tx_root: H256::zero(),
+            },
+        ];
+        let _ = &items[DataLedger::OneYear];
+    }
+
+    #[test]
+    fn test_block_index_item_roundtrip_with_four_ledgers() {
+        let item = BlockIndexItem {
+            block_hash: H256::random(),
+            num_ledgers: 4,
+            ledgers: vec![
+                LedgerIndexItem {
+                    total_chunks: 100,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::Publish,
+                },
+                LedgerIndexItem {
+                    total_chunks: 200,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::Submit,
+                },
+                LedgerIndexItem {
+                    total_chunks: 300,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::OneYear,
+                },
+                LedgerIndexItem {
+                    total_chunks: 400,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::ThirtyDay,
+                },
+            ],
+        };
+        let bytes = item.to_bytes();
+        let restored = BlockIndexItem::from_bytes(&bytes);
+        assert_eq!(restored.num_ledgers, 4);
+        assert_eq!(restored.block_hash, item.block_hash);
+        assert_eq!(restored.ledgers.len(), 4);
+        assert_eq!(restored.ledgers[0].total_chunks, 100);
+        assert_eq!(restored.ledgers[0].tx_root, item.ledgers[0].tx_root);
+        assert_eq!(restored.ledgers[1].total_chunks, 200);
+        assert_eq!(restored.ledgers[2].total_chunks, 300);
+        assert_eq!(restored.ledgers[3].total_chunks, 400);
+        assert_eq!(restored.ledgers[3].tx_root, item.ledgers[3].tx_root);
+    }
+
+    #[test]
+    fn test_block_index_item_roundtrip_with_two_ledgers() {
+        let item = BlockIndexItem {
+            block_hash: H256::random(),
+            num_ledgers: 2,
+            ledgers: vec![
+                LedgerIndexItem {
+                    total_chunks: 100,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::Publish,
+                },
+                LedgerIndexItem {
+                    total_chunks: 200,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::Submit,
+                },
+            ],
+        };
+        let bytes = item.to_bytes();
+        let restored = BlockIndexItem::from_bytes(&bytes);
+        assert_eq!(restored.num_ledgers, 2);
+        assert_eq!(restored.ledgers.len(), 2);
+        assert_eq!(restored.ledgers[0].total_chunks, 100);
+        assert_eq!(restored.ledgers[1].total_chunks, 200);
+    }
+
+    #[test]
+    fn test_mock_header_has_exactly_two_ledgers() {
+        let header = IrysBlockHeader::new_mock_header();
+        assert_eq!(header.data_ledgers.len(), 2);
+        assert_eq!(header.data_ledgers[0].ledger_id, DataLedger::Publish as u32);
+        assert_eq!(header.data_ledgers[1].ledger_id, DataLedger::Submit as u32);
     }
 }
