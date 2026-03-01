@@ -838,9 +838,9 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
     let has_memory = aggregated.iter().any(|t| t.avg_peak_rss_bytes.is_some());
 
     match sort {
-        "p90" => aggregated.sort_by(|a, b| b.avg_p90_cpu.partial_cmp(&a.avg_p90_cpu).unwrap()),
-        "peak" => aggregated.sort_by(|a, b| b.avg_peak_cpu.partial_cmp(&a.avg_peak_cpu).unwrap()),
-        "avg" => aggregated.sort_by(|a, b| b.avg_avg_cpu.partial_cmp(&a.avg_avg_cpu).unwrap()),
+        "p90" => aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu)),
+        "peak" => aggregated.sort_by(|a, b| b.avg_peak_cpu.total_cmp(&a.avg_peak_cpu)),
+        "avg" => aggregated.sort_by(|a, b| b.avg_avg_cpu.total_cmp(&a.avg_avg_cpu)),
         "duration" => aggregated.sort_by(|a, b| b.avg_duration_ms.cmp(&a.avg_duration_ms)),
         "nearpeak" => {
             aggregated.sort_by(|a, b| b.avg_time_near_peak_ms.cmp(&a.avg_time_near_peak_ms))
@@ -858,7 +858,7 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
         }),
         _ => {
             eprintln!("Unknown sort option: {}. Using 'p90'.", sort);
-            aggregated.sort_by(|a, b| b.avg_p90_cpu.partial_cmp(&a.avg_p90_cpu).unwrap());
+            aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu));
         }
     }
 

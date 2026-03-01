@@ -292,7 +292,7 @@ fn calculate_cpu_stats(samples: &[CpuSample], sample_interval: Duration) -> Calc
     }
 
     let mut cpu_values: Vec<f64> = samples.iter().map(|s| s.cpu_threads).collect();
-    cpu_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    cpu_values.sort_by(|a, b| a.total_cmp(b));
 
     let n = cpu_values.len();
     let peak_cpu = cpu_values[n - 1];
