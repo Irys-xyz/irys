@@ -10,6 +10,8 @@ use irys_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use irys_domain::HardforkConfigExt as _;
+
 use crate::{error::ApiError, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -157,21 +159,17 @@ pub async fn get_price(
             // Term ledger pricing — term-fee only, no perm_fee
             let cascade = state.config.consensus.hardforks.cascade.as_ref();
 
-            // OneYear/ThirtyDay require Cascade to be active
+            // OneYear/ThirtyDay require Cascade to be active (epoch-aligned activation)
             {
                 let tree = state.block_tree.read();
-                let (canonical, _) = tree.get_canonical_chain();
-                let tip_timestamp = canonical
-                    .last()
-                    .map(|entry| entry.header().timestamp_secs())
-                    .unwrap_or(irys_types::UnixTimestamp::from_secs(0));
-                drop(tree);
-                if !state
+                let epoch_snapshot = tree.canonical_epoch_snapshot();
+                let cascade_active = state
                     .config
                     .consensus
                     .hardforks
-                    .is_cascade_active_at(tip_timestamp)
-                {
+                    .is_cascade_active_for_epoch(&epoch_snapshot);
+                drop(tree);
+                if !cascade_active {
                     return Err((
                         format!(
                             "{:?} ledger not available: Cascade hardfork not active",

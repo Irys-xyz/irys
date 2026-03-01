@@ -24,7 +24,10 @@ use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_domain::{
+    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, HardforkConfigExt as _,
+    get_atomic_file,
+};
 use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
@@ -1013,7 +1016,10 @@ impl Inner {
                 DataLedger::OneYear | DataLedger::ThirtyDay => {
                     // Term-only ledgers: validate cascade is active, term fee, and fee structure
                     let consensus = self.config.node_config.consensus_config();
-                    if !consensus.hardforks.is_cascade_active_at(current_timestamp) {
+                    if !consensus
+                        .hardforks
+                        .is_cascade_active_for_epoch(&epoch_snapshot)
+                    {
                         debug!(
                             tx.id = ?tx.id,
                             tx.ledger = ?ledger,

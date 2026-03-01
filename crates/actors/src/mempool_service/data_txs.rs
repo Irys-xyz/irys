@@ -6,7 +6,7 @@ use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
-use irys_domain::get_optimistic_chain;
+use irys_domain::{HardforkConfigExt as _, get_optimistic_chain};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
@@ -38,20 +38,15 @@ impl Inner {
             return Err(TxIngressError::InvalidLedger(tx.ledger_id));
         }
         if matches!(ledger, DataLedger::OneYear | DataLedger::ThirtyDay) {
-            // Valid only when Cascade hardfork is active
+            // Valid only when Cascade hardfork is active (epoch-aligned activation)
             let cascade_active = {
                 let tree = self.block_tree_read_guard.read();
-                let (canonical, _) = tree.get_canonical_chain();
-                canonical
-                    .last()
-                    .map(|entry| {
-                        self.config
-                            .node_config
-                            .consensus_config()
-                            .hardforks
-                            .is_cascade_active_at(entry.header().timestamp_secs())
-                    })
-                    .unwrap_or(false)
+                let epoch_snapshot = tree.canonical_epoch_snapshot();
+                self.config
+                    .node_config
+                    .consensus_config()
+                    .hardforks
+                    .is_cascade_active_for_epoch(&epoch_snapshot)
             };
             if !cascade_active {
                 return Err(TxIngressError::InvalidLedger(tx.ledger_id));

@@ -181,14 +181,6 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
-    /// Check if the Cascade hardfork is active at a given timestamp (in seconds).
-    /// For non-epoch-aligned checks (pricing, fee calculation).
-    pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
-        self.cascade
-            .as_ref()
-            .is_some_and(|f| timestamp >= f.activation_timestamp)
-    }
-
     /// Retain only commitment transactions that meet the minimum version requirement.
     /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
     pub fn retain_valid_commitment_versions<T: VersionDiscriminant>(
@@ -569,46 +561,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
             }
-        }
-
-        #[test]
-        fn test_is_cascade_active_at_boundary() {
-            let config = IrysHardforkConfig {
-                cascade: Some(Cascade {
-                    activation_timestamp: UnixTimestamp::from_secs(1000),
-                    one_year_epoch_length: 365,
-                    thirty_day_epoch_length: 30,
-                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-                }),
-                ..base_config()
-            };
-            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
-            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(999)));
-            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1000)));
-            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1001)));
-            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(u64::MAX)));
-        }
-
-        #[test]
-        fn test_is_cascade_active_at_disabled() {
-            let config = base_config();
-            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
-            assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(u64::MAX)));
-        }
-
-        #[test]
-        fn test_is_cascade_active_at_from_genesis() {
-            let config = IrysHardforkConfig {
-                cascade: Some(Cascade {
-                    activation_timestamp: UnixTimestamp::from_secs(0),
-                    one_year_epoch_length: 365,
-                    thirty_day_epoch_length: 30,
-                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-                }),
-                ..base_config()
-            };
-            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(0)));
-            assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1)));
         }
 
         #[test]

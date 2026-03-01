@@ -28,7 +28,7 @@ use crate::block_validation::{
 use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
-use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
+use irys_domain::{BlockState, BlockTreeReadGuard, ChainState, HardforkConfigExt as _};
 use irys_types::{BlockHash, SealedBlock, SystemLedger};
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -393,6 +393,12 @@ impl BlockValidationTask {
             }
         };
 
+        // Determine cascade activation from the parent epoch snapshot
+        let cascade_active = config
+            .consensus
+            .hardforks
+            .is_cascade_active_for_epoch(&parent_epoch_snapshot);
+
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
@@ -499,6 +505,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
                 txs,
+                cascade_active,
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",

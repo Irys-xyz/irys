@@ -197,9 +197,7 @@ pub enum PreValidationError {
         ledger: DataLedger,
         block_hash: BlockHash,
     },
-    #[error(
-        "Transaction {tx_id} appears in multiple ledgers within the same block"
-    )]
+    #[error("Transaction {tx_id} appears in multiple ledgers within the same block")]
     TxInMultipleLedgers { tx_id: H256 },
     #[error(
         "Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs"
@@ -1632,7 +1630,7 @@ async fn generate_expected_shadow_transactions(
     let cascade_active = config
         .consensus
         .hardforks
-        .is_cascade_active_at(block.timestamp_secs());
+        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)?;
     let publish_ledger_with_txs = PublishLedgerWithTxs {
         txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
@@ -1662,7 +1660,7 @@ async fn generate_expected_shadow_transactions(
         let cascade_active = config
             .consensus
             .hardforks
-            .is_cascade_active_at(block.timestamp_secs());
+            .is_cascade_active_for_epoch(&parent_epoch_snapshot);
         if cascade_active {
             for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
                 let delta = ledger_expiry::calculate_expired_ledger_fees(
@@ -2263,6 +2261,7 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
     transactions: &BlockTransactions,
+    cascade_active: bool,
 ) -> Result<(), PreValidationError> {
     // Extract transaction slices from BlockTransactions
     let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
@@ -2303,10 +2302,6 @@ pub async fn data_txs_are_valid(
         })?;
 
     // Extract publish ledger for ingress proofs validation
-    let cascade_active = config
-        .consensus
-        .hardforks
-        .is_cascade_active_at(block.timestamp_secs());
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
 
