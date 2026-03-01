@@ -186,13 +186,13 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
                 let passed = exit_code == Some(0);
 
                 let cpu_stats = if monitor_cpu {
-                    Some(calculate_cpu_stats(&cpu_samples, sample_interval))
+                    Some(calculate_cpu_stats(&cpu_samples))
                 } else {
                     None
                 };
 
                 let mem_stats = if monitor_memory {
-                    Some(calculate_memory_stats(&memory_samples, sample_interval))
+                    Some(calculate_memory_stats(&memory_samples))
                 } else {
                     None
                 };
@@ -275,7 +275,25 @@ struct CalculatedCpuStats {
     time_above_4t_ms: u64,
 }
 
-fn calculate_cpu_stats(samples: &[CpuSample], sample_interval: Duration) -> CalculatedCpuStats {
+/// Compute the actual elapsed duration each sample represents by taking deltas
+/// between consecutive `elapsed_ms` timestamps. This is more accurate than
+/// assuming each sample spans exactly `sample_interval` because scheduler jitter
+/// can cause variable spacing between samples.
+fn sample_deltas(elapsed_ms_values: &[u64]) -> Vec<u64> {
+    elapsed_ms_values
+        .iter()
+        .enumerate()
+        .map(|(i, &ms)| {
+            if i == 0 {
+                ms
+            } else {
+                ms.saturating_sub(elapsed_ms_values[i - 1])
+            }
+        })
+        .collect()
+}
+
+fn calculate_cpu_stats(samples: &[CpuSample]) -> CalculatedCpuStats {
     if samples.is_empty() {
         return CalculatedCpuStats {
             peak_cpu: 0.0,
@@ -298,29 +316,28 @@ fn calculate_cpu_stats(samples: &[CpuSample], sample_interval: Duration) -> Calc
     let peak_cpu = cpu_values[n - 1];
     let avg_cpu = cpu_values.iter().sum::<f64>() / n as f64;
 
-    let p50_cpu = cpu_values[n * 50 / 100];
+    let p50_cpu = cpu_values[(n * 50 / 100).min(n - 1)];
     let p90_cpu = cpu_values[(n * 90 / 100).min(n - 1)];
 
-    let sample_ms = sample_interval.as_millis() as u64;
-
-    let time_at_p90_ms =
-        samples.iter().filter(|s| s.cpu_threads >= p90_cpu).count() as u64 * sample_ms;
+    let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
+    let deltas = sample_deltas(&elapsed_values);
 
     let near_peak_threshold = peak_cpu * 0.8;
-    let time_near_peak_ms = samples
-        .iter()
-        .filter(|s| s.cpu_threads >= near_peak_threshold)
-        .count() as u64
-        * sample_ms;
 
-    let time_above_1t_ms =
-        samples.iter().filter(|s| s.cpu_threads > 1.0).count() as u64 * sample_ms;
-    let time_above_2t_ms =
-        samples.iter().filter(|s| s.cpu_threads > 2.0).count() as u64 * sample_ms;
-    let time_above_3t_ms =
-        samples.iter().filter(|s| s.cpu_threads > 3.0).count() as u64 * sample_ms;
-    let time_above_4t_ms =
-        samples.iter().filter(|s| s.cpu_threads > 4.0).count() as u64 * sample_ms;
+    let (time_at_p90_ms, time_near_peak_ms, time_above_1t_ms, time_above_2t_ms, time_above_3t_ms, time_above_4t_ms) =
+        samples.iter().zip(deltas.iter()).fold(
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
+            |(p90, near_peak, a1, a2, a3, a4), (s, &d)| {
+                (
+                    p90 + if s.cpu_threads >= p90_cpu { d } else { 0 },
+                    near_peak + if s.cpu_threads >= near_peak_threshold { d } else { 0 },
+                    a1 + if s.cpu_threads > 1.0 { d } else { 0 },
+                    a2 + if s.cpu_threads > 2.0 { d } else { 0 },
+                    a3 + if s.cpu_threads > 3.0 { d } else { 0 },
+                    a4 + if s.cpu_threads > 4.0 { d } else { 0 },
+                )
+            },
+        );
 
     CalculatedCpuStats {
         peak_cpu,
@@ -350,10 +367,7 @@ struct CalculatedMemoryStats {
     time_above_1gb_ms: u64,
 }
 
-fn calculate_memory_stats(
-    samples: &[MemorySample],
-    sample_interval: Duration,
-) -> CalculatedMemoryStats {
+fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
     if samples.is_empty() {
         return CalculatedMemoryStats {
             peak_rss_bytes: 0,
@@ -371,19 +385,26 @@ fn calculate_memory_stats(
 
     let n = rss_values.len();
     let peak_rss_bytes = rss_values[n - 1];
-    let avg_rss_bytes = rss_values.iter().sum::<u64>() / n as u64;
+    let avg_rss_bytes =
+        (rss_values.iter().map(|&v| v as u128).sum::<u128>() / n as u128) as u64;
 
-    let p50_rss_bytes = rss_values[n * 50 / 100];
+    let p50_rss_bytes = rss_values[(n * 50 / 100).min(n - 1)];
     let p90_rss_bytes = rss_values[(n * 90 / 100).min(n - 1)];
 
-    let sample_ms = sample_interval.as_millis() as u64;
+    let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
+    let deltas = sample_deltas(&elapsed_values);
 
-    let time_above_100mb_ms =
-        samples.iter().filter(|s| s.rss_bytes > MB_100).count() as u64 * sample_ms;
-    let time_above_500mb_ms =
-        samples.iter().filter(|s| s.rss_bytes > MB_500).count() as u64 * sample_ms;
-    let time_above_1gb_ms =
-        samples.iter().filter(|s| s.rss_bytes > GB_1).count() as u64 * sample_ms;
+    let (time_above_100mb_ms, time_above_500mb_ms, time_above_1gb_ms) =
+        samples.iter().zip(deltas.iter()).fold(
+            (0u64, 0u64, 0u64),
+            |(a100, a500, a1g), (s, &d)| {
+                (
+                    a100 + if s.rss_bytes > MB_100 { d } else { 0 },
+                    a500 + if s.rss_bytes > MB_500 { d } else { 0 },
+                    a1g + if s.rss_bytes > GB_1 { d } else { 0 },
+                )
+            },
+        );
 
     CalculatedMemoryStats {
         peak_rss_bytes,
@@ -433,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_calculate_cpu_stats_empty() {
-        let stats = calculate_cpu_stats(&[], Duration::from_millis(50));
+        let stats = calculate_cpu_stats(&[]);
         assert_eq!(stats.peak_cpu, 0.0);
         assert_eq!(stats.avg_cpu, 0.0);
     }
@@ -462,7 +483,7 @@ mod tests {
                 cpu_threads: 1.0,
             },
         ];
-        let stats = calculate_cpu_stats(&samples, Duration::from_millis(50));
+        let stats = calculate_cpu_stats(&samples);
         assert_eq!(stats.peak_cpu, 3.0);
         assert!((stats.avg_cpu - 1.8).abs() < 0.01);
         assert!(stats.time_above_1t_ms > 0);
@@ -470,8 +491,33 @@ mod tests {
     }
 
     #[test]
+    fn test_calculate_cpu_stats_variable_spacing() {
+        // Simulate scheduler jitter: non-uniform sample intervals
+        let samples = vec![
+            CpuSample {
+                elapsed_ms: 50,
+                cpu_threads: 2.5,
+            },
+            CpuSample {
+                elapsed_ms: 120, // 70ms gap (jitter)
+                cpu_threads: 3.0,
+            },
+            CpuSample {
+                elapsed_ms: 160, // 40ms gap
+                cpu_threads: 0.5,
+            },
+        ];
+        let stats = calculate_cpu_stats(&samples);
+        // time_above_2t: first two samples qualify (2.5 and 3.0)
+        // deltas: 50 + 70 = 120ms
+        assert_eq!(stats.time_above_2t_ms, 120);
+        // time_above_1t: same first two qualify
+        assert_eq!(stats.time_above_1t_ms, 120);
+    }
+
+    #[test]
     fn test_calculate_memory_stats_empty() {
-        let stats = calculate_memory_stats(&[], Duration::from_millis(50));
+        let stats = calculate_memory_stats(&[]);
         assert_eq!(stats.peak_rss_bytes, 0);
         assert_eq!(stats.avg_rss_bytes, 0);
     }
@@ -500,11 +546,11 @@ mod tests {
                 rss_bytes: 100 * 1024 * 1024,
             },
         ];
-        let stats = calculate_memory_stats(&samples, Duration::from_millis(50));
+        let stats = calculate_memory_stats(&samples);
         assert_eq!(stats.peak_rss_bytes, 600 * 1024 * 1024);
-        // 150MB, 200MB, 600MB are above 100MB = 3 samples * 50ms = 150ms
+        // 150MB, 200MB, 600MB are above 100MB; deltas: 50+50+50 = 150ms
         assert_eq!(stats.time_above_100mb_ms, 150);
-        // 600MB is above 500MB = 1 sample * 50ms = 50ms
+        // 600MB is above 500MB; delta: 50ms
         assert_eq!(stats.time_above_500mb_ms, 50);
         assert_eq!(stats.time_above_1gb_ms, 0);
     }
@@ -517,9 +563,41 @@ mod tests {
                 rss_bytes: 2 * 1024 * 1024 * 1024,
             }, // 2GB
         ];
-        let stats = calculate_memory_stats(&samples, Duration::from_millis(50));
+        let stats = calculate_memory_stats(&samples);
         assert_eq!(stats.time_above_100mb_ms, 50);
         assert_eq!(stats.time_above_500mb_ms, 50);
         assert_eq!(stats.time_above_1gb_ms, 50);
+    }
+
+    #[test]
+    fn test_calculate_memory_stats_variable_spacing() {
+        // Non-uniform intervals to verify delta-based computation
+        let samples = vec![
+            MemorySample {
+                elapsed_ms: 60,
+                rss_bytes: 200 * 1024 * 1024, // 200MB
+            },
+            MemorySample {
+                elapsed_ms: 180, // 120ms gap
+                rss_bytes: 600 * 1024 * 1024, // 600MB
+            },
+            MemorySample {
+                elapsed_ms: 210, // 30ms gap
+                rss_bytes: 50 * 1024 * 1024, // 50MB
+            },
+        ];
+        let stats = calculate_memory_stats(&samples);
+        // above 100MB: first two samples, deltas: 60 + 120 = 180ms
+        assert_eq!(stats.time_above_100mb_ms, 180);
+        // above 500MB: second sample only, delta: 120ms
+        assert_eq!(stats.time_above_500mb_ms, 120);
+    }
+
+    #[test]
+    fn test_sample_deltas() {
+        assert_eq!(sample_deltas(&[]), Vec::<u64>::new());
+        assert_eq!(sample_deltas(&[50]), vec![50]);
+        assert_eq!(sample_deltas(&[50, 100, 150]), vec![50, 50, 50]);
+        assert_eq!(sample_deltas(&[50, 120, 160]), vec![50, 70, 40]);
     }
 }

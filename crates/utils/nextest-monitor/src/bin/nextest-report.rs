@@ -399,7 +399,8 @@ fn avg_opt_u64<'a>(
     if values.is_empty() {
         None
     } else {
-        Some(values.iter().sum::<u64>() / values.len() as u64)
+        let sum: u128 = values.iter().map(|&v| v as u128).sum();
+        Some((sum / values.len() as u128) as u64)
     }
 }
 
@@ -1023,6 +1024,9 @@ fn cmd_analyze(
                     }
                     if let Some(v) = r.stats.avg_avg_rss_bytes {
                         stats_json["avg_avg_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = r.stats.avg_p90_rss_bytes {
+                        stats_json["avg_p90_rss_bytes"] = serde_json::json!(v);
                     }
                     if let Some(v) = r.stats.max_peak_rss_bytes {
                         stats_json["max_peak_rss_bytes"] = serde_json::json!(v);

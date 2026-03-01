@@ -162,8 +162,10 @@ impl RunResults {
         for test in &stats.tests {
             if let Some(ref name) = test.test_name {
                 if test.passed {
+                    failed.remove(name);
                     passed.insert(name.clone());
                 } else {
+                    passed.remove(name);
                     failed.insert(name.clone());
                 }
             }
@@ -319,6 +321,26 @@ mod tests {
         assert!(passed.contains("test::one"));
         assert!(passed.contains("test::three"));
         assert!(failed.contains("test::two"));
+    }
+
+    #[test]
+    fn test_run_results_later_entries_override() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("stats.jsonl");
+
+        // test::one fails first, then passes — should end up only in passed
+        append_stats(&path, make_stats("test::one", false)).unwrap();
+        append_stats(&path, make_stats("test::one", true)).unwrap();
+        // test::two passes first, then fails — should end up only in failed
+        append_stats(&path, make_stats("test::two", true)).unwrap();
+        append_stats(&path, make_stats("test::two", false)).unwrap();
+
+        let loaded = RunResults::load_from(&path);
+        let (passed, failed) = loaded.into_sets();
+        assert!(passed.contains("test::one"), "test::one should be passed");
+        assert!(!failed.contains("test::one"), "test::one should NOT be failed");
+        assert!(failed.contains("test::two"), "test::two should be failed");
+        assert!(!passed.contains("test::two"), "test::two should NOT be passed");
     }
 
     #[test]

@@ -79,7 +79,6 @@ mod platform {
 
     pub struct CpuMonitor {
         pid: u32,
-        last_check: Instant,
     }
 
     impl CpuMonitor {
