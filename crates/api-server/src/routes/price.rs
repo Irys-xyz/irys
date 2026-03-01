@@ -159,26 +159,23 @@ pub async fn get_price(
             // Term ledger pricing — term-fee only, no perm_fee
             let cascade = state.config.consensus.hardforks.cascade.as_ref();
 
-            // OneYear/ThirtyDay require Cascade to be active (epoch-aligned activation)
-            {
-                let tree = state.block_tree.read();
-                let epoch_snapshot = tree.canonical_epoch_snapshot();
-                let cascade_active = state
-                    .config
-                    .consensus
-                    .hardforks
-                    .is_cascade_active_for_epoch(&epoch_snapshot);
-                drop(tree);
-                if !cascade_active {
-                    return Err((
-                        format!(
-                            "{:?} ledger not available: Cascade hardfork not active",
-                            data_ledger
-                        ),
-                        StatusCode::BAD_REQUEST,
-                    )
-                        .into());
-                }
+            // Single lock scope: cascade gating + fee/pricing inputs from same snapshot
+            let tree = state.block_tree.read();
+            let epoch_snapshot = tree.canonical_epoch_snapshot();
+            let cascade_active = state
+                .config
+                .consensus
+                .hardforks
+                .is_cascade_active_for_epoch(&epoch_snapshot);
+            if !cascade_active {
+                return Err((
+                    format!(
+                        "{:?} ledger not available: Cascade hardfork not active",
+                        data_ledger
+                    ),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into());
             }
 
             let cascade = cascade.ok_or((
@@ -191,7 +188,6 @@ pub async fn get_price(
                 _ => unreachable!(),
             };
 
-            let tree = state.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical
                 .last()
