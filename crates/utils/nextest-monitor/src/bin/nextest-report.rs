@@ -1,6 +1,6 @@
-//! nextest-cpu-report: Analyze and report on CPU usage statistics from test runs
+//! nextest-report: Analyze and report on CPU/memory usage statistics from test runs
 //!
-//! This tool reads the JSON output from nextest-cpu-wrapper and generates
+//! This tool reads the JSON output from nextest-wrapper and generates
 //! reports to help categorize tests by CPU consumption and timeout requirements.
 //! It reads classification rules directly from your .config/nextest.toml.
 
@@ -11,64 +11,14 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+use nextest_monitor::types::{AggregatedStats, CpuSample, MemorySample, TestStats};
 
 /// Default exceedance threshold: a test is considered to "need" N threads if it
 /// exceeds N threads for more than this fraction of its runtime.
 /// 0.20 = 20% — brief spikes up to 20% of runtime are tolerated.
 const DEFAULT_EXCEEDANCE_PCT: f64 = 0.20;
-
-// ============================================================================
-// Data structures for CPU stats (from wrapper)
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CpuSample {
-    pub elapsed_ms: u64,
-    pub cpu_threads: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestCpuStats {
-    pub binary: String,
-    pub test_name: Option<String>,
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    pub duration_ms: u64,
-    pub exit_code: Option<i32>,
-    pub peak_cpu: f64,
-    pub avg_cpu: f64,
-    /// P50 (median) CPU usage
-    #[serde(default)]
-    pub p50_cpu: f64,
-    /// P90 CPU usage
-    #[serde(default)]
-    pub p90_cpu: f64,
-    /// Time in ms where CPU was >= P90 value
-    #[serde(default)]
-    pub time_at_p90_ms: u64,
-    /// Time in ms where CPU was >= 80% of peak
-    #[serde(default)]
-    pub time_near_peak_ms: u64,
-    /// Time in ms where CPU exceeded 1.0 threads (normal allocation)
-    #[serde(default)]
-    pub time_above_1t_ms: u64,
-    /// Time in ms where CPU exceeded 2.0 threads (heavy allocation)
-    #[serde(default)]
-    pub time_above_2t_ms: u64,
-    /// Time in ms where CPU exceeded 3.0 threads (heavy3 allocation)
-    #[serde(default)]
-    pub time_above_3t_ms: u64,
-    /// Time in ms where CPU exceeded 4.0 threads (heavy4 allocation)
-    #[serde(default)]
-    pub time_above_4t_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub samples: Option<Vec<CpuSample>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AggregatedStats {
-    pub tests: Vec<TestCpuStats>,
-}
 
 // ============================================================================
 // Nextest config parsing
@@ -249,12 +199,6 @@ impl ClassificationConfig {
     }
 
     /// Determine what classification a test SHOULD have based on actual usage.
-    ///
-    /// Uses a **sustained exceedance** heuristic: for each thread bucket, check
-    /// what fraction of the test's runtime exceeds that allocation. If more than
-    /// `exceedance_pct` of the runtime is above the bucket, the bucket is too
-    /// small and we move to the next one. This avoids over-provisioning for
-    /// brief CPU spikes while still catching sustained high usage.
     #[allow(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
@@ -266,7 +210,6 @@ impl ClassificationConfig {
         time_above_4t_ms: u64,
         exceedance_pct: f64,
     ) -> SuggestedClassification {
-        // Collect all thread thresholds
         let mut thread_options: Vec<u32> = vec![self.default_threads];
         thread_options.extend(self.rules.iter().filter_map(|r| r.threads_required));
         thread_options.sort();
@@ -274,11 +217,6 @@ impl ClassificationConfig {
 
         let duration = duration_ms.max(1) as f64;
 
-        // Find the smallest allocation where the test doesn't exceed it for
-        // more than exceedance_pct of its runtime. This is the key insight:
-        // brief spikes (e.g. 2% of runtime at 4x) don't warrant a higher
-        // allocation, but sustained exceedance (e.g. 30% of runtime at 3x)
-        // does.
         let suggested_threads = thread_options
             .iter()
             .find(|&&t| {
@@ -296,28 +234,23 @@ impl ClassificationConfig {
             .unwrap_or_else(|| *thread_options.last().unwrap_or(&self.default_threads));
 
         // Sanity floor: if avg_cpu exceeds a bucket, don't use that bucket
-        // regardless of the time-above metric (avg > bucket means the test
-        // is continuously above, just with measurement noise).
         let suggested_threads = thread_options
             .iter()
             .find(|&&t| t >= suggested_threads && (t as f64) >= avg_cpu)
             .copied()
             .unwrap_or(suggested_threads);
 
-        // Collect all timeout thresholds
         let mut timeout_options: Vec<u64> = vec![self.default_timeout_ms];
         timeout_options.extend(self.rules.iter().filter_map(|r| r.timeout_ms));
         timeout_options.sort();
         timeout_options.dedup();
 
-        // Find minimum timeout needed
         let suggested_timeout = timeout_options
             .iter()
             .find(|&&t| t >= duration_ms)
             .copied()
             .unwrap_or_else(|| *timeout_options.last().unwrap_or(&self.default_timeout_ms));
 
-        // Find rules that would give us the needed classification
         let mut suggested_rules = Vec::new();
         for rule in &self.rules {
             let matches_threads = rule
@@ -449,10 +382,38 @@ pub struct TestAggregation {
     pub avg_time_above_4t_ms: u64,
     pub max_peak_cpu: f64,
     pub max_duration_ms: u64,
+    // Memory aggregation fields
+    pub avg_peak_rss_bytes: Option<u64>,
+    pub avg_avg_rss_bytes: Option<u64>,
+    pub avg_p90_rss_bytes: Option<u64>,
+    pub max_peak_rss_bytes: Option<u64>,
+}
+
+/// Helper to compute the average of optional u64 fields across runs.
+/// Returns `None` if none of the runs have the field set.
+fn avg_opt_u64<'a>(
+    runs: impl Iterator<Item = &'a TestStats>,
+    f: fn(&TestStats) -> Option<u64>,
+) -> Option<u64> {
+    let values: Vec<u64> = runs.filter_map(f).collect();
+    if values.is_empty() {
+        None
+    } else {
+        let sum: u128 = values.iter().map(|&v| v as u128).sum();
+        Some((sum / values.len() as u128) as u64)
+    }
+}
+
+/// Helper to compute the max of optional u64 fields across runs.
+fn max_opt_u64<'a>(
+    runs: impl Iterator<Item = &'a TestStats>,
+    f: fn(&TestStats) -> Option<u64>,
+) -> Option<u64> {
+    runs.filter_map(f).max()
 }
 
 fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
-    let mut by_name: HashMap<String, Vec<&TestCpuStats>> = HashMap::new();
+    let mut by_name: HashMap<String, Vec<&TestStats>> = HashMap::new();
 
     for test in &stats.tests {
         let name = test
@@ -466,26 +427,59 @@ fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
         .into_iter()
         .map(|(name, runs)| {
             let run_count = runs.len();
-            let avg_peak_cpu = runs.iter().map(|r| r.peak_cpu).sum::<f64>() / run_count as f64;
-            let avg_avg_cpu = runs.iter().map(|r| r.avg_cpu).sum::<f64>() / run_count as f64;
-            let avg_p50_cpu = runs.iter().map(|r| r.p50_cpu).sum::<f64>() / run_count as f64;
-            let avg_p90_cpu = runs.iter().map(|r| r.p90_cpu).sum::<f64>() / run_count as f64;
+
+            // CPU fields: use unwrap_or(0.0) for backward compat with data that has CPU fields
+            let avg_peak_cpu =
+                runs.iter().map(|r| r.peak_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
+            let avg_avg_cpu =
+                runs.iter().map(|r| r.avg_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
+            let avg_p50_cpu =
+                runs.iter().map(|r| r.p50_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
+            let avg_p90_cpu =
+                runs.iter().map(|r| r.p90_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
             let avg_duration_ms =
                 runs.iter().map(|r| r.duration_ms).sum::<u64>() / run_count as u64;
-            let avg_time_at_p90_ms =
-                runs.iter().map(|r| r.time_at_p90_ms).sum::<u64>() / run_count as u64;
-            let avg_time_near_peak_ms =
-                runs.iter().map(|r| r.time_near_peak_ms).sum::<u64>() / run_count as u64;
-            let avg_time_above_1t_ms =
-                runs.iter().map(|r| r.time_above_1t_ms).sum::<u64>() / run_count as u64;
-            let avg_time_above_2t_ms =
-                runs.iter().map(|r| r.time_above_2t_ms).sum::<u64>() / run_count as u64;
-            let avg_time_above_3t_ms =
-                runs.iter().map(|r| r.time_above_3t_ms).sum::<u64>() / run_count as u64;
-            let avg_time_above_4t_ms =
-                runs.iter().map(|r| r.time_above_4t_ms).sum::<u64>() / run_count as u64;
-            let max_peak_cpu = runs.iter().map(|r| r.peak_cpu).fold(0.0f64, f64::max);
+            let avg_time_at_p90_ms = runs
+                .iter()
+                .map(|r| r.time_at_p90_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let avg_time_near_peak_ms = runs
+                .iter()
+                .map(|r| r.time_near_peak_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let avg_time_above_1t_ms = runs
+                .iter()
+                .map(|r| r.time_above_1t_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let avg_time_above_2t_ms = runs
+                .iter()
+                .map(|r| r.time_above_2t_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let avg_time_above_3t_ms = runs
+                .iter()
+                .map(|r| r.time_above_3t_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let avg_time_above_4t_ms = runs
+                .iter()
+                .map(|r| r.time_above_4t_ms.unwrap_or(0))
+                .sum::<u64>()
+                / run_count as u64;
+            let max_peak_cpu = runs
+                .iter()
+                .map(|r| r.peak_cpu.unwrap_or(0.0))
+                .fold(0.0f64, f64::max);
             let max_duration_ms = runs.iter().map(|r| r.duration_ms).max().unwrap_or(0);
+
+            // Memory fields
+            let avg_peak_rss_bytes = avg_opt_u64(runs.iter().copied(), |r| r.peak_rss_bytes);
+            let avg_avg_rss_bytes = avg_opt_u64(runs.iter().copied(), |r| r.avg_rss_bytes);
+            let avg_p90_rss_bytes = avg_opt_u64(runs.iter().copied(), |r| r.p90_rss_bytes);
+            let max_peak_rss_bytes = max_opt_u64(runs.iter().copied(), |r| r.peak_rss_bytes);
 
             TestAggregation {
                 test_name: name,
@@ -503,6 +497,10 @@ fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
                 avg_time_above_4t_ms,
                 max_peak_cpu,
                 max_duration_ms,
+                avg_peak_rss_bytes,
+                avg_avg_rss_bytes,
+                avg_p90_rss_bytes,
+                max_peak_rss_bytes,
             }
         })
         .collect()
@@ -574,8 +572,7 @@ fn analyze_reclassifications(
         };
 
         // Check CPU classification using sustained exceedance
-        // A test needs more threads if it spends >20% of runtime above its allocation
-        let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0; // as percentage
+        let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0;
         if pct_above_allocation > exceedance_threshold {
             issues.push(format!(
                 "CPU regularly exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
@@ -648,11 +645,11 @@ fn analyze_reclassifications(
 // ============================================================================
 
 #[derive(Parser)]
-#[command(name = "nextest-cpu-report")]
-#[command(about = "Analyze CPU usage statistics from nextest test runs")]
+#[command(name = "nextest-report")]
+#[command(about = "Analyze CPU and memory usage statistics from nextest test runs")]
 struct Cli {
     /// Path to the stats JSON file
-    #[arg(short, long, default_value = "target/nextest-cpu-stats.json")]
+    #[arg(short, long, default_value = "target/nextest-monitor/stats.jsonl")]
     input: PathBuf,
 
     /// Path to nextest.toml config (default: .config/nextest.toml)
@@ -667,7 +664,7 @@ struct Cli {
 enum Commands {
     /// Show a summary of all tests sorted by CPU usage
     Summary {
-        /// Sort by: p90, peak, avg, duration, nearpeak, atp90
+        /// Sort by: p90, peak, avg, duration, nearpeak, atp90, peak_rss, avg_rss
         #[arg(short, long, default_value = "p90")]
         sort: String,
 
@@ -769,16 +766,18 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn load_stats(path: &PathBuf) -> std::io::Result<AggregatedStats> {
+fn load_stats(path: &std::path::Path) -> std::io::Result<AggregatedStats> {
     if !path.exists() {
-        eprintln!("Stats file not found: {}", path.display());
-        eprintln!("Run your tests with nextest-cpu-wrapper first.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Stats file not found: {}. Run your tests with nextest-wrapper first.",
+                path.display()
+            ),
+        ));
     }
 
-    let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    AggregatedStats::load(path)
 }
 
 fn cmd_config(config: &ClassificationConfig) {
@@ -821,21 +820,46 @@ fn cmd_config(config: &ClassificationConfig) {
     }
 }
 
+fn format_rss(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.0}M", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.0}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &str, top: usize) {
     let mut aggregated = aggregate_by_test(stats);
 
+    // Check if any test has memory data
+    let has_memory = aggregated.iter().any(|t| t.avg_peak_rss_bytes.is_some());
+
     match sort {
-        "p90" => aggregated.sort_by(|a, b| b.avg_p90_cpu.partial_cmp(&a.avg_p90_cpu).unwrap()),
-        "peak" => aggregated.sort_by(|a, b| b.avg_peak_cpu.partial_cmp(&a.avg_peak_cpu).unwrap()),
-        "avg" => aggregated.sort_by(|a, b| b.avg_avg_cpu.partial_cmp(&a.avg_avg_cpu).unwrap()),
+        "p90" => aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu)),
+        "peak" => aggregated.sort_by(|a, b| b.avg_peak_cpu.total_cmp(&a.avg_peak_cpu)),
+        "avg" => aggregated.sort_by(|a, b| b.avg_avg_cpu.total_cmp(&a.avg_avg_cpu)),
         "duration" => aggregated.sort_by(|a, b| b.avg_duration_ms.cmp(&a.avg_duration_ms)),
         "nearpeak" => {
             aggregated.sort_by(|a, b| b.avg_time_near_peak_ms.cmp(&a.avg_time_near_peak_ms))
         }
         "atp90" => aggregated.sort_by(|a, b| b.avg_time_at_p90_ms.cmp(&a.avg_time_at_p90_ms)),
+        "peak_rss" => aggregated.sort_by(|a, b| {
+            b.avg_peak_rss_bytes
+                .unwrap_or(0)
+                .cmp(&a.avg_peak_rss_bytes.unwrap_or(0))
+        }),
+        "avg_rss" => aggregated.sort_by(|a, b| {
+            b.avg_avg_rss_bytes
+                .unwrap_or(0)
+                .cmp(&a.avg_avg_rss_bytes.unwrap_or(0))
+        }),
         _ => {
             eprintln!("Unknown sort option: {}. Using 'p90'.", sort);
-            aggregated.sort_by(|a, b| b.avg_p90_cpu.partial_cmp(&a.avg_p90_cpu).unwrap());
+            aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu));
         }
     }
 
@@ -845,11 +869,29 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
         aggregated.len()
     };
 
-    println!(
-        "{:<45} {:>5} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6} {:>4}",
-        "Test Name", "Alloc", "P90", "Peak", "Avg", "Duration", "≥P90", "NrPk", "Runs"
-    );
-    println!("{}", "-".repeat(110));
+    if has_memory {
+        println!(
+            "{:<45} {:>5} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6} {:>7} {:>7} {:>4}",
+            "Test Name",
+            "Alloc",
+            "P90",
+            "Peak",
+            "Avg",
+            "Duration",
+            "≥P90",
+            "NrPk",
+            "PeakRSS",
+            "AvgRSS",
+            "Runs"
+        );
+        println!("{}", "-".repeat(125));
+    } else {
+        println!(
+            "{:<45} {:>5} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6} {:>4}",
+            "Test Name", "Alloc", "P90", "Peak", "Avg", "Duration", "≥P90", "NrPk", "Runs"
+        );
+        println!("{}", "-".repeat(110));
+    }
 
     for test in aggregated.iter().take(to_show) {
         let name = if test.test_name.len() > 43 {
@@ -858,7 +900,6 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
             test.test_name.clone()
         };
 
-        // Get current allocation
         let classification = config.classify(&test.test_name);
         let alloc_str = format!("{}T", classification.effective_threads);
 
@@ -875,18 +916,44 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
 
         let duration_str = format_duration(test.avg_duration_ms);
 
-        println!(
-            "{:<45} {:>5} {:>5.2}x {:>5.2}x {:>5.2}x {:>8} {:>5.0}% {:>5.0}% {:>4}",
-            name,
-            alloc_str,
-            test.avg_p90_cpu,
-            test.avg_peak_cpu,
-            test.avg_avg_cpu,
-            duration_str,
-            pct_at_p90,
-            pct_near_peak,
-            test.run_count
-        );
+        if has_memory {
+            let peak_rss_str = test
+                .avg_peak_rss_bytes
+                .map(format_rss)
+                .unwrap_or_else(|| "-".to_string());
+            let avg_rss_str = test
+                .avg_avg_rss_bytes
+                .map(format_rss)
+                .unwrap_or_else(|| "-".to_string());
+
+            println!(
+                "{:<45} {:>5} {:>5.2}x {:>5.2}x {:>5.2}x {:>8} {:>5.0}% {:>5.0}% {:>7} {:>7} {:>4}",
+                name,
+                alloc_str,
+                test.avg_p90_cpu,
+                test.avg_peak_cpu,
+                test.avg_avg_cpu,
+                duration_str,
+                pct_at_p90,
+                pct_near_peak,
+                peak_rss_str,
+                avg_rss_str,
+                test.run_count
+            );
+        } else {
+            println!(
+                "{:<45} {:>5} {:>5.2}x {:>5.2}x {:>5.2}x {:>8} {:>5.0}% {:>5.0}% {:>4}",
+                name,
+                alloc_str,
+                test.avg_p90_cpu,
+                test.avg_peak_cpu,
+                test.avg_avg_cpu,
+                duration_str,
+                pct_at_p90,
+                pct_near_peak,
+                test.run_count
+            );
+        }
     }
 
     println!();
@@ -898,6 +965,9 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
     println!();
     println!("Columns: Alloc=current allocation, P90=90th percentile, Peak=max, Avg=mean");
     println!("         ≥P90=% time at/above P90, NrPk=% time near peak (≥80% of peak)");
+    if has_memory {
+        println!("         PeakRSS=peak resident memory, AvgRSS=average resident memory");
+    }
 }
 
 /// Format duration in a human-readable way
@@ -934,6 +1004,34 @@ fn cmd_analyze(
             let output: Vec<serde_json::Value> = to_show
                 .iter()
                 .map(|r| {
+                    let mut stats_json = serde_json::json!({
+                        "avg_peak_cpu": r.stats.avg_peak_cpu,
+                        "avg_p90_cpu": r.stats.avg_p90_cpu,
+                        "avg_p50_cpu": r.stats.avg_p50_cpu,
+                        "avg_avg_cpu": r.stats.avg_avg_cpu,
+                        "avg_duration_ms": r.stats.avg_duration_ms,
+                        "time_at_p90_ms": r.stats.avg_time_at_p90_ms,
+                        "time_near_peak_ms": r.stats.avg_time_near_peak_ms,
+                        "time_above_1t_ms": r.stats.avg_time_above_1t_ms,
+                        "time_above_2t_ms": r.stats.avg_time_above_2t_ms,
+                        "time_above_3t_ms": r.stats.avg_time_above_3t_ms,
+                        "time_above_4t_ms": r.stats.avg_time_above_4t_ms,
+                        "run_count": r.stats.run_count,
+                    });
+
+                    if let Some(v) = r.stats.avg_peak_rss_bytes {
+                        stats_json["avg_peak_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = r.stats.avg_avg_rss_bytes {
+                        stats_json["avg_avg_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = r.stats.avg_p90_rss_bytes {
+                        stats_json["avg_p90_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = r.stats.max_peak_rss_bytes {
+                        stats_json["max_peak_rss_bytes"] = serde_json::json!(v);
+                    }
+
                     serde_json::json!({
                         "test_name": r.test_name,
                         "current_classification": {
@@ -947,20 +1045,7 @@ fn cmd_analyze(
                             "timeout_ms": r.suggested.timeout_ms,
                         },
                         "issues": r.issues,
-                        "stats": {
-                            "avg_peak_cpu": r.stats.avg_peak_cpu,
-                            "avg_p90_cpu": r.stats.avg_p90_cpu,
-                            "avg_p50_cpu": r.stats.avg_p50_cpu,
-                            "avg_avg_cpu": r.stats.avg_avg_cpu,
-                            "avg_duration_ms": r.stats.avg_duration_ms,
-                            "time_at_p90_ms": r.stats.avg_time_at_p90_ms,
-                            "time_near_peak_ms": r.stats.avg_time_near_peak_ms,
-                            "time_above_1t_ms": r.stats.avg_time_above_1t_ms,
-                            "time_above_2t_ms": r.stats.avg_time_above_2t_ms,
-                            "time_above_3t_ms": r.stats.avg_time_above_3t_ms,
-                            "time_above_4t_ms": r.stats.avg_time_above_4t_ms,
-                            "run_count": r.stats.run_count,
-                        }
+                        "stats": stats_json,
                     })
                 })
                 .collect();
@@ -983,7 +1068,6 @@ fn cmd_analyze(
                         r.current.rule_names().join(", ")
                     };
 
-                    // Calculate time above allocation percentage
                     let (time_above_ms, threshold) = match r.current.effective_threads {
                         1 => (r.stats.avg_time_above_1t_ms, 1),
                         2 => (r.stats.avg_time_above_2t_ms, 2),
@@ -1037,6 +1121,18 @@ fn cmd_analyze(
                             pct_above
                         );
                     }
+                    if let Some(peak_rss) = r.stats.avg_peak_rss_bytes {
+                        let avg_rss_str = r
+                            .stats
+                            .avg_avg_rss_bytes
+                            .map(format_rss)
+                            .unwrap_or_else(|| "-".to_string());
+                        println!(
+                            "│  Memory:  peak: {} | avg: {}",
+                            format_rss(peak_rss),
+                            avg_rss_str
+                        );
+                    }
 
                     for issue in &r.issues {
                         println!("│  ⚠️  {}", issue);
@@ -1062,7 +1158,7 @@ fn cmd_analyze(
                     needs_change.len()
                 );
             } else {
-                println!("✅ All tests are correctly classified!");
+                println!("All tests are correctly classified!");
             }
 
             if show_all && !ok.is_empty() {
@@ -1080,7 +1176,7 @@ fn cmd_analyze(
                     };
 
                     println!(
-                        "  ✓ [{}] {} (peak: {:.2}x, P90: {:.2}x, avg: {:.2}x, {:.1}s)",
+                        "  [{}] {} (peak: {:.2}x, P90: {:.2}x, avg: {:.2}x, {:.1}s)",
                         rules,
                         r.test_name,
                         r.stats.avg_peak_cpu,
@@ -1122,6 +1218,7 @@ fn cmd_detail(stats: &AggregatedStats, config: &ClassificationConfig, pattern: &
         println!();
         println!("  Binary:    {}", test.binary);
         println!("  Started:   {}", test.started_at);
+        println!("  Passed:    {}", test.passed);
         println!("  Exit Code: {:?}", test.exit_code);
         println!();
         println!("  Classification:");
@@ -1135,91 +1232,131 @@ fn cmd_detail(stats: &AggregatedStats, config: &ClassificationConfig, pattern: &
             "    Timeout:  {:.0}s",
             classification.effective_timeout_ms as f64 / 1000.0
         );
-        println!();
-        println!("  CPU Usage:");
-        println!("    Peak:     {:.2}x", test.peak_cpu);
-        println!("    P90:      {:.2}x", test.p90_cpu);
-        println!("    P50:      {:.2}x (median)", test.p50_cpu);
-        println!("    Average:  {:.2}x", test.avg_cpu);
-        println!();
-        println!("  Time Above Allocation Thresholds:");
-        let pct_1t = if test.duration_ms > 0 {
-            (test.time_above_1t_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        let pct_2t = if test.duration_ms > 0 {
-            (test.time_above_2t_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        let pct_3t = if test.duration_ms > 0 {
-            (test.time_above_3t_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        let pct_4t = if test.duration_ms > 0 {
-            (test.time_above_4t_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        let pct_at_p90 = if test.duration_ms > 0 {
-            (test.time_at_p90_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        let pct_near_peak = if test.duration_ms > 0 {
-            (test.time_near_peak_ms as f64 / test.duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
-        println!(
-            "    Above 1T: {:.2}s ({:.1}%)",
-            test.time_above_1t_ms as f64 / 1000.0,
-            pct_1t
-        );
-        println!(
-            "    Above 2T: {:.2}s ({:.1}%)",
-            test.time_above_2t_ms as f64 / 1000.0,
-            pct_2t
-        );
-        println!(
-            "    Above 3T: {:.2}s ({:.1}%)",
-            test.time_above_3t_ms as f64 / 1000.0,
-            pct_3t
-        );
-        println!(
-            "    Above 4T: {:.2}s ({:.1}%)",
-            test.time_above_4t_ms as f64 / 1000.0,
-            pct_4t
-        );
-        println!();
-        println!("  Time at P90 Level (≥{:.2}x):", test.p90_cpu);
-        println!(
-            "    Duration: {:.2}s ({:.1}% of runtime)",
-            test.time_at_p90_ms as f64 / 1000.0,
-            pct_at_p90
-        );
-        println!();
-        println!(
-            "  Time Near Peak (≥80% of {:.2}x = ≥{:.2}x):",
-            test.peak_cpu,
-            test.peak_cpu * 0.8
-        );
-        println!(
-            "    Duration: {:.2}s ({:.1}% of runtime)",
-            test.time_near_peak_ms as f64 / 1000.0,
-            pct_near_peak
-        );
+
+        // CPU section
+        if test.peak_cpu.is_some() {
+            println!();
+            println!("  CPU Usage:");
+            println!("    Peak:     {:.2}x", test.peak_cpu.unwrap_or(0.0));
+            println!("    P90:      {:.2}x", test.p90_cpu.unwrap_or(0.0));
+            println!("    P50:      {:.2}x (median)", test.p50_cpu.unwrap_or(0.0));
+            println!("    Average:  {:.2}x", test.avg_cpu.unwrap_or(0.0));
+            println!();
+            println!("  Time Above Allocation Thresholds:");
+            let duration_ms = test.duration_ms;
+            let pct = |v: Option<u64>| -> f64 {
+                if duration_ms > 0 {
+                    (v.unwrap_or(0) as f64 / duration_ms as f64) * 100.0
+                } else {
+                    0.0
+                }
+            };
+            println!(
+                "    Above 1T: {:.2}s ({:.1}%)",
+                test.time_above_1t_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_above_1t_ms)
+            );
+            println!(
+                "    Above 2T: {:.2}s ({:.1}%)",
+                test.time_above_2t_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_above_2t_ms)
+            );
+            println!(
+                "    Above 3T: {:.2}s ({:.1}%)",
+                test.time_above_3t_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_above_3t_ms)
+            );
+            println!(
+                "    Above 4T: {:.2}s ({:.1}%)",
+                test.time_above_4t_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_above_4t_ms)
+            );
+            println!();
+            println!(
+                "  Time at P90 Level (≥{:.2}x):",
+                test.p90_cpu.unwrap_or(0.0)
+            );
+            println!(
+                "    Duration: {:.2}s ({:.1}% of runtime)",
+                test.time_at_p90_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_at_p90_ms)
+            );
+            println!();
+            let peak = test.peak_cpu.unwrap_or(0.0);
+            println!(
+                "  Time Near Peak (≥80% of {:.2}x = ≥{:.2}x):",
+                peak,
+                peak * 0.8
+            );
+            println!(
+                "    Duration: {:.2}s ({:.1}% of runtime)",
+                test.time_near_peak_ms.unwrap_or(0) as f64 / 1000.0,
+                pct(test.time_near_peak_ms)
+            );
+        }
+
+        // Memory section
+        if test.peak_rss_bytes.is_some() {
+            println!();
+            println!("  Memory Usage:");
+            println!(
+                "    Peak RSS: {}",
+                format_rss(test.peak_rss_bytes.unwrap_or(0))
+            );
+            println!(
+                "    P90 RSS:  {}",
+                format_rss(test.p90_rss_bytes.unwrap_or(0))
+            );
+            println!(
+                "    P50 RSS:  {}",
+                format_rss(test.p50_rss_bytes.unwrap_or(0))
+            );
+            println!(
+                "    Avg RSS:  {}",
+                format_rss(test.avg_rss_bytes.unwrap_or(0))
+            );
+            println!();
+            println!("  Time Above Memory Thresholds:");
+            let duration_ms = test.duration_ms;
+            let pct_mem = |v: Option<u64>| -> f64 {
+                if duration_ms > 0 {
+                    (v.unwrap_or(0) as f64 / duration_ms as f64) * 100.0
+                } else {
+                    0.0
+                }
+            };
+            println!(
+                "    Above 100MB: {:.2}s ({:.1}%)",
+                test.time_above_100mb_ms.unwrap_or(0) as f64 / 1000.0,
+                pct_mem(test.time_above_100mb_ms)
+            );
+            println!(
+                "    Above 500MB: {:.2}s ({:.1}%)",
+                test.time_above_500mb_ms.unwrap_or(0) as f64 / 1000.0,
+                pct_mem(test.time_above_500mb_ms)
+            );
+            println!(
+                "    Above 1GB:   {:.2}s ({:.1}%)",
+                test.time_above_1gb_ms.unwrap_or(0) as f64 / 1000.0,
+                pct_mem(test.time_above_1gb_ms)
+            );
+        }
+
         println!();
         println!("  Timing:");
         println!("    Duration: {}", format_duration(test.duration_ms));
         println!();
 
-        if let Some(ref samples) = test.samples {
+        if let Some(ref samples) = test.cpu_samples {
             println!("  CPU Usage Over Time:");
             println!();
             print_cpu_chart(samples, classification.effective_threads as f64);
+        }
+
+        if let Some(ref samples) = test.memory_samples {
+            println!("  Memory Usage Over Time:");
+            println!();
+            print_memory_chart(samples);
         }
 
         println!();
@@ -1241,7 +1378,6 @@ fn print_cpu_chart(samples: &[CpuSample], allocation_threshold: f64) {
         .map(|chunk| chunk.iter().map(|s| s.cpu_threads).fold(0.0f64, f64::max))
         .collect();
 
-    // Scale should include the allocation threshold for reference
     let scale = max_cpu.max(allocation_threshold * 1.2);
     let threshold_row = ((allocation_threshold / scale) * chart_height as f64) as usize;
 
@@ -1253,18 +1389,17 @@ fn print_cpu_chart(samples: &[CpuSample], allocation_threshold: f64) {
             let bar_height = (val / scale * chart_height as f64) as usize;
             if bar_height > row {
                 if val > allocation_threshold {
-                    print!("█"); // Above allocation
+                    print!("█");
                 } else {
-                    print!("▒"); // Below allocation
+                    print!("▒");
                 }
             } else if row == threshold_row {
-                print!("─"); // Threshold line
+                print!("─");
             } else {
                 print!(" ");
             }
         }
 
-        // Mark the threshold row
         if row == threshold_row {
             print!(" ← {}T", allocation_threshold as u32);
         }
@@ -1291,6 +1426,57 @@ fn print_cpu_chart(samples: &[CpuSample], allocation_threshold: f64) {
     );
 }
 
+fn print_memory_chart(samples: &[MemorySample]) {
+    if samples.is_empty() {
+        return;
+    }
+
+    let max_rss = samples.iter().map(|s| s.rss_bytes).max().unwrap_or(0);
+    if max_rss == 0 {
+        return;
+    }
+
+    let chart_height = 10;
+    let chart_width = 60.min(samples.len());
+
+    let step = samples.len().div_ceil(chart_width);
+    let downsampled: Vec<u64> = samples
+        .chunks(step)
+        .map(|chunk| chunk.iter().map(|s| s.rss_bytes).max().unwrap_or(0))
+        .collect();
+
+    let scale = max_rss as f64;
+
+    for row in (0..chart_height).rev() {
+        let level = ((row as f64 + 0.5) / chart_height as f64) * scale;
+        print!("    {:>6} │", format_rss(level as u64));
+
+        for &val in &downsampled {
+            let bar_height = (val as f64 / scale * chart_height as f64) as usize;
+            if bar_height > row {
+                print!("▓");
+            } else {
+                print!(" ");
+            }
+        }
+        println!();
+    }
+
+    print!("           └");
+    for _ in 0..downsampled.len() {
+        print!("─");
+    }
+    println!();
+
+    let duration_s = samples.last().map(|s| s.elapsed_ms / 1000).unwrap_or(0);
+    println!(
+        "            0s{:>width$}{}s",
+        "",
+        duration_s,
+        width = downsampled.len().saturating_sub(4)
+    );
+}
+
 fn cmd_export(
     stats: &AggregatedStats,
     format: &str,
@@ -1303,7 +1489,7 @@ fn cmd_export(
             &aggregated
                 .iter()
                 .map(|t| {
-                    serde_json::json!({
+                    let mut json = serde_json::json!({
                         "test_name": t.test_name,
                         "run_count": t.run_count,
                         "avg_peak_cpu": t.avg_peak_cpu,
@@ -1319,18 +1505,33 @@ fn cmd_export(
                         "avg_time_above_4t_ms": t.avg_time_above_4t_ms,
                         "max_peak_cpu": t.max_peak_cpu,
                         "max_duration_ms": t.max_duration_ms,
-                    })
+                    });
+
+                    if let Some(v) = t.avg_peak_rss_bytes {
+                        json["avg_peak_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = t.avg_avg_rss_bytes {
+                        json["avg_avg_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = t.avg_p90_rss_bytes {
+                        json["avg_p90_rss_bytes"] = serde_json::json!(v);
+                    }
+                    if let Some(v) = t.max_peak_rss_bytes {
+                        json["max_peak_rss_bytes"] = serde_json::json!(v);
+                    }
+
+                    json
                 })
                 .collect::<Vec<_>>(),
         )
         .unwrap(),
         _ => {
             let mut lines = vec![
-                "test_name,run_count,avg_peak_cpu,avg_p90_cpu,avg_p50_cpu,avg_avg_cpu,avg_duration_ms,time_at_p90_ms,time_near_peak_ms,time_above_1t_ms,time_above_2t_ms,time_above_3t_ms,time_above_4t_ms,max_peak_cpu,max_duration_ms".to_string()
+                "test_name,run_count,avg_peak_cpu,avg_p90_cpu,avg_p50_cpu,avg_avg_cpu,avg_duration_ms,time_at_p90_ms,time_near_peak_ms,time_above_1t_ms,time_above_2t_ms,time_above_3t_ms,time_above_4t_ms,max_peak_cpu,max_duration_ms,avg_peak_rss_bytes,avg_avg_rss_bytes,avg_p90_rss_bytes,max_peak_rss_bytes".to_string()
             ];
             for t in &aggregated {
                 lines.push(format!(
-                    "\"{}\",{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{}",
+                    "\"{}\",{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{},{},{},{},{}",
                     t.test_name.replace('"', "\"\""),
                     t.run_count,
                     t.avg_peak_cpu,
@@ -1346,6 +1547,18 @@ fn cmd_export(
                     t.avg_time_above_4t_ms,
                     t.max_peak_cpu,
                     t.max_duration_ms,
+                    t.avg_peak_rss_bytes
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_avg_rss_bytes
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_p90_rss_bytes
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.max_peak_rss_bytes
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
                 ));
             }
             lines.join("\n")
