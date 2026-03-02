@@ -2215,22 +2215,25 @@ fn validate_term_ledger_expiry(
     let cascade = consensus.hardforks.cascade.as_ref();
 
     for dl in &block.data_ledgers {
-        let Ok(ledger) = DataLedger::try_from(dl.ledger_id) else {
-            continue; // invalid ledger IDs are caught elsewhere
+        let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
+            PreValidationError::LedgerIdInvalid {
+                ledger_id: dl.ledger_id,
+            }
+        })?;
+        let cascade_config = || {
+            cascade.ok_or(PreValidationError::TermLedgerExpiryMismatch {
+                ledger_id: dl.ledger_id,
+                expected: None,
+                actual: dl.expires,
+            })
         };
         let expected_expires = match ledger {
             DataLedger::Publish => None,
             DataLedger::Submit => Some(consensus.epoch.submit_ledger_epoch_length),
-            DataLedger::OneYear if cascade_active => Some(
-                cascade
-                    .expect("cascade must be configured when active")
-                    .one_year_epoch_length,
-            ),
-            DataLedger::ThirtyDay if cascade_active => Some(
-                cascade
-                    .expect("cascade must be configured when active")
-                    .thirty_day_epoch_length,
-            ),
+            DataLedger::OneYear if cascade_active => Some(cascade_config()?.one_year_epoch_length),
+            DataLedger::ThirtyDay if cascade_active => {
+                Some(cascade_config()?.thirty_day_epoch_length)
+            }
             _ => continue, // non-active cascade ledgers handled by presence check
         };
         if dl.expires != expected_expires {
