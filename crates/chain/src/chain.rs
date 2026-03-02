@@ -176,11 +176,6 @@ impl IrysNodeCtx {
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
         metrics::record_node_shutdown(reason.as_label());
-
-        // Clone the inner DB Arc so we can wait for all references to drain
-        // after dropping self.
-        let db_inner = Arc::clone(&self.db.0);
-
         // Cancel all subsystems via token (VDF, actor, backfill all observe this)
         self.shutdown_token.cancel();
 
@@ -251,21 +246,6 @@ impl IrysNodeCtx {
         // Drop self to release our references to all shared state (services,
         // block pool, gossip handler, etc. — all hold DatabaseProvider clones).
         drop(self);
-
-        // Wait for all DatabaseProvider clones to be released so the MDBX
-        // file lock is freed before the caller tries to re-open the DB.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Arc::strong_count(&db_inner) > 1 {
-            if Instant::now() > deadline {
-                warn!(
-                    refs = Arc::strong_count(&db_inner),
-                    "DB still has outstanding references after 5s, proceeding"
-                );
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        // db_inner dropped here -> DatabaseEnv dropped -> MDBX lock released
     }
 
     pub fn get_http_port(&self) -> u16 {
@@ -383,6 +363,8 @@ pub struct IrysNode {
 
 /// Timeout for stopping the API server during graceful shutdown.
 const API_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for waiting on the actix server task to exit after stop is requested.
+const ACTIX_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Timeout for stopping the gossip service during graceful shutdown.
 const GOSSIP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the VDF thread to finish during graceful shutdown.
@@ -692,8 +674,7 @@ impl IrysNode {
         if !genesis_block.is_signature_valid() {
             panic!(
                 "FATAL: Invalid genesis block signature from trusted peer. Block hash: {} miner: {}",
-                genesis_block.block_hash,
-                genesis_block.miner_address
+                genesis_block.block_hash, genesis_block.miner_address
             );
         }
         if genesis_block.block_hash != expected_genesis_hash {
@@ -886,9 +867,11 @@ impl IrysNode {
             &node_config.http.bind_port,
             node_config.gossip.bind_ip(&node_config.network_defaults),
             &node_config.gossip.bind_port,
-            node_config.reth.network.bind_ip(&node_config.network_defaults),
+            node_config
+                .reth
+                .network
+                .bind_ip(&node_config.network_defaults),
             &node_config.reth.network.bind_port,
-
         );
 
         // Subscribe before initial_sync so the receiver captures all block
@@ -1095,7 +1078,7 @@ impl IrysNode {
         // Spawn the actix API server so its future gets polled and it accepts connections.
         // (The gossip server is spawned separately via spawn_p2p_server_watcher_task.)
         let api_server_handle = actix_server.handle();
-        let actix_task = tokio::spawn(actix_server);
+        let mut actix_task = tokio::spawn(actix_server);
 
         // Send IrysNodeCtx back to start()
         irys_node_ctx_tx
@@ -1140,18 +1123,54 @@ impl IrysNode {
         // regardless of which select arm triggered the shutdown (ctrl_c, reth_exit, etc.).
         shutdown_token.cancel();
 
-        // Stop actix server (handle was captured before spawning the task)
-        debug!("Stopping API server");
-        match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, api_server_handle.stop(true)).await {
-            Ok(()) => debug!("API server stopped"),
-            Err(_) => error!("API server stop timed out after {API_SERVER_STOP_TIMEOUT:?}"),
+        info!(
+            shutdown.phase = "api_stop_graceful",
+            "Lifecycle shutdown phase"
+        );
+        let api_stopped_gracefully =
+            match tokio::time::timeout(API_SERVER_STOP_TIMEOUT, api_server_handle.stop(true)).await
+            {
+                Ok(()) => {
+                    debug!("API server stopped gracefully");
+                    true
+                }
+                Err(_) => {
+                    warn!("API server graceful stop timed out after {API_SERVER_STOP_TIMEOUT:?}");
+                    false
+                }
+            };
+
+        if !api_stopped_gracefully {
+            warn!("Forcing API server shutdown");
+            api_server_handle.stop(false).await;
         }
-        // Wait for the actix task to finish after the server is stopped
-        if let Err(e) = actix_task.await {
-            error!("API server task panicked: {:?}", e);
+
+        info!(shutdown.phase = "api_join", "Lifecycle shutdown phase");
+        match tokio::time::timeout(ACTIX_TASK_JOIN_TIMEOUT, &mut actix_task).await {
+            Ok(Ok(Ok(()))) => debug!("API server task exited"),
+            Ok(Ok(Err(e))) => error!("API server task exited with error: {:?}", e),
+            Ok(Err(e)) => error!("API server task panicked: {:?}", e),
+            Err(_) => {
+                warn!("API server task did not exit within {ACTIX_TASK_JOIN_TIMEOUT:?}; aborting");
+                actix_task.abort();
+                match actix_task.await {
+                    Ok(Ok(())) => warn!("API server task completed after abort request"),
+                    Ok(Err(e)) => {
+                        warn!(
+                            "API server task exited with error after abort request: {:?}",
+                            e
+                        )
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        warn!("API server task aborted after join timeout")
+                    }
+                    Err(e) => error!("API server task failed after abort: {:?}", e),
+                }
+            }
         }
 
         // Stop gossip
+        info!(shutdown.phase = "gossip_stop", "Lifecycle shutdown phase");
         match tokio::time::timeout(GOSSIP_STOP_TIMEOUT, gossip_service_handle.stop()).await {
             Ok(Ok(())) => info!("Gossip service stopped"),
             Ok(Err(e)) => warn!("Gossip service already stopped: {:?}", e),
@@ -1159,6 +1178,7 @@ impl IrysNode {
         }
 
         // Wait for VDF thread
+        info!(shutdown.phase = "vdf_wait", "Lifecycle shutdown phase");
         debug!("Waiting for VDF thread to finish");
         match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_done_rx).await {
             Ok(Ok(())) => debug!("VDF thread finished"),
@@ -1167,17 +1187,20 @@ impl IrysNode {
         }
 
         // Graceful shutdown of actor services
+        info!(shutdown.phase = "service_set", "Lifecycle shutdown phase");
         service_set.graceful_shutdown().await;
         debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
 
         // Graceful shutdown of reth tasks — sync spin loop, so run on a blocking thread
         // (mirrors master's dedicated OS thread behavior)
+        info!(shutdown.phase = "reth_shutdown", "Lifecycle shutdown phase");
         let reth_rt = reth_runtime.clone();
         tokio::task::spawn_blocking(move || reth_rt.graceful_shutdown())
             .await
             .expect("reth graceful shutdown should not panic");
 
         // Close reth DB (MDBX close is sync, use spawn_blocking)
+        info!(shutdown.phase = "db_close", "Lifecycle shutdown phase");
         let reth_node_for_close = node_handle.node;
         tokio::task::spawn_blocking(move || {
             reth_node_for_close.provider.database.db.close();
@@ -1861,7 +1884,9 @@ impl IrysNode {
             .is_some_and(|p| p.ends_with(".tmp"));
         let is_test_based_on_cfg_flag = cfg!(test);
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
+            panic!(
+                "VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)"
+            )
         }
         let span = tracing::Span::current();
         let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();

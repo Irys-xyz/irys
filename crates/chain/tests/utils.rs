@@ -305,6 +305,10 @@ impl RuntimeGuard {
     fn none() -> Self {
         Self(None)
     }
+
+    fn into_inner(mut self) -> Option<tokio::runtime::Runtime> {
+        self.0.take()
+    }
 }
 
 impl Drop for RuntimeGuard {
@@ -2467,13 +2471,29 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
         info!("Stopping node with state: {}", pre_stop_state);
+        let db_inner = Arc::clone(&self.node_ctx.db.0);
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::TestComplete)
             .await;
-        // RuntimeGuard::drop handles moving the runtime to a background thread.
-        // Explicitly drop it here so shutdown completes before we return.
-        drop(self.runtime);
+        // Drain DB refs here after runtime teardown because this wrapper owns the
+        // remaining test runtime tasks that may still hold DatabaseProvider clones.
+        if let Some(rt) = self.runtime.into_inner() {
+            tokio::task::spawn_blocking(move || drop(rt))
+                .await
+                .expect("runtime shutdown should not panic");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&db_inner) > 1 {
+            if Instant::now() > deadline {
+                warn!(
+                    refs = Arc::strong_count(&db_inner),
+                    "DB still has outstanding references after 5s, proceeding"
+                );
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
