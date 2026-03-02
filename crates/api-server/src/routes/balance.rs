@@ -1,9 +1,9 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{u64_stringify, BlockHash, IrysAddress, SendTraced as _, U256};
+use irys_types::{BlockHash, IrysAddress, SendTraced as _, U256, u64_stringify};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

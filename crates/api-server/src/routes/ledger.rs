@@ -1,8 +1,8 @@
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 use actix_web::web::{Data, Json, Path};
 use irys_types::{
-    partition::PartitionAssignment, serialization::string_u64, DataLedger, IrysAddress, H256,
+    DataLedger, H256, IrysAddress, partition::PartitionAssignment, serialization::string_u64,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,9 +1,9 @@
-use actix_web::{web, HttpResponse, ResponseError as _};
+use actix_web::{HttpResponse, ResponseError as _, web};
 use awc::http::StatusCode;
-use irys_types::serialization::{string_u128, string_u64};
+use irys_types::serialization::{string_u64, string_u128};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

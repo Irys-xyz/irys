@@ -1,13 +1,13 @@
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 use actix_web::{
-    web::{self, Json},
     Result,
+    web::{self, Json},
 };
 use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{CombinedBlockHeader, ExecutionHeader, SendTraced as _, H256};
+use irys_types::{CombinedBlockHeader, ExecutionHeader, H256, SendTraced as _};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
@@ -127,7 +127,7 @@ async fn get_block_by_hash(
         None => {
             return Err(ApiError::Internal {
                 err: String::from("db error"),
-            })
+            });
         }
     };
 

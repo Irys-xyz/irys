@@ -1,4 +1,4 @@
-use actix_web::{body::BoxBody, HttpResponse, ResponseError};
+use actix_web::{HttpResponse, ResponseError, body::BoxBody};
 use irys_types::{AddressParseError, DataLedger, IrysAddress};
 use serde::Serialize;
 

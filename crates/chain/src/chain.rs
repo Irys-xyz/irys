@@ -6,6 +6,7 @@ use base58::ToBase58 as _;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
+    BlockValidationTracker, DataSyncService, StorageModuleService,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -28,9 +29,8 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_api_server::{create_listener, run_server, ApiState};
+use irys_api_server::{ApiState, create_listener, run_server};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
@@ -38,44 +38,44 @@ use irys_database::{add_genesis_commitments, database};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
-    reth_provider, BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider,
-    ChunkType, EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner,
-    PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState,
-    SupplyStateReadGuard,
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, ChunkType,
+    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
+    reth_provider,
 };
 use irys_p2p::{
-    spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
-    ChainSyncServiceInner, GossipDataHandler, GossipServer, P2PService,
-    ServiceHandleWithShutdownSignal, SyncChainServiceFacade, SyncChainServiceMessage,
+    BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GossipDataHandler,
+    GossipServer, P2PService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
+    SyncChainServiceMessage, spawn_peer_network_service,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
-use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
+use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CommitmentTransaction,
-    Config, ConsensusOptions, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
-    UnixTimestampMs, H256, U256,
+    BlockBody, CommitmentTransaction, Config, ConsensusOptions, H256, IrysBlockHeader, NodeConfig,
+    NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage,
+    RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle,
+    Traced, U256, UnixTimestamp, UnixTimestampMs, app_state::DatabaseProvider,
+    calculate_initial_difficulty,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
+    VdfStep,
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
-    VdfStep,
 };
 use reth::{
     chainspec::ChainSpec,
     tasks::{RuntimeBuilder, RuntimeConfig, TaskExecutor, TokioConfig},
 };
-use reth_db::{transaction::DbTx as _, Database as _};
+use reth_db::{Database as _, transaction::DbTx as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{
@@ -92,7 +92,7 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -363,6 +363,8 @@ pub struct IrysNode {
 
 /// Timeout for stopping the API server during graceful shutdown.
 const API_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for waiting on the forced API stop signal path before moving on.
+const FORCED_API_SERVER_STOP_TIMEOUT: Duration = Duration::from_millis(250);
 /// Timeout for waiting on the actix server task to exit after stop is requested.
 const ACTIX_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Timeout for stopping the gossip service during graceful shutdown.
@@ -1142,7 +1144,18 @@ impl IrysNode {
 
         if !api_stopped_gracefully {
             warn!("Forcing API server shutdown");
-            api_server_handle.stop(false).await;
+            info!(
+                shutdown.phase = "api_stop_forced",
+                "Lifecycle shutdown phase"
+            );
+            let forced_stop = api_server_handle.stop(false);
+            tokio::pin!(forced_stop);
+            match tokio::time::timeout(FORCED_API_SERVER_STOP_TIMEOUT, &mut forced_stop).await {
+                Ok(()) => debug!("API server force-stop completed"),
+                Err(_) => warn!(
+                    "API server force-stop did not return within {FORCED_API_SERVER_STOP_TIMEOUT:?}; proceeding to task join"
+                ),
+            }
         }
 
         info!(shutdown.phase = "api_join", "Lifecycle shutdown phase");

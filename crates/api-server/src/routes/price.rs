@@ -1,16 +1,16 @@
 use actix_web::{
-    web::{self, Path},
     HttpResponse, Result as ActixResult,
+    web::{self, Path},
 };
 use awc::http::StatusCode;
 use irys_types::{
+    CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
-    CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -125,7 +125,11 @@ pub async fn get_price(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
                 bytes_to_store,
                 term_fee,
-                state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
+                state
+                    .config
+                    .consensus
+                    .immediate_tx_inclusion_reward_percent
+                    .amount,
                 number_of_ingress_proofs_total
             );
 

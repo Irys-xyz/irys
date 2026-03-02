@@ -4,10 +4,10 @@ pub mod routes;
 
 use actix_cors::Cors;
 use actix_web::{
+    App, HttpResponse, HttpServer,
     dev::{HttpServiceFactory, Server},
     error::InternalError,
     web::{self, JsonConfig, Redirect},
-    App, HttpResponse, HttpServer,
 };
 use irys_actors::{
     chunk_ingress_service::ChunkIngressMessage, mempool_guard::MempoolReadGuard,
@@ -18,7 +18,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList, SupplyStateReadGuard,
 };
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress, Traced};
+use irys_types::{Config, IrysAddress, PeerAddress, Traced, app_state::DatabaseProvider};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
     mining, peer_list, post_chunk, price, proxy::proxy, storage, tx,
@@ -36,6 +36,12 @@ use crate::routes::anchor;
 
 /// API version prefix for all routes
 pub const API_VERSION: &str = "v1";
+/// Timeout for waiting on internal actor/service replies before failing the request.
+pub const API_INTERNAL_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Timeout for upstream execution-RPC proxy requests.
+pub const API_PROXY_UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Timeout for the embedded actix server's own graceful shutdown before workers are dropped.
+const API_SERVER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -176,7 +182,11 @@ pub fn routes() -> impl HttpServiceFactory {
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
-    info!(custom.port = ?port, "Starting API server");
+    info!(
+        custom.port = ?port,
+        shutdown_timeout_s = API_SERVER_SHUTDOWN_TIMEOUT_SECS,
+        "Starting API server"
+    );
     let state = web::Data::new(app_state);
     HttpServer::new(move || {
         let span = tracing::info_span!(target: "irys-api-http", "api_server");
@@ -206,6 +216,8 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
     })
+    .disable_signals()
+    .shutdown_timeout(API_SERVER_SHUTDOWN_TIMEOUT_SECS)
     .listen(listener)
     .unwrap()
     .run()

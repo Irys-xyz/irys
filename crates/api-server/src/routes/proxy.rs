@@ -1,11 +1,12 @@
 use actix_web::{
-    web::{self, Data, Payload},
     HttpRequest, HttpResponse,
+    web::{self, Data, Payload},
 };
 use awc::Client;
-use std::time::Duration;
+use std::time::Instant;
+use tracing::{debug, info, warn};
 
-use crate::ApiState;
+use crate::{API_PROXY_UPSTREAM_TIMEOUT, ApiState};
 
 #[derive(Debug)]
 pub enum ProxyError {
@@ -41,6 +42,16 @@ pub async fn proxy(
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ProxyError> {
     let target_uri = &state.reth_http_url;
+    let method = req.method().clone();
+    let path = req.path().to_owned();
+    let start = Instant::now();
+
+    info!(
+        http.method = %method,
+        http.path = %path,
+        target = %target_uri,
+        "API proxy request started"
+    );
 
     // Create a new client request
     let mut client_req = match *req.method() {
@@ -54,7 +65,7 @@ pub async fn proxy(
         _ => return Err(ProxyError::MethodNotAllowed),
     }
     .no_decompress() // <- very important!
-    .timeout(Duration::from_secs(30));
+    .timeout(API_PROXY_UPSTREAM_TIMEOUT);
 
     // Forward relevant headers
     for (header_name, header_value) in req.headers() {
@@ -68,11 +79,28 @@ pub async fn proxy(
     let response = match req.method() {
         &actix_web::http::Method::POST
         | &actix_web::http::Method::PUT
-        | &actix_web::http::Method::PATCH => client_req
-            .send_stream(payload)
-            .await
-            .map_err(ProxyError::RequestError)?,
-        _ => client_req.send().await.map_err(ProxyError::RequestError)?,
+        | &actix_web::http::Method::PATCH => {
+            client_req.send_stream(payload).await.map_err(|err| {
+                warn!(
+                    http.method = %method,
+                    http.path = %path,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "API proxy upstream request failed: {}",
+                    err
+                );
+                ProxyError::RequestError(err)
+            })?
+        }
+        _ => client_req.send().await.map_err(|err| {
+            warn!(
+                http.method = %method,
+                http.path = %path,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "API proxy upstream request failed: {}",
+                err
+            );
+            ProxyError::RequestError(err)
+        })?,
     };
 
     // Build response
@@ -86,6 +114,13 @@ pub async fn proxy(
     }
 
     // Stream the response body
+    debug!(
+        http.method = %method,
+        http.path = %path,
+        status = response.status().as_u16(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "API proxy upstream response ready for streaming"
+    );
     Ok(client_response.streaming(response))
 }
 

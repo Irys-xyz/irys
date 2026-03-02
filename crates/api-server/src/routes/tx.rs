@@ -1,8 +1,8 @@
 use crate::error::{ApiError, ApiStatusResponse};
-use crate::ApiState;
+use crate::{API_INTERNAL_REPLY_TIMEOUT, ApiState};
 use actix_web::{
-    web::{self, Json},
     HttpResponse, Result,
+    web::{self, Json},
 };
 use awc::http::StatusCode;
 use irys_actors::{
@@ -11,11 +11,11 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
-    IrysTransactionResponse, SendTraced as _, H256,
+    CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IrysTransactionResponse,
+    SendTraced as _, option_u64_stringify, u64_stringify,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `DataTransactionHeader` type,
@@ -39,7 +39,20 @@ pub async fn post_tx(
         )
             .into());
     }
-    let msg_result = oneshot_rx.await;
+    let msg_result = match tokio::time::timeout(API_INTERNAL_REPLY_TIMEOUT, oneshot_rx).await {
+        Ok(v) => v,
+        Err(_) => {
+            warn!(
+                timeout_ms = API_INTERNAL_REPLY_TIMEOUT.as_millis() as u64,
+                "API /v1/tx timed out waiting for mempool reply"
+            );
+            return Err((
+                "Timed out waiting for transaction ingestion",
+                StatusCode::GATEWAY_TIMEOUT,
+            )
+                .into());
+        }
+    };
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
