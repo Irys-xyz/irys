@@ -1071,14 +1071,17 @@ pub trait BlockProdStrategy {
         let submit_total_chunks =
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
-        let cascade = self
+        let cascade_active = self
             .inner()
             .config
             .consensus
             .hardforks
-            .cascade
-            .as_ref()
-            .filter(|c| current_timestamp.to_secs() >= c.activation_timestamp);
+            .is_cascade_active_for_epoch(&epoch_snapshot);
+        let cascade = if cascade_active {
+            self.inner().config.consensus.hardforks.cascade.as_ref()
+        } else {
+            None
+        };
 
         let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
             let mut txids = H256List::new();
