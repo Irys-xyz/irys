@@ -146,7 +146,6 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
-
         Ok(())
     }
 }

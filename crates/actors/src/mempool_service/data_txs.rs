@@ -211,10 +211,7 @@ impl Inner {
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term ledgers: validate perm_fee rejection and fee structure
                 // (skip EMA pricing check since gossip may come from different fork)
-                if tx
-                    .perm_fee
-                    .is_some_and(|f| f > irys_types::BoundedFee::zero())
-                {
+                if tx.perm_fee.is_some() {
                     return Err(TxIngressError::FundMisalignment(
                         "Term-only ledger transactions must not have a perm_fee".to_string(),
                     ));
@@ -274,10 +271,7 @@ impl Inner {
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term-only ledgers must not carry a perm_fee
-                if tx
-                    .perm_fee
-                    .is_some_and(|f| f > irys_types::BoundedFee::zero())
-                {
+                if tx.perm_fee.is_some() {
                     return Err(TxIngressError::FundMisalignment(
                         "Term-only ledger transactions must not have a perm_fee".to_string(),
                     ));

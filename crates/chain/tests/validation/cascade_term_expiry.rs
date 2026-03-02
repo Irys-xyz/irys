@@ -64,7 +64,7 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
             ctx.get_anchor().await?,
             DataLedger::OneYear,
             BoundedFee::new(price.term_fee),
-            Some(BoundedFee::default()),
+            None,
         )?;
         let tx = signer.sign_transaction(tx)?;
         ctx.ingest_data_tx(tx.header.clone()).await?;
@@ -81,7 +81,7 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
             ctx.get_anchor().await?,
             DataLedger::ThirtyDay,
             BoundedFee::new(price.term_fee),
-            Some(BoundedFee::default()),
+            None,
         )?;
         let tx = signer.sign_transaction(tx)?;
         ctx.ingest_data_tx(tx.header.clone()).await?;

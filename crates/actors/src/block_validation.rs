@@ -2154,7 +2154,7 @@ fn validate_term_only_price(
     block_ema: &EmaSnapshot,
     config: &Config,
 ) -> Result<(), PreValidationError> {
-    if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+    if tx.perm_fee.is_some() {
         return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
     }
 
@@ -2288,7 +2288,7 @@ pub async fn data_txs_are_valid(
 
     // Structural pre-pass: validate term-only ledger txs have no perm_fee
     for tx in one_year_txs.iter().chain(thirty_day_txs) {
-        if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+        if tx.perm_fee.is_some() {
             return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
         }
     }

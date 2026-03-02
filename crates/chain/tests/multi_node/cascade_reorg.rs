@@ -67,7 +67,7 @@ async fn slow_heavy_cascade_reorg_reinjects_term_ledger_txs() -> eyre::Result<()
         genesis_node.get_anchor().await?,
         DataLedger::OneYear,
         BoundedFee::new(one_year_price.term_fee),
-        Some(BoundedFee::default()),
+        None,
     )?;
     let one_year_tx = signer.sign_transaction(one_year_tx)?;
 
@@ -76,7 +76,7 @@ async fn slow_heavy_cascade_reorg_reinjects_term_ledger_txs() -> eyre::Result<()
         genesis_node.get_anchor().await?,
         DataLedger::ThirtyDay,
         BoundedFee::new(thirty_day_price.term_fee),
-        Some(BoundedFee::default()),
+        None,
     )?;
     let thirty_day_tx = signer.sign_transaction(thirty_day_tx)?;
 
