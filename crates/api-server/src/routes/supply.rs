@@ -1,14 +1,14 @@
-use actix_web::{HttpResponse, Responder, ResponseError as _, web};
+use actix_web::{web, HttpResponse, Responder, ResponseError as _};
 use awc::http::StatusCode;
-use eyre::{Result, eyre};
+use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
 use irys_types::IrysBlockHeader;
-use irys_types::{U256, serialization::string_u64};
+use irys_types::{serialization::string_u64, U256};
 use serde::{Deserialize, Serialize};
 
-use crate::ApiState;
 use crate::error::ApiError;
+use crate::ApiState;
 
 const PERCENT_SCALE: u128 = 10000;
 const PERCENT_DIVISOR: u128 = 100;

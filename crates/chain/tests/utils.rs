@@ -1,25 +1,25 @@
 use actix_http::Request;
-use actix_web::App;
 use actix_web::http::StatusCode;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
+use actix_web::App;
 use actix_web::{
-    Error,
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
+    Error,
 };
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
-use eyre::{OptionExt as _, eyre};
+use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
-    MempoolServiceFacadeImpl,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
+    MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes;
@@ -33,8 +33,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    BlockState, BlockTreeEntry, ChainState, ChunkType, CommitmentSnapshotStatus, EmaSnapshot,
-    EpochSnapshot, get_canonical_chain,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
 use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
@@ -45,19 +45,19 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::SendTraced as _;
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::SendTraced as _;
+use irys_types::{
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
+    SystemLedger, H256, U256,
+};
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
-};
-use irys_types::{
-    BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
-    NetworkConfigWithDefaults as _, SealedBlock, SyncMode, SystemLedger, U256,
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -71,7 +71,7 @@ use reth::{
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
-use reth_db::{Database as _, cursor::*};
+use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;

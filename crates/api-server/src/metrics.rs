@@ -2,7 +2,7 @@ use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use irys_utils::ElapsedMs as _;
 use opentelemetry::KeyValue;
 use std::{
-    future::{Future, Ready, ready},
+    future::{ready, Future, Ready},
     pin::Pin,
     time::Instant,
 };

@@ -1,12 +1,12 @@
 use actix_web::{
-    HttpRequest, HttpResponse,
     web::{self, Data, Payload},
+    HttpRequest, HttpResponse,
 };
 use awc::Client;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::{API_PROXY_UPSTREAM_TIMEOUT, ApiState};
+use crate::{ApiState, API_PROXY_UPSTREAM_TIMEOUT};
 
 #[derive(Debug)]
 pub enum ProxyError {

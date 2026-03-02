@@ -1,6 +1,6 @@
-use crate::ApiState;
 use crate::error::ApiError;
-use actix_web::{HttpResponse, Result, web};
+use crate::ApiState;
+use actix_web::{web, HttpResponse, Result};
 use irys_actors::mempool_service::{MempoolServiceMessage, TxReadError};
 use irys_types::SendTraced as _;
 

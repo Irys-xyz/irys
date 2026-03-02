@@ -1,10 +1,10 @@
-use crate::ApiState;
 use crate::error::ApiError;
+use crate::ApiState;
 use actix_web::web::{Data, Json};
 use irys_domain::get_canonical_chain;
 use irys_types::{
+    serialization::{string_u128, string_u64},
     VDFLimiterInfo,
-    serialization::{string_u64, string_u128},
 };
 use serde::{Deserialize, Serialize};
 

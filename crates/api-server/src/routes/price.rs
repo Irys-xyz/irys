@@ -1,16 +1,16 @@
 use actix_web::{
-    HttpResponse, Result as ActixResult,
     web::{self, Path},
+    HttpResponse, Result as ActixResult,
 };
 use awc::http::StatusCode;
 use irys_types::{
-    CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
+    CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ApiState, error::ApiError};
+use crate::{error::ApiError, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

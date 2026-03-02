@@ -1,8 +1,8 @@
-use crate::{ApiState, error::ApiError};
+use crate::{error::ApiError, ApiState};
 use actix_web::{
-    HttpResponse,
     http::header::ContentType,
     web::{self},
+    HttpResponse,
 };
 
 use awc::http::StatusCode;

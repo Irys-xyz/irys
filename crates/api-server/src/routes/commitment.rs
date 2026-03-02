@@ -1,7 +1,7 @@
-use crate::{API_INTERNAL_REPLY_TIMEOUT, ApiState, error::ApiError};
+use crate::{error::ApiError, ApiState, API_INTERNAL_REPLY_TIMEOUT};
 use actix_web::{
-    HttpResponse,
     web::{self, Json},
+    HttpResponse,
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};

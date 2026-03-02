@@ -1,15 +1,15 @@
 use crate::{
-    API_INTERNAL_REPLY_TIMEOUT, ApiState,
     error::{ApiError, ApiStatusResponse},
     metrics::{record_chunk_error, record_chunk_processing_duration, record_chunk_received},
+    ApiState, API_INTERNAL_REPLY_TIMEOUT,
 };
 use actix_web::{
-    HttpResponse,
     http::header::ContentType,
     web::{self, Json},
+    HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::{ChunkIngressError, chunk_ingress_service::ChunkIngressMessage};
+use irys_actors::{chunk_ingress_service::ChunkIngressMessage, ChunkIngressError};
 use irys_types::{SendTraced as _, UnpackedChunk};
 use irys_utils::ElapsedMs as _;
 use std::time::Instant;
