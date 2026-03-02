@@ -90,8 +90,11 @@ impl PdService {
 
                 result = self.block_state_rx.recv() => {
                     match result {
-                        Ok(event) => {
+                        Ok(event) if !event.discarded => {
                             self.handle_block_state_update(event.height);
+                        }
+                        Ok(_) => {
+                            // Discarded block — don't advance height or expire entries.
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(skipped = n, "PdService lagged on block state events");
@@ -194,6 +197,12 @@ impl PdService {
 
     /// Provision chunks for a new PD transaction.
     fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
+        // Guard against duplicate NewTransaction messages — don't regress an already-tracked tx.
+        if self.tracker.get(&tx_hash).is_some() {
+            debug!(tx_hash = %tx_hash, "PD transaction already registered, skipping");
+            return;
+        }
+
         let required_chunks = self.specs_to_keys(&chunk_specs);
         let total_chunks = required_chunks.len();
 
@@ -287,6 +296,12 @@ impl PdService {
     /// Release chunks when a transaction is removed from the mempool.
     fn handle_release_chunks(&mut self, tx_hash: &B256) {
         if let Some(tx_state) = self.tracker.remove(tx_hash) {
+            // If this transaction was locked, unlock its cache entries first
+            // to prevent lock_count from leaking and pinning chunks forever.
+            if tx_state.state == ProvisioningState::Locked {
+                self.cache.unlock_chunks(&tx_state.required_chunks);
+            }
+
             let mut evicted = 0;
             for key in &tx_state.required_chunks {
                 let unreferenced = self.cache.remove_reference(key, tx_hash);
