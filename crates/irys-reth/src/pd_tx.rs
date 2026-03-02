@@ -4,7 +4,9 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{B256, Bytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _};
+use irys_types::range_specifier::{
+    ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _,
+};
 use std::io::{Read, Write};
 
 /// Create a PD access list for a list of ChunkRangeSpecifiers, under the PD precompile address.
