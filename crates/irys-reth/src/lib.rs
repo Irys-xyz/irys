@@ -151,6 +151,7 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
+                pd_chunk_sender: self.pd_chunk_sender.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
@@ -232,6 +233,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
@@ -239,6 +241,7 @@ impl std::fmt::Debug for IrysExecutorBuilder {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
+            .field("pd_chunk_sender", &"<sender>")
             .finish()
     }
 }
@@ -254,7 +257,8 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config)
+            .with_pd_chunk_sender(self.pd_chunk_sender);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
