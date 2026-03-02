@@ -914,6 +914,18 @@ impl Inner {
                     .await;
                 continue;
             }
+            // Skip txs that were already promoted (submit → publish) in a
+            // previous chain instance.  After a node restart the mempool
+            // reconstructs promoted_height from the DB — re-including such
+            // a tx would be redundant and waste block space.
+            if tx.promoted_height().is_some() {
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.promoted_height = ?tx.promoted_height(),
+                    "Skipping tx: already promoted"
+                );
+                continue;
+            }
             match ledger {
                 irys_types::DataLedger::Publish => {
                     // For Publish ledger, validate both term and perm fees
