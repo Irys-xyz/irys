@@ -241,6 +241,8 @@ pub enum PreValidationError {
     InvalidTermFeeStructure { tx_id: H256, reason: String },
     #[error("Transaction {tx_id} has invalid perm fee structure: {reason}")]
     InvalidPermFeeStructure { tx_id: H256, reason: String },
+    #[error("Transaction {tx_id} in Submit ledger must not have a promoted_height")]
+    SubmitTxHasPromotedHeight { tx_id: H256 },
     #[error("Transaction {tx_id} in term-only ledger must not have a perm_fee")]
     TermLedgerTxHasPermFee { tx_id: H256 },
     #[error(
@@ -2282,10 +2284,7 @@ pub async fn data_txs_are_valid(
             });
         }
         if tx.promoted_height().is_some() {
-            tracing::error!(
-                "Transaction {} in Submit ledger should not have a promoted_height",
-                tx.id
-            );
+            return Err(PreValidationError::SubmitTxHasPromotedHeight { tx_id: tx.id });
         }
     }
 
