@@ -11,11 +11,11 @@ use crate::block_status_provider::BlockStatusProvider;
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
-    SyncChainServiceMessage,
     cache::GossipCache,
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
+    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
@@ -25,8 +25,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::Traced;
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::Traced;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -35,9 +35,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{
-    Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, error::SendError,
+    channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{Instrument as _, debug, info, instrument, warn};
+use tracing::{debug, info, instrument, warn, Instrument as _};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
