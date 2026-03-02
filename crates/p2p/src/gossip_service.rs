@@ -11,11 +11,11 @@ use crate::block_status_provider::BlockStatusProvider;
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
+    SyncChainServiceMessage,
     cache::GossipCache,
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
@@ -25,8 +25,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::Traced;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -35,9 +35,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{
-    channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+    Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, error::SendError,
 };
-use tracing::{debug, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, info, instrument, warn};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -416,6 +416,10 @@ pub fn spawn_p2p_server_watcher_task(
                         }
                     }
 
+                    info!(
+                        shutdown.phase = "server_stop_graceful",
+                        "Gossip shutdown phase"
+                    );
                     debug!("Sending stop signal to server handle...");
                     server_handle.stop(true).await;
                     debug!("Server handle stop signal sent, waiting for server to shut down...");
@@ -436,6 +440,7 @@ pub fn spawn_p2p_server_watcher_task(
                         info!("Gossip broadcast already exited");
                         handle_result(res);
                     } else {
+                        info!(shutdown.phase = "broadcast_stop", "Gossip shutdown phase");
                         info!("Stopping gossip broadcast");
                         handle_result(broadcast_task_handle.stop().await);
                     }
@@ -451,6 +456,7 @@ pub fn spawn_p2p_server_watcher_task(
                 },
             );
 
+            info!(shutdown.phase = "server_join", "Gossip shutdown phase");
             match server.await {
                 Ok(()) => {
                     info!("Gossip server stopped");
@@ -459,6 +465,10 @@ pub fn spawn_p2p_server_watcher_task(
                     warn!("Gossip server shutdown error: {}", error);
                 }
             };
+            info!(
+                shutdown.phase = "shutdown_task_join",
+                "Gossip shutdown phase"
+            );
             match tasks_shutdown_handle.await {
                 Ok(()) => {}
                 Err(error) => {
