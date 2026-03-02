@@ -68,6 +68,16 @@ pub enum PdChunkMessage {
         offset: u64,
         response: oneshot::Sender<Option<Arc<Bytes>>>,
     },
+    /// Provision chunks needed for validating a peer block.
+    /// Loads chunks from local storage into cache.
+    /// Responds with Ok(()) when all chunks are cached, or Err with list of missing (ledger, offset).
+    ProvisionBlockChunks {
+        block_hash: B256,
+        chunk_specs: Vec<ChunkRangeSpecifier>,
+        response: oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
+    },
+    /// Release chunks provisioned for a block after validation completes.
+    ReleaseBlockChunks { block_hash: B256 },
 }
 
 /// Sender for PD chunk messages.
