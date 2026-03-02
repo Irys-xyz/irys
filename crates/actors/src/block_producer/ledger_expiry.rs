@@ -668,11 +668,14 @@ fn aggregate_balance_deltas(
 
         // process miner balance increments for storing the term tx
         {
-            // Deduplicate miners - each address should only get one share
+            // Deduplicate miners - each address should only get one share.
+            // BTreeSet ensures deterministic iteration order across all nodes,
+            // which is critical because the fee remainder is assigned to the
+            // first miner in the list.
             let unique_miners: Vec<IrysAddress> = miners_that_stored_this_tx
                 .iter()
                 .copied()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect();
 

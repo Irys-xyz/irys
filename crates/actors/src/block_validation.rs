@@ -2292,8 +2292,38 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Structural pre-pass: validate term-only ledger txs have no perm_fee
-    for tx in one_year_txs.iter().chain(thirty_day_txs) {
+    // Structural pre-pass: validate Publish txs have correct ledger_id
+    for tx in publish_txs {
+        if tx.ledger_id != DataLedger::Publish as u32 {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
+                tx_id: tx.id,
+                expected: DataLedger::Publish as u32,
+                actual: tx.ledger_id,
+            });
+        }
+    }
+
+    // Structural pre-pass: validate term-only ledger txs have correct ledger_id and no perm_fee
+    for tx in one_year_txs {
+        if tx.ledger_id != DataLedger::OneYear as u32 {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
+                tx_id: tx.id,
+                expected: DataLedger::OneYear as u32,
+                actual: tx.ledger_id,
+            });
+        }
+        if tx.perm_fee.is_some() {
+            return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
+        }
+    }
+    for tx in thirty_day_txs {
+        if tx.ledger_id != DataLedger::ThirtyDay as u32 {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
+                tx_id: tx.id,
+                expected: DataLedger::ThirtyDay as u32,
+                actual: tx.ledger_id,
+            });
+        }
         if tx.perm_fee.is_some() {
             return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
         }

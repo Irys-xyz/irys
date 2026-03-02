@@ -1439,6 +1439,12 @@ pub trait BlockProdStrategy {
         mempool_txs
             .submit_tx
             .sort_by(irys_types::DataTransactionHeader::compare_tx);
+        mempool_txs
+            .one_year_tx
+            .sort_by(irys_types::DataTransactionHeader::compare_tx);
+        mempool_txs
+            .thirty_day_tx
+            .sort_by(irys_types::DataTransactionHeader::compare_tx);
         mempool_txs.commitment_tx.sort();
 
         let block_height = prev_block_header.height + 1;
