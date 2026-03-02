@@ -7,7 +7,7 @@ use irys_types::range_specifier::ChunkRangeSpecifier;
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::{B256, bytes::Bytes};
 use reth::tasks::shutdown::Shutdown;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{Instrument as _, debug, info, trace, warn};
@@ -30,6 +30,7 @@ pub struct PdService {
     storage_provider: Arc<dyn RethChunkProvider>,
     block_state_rx: broadcast::Receiver<BlockStateUpdated>,
     current_height: Option<u64>,
+    block_tracker: HashMap<B256, Vec<ChunkKey>>,
 }
 
 impl PdService {
@@ -50,6 +51,7 @@ impl PdService {
             storage_provider,
             block_state_rx,
             current_height: None,
+            block_tracker: HashMap::new(),
         };
 
         let join_handle = runtime_handle.spawn(
@@ -140,6 +142,16 @@ impl PdService {
             } => {
                 let chunk = self.handle_get_chunk(ledger, offset);
                 let _ = response.send(chunk);
+            }
+            PdChunkMessage::ProvisionBlockChunks {
+                block_hash,
+                chunk_specs,
+                response,
+            } => {
+                self.handle_provision_block_chunks(block_hash, chunk_specs, response);
+            }
+            PdChunkMessage::ReleaseBlockChunks { block_hash } => {
+                self.handle_release_block_chunks(&block_hash);
             }
         }
     }
@@ -375,5 +387,211 @@ impl PdService {
                 }
             }
         }
+    }
+
+    /// Provision chunks needed for validating a peer block.
+    /// Loads chunks from local storage into cache, pins them with block_hash as reference.
+    fn handle_provision_block_chunks(
+        &mut self,
+        block_hash: B256,
+        chunk_specs: Vec<ChunkRangeSpecifier>,
+        response: tokio::sync::oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
+    ) {
+        let required_chunks = self.specs_to_keys(&chunk_specs);
+        let chunk_keys: Vec<ChunkKey> = required_chunks.into_iter().collect();
+
+        debug!(
+            block_hash = %block_hash,
+            total_chunks = chunk_keys.len(),
+            "Provisioning PD chunks for block validation"
+        );
+
+        let mut missing = Vec::new();
+
+        for key in &chunk_keys {
+            if self.cache.contains(key) {
+                self.cache.add_reference(key, block_hash);
+            } else {
+                match self
+                    .storage_provider
+                    .get_unpacked_chunk_by_ledger_offset(key.ledger, key.offset)
+                {
+                    Ok(Some(chunk)) => {
+                        self.cache.insert(*key, Arc::new(chunk), block_hash);
+                    }
+                    Ok(None) => {
+                        warn!(
+                            block_hash = %block_hash,
+                            ledger = key.ledger,
+                            offset = key.offset,
+                            "Chunk not found locally for block validation"
+                        );
+                        missing.push((key.ledger, key.offset));
+                    }
+                    Err(e) => {
+                        warn!(
+                            block_hash = %block_hash,
+                            ledger = key.ledger,
+                            offset = key.offset,
+                            error = %e,
+                            "Failed to fetch chunk from storage for block validation"
+                        );
+                        missing.push((key.ledger, key.offset));
+                    }
+                }
+            }
+        }
+
+        self.block_tracker.insert(block_hash, chunk_keys);
+
+        let result = if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        };
+        let _ = response.send(result);
+
+        debug!(
+            block_hash = %block_hash,
+            cached_chunks = self.cache.len(),
+            "Block chunk provisioning complete"
+        );
+    }
+
+    /// Release chunks provisioned for a block after validation completes.
+    fn handle_release_block_chunks(&mut self, block_hash: &B256) {
+        if let Some(chunk_keys) = self.block_tracker.remove(block_hash) {
+            for key in &chunk_keys {
+                let unreferenced = self.cache.remove_reference(key, block_hash);
+                if unreferenced {
+                    self.cache.remove(key);
+                }
+            }
+            trace!(
+                block_hash = %block_hash,
+                released_keys = chunk_keys.len(),
+                "Released block validation chunks"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::chunk_provider::MockChunkProvider;
+    use irys_types::range_specifier::ChunkRangeSpecifier;
+    use tokio::sync::{mpsc, oneshot};
+
+    /// Create a PdService for testing with a mock provider.
+    fn test_service() -> PdService {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_, block_state_rx) = tokio::sync::broadcast::channel(16);
+        let provider = Arc::new(MockChunkProvider::new());
+        let (_, shutdown) = reth::tasks::shutdown::signal();
+        PdService {
+            shutdown,
+            msg_rx: rx,
+            cache: ChunkCache::with_default_capacity(),
+            tracker: ProvisioningTracker::new(),
+            storage_provider: provider,
+            block_state_rx,
+            current_height: None,
+            block_tracker: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_provision_block_chunks_loads_into_cache() {
+        let mut service = test_service();
+        let block_hash = B256::with_last_byte(0xAA);
+        let specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 3,
+        }];
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        service.handle_provision_block_chunks(block_hash, specs, resp_tx);
+
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok(), "All chunks should be available from mock provider");
+
+        // Verify chunks are in cache
+        let key0 = ChunkKey { ledger: 0, offset: 0 };
+        let key1 = ChunkKey { ledger: 0, offset: 1 };
+        let key2 = ChunkKey { ledger: 0, offset: 2 };
+        assert!(service.cache.contains(&key0));
+        assert!(service.cache.contains(&key1));
+        assert!(service.cache.contains(&key2));
+
+        // Verify block is tracked
+        assert!(service.block_tracker.contains_key(&block_hash));
+    }
+
+    #[test]
+    fn test_release_block_chunks_removes_references() {
+        let mut service = test_service();
+        let block_hash = B256::with_last_byte(0xBB);
+        let specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+
+        // Provision
+        let (resp_tx, _) = oneshot::channel();
+        service.handle_provision_block_chunks(block_hash, specs, resp_tx);
+
+        // Verify chunks are cached
+        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
+        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+
+        // Release
+        service.handle_release_block_chunks(&block_hash);
+
+        // Block tracker should be empty
+        assert!(!service.block_tracker.contains_key(&block_hash));
+
+        // Chunks should be removed (no other references)
+        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
+        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+    }
+
+    #[test]
+    fn test_provision_block_chunks_shared_with_tx() {
+        let mut service = test_service();
+        let tx_hash = B256::with_last_byte(0x01);
+        let block_hash = B256::with_last_byte(0xCC);
+
+        // First, provision via a tx (simulating mempool monitor)
+        let tx_specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+        service.handle_provision_chunks(tx_hash, tx_specs);
+
+        // Now provision same chunks for a block
+        let block_specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+        let (resp_tx, resp_rx) = oneshot::channel();
+        service.handle_provision_block_chunks(block_hash, block_specs, resp_tx);
+
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_ok());
+
+        // Release block chunks — tx still references them, so they should stay
+        service.handle_release_block_chunks(&block_hash);
+        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
+        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+
+        // Release tx chunks — now they should be gone
+        service.handle_release_chunks(&tx_hash);
+        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
+        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
     }
 }
