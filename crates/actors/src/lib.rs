@@ -16,6 +16,7 @@ pub mod mining_bus;
 pub mod packing_service;
 pub mod partition_mining_service;
 pub mod pd_pricing;
+pub mod pd_service;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;

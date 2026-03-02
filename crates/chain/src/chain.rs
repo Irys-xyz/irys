@@ -25,7 +25,7 @@ use irys_actors::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
     pledge_provider::MempoolPledgeProvider,
-    reth_service::{ForkChoiceUpdateMessage, PdChunkManager, RethServiceMessage},
+    reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
     BlockValidationTracker, DataSyncService, StorageModuleService,
@@ -869,17 +869,8 @@ impl IrysNode {
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = reth_runtime.clone();
 
-        // Spawn PD chunk manager
-        // Use the chunk_provider from IrysNodeCtx as storage backend
-        let _chunk_provider = self.config.node_config.clone();
-        let pd_chunk_rx_for_manager = pd_chunk_rx;
-        tokio_runtime.handle().spawn(async move {
-            // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
-            let mock_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-            let mut manager = PdChunkManager::new(mock_provider);
-            manager.run(pd_chunk_rx_for_manager).await;
-        });
-        // vdf gets started here...
+        // PD service is spawned inside init_services() where it has access to the real ChunkProvider.
+        // pd_chunk_rx is passed through init_services_thread → init_services.
         // init the services
         let actor_done_rx = Self::init_services_thread(
             self.config.clone(),
@@ -898,6 +889,7 @@ impl IrysNode {
             self.gossip_listener,
             tokio_runtime.handle().clone(),
             shutdown_token.clone(),
+            pd_chunk_rx,
         )?;
 
         let handle = tokio_runtime.handle().clone();
@@ -1106,6 +1098,7 @@ impl IrysNode {
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
+        pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
     ) -> Result<oneshot::Receiver<()>, eyre::Error> {
         let span = tracing::Span::current();
         let (actor_done_tx, actor_done_rx) = oneshot::channel::<()>();
@@ -1139,6 +1132,7 @@ impl IrysNode {
                                 gossip_listener,
                                 runtime_handle,
                                 shutdown_token.clone(),
+                                pd_chunk_rx,
                             )
                             .instrument(tracing::Span::current())
                             .await
@@ -1347,6 +1341,7 @@ impl IrysNode {
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
+        pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -1786,6 +1781,15 @@ impl IrysNode {
         // set up chunk provider
         let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
 
+        // Spawn PD service with real ChunkProvider (replaces the old MockChunkProvider-based PdChunkManager)
+        let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
+            pd_chunk_rx,
+            chunk_provider.clone(),
+            service_senders.subscribe_block_state_updates(),
+            runtime_handle.clone(),
+        );
+        debug!("PD service initialized");
+
         // set up sync service
         let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
             sync_state.clone(),
@@ -1928,6 +1932,7 @@ impl IrysNode {
             services.push(storage_module_handle);
             services.push(data_sync_handle);
             services.push(chunk_migration_handle);
+            services.push(pd_service_handle);
 
             // 5. Sync operations
             services.push(sync_service_handle);
