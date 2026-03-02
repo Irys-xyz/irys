@@ -1443,12 +1443,12 @@ pub async fn shadow_transactions_are_valid(
 
         for tx in evm_block.body.transactions.iter() {
             let input = tx.input();
-            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-                if let Some(access_list) = tx.access_list() {
-                    let chunks = sum_pd_chunks_in_access_list(access_list);
-                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-                    pd_chunk_specs.extend(extract_pd_chunk_specs(access_list));
-                }
+            if let Ok(Some(_header)) = detect_and_decode_pd_header(input)
+                && let Some(access_list) = tx.access_list()
+            {
+                let chunks = sum_pd_chunks_in_access_list(access_list);
+                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+                pd_chunk_specs.extend(extract_pd_chunk_specs(access_list));
             }
         }
 
@@ -1472,11 +1472,13 @@ pub async fn shadow_transactions_are_valid(
     if !pd_chunk_specs.is_empty() {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         pd_chunk_sender
-            .send(irys_types::chunk_provider::PdChunkMessage::ProvisionBlockChunks {
-                block_hash: block.block_hash.into(),
-                chunk_specs: pd_chunk_specs,
-                response: resp_tx,
-            })
+            .send(
+                irys_types::chunk_provider::PdChunkMessage::ProvisionBlockChunks {
+                    block_hash: block.block_hash.into(),
+                    chunk_specs: pd_chunk_specs,
+                    response: resp_tx,
+                },
+            )
             .map_err(|_| eyre::eyre!("PD service channel closed"))?;
 
         match resp_rx
