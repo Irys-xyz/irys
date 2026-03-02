@@ -442,14 +442,27 @@ impl PdService {
             }
         }
 
-        self.block_tracker.insert(block_hash, chunk_keys);
-
-        let result = if missing.is_empty() {
-            Ok(())
+        if missing.is_empty() {
+            self.block_tracker.insert(block_hash, chunk_keys);
+            let _ = response.send(Ok(()));
         } else {
-            Err(missing)
-        };
-        let _ = response.send(result);
+            // Don't track a failed provisioning — the caller will bail and the
+            // partially-loaded chunks will be cleaned up by their absence from
+            // block_tracker (they still have the block_hash reference in the
+            // cache, but a subsequent ReleaseBlockChunks is a no-op, and the
+            // reference will be cleaned up when the cache entry is evicted via
+            // LRU or when we re-provision the same block later).
+            //
+            // Remove references for the chunks that WERE loaded, since we won't
+            // track them for later release.
+            for key in &chunk_keys {
+                let unreferenced = self.cache.remove_reference(key, &block_hash);
+                if unreferenced {
+                    self.cache.remove(key);
+                }
+            }
+            let _ = response.send(Err(missing));
+        }
 
         debug!(
             block_hash = %block_hash,
@@ -515,12 +528,24 @@ mod tests {
         service.handle_provision_block_chunks(block_hash, specs, resp_tx);
 
         let result = resp_rx.blocking_recv().unwrap();
-        assert!(result.is_ok(), "All chunks should be available from mock provider");
+        assert!(
+            result.is_ok(),
+            "All chunks should be available from mock provider"
+        );
 
         // Verify chunks are in cache
-        let key0 = ChunkKey { ledger: 0, offset: 0 };
-        let key1 = ChunkKey { ledger: 0, offset: 1 };
-        let key2 = ChunkKey { ledger: 0, offset: 2 };
+        let key0 = ChunkKey {
+            ledger: 0,
+            offset: 0,
+        };
+        let key1 = ChunkKey {
+            ledger: 0,
+            offset: 1,
+        };
+        let key2 = ChunkKey {
+            ledger: 0,
+            offset: 2,
+        };
         assert!(service.cache.contains(&key0));
         assert!(service.cache.contains(&key1));
         assert!(service.cache.contains(&key2));
@@ -544,8 +569,14 @@ mod tests {
         service.handle_provision_block_chunks(block_hash, specs, resp_tx);
 
         // Verify chunks are cached
-        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
-        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+        assert!(service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 0
+        }));
+        assert!(service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 1
+        }));
 
         // Release
         service.handle_release_block_chunks(&block_hash);
@@ -554,8 +585,14 @@ mod tests {
         assert!(!service.block_tracker.contains_key(&block_hash));
 
         // Chunks should be removed (no other references)
-        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
-        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+        assert!(!service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 0
+        }));
+        assert!(!service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 1
+        }));
     }
 
     #[test]
@@ -586,12 +623,24 @@ mod tests {
 
         // Release block chunks — tx still references them, so they should stay
         service.handle_release_block_chunks(&block_hash);
-        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
-        assert!(service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+        assert!(service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 0
+        }));
+        assert!(service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 1
+        }));
 
         // Release tx chunks — now they should be gone
         service.handle_release_chunks(&tx_hash);
-        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 0 }));
-        assert!(!service.cache.contains(&ChunkKey { ledger: 0, offset: 1 }));
+        assert!(!service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 0
+        }));
+        assert!(!service.cache.contains(&ChunkKey {
+            ledger: 0,
+            offset: 1
+        }));
     }
 }

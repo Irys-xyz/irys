@@ -1492,6 +1492,12 @@ pub async fn shadow_transactions_are_valid(
                 );
             }
             Err(missing) => {
+                tracing::warn!(
+                    block_hash = %block.block_hash,
+                    missing_count = missing.len(),
+                    first_missing = ?missing.iter().take(5).collect::<Vec<_>>(),
+                    "PD chunks not available locally for block validation"
+                );
                 eyre::bail!(
                     "Block {} references {} PD chunks not available locally",
                     block.block_hash,
