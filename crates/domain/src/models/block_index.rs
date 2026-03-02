@@ -187,7 +187,7 @@ impl BlockIndex {
             let ledger_txs = transactions.get_ledger_txs(ledger);
             let chunks_added = calculate_chunks_added(ledger_txs, chunk_size);
 
-            // Publish ledger has no chunks at genesis (genesis block only contains Submit data).
+            // Genesis block has no transactions — start all ledgers at 0 chunks.
             // For all other cases, accumulate from the previous block's total.
             let total_chunks = if is_genesis && ledger == DataLedger::Publish {
                 0
