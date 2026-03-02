@@ -829,6 +829,8 @@ pub trait BlockProdStrategy {
             &self.inner().config.consensus,
             &mempool.commitment_txs_to_bill,
             &mempool.submit_txs,
+            &mempool.one_year_txs,
+            &mempool.thirty_day_txs,
             &mempool.publish_txs,
             initial_treasury_balance,
             &mempool.aggregated_miner_fees,

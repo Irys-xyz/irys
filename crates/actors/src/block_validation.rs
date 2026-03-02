@@ -1625,8 +1625,10 @@ async fn generate_expected_shadow_transactions(
         transactions.get_ledger_system_txs(SystemLedger::Commitment)
     };
 
-    // Use pre-fetched submit ledger transactions
+    // Use pre-fetched data ledger transactions
     let data_txs = transactions.get_ledger_txs(DataLedger::Submit).to_vec();
+    let one_year_txs = transactions.get_ledger_txs(DataLedger::OneYear).to_vec();
+    let thirty_day_txs = transactions.get_ledger_txs(DataLedger::ThirtyDay).to_vec();
 
     // Use pre-fetched publish ledger transactions with proofs from block header
     let cascade_active = config
@@ -1715,6 +1717,8 @@ async fn generate_expected_shadow_transactions(
         &config.consensus,
         commitment_txs,
         &data_txs,
+        &one_year_txs,
+        &thirty_day_txs,
         &publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,

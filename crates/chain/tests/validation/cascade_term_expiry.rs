@@ -1,6 +1,8 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_types::{hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig, UnixTimestamp};
+use irys_types::{
+    hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig, UnixTimestamp, U256,
+};
 
 /// Verify that OneYear and ThirtyDay term ledgers expire at different rates
 /// based on their distinct epoch_length values from the Cascade hardfork config.
@@ -92,6 +94,20 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
     let inclusion_block = ctx.mine_block().await?;
     let inclusion_height = inclusion_block.height;
 
+    // Track treasury balance — it should increase when term txs are included
+    // (95% of each term_fee goes to treasury) and must never go negative.
+    let treasury_after_inclusion = inclusion_block.treasury;
+    tracing::info!(
+        "Treasury after inclusion block {}: {}",
+        inclusion_height,
+        treasury_after_inclusion
+    );
+    assert!(
+        treasury_after_inclusion > U256::zero(),
+        "Treasury should be positive after term tx inclusion (got {})",
+        treasury_after_inclusion
+    );
+
     let next_epoch_boundary = |h: u64| -> u64 {
         if h.is_multiple_of(num_blocks_in_epoch) {
             h
@@ -125,6 +141,24 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
             snapshot.get_first_unexpired_slot_index(DataLedger::OneYear),
         )
     };
+
+    // Verify treasury never went negative through the mid-boundary mining.
+    // Check every block from inclusion to mid_boundary.
+    for h in (inclusion_height + 1)..=mid_boundary {
+        let block = ctx.get_block_by_height(h).await?;
+        assert!(
+            block.treasury >= U256::zero(),
+            "Treasury must never go negative (height={}, treasury={})",
+            h,
+            block.treasury
+        );
+    }
+    let mid_treasury = mid_block.treasury;
+    tracing::info!(
+        "Treasury at mid-boundary {}: {}",
+        mid_boundary,
+        mid_treasury
+    );
 
     // ThirtyDay partitions should have been expired at this boundary
     assert!(
@@ -170,6 +204,23 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
             snapshot.get_first_unexpired_slot_index(DataLedger::OneYear),
         )
     };
+
+    // Verify treasury never went negative through the late-boundary mining.
+    for h in (mid_boundary + 1)..=late_boundary {
+        let block = ctx.get_block_by_height(h).await?;
+        assert!(
+            block.treasury >= U256::zero(),
+            "Treasury must never go negative (height={}, treasury={})",
+            h,
+            block.treasury
+        );
+    }
+    let late_treasury = late_block.treasury;
+    tracing::info!(
+        "Treasury at late-boundary {}: {}",
+        late_boundary,
+        late_treasury
+    );
 
     // OneYear partitions should now have expired
     assert!(
