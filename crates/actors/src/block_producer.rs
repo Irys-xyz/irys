@@ -1245,12 +1245,18 @@ pub trait BlockProdStrategy {
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
 
-        // Build BlockTransactions from the mempool bundle
+        // Build BlockTransactions from the mempool bundle.
+        // Clear internal metadata (promoted_height, included_height) so block
+        // contents match wire format — metadata is mempool-internal state and
+        // must not leak into produced blocks.
         let mut all_data_txs = Vec::new();
         all_data_txs.extend(mempool_bundle.submit_txs);
         all_data_txs.extend(mempool_bundle.one_year_txs);
         all_data_txs.extend(mempool_bundle.thirty_day_txs);
         all_data_txs.extend(mempool_bundle.publish_txs.txs);
+        for tx in &mut all_data_txs {
+            *tx.metadata_mut() = Default::default();
+        }
 
         let block_body = BlockBody {
             block_hash: irys_block.block_hash,
