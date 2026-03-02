@@ -324,20 +324,31 @@ fn calculate_cpu_stats(samples: &[CpuSample]) -> CalculatedCpuStats {
 
     let near_peak_threshold = peak_cpu * 0.8;
 
-    let (time_at_p90_ms, time_near_peak_ms, time_above_1t_ms, time_above_2t_ms, time_above_3t_ms, time_above_4t_ms) =
-        samples.iter().zip(deltas.iter()).fold(
-            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
-            |(p90, near_peak, a1, a2, a3, a4), (s, &d)| {
-                (
-                    p90 + if s.cpu_threads >= p90_cpu { d } else { 0 },
-                    near_peak + if s.cpu_threads >= near_peak_threshold { d } else { 0 },
-                    a1 + if s.cpu_threads > 1.0 { d } else { 0 },
-                    a2 + if s.cpu_threads > 2.0 { d } else { 0 },
-                    a3 + if s.cpu_threads > 3.0 { d } else { 0 },
-                    a4 + if s.cpu_threads > 4.0 { d } else { 0 },
-                )
-            },
-        );
+    let (
+        time_at_p90_ms,
+        time_near_peak_ms,
+        time_above_1t_ms,
+        time_above_2t_ms,
+        time_above_3t_ms,
+        time_above_4t_ms,
+    ) = samples.iter().zip(deltas.iter()).fold(
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
+        |(p90, near_peak, a1, a2, a3, a4), (s, &d)| {
+            (
+                p90 + if s.cpu_threads >= p90_cpu { d } else { 0 },
+                near_peak
+                    + if s.cpu_threads >= near_peak_threshold {
+                        d
+                    } else {
+                        0
+                    },
+                a1 + if s.cpu_threads > 1.0 { d } else { 0 },
+                a2 + if s.cpu_threads > 2.0 { d } else { 0 },
+                a3 + if s.cpu_threads > 3.0 { d } else { 0 },
+                a4 + if s.cpu_threads > 4.0 { d } else { 0 },
+            )
+        },
+    );
 
     CalculatedCpuStats {
         peak_cpu,
@@ -385,8 +396,7 @@ fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
 
     let n = rss_values.len();
     let peak_rss_bytes = rss_values[n - 1];
-    let avg_rss_bytes =
-        (rss_values.iter().map(|&v| v as u128).sum::<u128>() / n as u128) as u64;
+    let avg_rss_bytes = (rss_values.iter().map(|&v| v as u128).sum::<u128>() / n as u128) as u64;
 
     let p50_rss_bytes = rss_values[(n * 50 / 100).min(n - 1)];
     let p90_rss_bytes = rss_values[(n * 90 / 100).min(n - 1)];
@@ -394,17 +404,16 @@ fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
     let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
     let deltas = sample_deltas(&elapsed_values);
 
-    let (time_above_100mb_ms, time_above_500mb_ms, time_above_1gb_ms) =
-        samples.iter().zip(deltas.iter()).fold(
-            (0u64, 0u64, 0u64),
-            |(a100, a500, a1g), (s, &d)| {
-                (
-                    a100 + if s.rss_bytes > MB_100 { d } else { 0 },
-                    a500 + if s.rss_bytes > MB_500 { d } else { 0 },
-                    a1g + if s.rss_bytes > GB_1 { d } else { 0 },
-                )
-            },
-        );
+    let (time_above_100mb_ms, time_above_500mb_ms, time_above_1gb_ms) = samples
+        .iter()
+        .zip(deltas.iter())
+        .fold((0u64, 0u64, 0u64), |(a100, a500, a1g), (s, &d)| {
+            (
+                a100 + if s.rss_bytes > MB_100 { d } else { 0 },
+                a500 + if s.rss_bytes > MB_500 { d } else { 0 },
+                a1g + if s.rss_bytes > GB_1 { d } else { 0 },
+            )
+        });
 
     CalculatedMemoryStats {
         peak_rss_bytes,
@@ -578,11 +587,11 @@ mod tests {
                 rss_bytes: 200 * 1024 * 1024, // 200MB
             },
             MemorySample {
-                elapsed_ms: 180, // 120ms gap
+                elapsed_ms: 180,              // 120ms gap
                 rss_bytes: 600 * 1024 * 1024, // 600MB
             },
             MemorySample {
-                elapsed_ms: 210, // 30ms gap
+                elapsed_ms: 210,             // 30ms gap
                 rss_bytes: 50 * 1024 * 1024, // 50MB
             },
         ];

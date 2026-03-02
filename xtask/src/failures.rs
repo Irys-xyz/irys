@@ -338,9 +338,15 @@ mod tests {
         let loaded = RunResults::load_from(&path);
         let (passed, failed) = loaded.into_sets();
         assert!(passed.contains("test::one"), "test::one should be passed");
-        assert!(!failed.contains("test::one"), "test::one should NOT be failed");
+        assert!(
+            !failed.contains("test::one"),
+            "test::one should NOT be failed"
+        );
         assert!(failed.contains("test::two"), "test::two should be failed");
-        assert!(!passed.contains("test::two"), "test::two should NOT be passed");
+        assert!(
+            !passed.contains("test::two"),
+            "test::two should NOT be passed"
+        );
     }
 
     #[test]
