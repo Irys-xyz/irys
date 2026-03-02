@@ -224,7 +224,9 @@ impl Inner {
                     TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e))
                 })?;
             }
-            DataLedger::Submit => unreachable!("submit is not user-targetable"),
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
         }
 
         // Shared post-processing
@@ -285,7 +287,9 @@ impl Inner {
                         ))
                     })?;
             }
-            DataLedger::Submit => unreachable!("submit is not user-targetable"),
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
         }
 
         // Shared post-processing
@@ -378,8 +382,9 @@ impl Inner {
 
         let cascade = self.config.consensus.hardforks.cascade.as_ref();
         let epoch_length = match ledger {
-            DataLedger::Publish | DataLedger::Submit => {
-                self.config.consensus.epoch.submit_ledger_epoch_length
+            DataLedger::Publish => self.config.consensus.epoch.submit_ledger_epoch_length,
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
             DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).ok_or_else(|| {
                 TxIngressError::FundMisalignment(
@@ -400,13 +405,17 @@ impl Inner {
             epoch_length,
         );
 
-        // Submit uses the full ingress proof replica count (part of perm pipeline).
+        // Publish uses the full ingress proof replica count (part of perm pipeline).
         // OneYear/ThirtyDay have no ingress proofs — replica count is 1.
+        // Submit is already rejected above.
         let replica_count = match ledger {
-            DataLedger::Publish | DataLedger::Submit => self
+            DataLedger::Publish => self
                 .config
                 .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
             DataLedger::OneYear | DataLedger::ThirtyDay => 1,
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
         };
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
