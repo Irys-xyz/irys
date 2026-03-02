@@ -2,15 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::pd_tx::sum_pd_chunks_in_access_list;
+use crate::pd_tx::{extract_pd_chunk_specs, sum_pd_chunks_in_access_list};
 use alloy_consensus::Transaction as _;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
 use irys_types::UnixTimestamp;
 use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
 use irys_types::hardfork_config::IrysHardforkConfig;
-use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArg};
 use reth::{
     api::FullNodeTypes,
     builder::{BuilderContext, components::PoolBuilder},
@@ -33,7 +31,7 @@ use reth_transaction_pool::{
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
 use std::marker::PhantomData;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::IrysEthereumNode;
 
@@ -447,29 +445,6 @@ where
 // ============================================================================
 // PD Transaction Monitoring
 // ============================================================================
-
-/// Extracts PD chunk range specifiers from a transaction's access list.
-///
-/// Returns all `ChunkRangeSpecifier` entries found under the PD precompile address.
-/// Invalid encodings are logged as warnings and skipped.
-fn extract_pd_chunk_specs(
-    access_list: &alloy_eips::eip2930::AccessList,
-) -> Vec<ChunkRangeSpecifier> {
-    access_list
-        .0
-        .iter()
-        .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
-        .flat_map(|item| item.storage_keys.iter())
-        .filter_map(|key| match PdAccessListArg::decode(&key.0) {
-            Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec),
-            Ok(PdAccessListArg::ByteRead(_)) => None, // ByteRead doesn't need provisioning
-            Err(e) => {
-                warn!("Invalid PD access list key encoding, skipping: {}", e);
-                None
-            }
-        })
-        .collect()
-}
 
 /// Monitors the transaction pool for PD transactions and sends messages to the PdChunkManager.
 ///

@@ -4,7 +4,7 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{B256, Bytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{PdAccessListArg, PdAccessListArgSerde as _};
+use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _};
 use std::io::{Read, Write};
 
 /// Create a PD access list for a list of ChunkRangeSpecifiers, under the PD precompile address.
@@ -154,6 +154,29 @@ pub fn detect_and_decode_pd_header(
     let header = PdHeaderV1::deserialize_reader(&mut rdr)?;
     let consumed = input.len() - rdr.len();
     Ok(Some((header, consumed)))
+}
+
+/// Extracts PD chunk range specifiers from a transaction's access list.
+///
+/// Returns all `ChunkRangeSpecifier` entries found under the PD precompile address.
+/// Invalid encodings are logged as warnings and skipped.
+pub fn extract_pd_chunk_specs(
+    access_list: &alloy_eips::eip2930::AccessList,
+) -> Vec<ChunkRangeSpecifier> {
+    access_list
+        .0
+        .iter()
+        .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
+        .flat_map(|item| item.storage_keys.iter())
+        .filter_map(|key| match PdAccessListArg::decode(&key.0) {
+            Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec),
+            Ok(PdAccessListArg::ByteRead(_)) => None,
+            Err(e) => {
+                tracing::warn!("Invalid PD access list key encoding, skipping: {}", e);
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
