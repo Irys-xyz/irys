@@ -48,6 +48,7 @@ where
     data_handler: Arc<GossipDataHandler<M, B>>,
     peer_list: PeerList,
     chunk_semaphore: Arc<tokio::sync::Semaphore>,
+    actix_workers: usize,
 }
 
 impl<M, B> Clone for GossipServer<M, B>
@@ -60,6 +61,7 @@ where
             data_handler: self.data_handler.clone(),
             peer_list: self.peer_list.clone(),
             chunk_semaphore: self.chunk_semaphore.clone(),
+            actix_workers: self.actix_workers,
         }
     }
 }
@@ -73,6 +75,7 @@ where
         gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
         max_concurrent_chunks: usize,
+        actix_workers: usize,
     ) -> Self {
         let effective_limit = if max_concurrent_chunks == 0 {
             warn!("max_concurrent_gossip_chunks is 0, treating as unlimited");
@@ -84,6 +87,7 @@ where
             data_handler: gossip_server_data_handler,
             peer_list,
             chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(effective_limit)),
+            actix_workers,
         }
     }
 
@@ -1579,10 +1583,14 @@ where
     /// If the server fails to bind to the specified address and port, an error is returned.
     pub(crate) fn run(self, listener: TcpListener) -> GossipResult<Server> {
         let node_id = self.data_handler.gossip_client.mining_address;
-        debug!("Node {}: Starting the gossip server", node_id);
+        let actix_workers = self.actix_workers;
+        debug!(
+            "Node {}: Starting the gossip server (actix_workers={:?})",
+            node_id, actix_workers
+        );
         let server = self;
 
-        let server_handle = HttpServer::new(move || {
+        let mut server_handle = HttpServer::new(move || {
             let span = tracing::info_span!(target: "irys-api-gossip", "gossip_server");
             let _guard = span.enter();
 
@@ -1592,10 +1600,15 @@ where
                 .wrap(TracingLogger::default())
                 .service(Self::routes())
         })
+        .disable_signals()
         .shutdown_timeout(5)
-        .keep_alive(actix_web::http::KeepAlive::Disabled)
-        .listen(listener)
-        .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?;
+        .keep_alive(actix_web::http::KeepAlive::Disabled);
+
+        server_handle = server_handle.workers(actix_workers.max(1));
+
+        let server_handle = server_handle.listen(listener).map_err(|error| {
+            GossipError::Internal(InternalGossipError::Unknown(error.to_string()))
+        })?;
 
         debug!(
             "Node {}: Gossip server listens on {:?}",

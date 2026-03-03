@@ -349,6 +349,12 @@ macro_rules! impl_network_config_with_defaults {
     };
 }
 
+fn default_embedded_actix_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| core::cmp::max(1, count.get() / 2))
+        .unwrap_or(1)
+}
+
 /// # Gossip Network Configuration
 ///
 /// Settings for peer-to-peer communication between nodes.
@@ -365,6 +371,11 @@ pub struct GossipConfig {
     pub bind_ip: Option<String>,
     /// The port number the gossip service listens on
     pub bind_port: u16,
+    /// Embedded Actix worker count for the gossip service.
+    /// Defaults to half of the available system threads because API and gossip
+    /// share the same host by default.
+    #[serde(default = "default_embedded_actix_workers")]
+    pub actix_workers: usize,
 }
 
 impl_network_config_with_defaults!(GossipConfig);
@@ -490,6 +501,11 @@ pub struct HttpConfig {
     pub bind_ip: Option<String>,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
+    /// Embedded Actix worker count for the API service.
+    /// Defaults to half of the available system threads because API and gossip
+    /// share the same host by default.
+    #[serde(default = "default_embedded_actix_workers")]
+    pub actix_workers: usize,
 }
 
 impl_network_config_with_defaults!(HttpConfig);
@@ -851,6 +867,7 @@ impl NodeConfig {
                 public_port: 0,
                 bind_ip: None,
                 bind_port: 0,
+                actix_workers: default_embedded_actix_workers(),
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
@@ -879,6 +896,7 @@ impl NodeConfig {
                 public_port: 0,
                 bind_ip: None,
                 bind_port: 0,
+                actix_workers: default_embedded_actix_workers(),
             },
             mempool: MempoolNodeConfig {
                 max_pending_pledge_items: 100,
@@ -997,6 +1015,7 @@ impl NodeConfig {
                 public_port: 8081,
                 bind_ip: None,
                 bind_port: 8081,
+                actix_workers: default_embedded_actix_workers(),
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
@@ -1025,6 +1044,7 @@ impl NodeConfig {
                 public_port: 8080,
                 bind_ip: None,
                 bind_port: 8080,
+                actix_workers: default_embedded_actix_workers(),
             },
 
             mempool: MempoolNodeConfig {

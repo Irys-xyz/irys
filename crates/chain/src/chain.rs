@@ -30,7 +30,7 @@ use irys_actors::{
     validation_service::ValidationService,
     BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_api_server::{create_listener, run_server, ApiState};
+use irys_api_server::{create_listener, run_server, ApiState, API_VERSION};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
@@ -79,7 +79,7 @@ use reth_db::{transaction::DbTx as _, Database as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{
-    net::TcpListener,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -169,6 +169,7 @@ impl IrysNodeCtx {
                 .node_config
                 .p2p_gossip
                 .max_concurrent_gossip_chunks,
+            self.config.node_config.gossip.actix_workers,
         )
     }
 
@@ -364,6 +365,8 @@ pub struct IrysNode {
 
 /// Timeout for stopping the API server during graceful shutdown.
 const API_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for waiting for the embedded API server to begin serving requests during startup.
+const API_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for waiting on the forced API stop signal path before moving on.
 const FORCED_API_SERVER_STOP_TIMEOUT: Duration = Duration::from_millis(250);
 /// Timeout for waiting on the actix server task to exit after stop is requested.
@@ -890,6 +893,20 @@ impl IrysNode {
         //  going to wait for sync otherwise.
         ctx.sync_service_facade.initial_sync().await?;
 
+        let api_probe_addr = Self::api_probe_addr(&ctx.config.node_config)?;
+        info!(
+            startup.phase = "api_ready_wait",
+            api.addr = %api_probe_addr,
+            timeout = ?API_SERVER_READY_TIMEOUT,
+            "Waiting for API server readiness"
+        );
+        if let Err(err) = Self::wait_for_api_ready(api_probe_addr, API_SERVER_READY_TIMEOUT).await {
+            error!(error = ?err, "API server failed readiness check during startup");
+            ctx.stop(ShutdownReason::Signal("api_readiness_failed".to_string()))
+                .await;
+            return Err(err.wrap_err("API server did not become ready during node startup"));
+        }
+
         // Call stake_and_pledge after mempool service is initialized
         if ctx.config.node_config.stake_pledge_drives {
             let block_tree_guard = ctx.block_tree_guard.clone();
@@ -1026,6 +1043,61 @@ impl IrysNode {
         }
 
         Ok(ctx)
+    }
+
+    fn api_probe_addr(node_config: &NodeConfig) -> eyre::Result<SocketAddr> {
+        let bind_ip = node_config.http.bind_ip(&node_config.network_defaults);
+        let parsed_ip: IpAddr = bind_ip
+            .parse()
+            .wrap_err_with(|| format!("invalid HTTP bind IP for readiness probe: {bind_ip}"))?;
+        let probe_ip = match parsed_ip {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        };
+
+        Ok(SocketAddr::new(probe_ip, node_config.http.bind_port))
+    }
+
+    async fn wait_for_api_ready(addr: SocketAddr, timeout: Duration) -> eyre::Result<()> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(250))
+            .timeout(Duration::from_millis(250))
+            .build()?;
+        let url = format!("http://{addr}/{API_VERSION}/ready");
+        let started_at = tokio::time::Instant::now();
+        let deadline = started_at + timeout;
+
+        loop {
+            match client.get(&url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!(
+                        startup.phase = "api_ready",
+                        api.addr = %addr,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        "API server readiness confirmed"
+                    );
+                    return Ok(());
+                }
+                Ok(response) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(eyre::eyre!(
+                            "API server at {addr} did not become ready within {timeout:?} (unexpected status {})",
+                            response.status()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(eyre::eyre!(
+                            "API server at {addr} did not become ready within {timeout:?} ({error})"
+                        ));
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Single async lifecycle task that replaces the old init_services_thread + init_reth_thread.

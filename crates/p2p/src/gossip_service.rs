@@ -222,6 +222,7 @@ impl P2PService {
             Arc::clone(&gossip_data_handler),
             peer_list.clone(),
             config.node_config.p2p_gossip.max_concurrent_gossip_chunks,
+            config.node_config.gossip.actix_workers,
         );
 
         let server = server.run(listener)?;

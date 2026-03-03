@@ -23,6 +23,10 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         .body(serde_json::to_string_pretty(&node_info).unwrap())
 }
 
+pub async fn ready_route() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
 pub async fn genesis_route(state: web::Data<ApiState>) -> HttpResponse {
     let genesis_hash = state
         .block_index
