@@ -1,7 +1,7 @@
 use crate::{
     error::{ApiError, ApiStatusResponse},
     metrics::{record_chunk_error, record_chunk_processing_duration, record_chunk_received},
-    ApiState, API_INTERNAL_REPLY_TIMEOUT,
+    ApiState,
 };
 use actix_web::{
     http::header::ContentType,
@@ -51,8 +51,8 @@ pub async fn post_chunk(
     }
 
     // Handle errors in reading the oneshot response
-    let msg_result = match tokio::time::timeout(API_INTERNAL_REPLY_TIMEOUT, oneshot_rx).await {
-        Ok(Err(err)) => {
+    let msg_result = match oneshot_rx.await {
+        Err(err) => {
             tracing::error!(
                 "API: Errors reading the chunk ingress oneshot response {:?}",
                 err
@@ -64,21 +64,7 @@ pub async fn post_chunk(
             )
                 .into());
         }
-        Ok(Ok(v)) => v,
-        Err(_) => {
-            warn!(
-                chunk.data_root = ?data_root,
-                chunk.tx_offset = ?number,
-                timeout_ms = API_INTERNAL_REPLY_TIMEOUT.as_millis() as u64,
-                "Timed out waiting for chunk ingress reply"
-            );
-            record_chunk_error("timeout", false);
-            return Err((
-                "Timed out waiting for chunk ingestion",
-                StatusCode::GATEWAY_TIMEOUT,
-            )
-                .into());
-        }
+        Ok(v) => v,
     };
 
     // If we received a response, check for validation errors within the response

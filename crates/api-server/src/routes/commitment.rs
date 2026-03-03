@@ -1,4 +1,4 @@
-use crate::{error::ApiError, ApiState, API_INTERNAL_REPLY_TIMEOUT};
+use crate::{error::ApiError, ApiState};
 use actix_web::{
     web::{self, Json},
     HttpResponse,
@@ -6,7 +6,6 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_types::{CommitmentTransaction, SendTraced as _, UnixTimestamp, VersionDiscriminant as _};
-use tracing::warn;
 
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
@@ -55,19 +54,7 @@ async fn process_commitment_transaction(
         )));
     }
 
-    let msg_result = match tokio::time::timeout(API_INTERNAL_REPLY_TIMEOUT, oneshot_rx).await {
-        Ok(v) => v,
-        Err(_) => {
-            warn!(
-                timeout_ms = API_INTERNAL_REPLY_TIMEOUT.as_millis() as u64,
-                "API /v1/commitment-tx timed out waiting for mempool reply"
-            );
-            return Err(ApiError::from((
-                "Timed out waiting for commitment ingestion",
-                StatusCode::GATEWAY_TIMEOUT,
-            )));
-        }
-    };
+    let msg_result = oneshot_rx.await;
 
     if let Err(err) = msg_result {
         tracing::error!("API: {}", err);

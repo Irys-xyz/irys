@@ -36,10 +36,6 @@ use crate::routes::anchor;
 
 /// API version prefix for all routes
 pub const API_VERSION: &str = "v1";
-/// Timeout for waiting on internal actor/service replies before failing the request.
-pub const API_INTERNAL_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Timeout for upstream execution-RPC proxy requests.
-pub const API_PROXY_UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Timeout for the embedded actix server's own graceful shutdown before workers are dropped.
 const API_SERVER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 

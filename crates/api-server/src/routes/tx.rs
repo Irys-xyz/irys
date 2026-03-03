@@ -1,5 +1,5 @@
 use crate::error::{ApiError, ApiStatusResponse};
-use crate::{ApiState, API_INTERNAL_REPLY_TIMEOUT};
+use crate::ApiState;
 use actix_web::{
     web::{self, Json},
     HttpResponse, Result,
@@ -15,7 +15,7 @@ use irys_types::{
     IrysTransactionResponse, SendTraced as _, H256,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `DataTransactionHeader` type,
@@ -39,20 +39,7 @@ pub async fn post_tx(
         )
             .into());
     }
-    let msg_result = match tokio::time::timeout(API_INTERNAL_REPLY_TIMEOUT, oneshot_rx).await {
-        Ok(v) => v,
-        Err(_) => {
-            warn!(
-                timeout_ms = API_INTERNAL_REPLY_TIMEOUT.as_millis() as u64,
-                "API /v1/tx timed out waiting for mempool reply"
-            );
-            return Err((
-                "Timed out waiting for transaction ingestion",
-                StatusCode::GATEWAY_TIMEOUT,
-            )
-                .into());
-        }
-    };
+    let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
