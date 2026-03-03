@@ -319,14 +319,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             if only_check {
                 cmd!(sh, "cargo fmt --check {args...}").remove_and_run()?;
             } else {
-                println!("cargo fmt & fix & clippy fix");
+                println!("cargo fmt & clippy fix");
                 cmd!(sh, "cargo fmt --all").remove_and_run()?;
-                let args_clone = args.clone();
-                cmd!(
-                    sh,
-                    "cargo fix --allow-dirty --allow-staged --workspace --tests {args_clone...}"
-                )
-                .remove_and_run()?;
+                // clippy --fix applies both rustc and clippy suggestions, so a
+                // separate `cargo fix` pass is unnecessary and would force a full
+                // recompile (clippy uses a different compiler driver).
+                let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
                 cmd!(
                     sh,
                     "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests {args...}"
@@ -372,9 +370,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 },
                 sh,
             )?;
-            {
-                // push -D warnings to mimic CI for both check and clippy so they
-                // share the same compilation cache (avoids a full recompile between steps)
+            if !fix {
+                // When --fix is used, `cargo fix` and `cargo clippy --fix` (in the
+                // Fmt handler) already compile the full workspace with -D warnings
+                // and would fail on any issues, so these verification steps are only
+                // needed for the non-fix (check-only) path.
                 let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
                 run_command(
                     Commands::Check {
