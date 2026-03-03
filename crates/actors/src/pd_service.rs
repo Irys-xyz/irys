@@ -2,7 +2,7 @@ pub mod cache;
 pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
-use irys_types::chunk_provider::{PdChunkMessage, PdChunkReceiver, RethChunkProvider};
+use irys_types::chunk_provider::{ChunkTable, PdChunkMessage, PdChunkReceiver, RethChunkProvider};
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::{B256, bytes::Bytes};
@@ -19,9 +19,8 @@ use irys_types::TokioServiceHandle;
 ///
 /// It handles the full lifecycle:
 /// 1. New PD transaction → fetch required chunks from storage into LRU cache
-/// 2. Payload building → check readiness, lock chunks during execution
-/// 3. Transaction removal → release references, let LRU evict unused chunks
-/// 4. Block state updates → expire stale provisioning entries
+/// 2. Transaction removal → release references, let LRU evict unused chunks
+/// 3. Block state updates → expire stale provisioning entries
 pub struct PdService {
     shutdown: Shutdown,
     msg_rx: PdChunkReceiver,
@@ -30,7 +29,6 @@ pub struct PdService {
     storage_provider: Arc<dyn RethChunkProvider>,
     block_state_rx: broadcast::Receiver<BlockStateUpdated>,
     current_height: Option<u64>,
-    block_tracker: HashMap<B256, Vec<ChunkKey>>,
 }
 
 impl PdService {
@@ -51,7 +49,6 @@ impl PdService {
             storage_provider,
             block_state_rx,
             current_height: None,
-            block_tracker: HashMap::new(),
         };
 
         let join_handle = runtime_handle.spawn(
@@ -128,30 +125,9 @@ impl PdService {
                 let ready = self.handle_is_ready(&tx_hash);
                 let _ = response.send(ready);
             }
-            PdChunkMessage::Lock { tx_hash, response } => {
-                let locked = self.handle_lock(&tx_hash);
-                let _ = response.send(locked);
-            }
-            PdChunkMessage::Unlock { tx_hash } => {
-                self.handle_unlock(&tx_hash);
-            }
-            PdChunkMessage::GetChunk {
-                ledger,
-                offset,
-                response,
-            } => {
-                let chunk = self.handle_get_chunk(ledger, offset);
-                let _ = response.send(chunk);
-            }
-            PdChunkMessage::ProvisionBlockChunks {
-                block_hash,
-                chunk_specs,
-                response,
-            } => {
-                self.handle_provision_block_chunks(block_hash, chunk_specs, response);
-            }
-            PdChunkMessage::ReleaseBlockChunks { block_hash } => {
-                self.handle_release_block_chunks(&block_hash);
+            PdChunkMessage::GetChunksBatch { keys, response } => {
+                let table = self.handle_get_chunks_batch(keys);
+                let _ = response.send(table);
             }
         }
     }
@@ -308,12 +284,6 @@ impl PdService {
     /// Release chunks when a transaction is removed from the mempool.
     fn handle_release_chunks(&mut self, tx_hash: &B256) {
         if let Some(tx_state) = self.tracker.remove(tx_hash) {
-            // If this transaction was locked, unlock its cache entries first
-            // to prevent lock_count from leaking and pinning chunks forever.
-            if tx_state.state == ProvisioningState::Locked {
-                self.cache.unlock_chunks(&tx_state.required_chunks);
-            }
-
             let mut evicted = 0;
             for key in &tx_state.required_chunks {
                 let unreferenced = self.cache.remove_reference(key, tx_hash);
@@ -335,30 +305,6 @@ impl PdService {
     /// Check if chunks for a transaction are ready.
     fn handle_is_ready(&self, tx_hash: &B256) -> bool {
         self.tracker.is_ready(tx_hash)
-    }
-
-    /// Lock chunks for EVM execution.
-    fn handle_lock(&mut self, tx_hash: &B256) -> bool {
-        if !self.tracker.lock(tx_hash) {
-            return false;
-        }
-
-        // If tracker had state, lock the chunks in cache
-        if let Some(state) = self.tracker.get(tx_hash) {
-            self.cache.lock_chunks(&state.required_chunks);
-        }
-        true
-    }
-
-    /// Unlock chunks after execution.
-    fn handle_unlock(&mut self, tx_hash: &B256) {
-        // Unlock chunks in cache before changing tracker state
-        if let Some(state) = self.tracker.get(tx_hash)
-            && state.state == ProvisioningState::Locked
-        {
-            self.cache.unlock_chunks(&state.required_chunks);
-        }
-        self.tracker.unlock(tx_hash);
     }
 
     /// Get a chunk from the cache by ledger and offset.
@@ -405,7 +351,18 @@ impl PdService {
         }
     }
 
-    /// Handle block state update — expire stale provisioning entries and track height.
+    /// Batch-fetch chunks by (ledger, offset), reusing the per-key `handle_get_chunk` logic.
+    /// Missing chunks are silently omitted — the precompile will return `ChunkNotFound`.
+    fn handle_get_chunks_batch(&mut self, keys: Vec<(u32, u64)>) -> ChunkTable {
+        let mut table = HashMap::with_capacity(keys.len());
+        for (ledger, offset) in keys {
+            if let Some(data) = self.handle_get_chunk(ledger, offset) {
+                table.insert((ledger, offset), data);
+            }
+        }
+        table
+    }
+
     fn handle_block_state_update(&mut self, height: u64) {
         self.current_height = Some(height);
 
@@ -426,105 +383,6 @@ impl PdService {
             }
         }
     }
-
-    /// Provision chunks needed for validating a peer block.
-    /// Loads chunks from local storage into cache, pins them with block_hash as reference.
-    fn handle_provision_block_chunks(
-        &mut self,
-        block_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
-        response: tokio::sync::oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
-    ) {
-        let required_chunks = self.specs_to_keys(&chunk_specs);
-        let chunk_keys: Vec<ChunkKey> = required_chunks.into_iter().collect();
-
-        debug!(
-            block_hash = %block_hash,
-            total_chunks = chunk_keys.len(),
-            "Provisioning PD chunks for block validation"
-        );
-
-        let mut missing = Vec::new();
-
-        for key in &chunk_keys {
-            if self.cache.contains(key) {
-                self.cache.add_reference(key, block_hash);
-            } else {
-                match self
-                    .storage_provider
-                    .get_unpacked_chunk_by_ledger_offset(key.ledger, key.offset)
-                {
-                    Ok(Some(chunk)) => {
-                        self.cache.insert(*key, Arc::new(chunk), block_hash);
-                    }
-                    Ok(None) => {
-                        warn!(
-                            block_hash = %block_hash,
-                            ledger = key.ledger,
-                            offset = key.offset,
-                            "Chunk not found locally for block validation"
-                        );
-                        missing.push((key.ledger, key.offset));
-                    }
-                    Err(e) => {
-                        warn!(
-                            block_hash = %block_hash,
-                            ledger = key.ledger,
-                            offset = key.offset,
-                            error = %e,
-                            "Failed to fetch chunk from storage for block validation"
-                        );
-                        missing.push((key.ledger, key.offset));
-                    }
-                }
-            }
-        }
-
-        if missing.is_empty() {
-            self.block_tracker.insert(block_hash, chunk_keys);
-            let _ = response.send(Ok(()));
-        } else {
-            // Don't track a failed provisioning — the caller will bail and the
-            // partially-loaded chunks will be cleaned up by their absence from
-            // block_tracker (they still have the block_hash reference in the
-            // cache, but a subsequent ReleaseBlockChunks is a no-op, and the
-            // reference will be cleaned up when the cache entry is evicted via
-            // LRU or when we re-provision the same block later).
-            //
-            // Remove references for the chunks that WERE loaded, since we won't
-            // track them for later release.
-            for key in &chunk_keys {
-                let unreferenced = self.cache.remove_reference(key, &block_hash);
-                if unreferenced {
-                    self.cache.remove(key);
-                }
-            }
-            let _ = response.send(Err(missing));
-        }
-
-        debug!(
-            block_hash = %block_hash,
-            cached_chunks = self.cache.len(),
-            "Block chunk provisioning complete"
-        );
-    }
-
-    /// Release chunks provisioned for a block after validation completes.
-    fn handle_release_block_chunks(&mut self, block_hash: &B256) {
-        if let Some(chunk_keys) = self.block_tracker.remove(block_hash) {
-            for key in &chunk_keys {
-                let unreferenced = self.cache.remove_reference(key, block_hash);
-                if unreferenced {
-                    self.cache.remove(key);
-                }
-            }
-            trace!(
-                block_hash = %block_hash,
-                released_keys = chunk_keys.len(),
-                "Released block validation chunks"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -532,7 +390,7 @@ mod tests {
     use super::*;
     use irys_types::chunk_provider::MockChunkProvider;
     use irys_types::range_specifier::ChunkRangeSpecifier;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::mpsc;
 
     /// Create a PdService for testing with a mock provider.
     fn test_service() -> PdService {
@@ -548,63 +406,47 @@ mod tests {
             storage_provider: provider,
             block_state_rx,
             current_height: None,
-            block_tracker: HashMap::new(),
         }
     }
 
     #[test]
-    fn test_provision_block_chunks_loads_into_cache() {
+    fn test_provision_chunks_loads_into_cache() {
         let mut service = test_service();
-        let block_hash = B256::with_last_byte(0xAA);
+        let tx_hash = B256::with_last_byte(0x01);
         let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
             offset: 0,
             chunk_count: 3,
         }];
 
-        let (resp_tx, resp_rx) = oneshot::channel();
-        service.handle_provision_block_chunks(block_hash, specs, resp_tx);
-
-        let result = resp_rx.blocking_recv().unwrap();
-        assert!(
-            result.is_ok(),
-            "All chunks should be available from mock provider"
-        );
+        service.handle_provision_chunks(tx_hash, specs);
 
         // Verify chunks are in cache
-        let key0 = ChunkKey {
+        assert!(service.cache.contains(&ChunkKey {
             ledger: 0,
-            offset: 0,
-        };
-        let key1 = ChunkKey {
+            offset: 0
+        }));
+        assert!(service.cache.contains(&ChunkKey {
             ledger: 0,
-            offset: 1,
-        };
-        let key2 = ChunkKey {
+            offset: 1
+        }));
+        assert!(service.cache.contains(&ChunkKey {
             ledger: 0,
-            offset: 2,
-        };
-        assert!(service.cache.contains(&key0));
-        assert!(service.cache.contains(&key1));
-        assert!(service.cache.contains(&key2));
-
-        // Verify block is tracked
-        assert!(service.block_tracker.contains_key(&block_hash));
+            offset: 2
+        }));
     }
 
     #[test]
-    fn test_release_block_chunks_removes_references() {
+    fn test_release_chunks_removes_references() {
         let mut service = test_service();
-        let block_hash = B256::with_last_byte(0xBB);
+        let tx_hash = B256::with_last_byte(0x01);
         let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
             offset: 0,
             chunk_count: 2,
         }];
 
-        // Provision
-        let (resp_tx, _) = oneshot::channel();
-        service.handle_provision_block_chunks(block_hash, specs, resp_tx);
+        service.handle_provision_chunks(tx_hash, specs);
 
         // Verify chunks are cached
         assert!(service.cache.contains(&ChunkKey {
@@ -617,10 +459,7 @@ mod tests {
         }));
 
         // Release
-        service.handle_release_block_chunks(&block_hash);
-
-        // Block tracker should be empty
-        assert!(!service.block_tracker.contains_key(&block_hash));
+        service.handle_release_chunks(&tx_hash);
 
         // Chunks should be removed (no other references)
         assert!(!service.cache.contains(&ChunkKey {
@@ -634,33 +473,21 @@ mod tests {
     }
 
     #[test]
-    fn test_provision_block_chunks_shared_with_tx() {
+    fn test_provision_chunks_shared_references() {
         let mut service = test_service();
-        let tx_hash = B256::with_last_byte(0x01);
-        let block_hash = B256::with_last_byte(0xCC);
+        let tx_hash1 = B256::with_last_byte(0x01);
+        let tx_hash2 = B256::with_last_byte(0x02);
 
-        // First, provision via a tx (simulating mempool monitor)
-        let tx_specs = vec![ChunkRangeSpecifier {
+        let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
             offset: 0,
             chunk_count: 2,
         }];
-        service.handle_provision_chunks(tx_hash, tx_specs);
+        service.handle_provision_chunks(tx_hash1, specs.clone());
+        service.handle_provision_chunks(tx_hash2, specs);
 
-        // Now provision same chunks for a block
-        let block_specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
-        }];
-        let (resp_tx, resp_rx) = oneshot::channel();
-        service.handle_provision_block_chunks(block_hash, block_specs, resp_tx);
-
-        let result = resp_rx.blocking_recv().unwrap();
-        assert!(result.is_ok());
-
-        // Release block chunks — tx still references them, so they should stay
-        service.handle_release_block_chunks(&block_hash);
+        // Release tx1 — tx2 still references them, so they should stay
+        service.handle_release_chunks(&tx_hash1);
         assert!(service.cache.contains(&ChunkKey {
             ledger: 0,
             offset: 0
@@ -670,8 +497,8 @@ mod tests {
             offset: 1
         }));
 
-        // Release tx chunks — now they should be gone
-        service.handle_release_chunks(&tx_hash);
+        // Release tx2 — now they should be gone
+        service.handle_release_chunks(&tx_hash2);
         assert!(!service.cache.contains(&ChunkKey {
             ledger: 0,
             offset: 0

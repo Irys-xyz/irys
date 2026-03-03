@@ -13,8 +13,6 @@ pub enum ProvisioningState {
     Provisioning,
     /// All chunks available in cache.
     Ready,
-    /// Chunks locked for EVM execution.
-    Locked,
     /// Some chunks unavailable (P2P not yet implemented).
     PartiallyReady { found: usize, total: usize },
 }
@@ -91,48 +89,19 @@ impl ProvisioningTracker {
     /// Check if a transaction is ready for execution.
     pub fn is_ready(&self, tx_hash: &B256) -> bool {
         match self.txs.get(tx_hash) {
-            Some(state) => matches!(
-                state.state,
-                ProvisioningState::Ready | ProvisioningState::Locked
-            ),
+            Some(state) => matches!(state.state, ProvisioningState::Ready),
             // Unknown tx — return true to not block non-PD transactions
             None => true,
         }
     }
 
-    /// Transition a transaction to the Locked state. Only succeeds if Ready.
-    pub fn lock(&mut self, tx_hash: &B256) -> bool {
-        if let Some(state) = self.txs.get_mut(tx_hash) {
-            if state.state == ProvisioningState::Ready {
-                state.state = ProvisioningState::Locked;
-                return true;
-            }
-            return false;
-        }
-        // Unknown tx — allow lock for non-PD transactions
-        true
-    }
-
-    /// Transition a transaction from Locked back to Ready.
-    pub fn unlock(&mut self, tx_hash: &B256) {
-        if let Some(state) = self.txs.get_mut(tx_hash)
-            && state.state == ProvisioningState::Locked
-        {
-            state.state = ProvisioningState::Ready;
-        }
-    }
-
     /// Remove expired entries based on block height.
-    /// Locked entries are not expired (they must be unlocked first).
     /// Returns the tx hashes and required chunk keys of expired entries.
     pub fn expire_at_height(&mut self, height: u64) -> Vec<(B256, HashSet<ChunkKey>)> {
         let expired: Vec<B256> = self
             .txs
             .iter()
-            .filter(|(_, state)| {
-                state.state != ProvisioningState::Locked
-                    && state.expire_height.is_some_and(|expire| expire <= height)
-            })
+            .filter(|(_, state)| state.expire_height.is_some_and(|expire| expire <= height))
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -186,28 +155,21 @@ mod tests {
     }
 
     #[test]
-    fn test_lock_unlock_flow() {
+    fn test_ready_state_flow() {
         let mut tracker = ProvisioningTracker::new();
         let tx = B256::ZERO;
         tracker.register(tx, HashSet::new(), Some(100));
 
-        // Can't lock while Provisioning
-        assert!(!tracker.lock(&tx));
+        // Not ready while Provisioning
+        assert!(!tracker.is_ready(&tx));
 
         // Transition to Ready
         tracker.get_mut(&tx).unwrap().state = ProvisioningState::Ready;
-
-        // Now can lock
-        assert!(tracker.lock(&tx));
-        assert_eq!(tracker.get(&tx).unwrap().state, ProvisioningState::Locked);
-
-        // Unlock
-        tracker.unlock(&tx);
-        assert_eq!(tracker.get(&tx).unwrap().state, ProvisioningState::Ready);
+        assert!(tracker.is_ready(&tx));
     }
 
     #[test]
-    fn test_expire_skips_locked() {
+    fn test_expire_at_height() {
         let mut tracker = ProvisioningTracker::new();
         let tx1 = B256::ZERO;
         let tx2 = B256::with_last_byte(1);
@@ -215,17 +177,16 @@ mod tests {
         tracker.register(tx1, HashSet::from([make_key(1)]), Some(100));
         tracker.register(tx2, HashSet::from([make_key(2)]), Some(100));
 
-        // Make tx1 Ready then Locked
+        // Make tx1 Ready
         tracker.get_mut(&tx1).unwrap().state = ProvisioningState::Ready;
-        tracker.lock(&tx1);
 
-        // Expire at height 120 — tx2 should expire, tx1 should not (it's locked)
+        // Expire at height 120 — both should expire
         let expired = tracker.expire_at_height(120);
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].0, tx2);
+        assert_eq!(expired.len(), 2);
 
-        // tx1 still tracked
-        assert!(tracker.get(&tx1).is_some());
+        // Neither still tracked
+        assert!(tracker.get(&tx1).is_none());
+        assert!(tracker.get(&tx2).is_none());
     }
 
     #[test]

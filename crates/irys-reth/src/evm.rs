@@ -1,10 +1,12 @@
 // Standard library imports
 use core::convert::Infallible;
+use std::collections::{HashMap, HashSet};
 
+use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_rpc_types_engine::ExecutionData;
 use either::Either;
 
-use alloy_consensus::{Block, Header};
+use alloy_consensus::{Block, BlockBody, Header, Transaction as _};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
@@ -13,6 +15,7 @@ use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256, keccak256};
 use std::sync::LazyLock;
 
+use irys_types::chunk_provider::{ChunkTable, PdChunkMessage};
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::TxEnv;
@@ -43,6 +46,7 @@ use tracing::trace;
 use irys_types::storage_pricing::TOKEN_SCALE;
 
 use super::*;
+use crate::pd_tx::{detect_and_decode_pd_header, extract_pd_chunk_specs, specs_to_ledger_offsets};
 use crate::precompiles::pd::context::PdContext;
 use crate::precompiles::pd::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
@@ -71,10 +75,34 @@ pub static IRYS_USD_PRICE_ACCOUNT: LazyLock<Address> =
 pub static TREASURY_ACCOUNT: LazyLock<Address> =
     LazyLock::new(|| Address::from_word(keccak256("irys_treasury_account")));
 
+/// Irys execution context — extends Eth context with pre-loaded PD chunks.
+#[derive(Debug, Clone)]
+pub struct IrysBlockExecutionCtx<'a> {
+    /// Standard Eth execution context (parent_hash, beacon root, withdrawals, etc.)
+    pub inner: EthBlockExecutionCtx<'a>,
+    /// Pre-loaded PD chunk data for this block. Empty if no PD txs or pre-Sprite.
+    pub chunk_table: Arc<ChunkTable>,
+}
+
+/// Trait for EVM types that can have a chunk table installed.
+pub trait HasChunkTable {
+    /// Install the pre-loaded chunk table for this block.
+    fn set_chunk_table(&self, table: Arc<ChunkTable>);
+}
+
+/// Trait for EVM types that expose PD context for incremental chunk loading.
+pub trait HasPdContext {
+    /// Extend the chunk table with additional entries.
+    fn extend_chunk_table(&self, additional: ChunkTable);
+    /// Return the set of keys currently in the chunk table.
+    fn chunk_table_keys(&self) -> HashSet<(u32, u64)>;
+}
+
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
     inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
+    chunk_table: Arc<ChunkTable>,
 }
 
 impl<'a, Evm> IrysBlockExecutor<'a, Evm> {
@@ -99,7 +127,7 @@ where
     E: Evm<
             DB = &'db mut State<DB>,
             Tx: FromRecoveredTx<TransactionSigned> + FromTxWithEncoded<TransactionSigned>,
-        >,
+        > + HasChunkTable,
 {
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
@@ -107,7 +135,12 @@ where
     type Result = alloy_evm::eth::EthTxResult<E::HaltReason, alloy_consensus::TxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        self.inner.apply_pre_execution_changes()
+        self.inner.apply_pre_execution_changes()?;
+        // Install the pre-loaded chunk table on the EVM's PdContext.
+        self.inner
+            .evm_mut()
+            .set_chunk_table(Arc::clone(&self.chunk_table));
+        Ok(())
     }
 
     fn execute_transaction_with_result_closure(
@@ -171,7 +204,7 @@ impl<ChainSpec> IrysBlockAssembler<ChainSpec> {
 impl<F, ChainSpec> BlockAssembler<F> for IrysBlockAssembler<ChainSpec>
 where
     F: for<'a> BlockExecutorFactory<
-            ExecutionCtx<'a> = EthBlockExecutionCtx<'a>,
+            ExecutionCtx<'a> = IrysBlockExecutionCtx<'a>,
             Transaction = TransactionSigned,
             Receipt = Receipt,
         >,
@@ -183,7 +216,115 @@ where
         &self,
         input: BlockAssemblerInput<'_, '_, F>,
     ) -> Result<Block<TransactionSigned>, BlockExecutionError> {
-        self.inner.assemble_block(input)
+        use alloy_consensus::proofs::{self, calculate_receipt_root};
+        use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt as _};
+        use alloy_eips::merge::BEACON_NONCE;
+        use reth_primitives_traits::logs_bloom;
+        use revm::context::Block as _;
+
+        let BlockAssemblerInput {
+            evm_env,
+            execution_ctx,
+            parent,
+            transactions,
+            output,
+            state_root,
+            ..
+        } = input;
+
+        let receipts = &output.receipts;
+        let requests = &output.requests;
+        let gas_used = &output.gas_used;
+        let blob_gas_used = &output.blob_gas_used;
+
+        let ctx = execution_ctx.inner;
+        let timestamp: u64 = evm_env.block_env.timestamp().saturating_to();
+
+        let transactions_root = proofs::calculate_transaction_root(&transactions);
+        let receipts_root = calculate_receipt_root(
+            &receipts
+                .iter()
+                .map(|r: &Receipt| r.with_bloom_ref())
+                .collect::<Vec<_>>(),
+        );
+        let logs_bloom_val = logs_bloom(receipts.iter().flat_map(|r: &Receipt| r.logs()));
+
+        let withdrawals = self
+            .inner
+            .chain_spec
+            .is_shanghai_active_at_timestamp(timestamp)
+            .then(|| {
+                ctx.withdrawals
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default()
+            });
+
+        let withdrawals_root = withdrawals
+            .as_deref()
+            .map(|w| proofs::calculate_withdrawals_root(w));
+        let requests_hash = self
+            .inner
+            .chain_spec
+            .is_prague_active_at_timestamp(timestamp)
+            .then(|| requests.requests_hash());
+
+        let mut excess_blob_gas = None;
+        let mut block_blob_gas_used = None;
+
+        if self
+            .inner
+            .chain_spec
+            .is_cancun_active_at_timestamp(timestamp)
+        {
+            block_blob_gas_used = Some(*blob_gas_used);
+            excess_blob_gas = if self
+                .inner
+                .chain_spec
+                .is_cancun_active_at_timestamp(parent.timestamp)
+            {
+                parent.maybe_next_block_excess_blob_gas(
+                    self.inner.chain_spec.blob_params_at_timestamp(timestamp),
+                )
+            } else {
+                Some(
+                    alloy_eips::eip7840::BlobParams::cancun()
+                        .next_block_excess_blob_gas_osaka(0, 0, 0),
+                )
+            };
+        }
+
+        let header = Header {
+            parent_hash: ctx.parent_hash,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            beneficiary: evm_env.block_env.beneficiary(),
+            state_root,
+            transactions_root,
+            receipts_root,
+            withdrawals_root,
+            logs_bloom: logs_bloom_val,
+            timestamp,
+            mix_hash: evm_env.block_env.prevrandao().unwrap_or_default(),
+            nonce: BEACON_NONCE.into(),
+            base_fee_per_gas: Some(evm_env.block_env.basefee()),
+            number: evm_env.block_env.number().saturating_to(),
+            gas_limit: evm_env.block_env.gas_limit(),
+            difficulty: evm_env.block_env.difficulty(),
+            gas_used: *gas_used,
+            extra_data: Bytes::default(),
+            parent_beacon_block_root: ctx.parent_beacon_block_root,
+            blob_gas_used: block_blob_gas_used,
+            excess_blob_gas,
+            requests_hash,
+        };
+
+        Ok(Block {
+            header,
+            body: BlockBody {
+                transactions,
+                ommers: Default::default(),
+                withdrawals,
+            },
+        })
     }
 }
 
@@ -227,21 +368,6 @@ impl IrysBlockExecutorFactory {
     pub const fn evm_factory(&self) -> &IrysEvmFactory {
         self.inner.evm_factory()
     }
-
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
-    ///
-    /// Reconstructs this factory with the `pd_chunk_sender` set on the inner
-    /// [`IrysEvmFactory`], leaving the receipt builder and spec unchanged.
-    pub fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        let receipt_builder = *self.inner.receipt_builder();
-        let spec = Arc::clone(self.inner.spec());
-        let evm_factory = self
-            .inner
-            .evm_factory()
-            .clone()
-            .with_pd_chunk_sender(sender);
-        Self::new(receipt_builder, spec, evm_factory)
-    }
 }
 
 impl BlockExecutorFactory for IrysBlockExecutorFactory
@@ -249,7 +375,7 @@ where
     Self: 'static,
 {
     type EvmFactory = IrysEvmFactory;
-    type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
+    type ExecutionCtx<'a> = IrysBlockExecutionCtx<'a>;
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
 
@@ -267,8 +393,10 @@ where
         I: Inspector<<IrysEvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,
     {
         let receipt_builder = self.inner.receipt_builder();
+        let chunk_table = ctx.chunk_table;
         IrysBlockExecutor {
-            inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
+            inner: EthBlockExecutor::new(evm, ctx.inner, self.inner.spec(), receipt_builder),
+            chunk_table,
         }
     }
 }
@@ -279,6 +407,8 @@ pub struct IrysEvmConfig {
     pub inner: EthEvmConfig<ChainSpec, EthEvmFactory>,
     pub executor_factory: IrysBlockExecutorFactory,
     pub assembler: IrysBlockAssembler,
+    /// PD chunk sender for pre-loading chunks before block execution.
+    pub pd_chunk_sender: Option<irys_types::chunk_provider::PdChunkSender>,
 }
 
 impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
@@ -293,7 +423,9 @@ impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
         &self,
         payload: &'a ExecutionData,
     ) -> Result<reth_evm::ExecutionCtxFor<'a, Self>, Self::Error> {
-        self.inner.context_for_payload(payload)
+        let inner = self.inner.context_for_payload(payload)?;
+        let chunk_table = self.preload_chunks_for_payload(payload);
+        Ok(IrysBlockExecutionCtx { inner, chunk_table })
     }
 
     fn tx_iterator_for_payload(
@@ -334,31 +466,132 @@ impl ConfigureEvm for IrysEvmConfig {
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
-    ) -> Result<EthBlockExecutionCtx<'a>, Infallible> {
-        self.inner.context_for_block(block)
+    ) -> Result<IrysBlockExecutionCtx<'a>, Infallible> {
+        let inner = self.inner.context_for_block(block)?;
+        let chunk_table = self.preload_chunks_for_block(block);
+        Ok(IrysBlockExecutionCtx { inner, chunk_table })
     }
 
     fn context_for_next_block(
         &self,
         parent: &SealedHeader,
         attributes: Self::NextBlockEnvCtx,
-    ) -> Result<EthBlockExecutionCtx<'_>, Infallible> {
-        self.inner.context_for_next_block(parent, attributes)
+    ) -> Result<IrysBlockExecutionCtx<'_>, Infallible> {
+        let inner = self.inner.context_for_next_block(parent, attributes)?;
+        Ok(IrysBlockExecutionCtx {
+            inner,
+            chunk_table: Arc::new(HashMap::new()),
+        })
     }
 }
 
 impl IrysEvmConfig {
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
-    ///
-    /// Sets a [`PdChunkSender`] on the inner [`IrysEvmFactory`] so that all EVMs
-    /// created by the payload builder use `PdContext::new_with_manager()` instead
-    /// of the storage-backed path used during block validation.
-    pub fn with_pd_chunk_sender(
-        mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
-    ) -> Self {
-        self.executor_factory = self.executor_factory.with_pd_chunk_sender(sender);
-        self
+    /// Store the PD chunk sender for use in chunk pre-loading.
+    pub fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
+        // Also wire the sender into the EVM factory so per-tx preloading works during
+        // payload building (IrysEvm::transact_raw uses context.pd_chunk_sender()).
+        self.executor_factory
+            .evm_factory()
+            .set_pd_chunk_sender(sender.clone());
+        Self {
+            pd_chunk_sender: Some(sender),
+            ..self
+        }
+    }
+
+    /// Pre-load all PD chunks referenced by transactions in a payload.
+    /// Used for the new_payload validation path.
+    fn preload_chunks_for_payload(&self, payload: &ExecutionData) -> Arc<ChunkTable> {
+        let timestamp = irys_types::UnixTimestamp::from_secs(payload.payload.timestamp());
+        let hardfork_config = self.executor_factory.evm_factory().hardfork_config();
+        if !hardfork_config.is_sprite_active(timestamp) {
+            return Arc::new(HashMap::new());
+        }
+
+        let chunk_config = self.executor_factory.evm_factory().context.chunk_config();
+        let mut keys = HashSet::new();
+        for raw_tx in payload.payload.transactions() {
+            let Ok(tx) = TransactionSigned::decode_2718(&mut raw_tx.as_ref()) else {
+                continue;
+            };
+            let Some(access_list) = tx.access_list() else {
+                continue;
+            };
+            if detect_and_decode_pd_header(tx.input())
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                continue;
+            }
+            for spec in extract_pd_chunk_specs(access_list) {
+                for key in specs_to_ledger_offsets(&spec, &chunk_config) {
+                    keys.insert(key);
+                }
+            }
+        }
+
+        if keys.is_empty() {
+            return Arc::new(HashMap::new());
+        }
+
+        self.batch_load_chunks(keys)
+    }
+
+    /// Pre-load all PD chunks referenced by transactions in a sealed block.
+    /// Used for the execute_block validation path.
+    fn preload_chunks_for_block(
+        &self,
+        block: &SealedBlock<alloy_consensus::Block<TransactionSigned>>,
+    ) -> Arc<ChunkTable> {
+        let timestamp = irys_types::UnixTimestamp::from_secs(block.header().timestamp);
+        let hardfork_config = self.executor_factory.evm_factory().hardfork_config();
+        if !hardfork_config.is_sprite_active(timestamp) {
+            return Arc::new(HashMap::new());
+        }
+
+        let chunk_config = self.executor_factory.evm_factory().context.chunk_config();
+        let mut keys = HashSet::new();
+        for tx in &block.body().transactions {
+            let Some(access_list) = tx.access_list() else {
+                continue;
+            };
+            if detect_and_decode_pd_header(tx.input())
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                continue;
+            }
+            for spec in extract_pd_chunk_specs(access_list) {
+                for key in specs_to_ledger_offsets(&spec, &chunk_config) {
+                    keys.insert(key);
+                }
+            }
+        }
+
+        if keys.is_empty() {
+            return Arc::new(HashMap::new());
+        }
+
+        self.batch_load_chunks(keys)
+    }
+
+    /// Batch-fetch chunks by (ledger, offset) from the PD chunk manager.
+    fn batch_load_chunks(&self, keys: HashSet<(u32, u64)>) -> Arc<ChunkTable> {
+        match &self.pd_chunk_sender {
+            Some(sender) => {
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                let _ = sender.send(PdChunkMessage::GetChunksBatch {
+                    keys: keys.into_iter().collect(),
+                    response: resp_tx,
+                });
+                Arc::new(
+                    tokio::task::block_in_place(|| resp_rx.blocking_recv()).unwrap_or_default(),
+                )
+            }
+            None => Arc::new(HashMap::new()),
+        }
     }
 }
 
@@ -382,35 +615,22 @@ impl ConfigurePdChunkSender for IrysEvmConfig {
 pub struct IrysEvmFactory {
     context: PdContext,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// When set, creates `PdContext` in Manager mode for payload building.
-    /// When `None`, uses the Storage-backed `PdContext` (block validation).
-    pd_chunk_sender: Option<irys_types::chunk_provider::PdChunkSender>,
 }
 
 impl IrysEvmFactory {
     pub fn new(
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+        chunk_config: irys_types::chunk_provider::ChunkConfig,
         hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
     ) -> Self {
-        let context = PdContext::new(chunk_provider);
+        let context = PdContext::new(chunk_config);
         Self {
             context,
             hardfork_config,
-            pd_chunk_sender: None,
         }
     }
 
-    /// Configure for payload building mode — chunks fetched from `PdChunkManager` cache.
-    pub fn with_pd_chunk_sender(
-        mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
-    ) -> Self {
-        self.pd_chunk_sender = Some(sender);
-        self
-    }
-
     /// Provides access to the PdContext for test setup.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn context(&self) -> &PdContext {
         &self.context
     }
@@ -420,13 +640,35 @@ impl IrysEvmFactory {
         &self.hardfork_config
     }
 
+    /// Set the PD chunk sender on the factory's shared context.
+    /// All EVMs created by this factory will inherit this sender.
+    pub fn set_pd_chunk_sender(&self, sender: irys_types::chunk_provider::PdChunkSender) {
+        self.context.set_pd_chunk_sender(sender);
+    }
+
     /// Creates a new factory for testing with Sprite hardfork enabled from genesis.
-    #[cfg(test)]
+    /// Pre-populates the chunk table with zero-filled chunks from MockChunkProvider.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_testing(
         chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     ) -> Self {
+        let config = chunk_provider.config();
         let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
-        Self::new(chunk_provider, hardfork_config)
+        let factory = Self::new(config, hardfork_config);
+        // Pre-populate the chunk table so precompile tests can read chunks.
+        // Fill offsets 0..num_chunks_in_partition for ledger 0.
+        let mut table = irys_types::chunk_provider::ChunkTable::new();
+        for offset in 0..config.num_chunks_in_partition {
+            let chunk_bytes = chunk_provider
+                .get_unpacked_chunk_by_ledger_offset(0, offset)
+                .ok()
+                .flatten();
+            if let Some(bytes) = chunk_bytes {
+                table.insert((0, offset), Arc::new(bytes));
+            }
+        }
+        factory.context.set_chunk_table(Arc::new(table));
+        factory
     }
 }
 
@@ -453,13 +695,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
-            }
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = self.context.clone_for_new_evm();
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -503,13 +739,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
-            }
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = self.context.clone_for_new_evm();
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -647,6 +877,27 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     pub const fn pd_context(&self) -> &PdContext {
         &self.context
     }
+
+    /// Install a pre-loaded chunk table on the PD context for this block.
+    pub fn set_chunk_table(&self, table: Arc<ChunkTable>) {
+        self.context.set_chunk_table(table);
+    }
+}
+
+impl<DB: Database, I, PRECOMPILE> HasChunkTable for IrysEvm<DB, I, PRECOMPILE> {
+    fn set_chunk_table(&self, table: Arc<ChunkTable>) {
+        self.context.set_chunk_table(table);
+    }
+}
+
+impl<DB: Database, I, PRECOMPILE> HasPdContext for IrysEvm<DB, I, PRECOMPILE> {
+    fn extend_chunk_table(&self, additional: ChunkTable) {
+        self.context.extend_chunk_table(additional);
+    }
+
+    fn chunk_table_keys(&self) -> HashSet<(u32, u64)> {
+        self.context.chunk_table_keys()
+    }
 }
 
 impl<DB: Database, I, PRECOMPILE> Deref for IrysEvm<DB, I, PRECOMPILE> {
@@ -714,6 +965,40 @@ where
 
         // PD (Programmable Data) features are only available when Sprite hardfork is active
         if self.is_sprite_active {
+            // Incremental per-tx chunk preloading for payload building.
+            // When a pd_chunk_sender is available (payload builder path), we detect PD
+            // transactions and fetch any chunks not already in the chunk table.
+            if let Some(sender) = self.context.pd_chunk_sender()
+                && detect_and_decode_pd_header(&tx.data)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                let chunk_config = self.context.chunk_config();
+                let existing_keys = self.context.chunk_table_keys();
+                let new_keys: HashSet<(u32, u64)> = extract_pd_chunk_specs(&tx.access_list)
+                    .into_iter()
+                    .flat_map(|spec| specs_to_ledger_offsets(&spec, &chunk_config))
+                    .filter(|k| !existing_keys.contains(k))
+                    .collect();
+
+                if !new_keys.is_empty() {
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                    let _ = sender.send(PdChunkMessage::GetChunksBatch {
+                        keys: new_keys.into_iter().collect(),
+                        response: resp_tx,
+                    });
+                    if let Ok(new_chunks) =
+                        tokio::task::block_in_place(|| resp_rx.blocking_recv())
+                    {
+                        self.context.extend_chunk_table(new_chunks);
+                        tracing::debug!(
+                            "Pre-loaded PD chunks for transaction during payload building"
+                        );
+                    }
+                }
+            }
+
             // Update EVM's PdContext with transaction access_list for PD precompile
             // Each EVM has its own PdContext (via clone), so this is thread-safe
             let access_list = tx.access_list.to_vec();

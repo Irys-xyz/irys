@@ -257,8 +257,7 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config)
-            .with_pd_chunk_sender(self.pd_chunk_sender);
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider.config(), self.hardfork_config);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -267,7 +266,9 @@ where
                 spec,
                 evm_factory,
             ),
-        };
+            pd_chunk_sender: None,
+        }
+        .with_pd_chunk_sender(self.pd_chunk_sender);
         Ok(evm_config)
     }
 }

@@ -7,7 +7,7 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_evm::Evm as _;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256, aliases::U200};
 use irys_reth::evm::IrysEvmFactory;
-use irys_types::chunk_provider::MockChunkProvider;
+use irys_types::chunk_provider::{MockChunkProvider, RethChunkProvider as _};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{
     ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
@@ -63,9 +63,9 @@ fn create_pd_transaction(access_list: AccessList) -> TxEnv {
 #[test]
 fn test_evm_instances_have_isolated_pd_contexts() {
     // Create a single factory with test hardfork config (Sprite enabled from genesis)
-    let mock_chunk_provider = Arc::new(MockChunkProvider::new());
+    let mock_chunk_provider = MockChunkProvider::new();
     let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
-    let factory = IrysEvmFactory::new(mock_chunk_provider, hardfork_config);
+    let factory = IrysEvmFactory::new(mock_chunk_provider.config(), hardfork_config);
 
     // Create two EVMs from the same factory
     let mut cfg_env = CfgEnv::default();

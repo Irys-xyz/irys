@@ -2,10 +2,14 @@
 
 use alloy_primitives::B256;
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::range_specifier::ChunkRangeSpecifier;
+
+/// Pre-loaded chunk data for EVM execution. Key: (ledger, ledger_offset).
+pub type ChunkTable = HashMap<(u32, u64), Arc<Bytes>>;
 
 /// Configuration values needed for chunk operations.
 #[derive(Debug, Clone, Copy)]
@@ -37,7 +41,7 @@ pub trait RethChunkProvider: Send + Sync + std::fmt::Debug {
 /// Messages for the unified PD chunk manager.
 ///
 /// The manager handles the full lifecycle per PD transaction:
-/// Pending → Provisioning → Ready → Locked → Completed
+/// Pending → Provisioning → Ready → Completed
 #[derive(Debug)]
 pub enum PdChunkMessage {
     /// New PD transaction detected - start provisioning chunks.
@@ -52,32 +56,12 @@ pub enum PdChunkMessage {
         tx_hash: B256,
         response: oneshot::Sender<bool>,
     },
-    /// Lock chunks for execution.
-    /// Only succeeds if state is Ready.
-    Lock {
-        tx_hash: B256,
-        response: oneshot::Sender<bool>,
+    /// Batch-fetch chunks by (ledger, offset). Returns the loaded table.
+    /// Cache hits are instant; cache misses fall back to storage.
+    GetChunksBatch {
+        keys: Vec<(u32, u64)>,
+        response: oneshot::Sender<ChunkTable>,
     },
-    /// Unlock chunks after execution completes.
-    Unlock { tx_hash: B256 },
-    /// Get cached chunk during EVM execution.
-    /// Chunks are stored in a global cache keyed by (ledger, offset).
-    /// No tx_hash needed - chunks are immutable data identified by position.
-    GetChunk {
-        ledger: u32,
-        offset: u64,
-        response: oneshot::Sender<Option<Arc<Bytes>>>,
-    },
-    /// Provision chunks needed for validating a peer block.
-    /// Loads chunks from local storage into cache.
-    /// Responds with Ok(()) when all chunks are cached, or Err with list of missing (ledger, offset).
-    ProvisionBlockChunks {
-        block_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
-        response: oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
-    },
-    /// Release chunks provisioned for a block after validation completes.
-    ReleaseBlockChunks { block_hash: B256 },
 }
 
 /// Sender for PD chunk messages.

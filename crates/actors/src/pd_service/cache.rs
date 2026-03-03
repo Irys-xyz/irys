@@ -15,22 +15,20 @@ pub struct ChunkKey {
     pub offset: u64,
 }
 
-/// A cached chunk entry with reference tracking and lock support.
+/// A cached chunk entry with reference tracking.
 pub struct CachedChunkEntry {
     /// The unpacked chunk data.
     pub data: Arc<Bytes>,
     /// Transactions currently referencing this chunk (prevents eviction when non-empty).
     pub referencing_txs: HashSet<B256>,
-    /// Number of active execution locks on this chunk.
-    pub lock_count: u32,
     /// When this chunk was first cached.
     pub cached_at: Instant,
 }
 
-/// LRU-backed chunk cache with reference counting and lock pinning.
+/// LRU-backed chunk cache with reference counting.
 ///
-/// Chunks referenced by transactions or locked for execution are pinned —
-/// the LRU only evicts unreferenced, unlocked entries.
+/// Chunks referenced by transactions are pinned —
+/// the LRU only evicts unreferenced entries.
 pub struct ChunkCache {
     chunks: LruCache<ChunkKey, CachedChunkEntry>,
 }
@@ -85,7 +83,6 @@ impl ChunkCache {
             CachedChunkEntry {
                 data,
                 referencing_txs: HashSet::new(),
-                lock_count: 0,
                 cached_at: Instant::now(),
             },
         );
@@ -117,7 +114,6 @@ impl ChunkCache {
             CachedChunkEntry {
                 data,
                 referencing_txs,
-                lock_count: 0,
                 cached_at: Instant::now(),
             },
         );
@@ -136,31 +132,13 @@ impl ChunkCache {
     }
 
     /// Remove a transaction reference from a cached chunk.
-    /// Returns `true` if the chunk has no remaining references and is not locked.
+    /// Returns `true` if the chunk has no remaining references.
     pub fn remove_reference(&mut self, key: &ChunkKey, tx_hash: &B256) -> bool {
         if let Some(entry) = self.chunks.get_mut(key) {
             entry.referencing_txs.remove(tx_hash);
-            entry.referencing_txs.is_empty() && entry.lock_count == 0
+            entry.referencing_txs.is_empty()
         } else {
             false
-        }
-    }
-
-    /// Increment the lock count for all given chunks.
-    pub fn lock_chunks(&mut self, keys: &HashSet<ChunkKey>) {
-        for key in keys {
-            if let Some(entry) = self.chunks.get_mut(key) {
-                entry.lock_count = entry.lock_count.saturating_add(1);
-            }
-        }
-    }
-
-    /// Decrement the lock count for all given chunks.
-    pub fn unlock_chunks(&mut self, keys: &HashSet<ChunkKey>) {
-        for key in keys {
-            if let Some(entry) = self.chunks.get_mut(key) {
-                entry.lock_count = entry.lock_count.saturating_sub(1);
-            }
         }
     }
 
@@ -192,7 +170,7 @@ impl ChunkCache {
             .chunks
             .iter()
             .rev() // LRU order: least-recently-used first
-            .find(|(_, entry)| entry.referencing_txs.is_empty() && entry.lock_count == 0)
+            .find(|(_, entry)| entry.referencing_txs.is_empty())
             .map(|(key, _)| *key);
 
         if let Some(key) = evictable {
@@ -300,26 +278,5 @@ mod tests {
         assert!(!cache.contains(&make_key(1)));
         assert!(cache.contains(&make_key(2)));
         assert!(cache.contains(&make_key(3)));
-    }
-
-    #[test]
-    fn test_lock_prevents_eviction() {
-        let cap = NonZeroUsize::new(2).unwrap();
-        let mut cache = ChunkCache::new(cap);
-        let tx = B256::ZERO;
-
-        cache.insert(make_key(1), make_data(1), tx);
-        cache.insert(make_key(2), make_data(2), tx);
-
-        // Remove all references from key 1 but lock it
-        cache.remove_reference(&make_key(1), &tx);
-        let keys = HashSet::from([make_key(1)]);
-        cache.lock_chunks(&keys);
-
-        // Insert new entry — key 1 is locked so should not be evicted
-        let tx2 = B256::with_last_byte(1);
-        cache.insert(make_key(3), make_data(3), tx2);
-
-        assert!(cache.contains(&make_key(1)));
     }
 }

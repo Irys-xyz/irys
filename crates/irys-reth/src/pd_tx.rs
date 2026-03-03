@@ -3,6 +3,7 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{B256, Bytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
+use irys_types::chunk_provider::ChunkConfig;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{
     ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _,
@@ -177,6 +178,25 @@ pub fn extract_pd_chunk_specs(
                 tracing::warn!("Invalid PD access list key encoding, skipping: {}", e);
                 None
             }
+        })
+        .collect()
+}
+
+/// Convert a [`ChunkRangeSpecifier`] into a list of `(ledger, ledger_offset)` keys
+/// using the same checked-arithmetic logic as [`PdService::specs_to_keys`].
+///
+/// The ledger value is currently hardcoded to `0`.
+pub fn specs_to_ledger_offsets(
+    spec: &ChunkRangeSpecifier,
+    config: &ChunkConfig,
+) -> Vec<(u32, u64)> {
+    let partition_index: u64 = spec.partition_index.try_into().unwrap_or(u64::MAX);
+    let base = config.num_chunks_in_partition.checked_mul(partition_index);
+    (0..spec.chunk_count)
+        .filter_map(|i| {
+            base.and_then(|b| b.checked_add(spec.offset as u64))
+                .and_then(|b| b.checked_add(i as u64))
+                .map(|offset| (0_u32, offset))
         })
         .collect()
 }

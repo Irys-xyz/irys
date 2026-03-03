@@ -354,14 +354,24 @@ mod tests {
     use super::*;
     use crate::precompiles::pd::context::PdContext;
     use crate::precompiles::pd::utils::ParsedAccessLists;
-    use irys_types::chunk_provider::MockChunkProvider;
+    use irys_types::chunk_provider::{ChunkTable, MockChunkProvider, RethChunkProvider as _};
     use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
     use std::sync::Arc;
 
-    /// Creates a test PD context with a mock chunk provider (storage mode).
+    /// Creates a test PD context with a pre-populated chunk table from MockChunkProvider.
     fn create_test_context() -> PdContext {
-        let mock_provider = Arc::new(MockChunkProvider::new());
-        PdContext::new(mock_provider)
+        let mock = MockChunkProvider::new();
+        let config = mock.config();
+        let ctx = PdContext::new(config);
+        // Pre-populate chunk table with zero-filled chunks for ledger 0.
+        let mut table = ChunkTable::new();
+        for offset in 0..config.num_chunks_in_partition {
+            if let Ok(Some(bytes)) = mock.get_unpacked_chunk_by_ledger_offset(0, offset) {
+                table.insert((0, offset), Arc::new(bytes));
+            }
+        }
+        ctx.set_chunk_table(Arc::new(table));
+        ctx
     }
 
     /// Creates parsed access lists from chunk and byte range specifiers.
