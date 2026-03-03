@@ -210,7 +210,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     };
 
     let status = if monitoring_enabled {
-        // Initial delay to let the process start
+        // Initial delay to let the process start before first CPU sample
         thread::sleep(Duration::from_millis(10));
 
         loop {
@@ -333,6 +333,11 @@ fn sample_deltas(elapsed_ms_values: &[u64]) -> Vec<u64> {
         .collect()
 }
 
+fn percentile_index(len: usize, pct: f64) -> usize {
+    let k = (len as f64 * pct / 100.0).ceil() as usize;
+    k.saturating_sub(1).min(len - 1)
+}
+
 fn calculate_cpu_stats(samples: &[CpuSample], duration_ms: u64) -> CalculatedCpuStats {
     if samples.is_empty() {
         return CalculatedCpuStats {
@@ -356,8 +361,8 @@ fn calculate_cpu_stats(samples: &[CpuSample], duration_ms: u64) -> CalculatedCpu
     let peak_cpu = cpu_values[n - 1];
     let avg_cpu = cpu_values.iter().sum::<f64>() / n as f64;
 
-    let p50_cpu = cpu_values[(n * 50 / 100).min(n - 1)];
-    let p90_cpu = cpu_values[(n * 90 / 100).min(n - 1)];
+    let p50_cpu = cpu_values[percentile_index(n, 50.0)];
+    let p90_cpu = cpu_values[percentile_index(n, 90.0)];
 
     let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
     let deltas = sample_deltas(&elapsed_values);
@@ -464,8 +469,8 @@ fn calculate_memory_stats(samples: &[MemorySample], duration_ms: u64) -> Calcula
     let peak_rss_bytes = rss_values[n - 1];
     let avg_rss_bytes = (rss_values.iter().map(|&v| v as u128).sum::<u128>() / n as u128) as u64;
 
-    let p50_rss_bytes = rss_values[(n * 50 / 100).min(n - 1)];
-    let p90_rss_bytes = rss_values[(n * 90 / 100).min(n - 1)];
+    let p50_rss_bytes = rss_values[percentile_index(n, 50.0)];
+    let p90_rss_bytes = rss_values[percentile_index(n, 90.0)];
 
     let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
     let deltas = sample_deltas(&elapsed_values);
