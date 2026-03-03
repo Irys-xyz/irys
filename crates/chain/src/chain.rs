@@ -357,8 +357,9 @@ pub struct IrysNode {
     pub gossip_listener: TcpListener,
     pub irys_db: DatabaseProvider,
     /// Tokio runtime handle for spawning async tasks.
-    /// Defaults to the caller's runtime; override with `with_runtime_handle()` for test isolation.
-    runtime_handle: Handle,
+    /// Resolved lazily in [`start()`] via `Handle::current()` unless
+    /// explicitly set with [`with_runtime_handle()`] (used in tests).
+    runtime_handle: Option<Handle>,
 }
 
 /// Timeout for stopping the API server during graceful shutdown.
@@ -446,14 +447,14 @@ impl IrysNode {
             http_listener,
             gossip_listener,
             irys_db,
-            runtime_handle: Handle::current(),
+            runtime_handle: None,
         })
     }
 
     /// Override the runtime handle used for spawning async tasks.
     /// Use this in tests to pass a dedicated multi-thread runtime handle.
     pub fn with_runtime_handle(mut self, handle: Handle) -> Self {
-        self.runtime_handle = handle;
+        self.runtime_handle = Some(handle);
         self
     }
 
@@ -813,7 +814,7 @@ impl IrysNode {
             );
         }
 
-        let runtime_handle = self.runtime_handle.clone();
+        let runtime_handle = self.runtime_handle.unwrap_or_else(Handle::current);
 
         let reth_runtime = RuntimeBuilder::new(
             RuntimeConfig::default()
