@@ -1,26 +1,36 @@
-# Irys Mainnet Beta 
-_Node Deployment Guide_
-# Requirements
-High level overview of the Irys Node Software requirements
-## Operating System
-The Irys node software is built for and tested on __Linux__, specifically on __Ubuntu 22/24.04__.
+# Irys Mainnet Beta
 
-While the source may be compiled for other targets, MacOS or Windows, it is entirely untested on those platforms.
+_Node Deployment Guide_
+
+# Requirements
+
+High level overview of the Irys Node Software requirements
+
+## Operating System
+
+The Irys node software is built for and tested on **Linux**, specifically on **Ubuntu 22/24.04**.
+
+While the source may be compiled for other targets, macOS or Windows, it is entirely untested on those platforms.
+
 ## CPU
-The Irys node uses multiple CPU cores; more cores mean better performance on compute-heavy tasks. One core is dedicated to computing the VDF hashes used in mining. You’ll want a high-performance core (ideally with SHA extensions) to stay competitive with the network and mine efficiently.
+
+The Irys node uses multiple CPU cores; more cores mean better performance on compute-heavy tasks. One core is dedicated to computing the VDF hashes used in mining. You'll want a high-performance core (ideally with SHA extensions) to stay competitive with the network and mine efficiently.
 
 **Note:** the Irys node will pin a dedicated core for its VDF calculations (typically the first available core). This is expected to take up 100% of this core, almost constantly.
 
-We recommend CPUs like the __AMD Ryzen 9 3900__ or __AMD EPYC 4344P__ as both have high enough single core performance.
+We recommend CPUs like the **AMD Ryzen 9 3900** or **AMD EPYC 4344P** as both have high enough single-core performance.
+
 ## GPU
-Irys supports GPU-based packing to speed up the preparation of storage for the protocol. Currently, this requires an NVIDIA CUDA-capable GPU, and packing speed scales with the number of CUDA cores. This has been tested on __NVIDIA 3090__ and __5090__ cards, and all modern NVIDIA GPUs should work.
+
+Irys supports GPU-based packing to speed up the preparation of storage for the protocol. Currently, this requires an NVIDIA CUDA-capable GPU, and packing speed scales with the number of CUDA cores. This has been tested on **NVIDIA 3090** and **5090** cards, and all modern NVIDIA GPUs should work.
+
 ## Storage
+
 Miners provide storage to the network in the form of partitions. These partitions are optimized to take advantage of __22TB HDDs__.  The read speeds required to mine a partition are capped at ~100MB/s, well within the range of HDD transfer speeds so by design there is no advantage to deploying SSD storage.
 
 The minimum amount of storage a miner can provide to the protocol is a full 22TB partition with the ability to pledge multiple partitions to the protocol.
 
 We recommend formatting your drives with XFS - it has demonstrated the best characteristics (fast I/O, low space overhead) out of the suitable mainline file systems.
-
 # Building from source
 First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases (tagged mainnet-\*, DO NOT use the testnet-\* tagged releases!)
 
@@ -53,7 +63,7 @@ Once you’ve installed the dependencies you can compile the build with
 ## Compile feature flags
 `telemetry` - enables exporting of opentelemetry log, span, and metrics collection. Telemetry activates automatically when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, or can be explicitly enabled with `ENABLE_TELEMETRY=true`.
 
-Environment variables (per the OTEL specification):
+
 * `OTEL_EXPORTER_OTLP_ENDPOINT` — base OTLP endpoint (default: `http://localhost:4317`). Signal-specific endpoints derive from this with paths appended (e.g. `/v1/logs`).
 * `OTEL_SERVICE_NAME` — service name reported in telemetry (default: `irys-node`).
 * `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — optional override endpoint for traces.
@@ -63,7 +73,7 @@ Environment variables (per the OTEL specification):
 Custom: 
 * `AXIOM_LOGS_ENDPOINT` — optional additional Axiom OTLP endpoint. When set, logs are sent to both the primary logs endpoint and Axiom.
 
-**Note** This repository contains a full observability stack (with Irys-specific dashboards), which you are more than welcome to use if you want. See [README.md](../../docker/observation) for more details.
+**Note:** This repository contains a full observability stack (with Irys-specific dashboards), which you are welcome to use. See [README.md](../../docker/observation/README.md) for more details.
 
 `nvidia` - enables CUDA accelerated packing. 
 
