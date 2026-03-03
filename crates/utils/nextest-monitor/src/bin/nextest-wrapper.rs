@@ -164,6 +164,8 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     let mut cpu_samples = Vec::new();
     let mut memory_samples = Vec::new();
 
+    let monitoring_enabled = monitor_cpu || monitor_memory;
+
     let mut cpu_monitor = if monitor_cpu {
         Some(CpuMonitor::new(pid))
     } else {
@@ -175,91 +177,95 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         None
     };
 
-    // Initial delay to let the process start
-    thread::sleep(Duration::from_millis(10));
+    let status = if monitoring_enabled {
+        // Initial delay to let the process start
+        thread::sleep(Duration::from_millis(10));
 
-    loop {
-        match child.try_wait()? {
-            Some(status) => {
-                let duration_ms = start_instant.elapsed().as_millis() as u64;
-                let exit_code = status.code();
-                let passed = exit_code == Some(0);
+        loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => {
+                    let elapsed_ms = start_instant.elapsed().as_millis() as u64;
 
-                let cpu_stats = if monitor_cpu {
-                    Some(calculate_cpu_stats(&cpu_samples))
-                } else {
-                    None
-                };
+                    if let Some(ref mut cpu_mon) = cpu_monitor {
+                        let cpu_threads = cpu_mon.sample();
+                        cpu_samples.push(CpuSample {
+                            elapsed_ms,
+                            cpu_threads,
+                        });
+                    }
 
-                let mem_stats = if monitor_memory {
-                    Some(calculate_memory_stats(&memory_samples))
-                } else {
-                    None
-                };
+                    if let Some(ref mem_mon) = memory_monitor {
+                        let rss_bytes = mem_mon.sample();
+                        memory_samples.push(MemorySample {
+                            elapsed_ms,
+                            rss_bytes,
+                        });
+                    }
 
-                let stats = TestStats {
-                    binary: binary.to_string(),
-                    test_name,
-                    passed,
-                    started_at,
-                    duration_ms,
-                    exit_code,
-                    peak_cpu: cpu_stats.as_ref().map(|s| s.peak_cpu),
-                    avg_cpu: cpu_stats.as_ref().map(|s| s.avg_cpu),
-                    p50_cpu: cpu_stats.as_ref().map(|s| s.p50_cpu),
-                    p90_cpu: cpu_stats.as_ref().map(|s| s.p90_cpu),
-                    time_at_p90_ms: cpu_stats.as_ref().map(|s| s.time_at_p90_ms),
-                    time_near_peak_ms: cpu_stats.as_ref().map(|s| s.time_near_peak_ms),
-                    time_above_1t_ms: cpu_stats.as_ref().map(|s| s.time_above_1t_ms),
-                    time_above_2t_ms: cpu_stats.as_ref().map(|s| s.time_above_2t_ms),
-                    time_above_3t_ms: cpu_stats.as_ref().map(|s| s.time_above_3t_ms),
-                    time_above_4t_ms: cpu_stats.as_ref().map(|s| s.time_above_4t_ms),
-                    cpu_samples: if record_samples && monitor_cpu {
-                        Some(cpu_samples)
-                    } else {
-                        None
-                    },
-                    peak_rss_bytes: mem_stats.as_ref().map(|s| s.peak_rss_bytes),
-                    avg_rss_bytes: mem_stats.as_ref().map(|s| s.avg_rss_bytes),
-                    p50_rss_bytes: mem_stats.as_ref().map(|s| s.p50_rss_bytes),
-                    p90_rss_bytes: mem_stats.as_ref().map(|s| s.p90_rss_bytes),
-                    time_above_100mb_ms: mem_stats.as_ref().map(|s| s.time_above_100mb_ms),
-                    time_above_500mb_ms: mem_stats.as_ref().map(|s| s.time_above_500mb_ms),
-                    time_above_1gb_ms: mem_stats.as_ref().map(|s| s.time_above_1gb_ms),
-                    memory_samples: if record_samples && monitor_memory {
-                        Some(memory_samples)
-                    } else {
-                        None
-                    },
-                };
-
-                append_stats(output_path, stats)?;
-
-                return Ok(exit_code.unwrap_or(1));
-            }
-            None => {
-                let elapsed_ms = start_instant.elapsed().as_millis() as u64;
-
-                if let Some(ref mut cpu_mon) = cpu_monitor {
-                    let cpu_threads = cpu_mon.sample();
-                    cpu_samples.push(CpuSample {
-                        elapsed_ms,
-                        cpu_threads,
-                    });
+                    thread::sleep(sample_interval);
                 }
-
-                if let Some(ref mem_mon) = memory_monitor {
-                    let rss_bytes = mem_mon.sample();
-                    memory_samples.push(MemorySample {
-                        elapsed_ms,
-                        rss_bytes,
-                    });
-                }
-
-                thread::sleep(sample_interval);
             }
         }
-    }
+    } else {
+        child.wait()?
+    };
+
+    let duration_ms = start_instant.elapsed().as_millis() as u64;
+    let exit_code = status.code();
+    let passed = exit_code == Some(0);
+
+    let cpu_stats = if monitor_cpu {
+        Some(calculate_cpu_stats(&cpu_samples))
+    } else {
+        None
+    };
+
+    let mem_stats = if monitor_memory {
+        Some(calculate_memory_stats(&memory_samples))
+    } else {
+        None
+    };
+
+    let stats = TestStats {
+        binary: binary.to_string(),
+        test_name,
+        passed,
+        started_at,
+        duration_ms,
+        exit_code,
+        peak_cpu: cpu_stats.as_ref().map(|s| s.peak_cpu),
+        avg_cpu: cpu_stats.as_ref().map(|s| s.avg_cpu),
+        p50_cpu: cpu_stats.as_ref().map(|s| s.p50_cpu),
+        p90_cpu: cpu_stats.as_ref().map(|s| s.p90_cpu),
+        time_at_p90_ms: cpu_stats.as_ref().map(|s| s.time_at_p90_ms),
+        time_near_peak_ms: cpu_stats.as_ref().map(|s| s.time_near_peak_ms),
+        time_above_1t_ms: cpu_stats.as_ref().map(|s| s.time_above_1t_ms),
+        time_above_2t_ms: cpu_stats.as_ref().map(|s| s.time_above_2t_ms),
+        time_above_3t_ms: cpu_stats.as_ref().map(|s| s.time_above_3t_ms),
+        time_above_4t_ms: cpu_stats.as_ref().map(|s| s.time_above_4t_ms),
+        cpu_samples: if record_samples && monitor_cpu {
+            Some(cpu_samples)
+        } else {
+            None
+        },
+        peak_rss_bytes: mem_stats.as_ref().map(|s| s.peak_rss_bytes),
+        avg_rss_bytes: mem_stats.as_ref().map(|s| s.avg_rss_bytes),
+        p50_rss_bytes: mem_stats.as_ref().map(|s| s.p50_rss_bytes),
+        p90_rss_bytes: mem_stats.as_ref().map(|s| s.p90_rss_bytes),
+        time_above_100mb_ms: mem_stats.as_ref().map(|s| s.time_above_100mb_ms),
+        time_above_500mb_ms: mem_stats.as_ref().map(|s| s.time_above_500mb_ms),
+        time_above_1gb_ms: mem_stats.as_ref().map(|s| s.time_above_1gb_ms),
+        memory_samples: if record_samples && monitor_memory {
+            Some(memory_samples)
+        } else {
+            None
+        },
+    };
+
+    append_stats(output_path, stats)?;
+
+    Ok(exit_code.unwrap_or(1))
 }
 
 struct CalculatedCpuStats {
