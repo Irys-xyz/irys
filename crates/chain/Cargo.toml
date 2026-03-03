@@ -71,6 +71,7 @@ alloy-rpc-types-eth.workspace = true
 reth-cli-util = { workspace = true, features = ["jemalloc"] }
 reqwest = { workspace = true, features = ["json"] }
 dotenvy = "0.15"
+clap.workspace = true
 
 [dev-dependencies]
 assert_matches = "1.5.0"
