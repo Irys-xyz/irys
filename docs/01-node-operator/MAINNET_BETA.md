@@ -9,7 +9,7 @@ While the source may be compiled for other targets, MacOS or Windows, it is enti
 ## CPU
 The Irys node uses multiple CPU cores; more cores mean better performance on compute-heavy tasks. One core is dedicated to computing the VDF hashes used in mining. You’ll want a high-performance core (ideally with SHA extensions) to stay competitive with the network and mine efficiently.
 
-**Note:** the Irys node will pin core 0 for its VDF calculations. This is expected to take up 100% of this core, almost constantly.
+**Note:** the Irys node will pin a dedicated core for its VDF calculations (typically the first available core). This is expected to take up 100% of this core, almost constantly.
 
 We recommend CPUs like the __AMD Ryzen 9 3900__ or __AMD EPYC 4344P__ as both have high enough single core performance.
 ## GPU
@@ -39,7 +39,7 @@ Once you’ve installed the dependencies you can compile the build with
 ## Compile feature flags
 `telemetry` - enables exporting of opentelemetry log & span collection.
 *  Use the canonical `OTEL_EXPORTER_OTLP_ENDPOINT` env var to configure the opentelemetry endpoint to send both spans and logs to.
-* Optionally, specify the `AXIOM_API_TOKEN` and `AXIOM_DATASET` env vars to configure support for Axiom. \
+* Optionally, specify the `AXIOM_LOGS_ENDPOINT` env var to configure support for Axiom.
 
 `nvidia` - enables CUDA accelerated packing. 
 
@@ -58,7 +58,6 @@ Note that the “consensus” values that are in some of the other template conf
  sync_mode = "Full"
  base_directory = ".irys"
  mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
- initial_stake_and_pledge_whitelist = []
  reward_address = "0x0000000000000000000000000000000000000000"
  stake_pledge_drives = false
  genesis_peer_discovery_timeout_millis = 10000
@@ -98,25 +97,27 @@ Do not add random nodes to the trusted peers list. You generally shouldn’t rem
 
 Next is the section for configuring networking:
 ```toml
- [gossip]
+ # Default network configuration used by all services (http, gossip, reth)
+ # Individual services can override these values if needed
+ [network_defaults]
  public_ip = "127.0.0.1"
- public_port = 8081
  bind_ip = "0.0.0.0"
+
+ [gossip]
+ public_port = 8081
  bind_port = 8081
 
  [http]
- public_ip = "127.0.0.1"
  public_port = 8080
- bind_ip = "0.0.0.0"
  bind_port = 8080
 
  [reth.network]
  use_random_ports = false
- public_ip = "127.0.0.1"
  public_port = 30303
- bind_ip = "0.0.0.0"
  bind_port = 30303
 ```
+The `[network_defaults]` section sets the shared IP configuration for all services. Each service then specifies its own port.
+
 The Irys node exposes three web services, each on its own port:
 * `[http]` for user transactions and node discovery
 * `[gossip]` for peer handshakes and p2p communication
@@ -149,13 +150,12 @@ parallel_verification_thread_limit = 4
 ```toml
 [[oracles]]
 ```
-<!-- TODO: update below & config template once mainnet is updated with https://github.com/Irys-xyz/irys/pull/1046 -->
 The `[[oracles]]` sections control the $IRYS price oracles your node will consult when producing a block. By default, the `mock` oracle is specified, but we support both Coingecko and Coinmarketcap as price sources - simply fill out the api_key and other configuration parameters and then uncomment the block to activate the oracle. Multiple oracles are supported, and the node will use the most recent price info out of all of them.
 
 ## Storage Configuration
 To participate in mining on Irys you must provide drives for your assigned partitions to be stored on. Once provided and pledged the protocol will assign a partition hash which your node will use to pack your partition. Once packed the Irys node software will begin to mine the storage and you will be able to earn block rewards for any blocks you produce.
 
-To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base directory>/irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
+To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base directory>/.irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
 
 ```toml
 submodule_paths = [
@@ -169,7 +169,7 @@ The irys node will automatically create symlinks to the specified mount points i
 
 Ensure the user running the executable has read-write permissions for drive.
 # Running the node
-Once you’ve configured the `./config.toml` file and `<base dir>/irys_submodules.toml` file, it’s time to run the node.
+Once you’ve configured the `./config.toml` file and `<base dir>/.irys_submodules.toml` file, it’s time to run the node.
 
 `cargo run --bin irys --release`
 
@@ -183,5 +183,5 @@ The node supports the conventional `RUST_LOG` environment variable to configure 
 ## Full node (non-mining)
 A full node that tracks the current network state without participating in mining follows the same setup as a mining node with two exceptions:
 
-1. Since the node will not provide storage, the `irys_submodules.toml` file should remain empty.
+1. Since the node will not provide storage, the `.irys_submodules.toml` file should remain empty.
 2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.
