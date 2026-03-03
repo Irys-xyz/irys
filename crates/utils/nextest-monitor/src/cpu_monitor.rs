@@ -75,7 +75,6 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use std::process::Command;
-    use std::time::Instant;
 
     pub struct CpuMonitor {
         pid: u32,
@@ -83,16 +82,11 @@ mod platform {
 
     impl CpuMonitor {
         pub fn new(pid: u32) -> Self {
-            Self {
-                pid,
-                last_check: Instant::now(),
-            }
+            Self { pid }
         }
 
         /// Sample current CPU usage using ps command
         pub fn sample(&mut self) -> f64 {
-            self.last_check = Instant::now();
-
             if let Ok(output) = Command::new("ps")
                 .args(["-p", &self.pid.to_string(), "-o", "%cpu="])
                 .output()
