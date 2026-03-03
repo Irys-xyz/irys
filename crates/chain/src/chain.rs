@@ -1028,8 +1028,7 @@ impl IrysNode {
     }
 
     /// Single async lifecycle task that replaces the old init_services_thread + init_reth_thread.
-    /// Runs on the 2nd tokio runtime. Performs reth startup, service init, runs until exit, then
-    /// performs ordered shutdown.
+    /// Performs reth startup, service init, runs until exit, then performs ordered shutdown.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     async fn node_lifecycle(
         config: Config,
