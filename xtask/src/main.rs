@@ -195,6 +195,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 sh.set_var("NEXTEST_MONITOR_CPU", "1");
                 sh.set_var("NEXTEST_MONITOR_MEMORY", "1");
                 println!("Monitoring CPU and memory usage...");
+            } else {
+                sh.set_var("NEXTEST_MONITOR_CPU", "0");
+                sh.set_var("NEXTEST_MONITOR_MEMORY", "0");
             }
 
             // Build the wrapper binary and generate config

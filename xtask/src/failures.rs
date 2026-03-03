@@ -155,7 +155,14 @@ impl RunResults {
     }
 
     pub fn load_from(path: &Path) -> Self {
-        let stats = AggregatedStats::load_or_default(path);
+        let stats = match AggregatedStats::load(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => AggregatedStats::default(),
+            Err(e) => {
+                eprintln!("Warning: failed to load stats from {}: {e}", path.display());
+                AggregatedStats::default()
+            }
+        };
         let mut passed = HashSet::new();
         let mut failed = HashSet::new();
 

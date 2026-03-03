@@ -91,25 +91,30 @@ pub struct AggregatedStats {
     pub tests: Vec<TestStats>,
 }
 
+fn parse_tests_from_str(s: &str) -> Vec<TestStats> {
+    let mut tests = Vec::new();
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<TestStats>(line) {
+            Ok(stats) => tests.push(stats),
+            Err(e) => {
+                eprintln!("Warning: skipping malformed stats line: {e}");
+            }
+        }
+    }
+    tests
+}
+
 impl AggregatedStats {
     /// Load stats from a JSONL file, propagating IO errors.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = fs::read_to_string(path)?;
-
-        let mut tests = Vec::new();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<TestStats>(line) {
-                Ok(stats) => tests.push(stats),
-                Err(e) => {
-                    eprintln!("Warning: skipping malformed stats line: {e}");
-                }
-            }
-        }
-        Ok(AggregatedStats { tests })
+        Ok(AggregatedStats {
+            tests: parse_tests_from_str(&content),
+        })
     }
 
     /// Load stats from a JSONL file (one TestStats per line).
@@ -120,21 +125,9 @@ impl AggregatedStats {
         let Ok(content) = fs::read_to_string(path) else {
             return Self::default();
         };
-
-        let mut tests = Vec::new();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<TestStats>(line) {
-                Ok(stats) => tests.push(stats),
-                Err(e) => {
-                    eprintln!("Warning: skipping malformed stats line: {e}");
-                }
-            }
+        AggregatedStats {
+            tests: parse_tests_from_str(&content),
         }
-        AggregatedStats { tests }
     }
 
     pub fn append(&mut self, stats: TestStats) {
