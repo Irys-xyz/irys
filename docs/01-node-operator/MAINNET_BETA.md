@@ -20,35 +20,62 @@ Miners provide storage to the network in the form of partitions. These partition
 The minimum amount of storage a miner can provide to the protocol is a full 22TB partition with the ability to pledge multiple partitions to the protocol.
 
 We recommend formatting your drives with XFS - it has demonstrated the best characteristics (fast I/O, low space overhead) out of the suitable mainline file systems.
+
 # Building from source
 First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases (tagged mainnet-\*, DO NOT use the testnet-\* tagged releases!)
+
 ## Dependencies
-* clang & a C/C++ build toolchain (some of the packing routines are written in C/C++)
-* gmp
+Buildtime:
+* C++ compiler (10.2+)
 * pkg-config
+* clang
+* cmake
+* git
+* libgmp-dev
+* m4
+* Rust toolchain
+
+Runtime (i.e docker containers)
+* libgmp10
+* glibc
+
+See [the release dockerfile](../../docker/Dockerfile.release) for more info
 
 To build and enable NVIDIA GPU accelerated matrix packing you must have the latest CUDA toolkit (12.6+) and gcc-13 as well as g++ 13
 
-See `.devcontainer/setup.sh` for more information.
+See [.devcontainer/setup.sh](../../.devcontainer/setup.sh) for more information.
 ## Compiling
 Once you’ve installed the dependencies you can compile the build with
 
 `cargo build --bin irys --release`
 
-**Note:** the default configuration is to aggressively optimize for the machine (CPU & GPU) the compiler is operating on. For this reason, we heavily recommend compiling the binary on each distinct machine (non-identical CPU & GPU) instead of passing around the built binary
+**Note:** the default configuration is to aggressively optimize for the machine (CPU & GPU) the compiler is operating on. For this reason, we heavily recommend compiling the binary on each distinct machine (non-identical CPU & GPU) instead of passing around the built binary.
 ## Compile feature flags
-`telemetry` - enables exporting of opentelemetry log & span collection.
-*  Use the canonical `OTEL_EXPORTER_OTLP_ENDPOINT` env var to configure the opentelemetry endpoint to send both spans and logs to.
-* Optionally, specify the `AXIOM_LOGS_ENDPOINT` env var to configure support for Axiom.
+`telemetry` - enables exporting of opentelemetry log, span, and metrics collection. Telemetry activates automatically when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, or can be explicitly enabled with `ENABLE_TELEMETRY=true`.
+
+Environment variables (per the OTEL specification):
+* `OTEL_EXPORTER_OTLP_ENDPOINT` — base OTLP endpoint (default: `http://localhost:4317`). Signal-specific endpoints derive from this with paths appended (e.g. `/v1/logs`).
+* `OTEL_SERVICE_NAME` — service name reported in telemetry (default: `irys-node`).
+* `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — optional override endpoint for traces.
+* `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` — optional override endpoint for logs.
+* `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — optional override endpoint for metrics.\
+
+Custom: 
+* `AXIOM_LOGS_ENDPOINT` — optional additional Axiom OTLP endpoint. When set, logs are sent to both the primary logs endpoint and Axiom.
+
+**Note** This repository contains a full observability stack (with Irys-specific dashboards), which you are more than welcome to use if you want. See [README.md](../../docker/observation) for more details.
 
 `nvidia` - enables CUDA accelerated packing. 
 
 **Note:** GPU packing currently takes priority over CPU packing for bulk packing operations - future work will enable the node to use both simultaneously.
 
 **Note:** Multiple GPUs are currently unsupported - ensure your highest performance card shows up as the first entry in `nvidia-smi` 
+# Docker
+As part of our release process, we build a reproducible docker image containing the appropriate version of the node software. We currently only compile for x86. You can find these releases [here](https://github.com/Irys-xyz/irys/releases), and the source dockerfiles [here](../../docker/Dockerfile.release). Using them is as simple as mounting the config.toml and drives into the container.
+
 ## Node Configuration
-When it starts the Irys node will load its configuration from `./config.toml`, you can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it  in the directory where you will run the executable.
-Additionally, you can specify the full path to the configuration using the `CONFIG` env var.
+When it starts the Irys node will load its configuration from `${PWD}/config.toml`, you can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it  in the directory where you will run the executable.
+Additionally, you can specify the full path to the configuration using the `CONFIG` env var, if you want the PWD to be separate.
 
 Note that the “consensus” values that are in some of the other template configs are absent in the mainnet template. This is intentional as the “consensus” values for mainnet are hard coded into the node software itself.  It’s very important that all nodes operating on the network use the same set of hard coded consensus values.
 
@@ -66,9 +93,10 @@ Note that the “consensus” values that are in some of the other template conf
 The main things to configure in this section of the template are `mining_key`, `reward_address`, `base_directory`
 
 * `mining_key` is the hex encoded bytes of your node's private key which will be used for signing the blocks your node produces.
-* `reward_address` is the hex encoded actress of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
-* `base_directory` is the path to the folder you want irys to store all it’s state in (consensus data)
-**Note:** Irys will not store any protocol data in this folder, instead it will symlink to locations provided in the `submodules.toml` (see [Storage Configuration](#storage-configuration))
+* `reward_address` is the hex encoded address of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
+* `base_directory` is the path to the folder you want irys to store all its state in (consensus data). The node process/user will require full control over this folder and all subfolders.
+
+**Note:** Irys will not store any protocol (partition) data in this folder, instead it will symlink to locations provided in the `.irys_submodules.toml` (see [Storage Configuration](#storage-configuration))
 
 Next, you will notice a set of entries for "trusted peers" that look like the following:
 ```toml
@@ -122,9 +150,10 @@ The Irys node exposes three web services, each on its own port:
 * `[http]` for user transactions and node discovery
 * `[gossip]` for peer handshakes and p2p communication
 * `[reth.network]` for Reth peering (EVM P2P)
-They should share the same IP, but each must run on a unique port to avoid conflicts.
+They should share the same IP, but each must run on a unique port to avoid conflicts. You can deviate from these default ports freely.
+You should allow both TCP and UDP for all these ports.
 
-**Note:** Reverse proxies are not currently supported, they will cause your node to have difficulty joining the network.
+**Note:** Asymmetric NAT/Reverse proxies are not currently supported, they will cause your node to have difficulty joining the network.
 
 ```toml
  [packing.local]
@@ -184,4 +213,4 @@ The node supports the conventional `RUST_LOG` environment variable to configure 
 A full node that tracks the current network state without participating in mining follows the same setup as a mining node with two exceptions:
 
 1. Since the node will not provide storage, the `.irys_submodules.toml` file should remain empty.
-2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.
+2. The `stake_pledge_drives` parameter in `config.toml` should be set to `false`.
