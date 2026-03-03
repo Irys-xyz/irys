@@ -15,6 +15,33 @@ use nextest_monitor::cpu_monitor::CpuMonitor;
 use nextest_monitor::memory_monitor::MemoryMonitor;
 use nextest_monitor::types::{append_stats, CpuSample, MemorySample, TestStats};
 
+/// Flags known to take a following value argument.
+const VALUE_TAKING_FLAGS: &[&str] = &[
+    "--test-threads",
+    "--test",
+    "--package",
+    "--bin",
+    "--example",
+    "--manifest-path",
+    "--color",
+    "--format",
+    "--logfile",
+    "--skip",
+    "--report-time",
+    "-Z",
+    "-j",
+];
+
+fn flag_takes_value(flag: &str) -> bool {
+    // Exact match (e.g. "--test-threads")
+    if VALUE_TAKING_FLAGS.contains(&flag) {
+        return true;
+    }
+    // Prefix form with '=' already consumed the value (e.g. "--test-threads=4"),
+    // so the *next* token is NOT a value — return false for those.
+    false
+}
+
 fn extract_test_name(args: &[String]) -> Option<String> {
     for (i, arg) in args.iter().enumerate() {
         if arg.starts_with('-') {
@@ -23,9 +50,9 @@ fn extract_test_name(args: &[String]) -> Option<String> {
         if arg.contains('/') || arg.contains('\\') {
             continue;
         }
-        // If the previous argument starts with '-', treat this token as an
-        // option value (e.g. the "1" after "--test-threads") and skip it.
-        if i > 0 && args[i - 1].starts_with('-') {
+        // If the previous argument is a flag that takes a value, treat this
+        // token as that flag's value (e.g. the "1" after "--test-threads").
+        if i > 0 && flag_takes_value(&args[i - 1]) {
             continue;
         }
         return Some(arg.clone());
@@ -221,13 +248,13 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     let passed = exit_code == Some(0);
 
     let cpu_stats = if monitor_cpu {
-        Some(calculate_cpu_stats(&cpu_samples))
+        Some(calculate_cpu_stats(&cpu_samples, duration_ms))
     } else {
         None
     };
 
     let mem_stats = if monitor_memory {
-        Some(calculate_memory_stats(&memory_samples))
+        Some(calculate_memory_stats(&memory_samples, duration_ms))
     } else {
         None
     };
@@ -306,7 +333,7 @@ fn sample_deltas(elapsed_ms_values: &[u64]) -> Vec<u64> {
         .collect()
 }
 
-fn calculate_cpu_stats(samples: &[CpuSample]) -> CalculatedCpuStats {
+fn calculate_cpu_stats(samples: &[CpuSample], duration_ms: u64) -> CalculatedCpuStats {
     if samples.is_empty() {
         return CalculatedCpuStats {
             peak_cpu: 0.0,
@@ -338,12 +365,12 @@ fn calculate_cpu_stats(samples: &[CpuSample]) -> CalculatedCpuStats {
     let near_peak_threshold = peak_cpu * 0.8;
 
     let (
-        time_at_p90_ms,
-        time_near_peak_ms,
-        time_above_1t_ms,
-        time_above_2t_ms,
-        time_above_3t_ms,
-        time_above_4t_ms,
+        mut time_at_p90_ms,
+        mut time_near_peak_ms,
+        mut time_above_1t_ms,
+        mut time_above_2t_ms,
+        mut time_above_3t_ms,
+        mut time_above_4t_ms,
     ) = samples.iter().zip(deltas.iter()).fold(
         (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
         |(p90, near_peak, a1, a2, a3, a4), (s, &d)| {
@@ -362,6 +389,32 @@ fn calculate_cpu_stats(samples: &[CpuSample]) -> CalculatedCpuStats {
             )
         },
     );
+
+    // Account for the interval from the last sample to process exit,
+    // using the last sample's CPU value as the best estimate.
+    let sum_of_deltas: u64 = deltas.iter().sum();
+    let final_delta = duration_ms.saturating_sub(sum_of_deltas);
+    if final_delta > 0 {
+        let last = &samples[samples.len() - 1];
+        if last.cpu_threads >= p90_cpu {
+            time_at_p90_ms += final_delta;
+        }
+        if last.cpu_threads >= near_peak_threshold {
+            time_near_peak_ms += final_delta;
+        }
+        if last.cpu_threads > 1.0 {
+            time_above_1t_ms += final_delta;
+        }
+        if last.cpu_threads > 2.0 {
+            time_above_2t_ms += final_delta;
+        }
+        if last.cpu_threads > 3.0 {
+            time_above_3t_ms += final_delta;
+        }
+        if last.cpu_threads > 4.0 {
+            time_above_4t_ms += final_delta;
+        }
+    }
 
     CalculatedCpuStats {
         peak_cpu,
@@ -391,7 +444,7 @@ struct CalculatedMemoryStats {
     time_above_1gb_ms: u64,
 }
 
-fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
+fn calculate_memory_stats(samples: &[MemorySample], duration_ms: u64) -> CalculatedMemoryStats {
     if samples.is_empty() {
         return CalculatedMemoryStats {
             peak_rss_bytes: 0,
@@ -417,7 +470,7 @@ fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
     let elapsed_values: Vec<u64> = samples.iter().map(|s| s.elapsed_ms).collect();
     let deltas = sample_deltas(&elapsed_values);
 
-    let (time_above_100mb_ms, time_above_500mb_ms, time_above_1gb_ms) = samples
+    let (mut time_above_100mb_ms, mut time_above_500mb_ms, mut time_above_1gb_ms) = samples
         .iter()
         .zip(deltas.iter())
         .fold((0u64, 0u64, 0u64), |(a100, a500, a1g), (s, &d)| {
@@ -427,6 +480,23 @@ fn calculate_memory_stats(samples: &[MemorySample]) -> CalculatedMemoryStats {
                 a1g + if s.rss_bytes > GB_1 { d } else { 0 },
             )
         });
+
+    // Account for the interval from the last sample to process exit,
+    // using the last sample's RSS value as the best estimate.
+    let sum_of_deltas: u64 = deltas.iter().sum();
+    let final_delta = duration_ms.saturating_sub(sum_of_deltas);
+    if final_delta > 0 {
+        let last = &samples[samples.len() - 1];
+        if last.rss_bytes > MB_100 {
+            time_above_100mb_ms += final_delta;
+        }
+        if last.rss_bytes > MB_500 {
+            time_above_500mb_ms += final_delta;
+        }
+        if last.rss_bytes > GB_1 {
+            time_above_1gb_ms += final_delta;
+        }
+    }
 
     CalculatedMemoryStats {
         peak_rss_bytes,
@@ -458,10 +528,9 @@ mod tests {
 
     #[test]
     fn test_extract_test_name_with_leading_flags() {
-        // Value immediately after a flag is treated as that flag's value, not
-        // the test name.
+        // Boolean flags (not in VALUE_TAKING_FLAGS) don't consume the next token.
         let args = vec!["--some-flag".to_string(), "test_name".to_string()];
-        assert_eq!(extract_test_name(&args), None);
+        assert_eq!(extract_test_name(&args), Some("test_name".to_string()));
     }
 
     #[test]
@@ -490,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_calculate_cpu_stats_empty() {
-        let stats = calculate_cpu_stats(&[]);
+        let stats = calculate_cpu_stats(&[], 0);
         assert_eq!(stats.peak_cpu, 0.0);
         assert_eq!(stats.avg_cpu, 0.0);
     }
@@ -519,7 +588,7 @@ mod tests {
                 cpu_threads: 1.0,
             },
         ];
-        let stats = calculate_cpu_stats(&samples);
+        let stats = calculate_cpu_stats(&samples, 250);
         assert_eq!(stats.peak_cpu, 3.0);
         assert!((stats.avg_cpu - 1.8).abs() < 0.01);
         assert!(stats.time_above_1t_ms > 0);
@@ -543,7 +612,7 @@ mod tests {
                 cpu_threads: 0.5,
             },
         ];
-        let stats = calculate_cpu_stats(&samples);
+        let stats = calculate_cpu_stats(&samples, 160);
         // time_above_2t: first two samples qualify (2.5 and 3.0)
         // deltas: 50 + 70 = 120ms
         assert_eq!(stats.time_above_2t_ms, 120);
@@ -553,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_calculate_memory_stats_empty() {
-        let stats = calculate_memory_stats(&[]);
+        let stats = calculate_memory_stats(&[], 0);
         assert_eq!(stats.peak_rss_bytes, 0);
         assert_eq!(stats.avg_rss_bytes, 0);
     }
@@ -582,7 +651,7 @@ mod tests {
                 rss_bytes: 100 * 1024 * 1024,
             },
         ];
-        let stats = calculate_memory_stats(&samples);
+        let stats = calculate_memory_stats(&samples, 250);
         assert_eq!(stats.peak_rss_bytes, 600 * 1024 * 1024);
         // 150MB, 200MB, 600MB are above 100MB; deltas: 50+50+50 = 150ms
         assert_eq!(stats.time_above_100mb_ms, 150);
@@ -599,7 +668,7 @@ mod tests {
                 rss_bytes: 2 * 1024 * 1024 * 1024,
             }, // 2GB
         ];
-        let stats = calculate_memory_stats(&samples);
+        let stats = calculate_memory_stats(&samples, 50);
         assert_eq!(stats.time_above_100mb_ms, 50);
         assert_eq!(stats.time_above_500mb_ms, 50);
         assert_eq!(stats.time_above_1gb_ms, 50);
@@ -622,7 +691,7 @@ mod tests {
                 rss_bytes: 50 * 1024 * 1024, // 50MB
             },
         ];
-        let stats = calculate_memory_stats(&samples);
+        let stats = calculate_memory_stats(&samples, 210);
         // above 100MB: first two samples, deltas: 60 + 120 = 180ms
         assert_eq!(stats.time_above_100mb_ms, 180);
         // above 500MB: second sample only, delta: 120ms

@@ -227,9 +227,9 @@ impl ClassificationConfig {
                     4 => time_above_4t_ms,
                     _ => None,
                 };
-                // If telemetry is missing, treat as fitting this bucket (don't upgrade)
+                // If telemetry is missing, treat as unknown (don't assume it fits)
                 let Some(time_above) = time_above else {
-                    return true;
+                    return false;
                 };
                 let pct = time_above as f64 / duration;
                 pct <= exceedance_pct
@@ -833,7 +833,12 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
     let mut aggregated = aggregate_by_test(stats);
 
     // Check if any test has memory data
-    let has_memory = aggregated.iter().any(|t| t.avg_peak_rss_bytes.is_some());
+    let has_memory = aggregated.iter().any(|t| {
+        t.avg_peak_rss_bytes.is_some()
+            || t.avg_avg_rss_bytes.is_some()
+            || t.avg_p90_rss_bytes.is_some()
+            || t.max_peak_rss_bytes.is_some()
+    });
 
     match sort {
         "p90" => aggregated.sort_by(|a, b| {
@@ -1001,6 +1006,18 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
+/// Format an optional CPU multiplier, showing "N/A" when absent.
+fn fmt_opt_cpu(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.2}x", x))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+/// Format an optional percentage, showing "N/A" when absent.
+fn fmt_opt_pct(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.0}%", x))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
 fn cmd_analyze(
     stats: &AggregatedStats,
     config: &ClassificationConfig,
@@ -1089,31 +1106,23 @@ fn cmd_analyze(
                     };
 
                     let (time_above_ms, threshold) = match r.current.effective_threads {
-                        1 => (r.stats.avg_time_above_1t_ms.unwrap_or(0), 1),
-                        2 => (r.stats.avg_time_above_2t_ms.unwrap_or(0), 2),
-                        3 => (r.stats.avg_time_above_3t_ms.unwrap_or(0), 3),
-                        4 => (r.stats.avg_time_above_4t_ms.unwrap_or(0), 4),
-                        _ => (r.stats.avg_time_above_1t_ms.unwrap_or(0), 1),
+                        1 => (r.stats.avg_time_above_1t_ms, 1),
+                        2 => (r.stats.avg_time_above_2t_ms, 2),
+                        3 => (r.stats.avg_time_above_3t_ms, 3),
+                        4 => (r.stats.avg_time_above_4t_ms, 4),
+                        _ => (r.stats.avg_time_above_1t_ms, 1),
                     };
-                    let pct_above = if r.stats.avg_duration_ms > 0 {
-                        (time_above_ms as f64 / r.stats.avg_duration_ms as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    let pct_at_p90 = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_at_p90_ms.unwrap_or(0) as f64
-                            / r.stats.avg_duration_ms as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    };
-                    let pct_near_peak = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_near_peak_ms.unwrap_or(0) as f64
-                            / r.stats.avg_duration_ms as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    };
+                    let dur = r.stats.avg_duration_ms;
+                    let pct_above = time_above_ms
+                        .and_then(|t| (dur > 0).then(|| (t as f64 / dur as f64) * 100.0));
+                    let pct_at_p90 = r
+                        .stats
+                        .avg_time_at_p90_ms
+                        .and_then(|t| (dur > 0).then(|| (t as f64 / dur as f64) * 100.0));
+                    let pct_near_peak = r
+                        .stats
+                        .avg_time_near_peak_ms
+                        .and_then(|t| (dur > 0).then(|| (t as f64 / dur as f64) * 100.0));
 
                     println!("┌─ {}", r.test_name);
                     println!(
@@ -1123,26 +1132,29 @@ fn cmd_analyze(
                         r.current.effective_timeout_ms as f64 / 1000.0
                     );
                     println!(
-                        "│  CPU:     peak: {:.2}x | P90: {:.2}x | P50: {:.2}x | avg: {:.2}x",
-                        r.stats.avg_peak_cpu.unwrap_or(0.0),
-                        r.stats.avg_p90_cpu.unwrap_or(0.0),
-                        r.stats.avg_p50_cpu.unwrap_or(0.0),
-                        r.stats.avg_avg_cpu.unwrap_or(0.0)
+                        "│  CPU:     peak: {} | P90: {} | P50: {} | avg: {}",
+                        fmt_opt_cpu(r.stats.avg_peak_cpu),
+                        fmt_opt_cpu(r.stats.avg_p90_cpu),
+                        fmt_opt_cpu(r.stats.avg_p50_cpu),
+                        fmt_opt_cpu(r.stats.avg_avg_cpu)
                     );
                     println!(
-                        "│  Time:    {} runs | {} | at P90: {:.0}% | near peak: {:.0}%",
+                        "│  Time:    {} runs | {} | at P90: {} | near peak: {}",
                         r.stats.run_count,
                         format_duration(r.stats.avg_duration_ms),
-                        pct_at_p90,
-                        pct_near_peak
+                        fmt_opt_pct(pct_at_p90),
+                        fmt_opt_pct(pct_near_peak)
                     );
-                    if time_above_ms > 0 {
-                        println!(
-                            "│  Above {}T: {:.1}s ({:.0}% of runtime)",
-                            threshold,
-                            time_above_ms as f64 / 1000.0,
-                            pct_above
-                        );
+                    if let Some(time_above) = time_above_ms {
+                        if time_above > 0 {
+                            let pct_str = fmt_opt_pct(pct_above);
+                            println!(
+                                "│  Above {}T: {:.1}s ({} of runtime)",
+                                threshold,
+                                time_above as f64 / 1000.0,
+                                pct_str
+                            );
+                        }
                     }
                     if let Some(peak_rss) = r.stats.avg_peak_rss_bytes {
                         let avg_rss_str = r
@@ -1199,12 +1211,12 @@ fn cmd_analyze(
                     };
 
                     println!(
-                        "  [{}] {} (peak: {:.2}x, P90: {:.2}x, avg: {:.2}x, {:.1}s)",
+                        "  [{}] {} (peak: {}, P90: {}, avg: {}, {:.1}s)",
                         rules,
                         r.test_name,
-                        r.stats.avg_peak_cpu.unwrap_or(0.0),
-                        r.stats.avg_p90_cpu.unwrap_or(0.0),
-                        r.stats.avg_avg_cpu.unwrap_or(0.0),
+                        fmt_opt_cpu(r.stats.avg_peak_cpu),
+                        fmt_opt_cpu(r.stats.avg_p90_cpu),
+                        fmt_opt_cpu(r.stats.avg_avg_cpu),
                         r.stats.avg_duration_ms as f64 / 1000.0
                     );
                 }
