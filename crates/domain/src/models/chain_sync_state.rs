@@ -312,15 +312,9 @@ impl ChainSyncState {
             return;
         }
 
-        // Create a future that polls the sync state
-        let syncing = Arc::clone(&self.syncing);
-        tokio::spawn(async move {
-            while syncing.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("Sync checking task failed");
+        while self.syncing.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Sets the current sync height. During syncing, the gossip won't
@@ -533,49 +527,44 @@ impl ChainSyncState {
             return;
         }
 
-        // Create a future that polls the sync state
         let target = Arc::clone(&self.sync_target_height);
         let highest_processed_block = Arc::clone(&self.highest_processed_block);
-        tokio::spawn(async move {
-            let progress_timeout = Duration::from_secs(60);
-            let mut last_made_progress = Instant::now();
-            let mut prev_hpb = 0;
-            loop {
-                let target = target.load(Ordering::Relaxed);
-                let hpb = highest_processed_block.load(Ordering::Relaxed);
-                let made_progress = hpb > prev_hpb;
+        let progress_timeout = Duration::from_secs(60);
+        let mut last_made_progress = Instant::now();
+        let mut prev_hpb = 0;
+        loop {
+            let target = target.load(Ordering::Relaxed);
+            let hpb = highest_processed_block.load(Ordering::Relaxed);
+            let made_progress = hpb > prev_hpb;
 
-                // We need to add 1 to the highest processed block. For the cases when the node
-                // starts fully caught up, no new blocks are added to the index, and the
-                // target is always going to be one more than the highest processed block.
-                // If this function never resolves, no new blocks can arrive over gossip in that case.
+            // We need to add 1 to the highest processed block. For the cases when the node
+            // starts fully caught up, no new blocks are added to the index, and the
+            // target is always going to be one more than the highest processed block.
+            // If this function never resolves, no new blocks can arrive over gossip in that case.
 
-                if hpb + 1 >= target {
-                    // synchronised
-                    break;
-                } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
-                    // didn't make any progress in the last `progress_timeout` duration
-                    warn!(
-                        "Did not make sync process from {} in {}ms",
-                        &hpb,
-                        &progress_timeout.as_millis()
+            if hpb + 1 >= target {
+                // synchronised
+                break;
+            } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
+                // didn't make any progress in the last `progress_timeout` duration
+                warn!(
+                    "Did not make sync process from {} in {}ms",
+                    &hpb,
+                    &progress_timeout.as_millis()
+                );
+                break; // progression timeout
+            } else {
+                if made_progress {
+                    debug!(
+                        "Progressed: {} -> {} (target: {})",
+                        &prev_hpb, &hpb, &target
                     );
-                    break; // progression timeout
-                } else {
-                    if made_progress {
-                        debug!(
-                            "Progressed: {} -> {} (target: {})",
-                            &prev_hpb, &hpb, &target
-                        );
-                        last_made_progress = Instant::now();
-                        prev_hpb = hpb;
-                    };
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                    last_made_progress = Instant::now();
+                    prev_hpb = hpb;
+                };
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        })
-        .await
-        .expect("Sync checking task failed");
+        }
     }
 
     pub fn set_trusted_sync(&self, is_trusted_sync: bool) {
