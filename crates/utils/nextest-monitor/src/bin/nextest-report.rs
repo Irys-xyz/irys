@@ -369,17 +369,17 @@ fn extract_rule_name(filter: &str) -> String {
 pub struct TestAggregation {
     pub test_name: String,
     pub run_count: usize,
-    pub avg_peak_cpu: f64,
-    pub avg_avg_cpu: f64,
-    pub avg_p50_cpu: f64,
-    pub avg_p90_cpu: f64,
+    pub avg_peak_cpu: Option<f64>,
+    pub avg_avg_cpu: Option<f64>,
+    pub avg_p50_cpu: Option<f64>,
+    pub avg_p90_cpu: Option<f64>,
     pub avg_duration_ms: u64,
-    pub avg_time_at_p90_ms: u64,
-    pub avg_time_near_peak_ms: u64,
-    pub avg_time_above_1t_ms: u64,
-    pub avg_time_above_2t_ms: u64,
-    pub avg_time_above_3t_ms: u64,
-    pub avg_time_above_4t_ms: u64,
+    pub avg_time_at_p90_ms: Option<u64>,
+    pub avg_time_near_peak_ms: Option<u64>,
+    pub avg_time_above_1t_ms: Option<u64>,
+    pub avg_time_above_2t_ms: Option<u64>,
+    pub avg_time_above_3t_ms: Option<u64>,
+    pub avg_time_above_4t_ms: Option<u64>,
     pub max_peak_cpu: f64,
     pub max_duration_ms: u64,
     // Memory aggregation fields
@@ -387,6 +387,20 @@ pub struct TestAggregation {
     pub avg_avg_rss_bytes: Option<u64>,
     pub avg_p90_rss_bytes: Option<u64>,
     pub max_peak_rss_bytes: Option<u64>,
+}
+
+/// Helper to compute the average of optional f64 fields across runs.
+/// Returns `None` if none of the runs have the field set.
+fn avg_opt_f64<'a>(
+    runs: impl Iterator<Item = &'a TestStats>,
+    f: fn(&TestStats) -> Option<f64>,
+) -> Option<f64> {
+    let values: Vec<f64> = runs.filter_map(f).collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
 }
 
 /// Helper to compute the average of optional u64 fields across runs.
@@ -428,47 +442,25 @@ fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
         .map(|(name, runs)| {
             let run_count = runs.len();
 
-            // CPU fields: use unwrap_or(0.0) for backward compat with data that has CPU fields
-            let avg_peak_cpu =
-                runs.iter().map(|r| r.peak_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
-            let avg_avg_cpu =
-                runs.iter().map(|r| r.avg_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
-            let avg_p50_cpu =
-                runs.iter().map(|r| r.p50_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
-            let avg_p90_cpu =
-                runs.iter().map(|r| r.p90_cpu.unwrap_or(0.0)).sum::<f64>() / run_count as f64;
+            // CPU fields: average only over runs that have telemetry data
+            let avg_peak_cpu = avg_opt_f64(runs.iter().copied(), |r| r.peak_cpu);
+            let avg_avg_cpu = avg_opt_f64(runs.iter().copied(), |r| r.avg_cpu);
+            let avg_p50_cpu = avg_opt_f64(runs.iter().copied(), |r| r.p50_cpu);
+            let avg_p90_cpu = avg_opt_f64(runs.iter().copied(), |r| r.p90_cpu);
             let avg_duration_ms =
                 runs.iter().map(|r| r.duration_ms).sum::<u64>() / run_count as u64;
-            let avg_time_at_p90_ms = runs
-                .iter()
-                .map(|r| r.time_at_p90_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
-            let avg_time_near_peak_ms = runs
-                .iter()
-                .map(|r| r.time_near_peak_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
-            let avg_time_above_1t_ms = runs
-                .iter()
-                .map(|r| r.time_above_1t_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
-            let avg_time_above_2t_ms = runs
-                .iter()
-                .map(|r| r.time_above_2t_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
-            let avg_time_above_3t_ms = runs
-                .iter()
-                .map(|r| r.time_above_3t_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
-            let avg_time_above_4t_ms = runs
-                .iter()
-                .map(|r| r.time_above_4t_ms.unwrap_or(0))
-                .sum::<u64>()
-                / run_count as u64;
+            let avg_time_at_p90_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_at_p90_ms);
+            let avg_time_near_peak_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_near_peak_ms);
+            let avg_time_above_1t_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_above_1t_ms);
+            let avg_time_above_2t_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_above_2t_ms);
+            let avg_time_above_3t_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_above_3t_ms);
+            let avg_time_above_4t_ms =
+                avg_opt_u64(runs.iter().copied(), |r| r.time_above_4t_ms);
             let max_peak_cpu = runs
                 .iter()
                 .map(|r| r.peak_cpu.unwrap_or(0.0))
@@ -535,12 +527,12 @@ fn analyze_reclassifications(
     for test in aggregated {
         let current = config.classify(&test.test_name);
         let suggested = config.suggest_classification(
-            test.avg_avg_cpu,
+            test.avg_avg_cpu.unwrap_or(0.0),
             test.avg_duration_ms,
-            test.avg_time_above_1t_ms,
-            test.avg_time_above_2t_ms,
-            test.avg_time_above_3t_ms,
-            test.avg_time_above_4t_ms,
+            test.avg_time_above_1t_ms.unwrap_or(0),
+            test.avg_time_above_2t_ms.unwrap_or(0),
+            test.avg_time_above_3t_ms.unwrap_or(0),
+            test.avg_time_above_4t_ms.unwrap_or(0),
             DEFAULT_EXCEEDANCE_PCT,
         );
 
@@ -548,19 +540,19 @@ fn analyze_reclassifications(
 
         // Determine time above current allocation
         let (time_above_allocation_ms, allocation_threshold) = match current.effective_threads {
-            1 => (test.avg_time_above_1t_ms, 1.0),
-            2 => (test.avg_time_above_2t_ms, 2.0),
-            3 => (test.avg_time_above_3t_ms, 3.0),
-            4 => (test.avg_time_above_4t_ms, 4.0),
+            1 => (test.avg_time_above_1t_ms.unwrap_or(0), 1.0),
+            2 => (test.avg_time_above_2t_ms.unwrap_or(0), 2.0),
+            3 => (test.avg_time_above_3t_ms.unwrap_or(0), 3.0),
+            4 => (test.avg_time_above_4t_ms.unwrap_or(0), 4.0),
             t => {
                 if t < 2 {
-                    (test.avg_time_above_1t_ms, 1.0)
+                    (test.avg_time_above_1t_ms.unwrap_or(0), 1.0)
                 } else if t < 3 {
-                    (test.avg_time_above_2t_ms, 2.0)
+                    (test.avg_time_above_2t_ms.unwrap_or(0), 2.0)
                 } else if t < 4 {
-                    (test.avg_time_above_3t_ms, 3.0)
+                    (test.avg_time_above_3t_ms.unwrap_or(0), 3.0)
                 } else {
-                    (test.avg_time_above_4t_ms, 4.0)
+                    (test.avg_time_above_4t_ms.unwrap_or(0), 4.0)
                 }
             }
         };
@@ -579,8 +571,8 @@ fn analyze_reclassifications(
                 current.effective_threads,
                 pct_above_allocation,
                 exceedance_threshold,
-                test.avg_avg_cpu,
-                test.avg_peak_cpu,
+                test.avg_avg_cpu.unwrap_or(0.0),
+                test.avg_peak_cpu.unwrap_or(0.0),
                 allocation_threshold as u32,
                 time_above_allocation_ms as f64 / 1000.0,
             ));
@@ -589,7 +581,7 @@ fn analyze_reclassifications(
         {
             issues.push(format!(
                 "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
-                test.avg_avg_cpu,
+                test.avg_avg_cpu.unwrap_or(0.0),
                 allocation_threshold as u32,
                 pct_above_allocation,
                 current.effective_threads,
@@ -839,14 +831,32 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
     let has_memory = aggregated.iter().any(|t| t.avg_peak_rss_bytes.is_some());
 
     match sort {
-        "p90" => aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu)),
-        "peak" => aggregated.sort_by(|a, b| b.avg_peak_cpu.total_cmp(&a.avg_peak_cpu)),
-        "avg" => aggregated.sort_by(|a, b| b.avg_avg_cpu.total_cmp(&a.avg_avg_cpu)),
+        "p90" => aggregated.sort_by(|a, b| {
+            b.avg_p90_cpu
+                .unwrap_or(0.0)
+                .total_cmp(&a.avg_p90_cpu.unwrap_or(0.0))
+        }),
+        "peak" => aggregated.sort_by(|a, b| {
+            b.avg_peak_cpu
+                .unwrap_or(0.0)
+                .total_cmp(&a.avg_peak_cpu.unwrap_or(0.0))
+        }),
+        "avg" => aggregated.sort_by(|a, b| {
+            b.avg_avg_cpu
+                .unwrap_or(0.0)
+                .total_cmp(&a.avg_avg_cpu.unwrap_or(0.0))
+        }),
         "duration" => aggregated.sort_by(|a, b| b.avg_duration_ms.cmp(&a.avg_duration_ms)),
-        "nearpeak" => {
-            aggregated.sort_by(|a, b| b.avg_time_near_peak_ms.cmp(&a.avg_time_near_peak_ms))
-        }
-        "atp90" => aggregated.sort_by(|a, b| b.avg_time_at_p90_ms.cmp(&a.avg_time_at_p90_ms)),
+        "nearpeak" => aggregated.sort_by(|a, b| {
+            b.avg_time_near_peak_ms
+                .unwrap_or(0)
+                .cmp(&a.avg_time_near_peak_ms.unwrap_or(0))
+        }),
+        "atp90" => aggregated.sort_by(|a, b| {
+            b.avg_time_at_p90_ms
+                .unwrap_or(0)
+                .cmp(&a.avg_time_at_p90_ms.unwrap_or(0))
+        }),
         "peak_rss" => aggregated.sort_by(|a, b| {
             b.avg_peak_rss_bytes
                 .unwrap_or(0)
@@ -859,7 +869,11 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
         }),
         _ => {
             eprintln!("Unknown sort option: {}. Using 'p90'.", sort);
-            aggregated.sort_by(|a, b| b.avg_p90_cpu.total_cmp(&a.avg_p90_cpu));
+            aggregated.sort_by(|a, b| {
+                b.avg_p90_cpu
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.avg_p90_cpu.unwrap_or(0.0))
+            });
         }
     }
 
@@ -904,12 +918,12 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
         let alloc_str = format!("{}T", classification.effective_threads);
 
         let pct_at_p90 = if test.avg_duration_ms > 0 {
-            (test.avg_time_at_p90_ms as f64 / test.avg_duration_ms as f64) * 100.0
+            (test.avg_time_at_p90_ms.unwrap_or(0) as f64 / test.avg_duration_ms as f64) * 100.0
         } else {
             0.0
         };
         let pct_near_peak = if test.avg_duration_ms > 0 {
-            (test.avg_time_near_peak_ms as f64 / test.avg_duration_ms as f64) * 100.0
+            (test.avg_time_near_peak_ms.unwrap_or(0) as f64 / test.avg_duration_ms as f64) * 100.0
         } else {
             0.0
         };
@@ -930,9 +944,9 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
                 "{:<45} {:>5} {:>5.2}x {:>5.2}x {:>5.2}x {:>8} {:>5.0}% {:>5.0}% {:>7} {:>7} {:>4}",
                 name,
                 alloc_str,
-                test.avg_p90_cpu,
-                test.avg_peak_cpu,
-                test.avg_avg_cpu,
+                test.avg_p90_cpu.unwrap_or(0.0),
+                test.avg_peak_cpu.unwrap_or(0.0),
+                test.avg_avg_cpu.unwrap_or(0.0),
                 duration_str,
                 pct_at_p90,
                 pct_near_peak,
@@ -945,9 +959,9 @@ fn cmd_summary(stats: &AggregatedStats, config: &ClassificationConfig, sort: &st
                 "{:<45} {:>5} {:>5.2}x {:>5.2}x {:>5.2}x {:>8} {:>5.0}% {:>5.0}% {:>4}",
                 name,
                 alloc_str,
-                test.avg_p90_cpu,
-                test.avg_peak_cpu,
-                test.avg_avg_cpu,
+                test.avg_p90_cpu.unwrap_or(0.0),
+                test.avg_peak_cpu.unwrap_or(0.0),
+                test.avg_avg_cpu.unwrap_or(0.0),
                 duration_str,
                 pct_at_p90,
                 pct_near_peak,
@@ -1018,6 +1032,7 @@ fn cmd_analyze(
                         "time_above_4t_ms": r.stats.avg_time_above_4t_ms,
                         "run_count": r.stats.run_count,
                     });
+                    // Note: Option fields serialize as `null` in JSON when None
 
                     if let Some(v) = r.stats.avg_peak_rss_bytes {
                         stats_json["avg_peak_rss_bytes"] = serde_json::json!(v);
@@ -1069,11 +1084,11 @@ fn cmd_analyze(
                     };
 
                     let (time_above_ms, threshold) = match r.current.effective_threads {
-                        1 => (r.stats.avg_time_above_1t_ms, 1),
-                        2 => (r.stats.avg_time_above_2t_ms, 2),
-                        3 => (r.stats.avg_time_above_3t_ms, 3),
-                        4 => (r.stats.avg_time_above_4t_ms, 4),
-                        _ => (r.stats.avg_time_above_1t_ms, 1),
+                        1 => (r.stats.avg_time_above_1t_ms.unwrap_or(0), 1),
+                        2 => (r.stats.avg_time_above_2t_ms.unwrap_or(0), 2),
+                        3 => (r.stats.avg_time_above_3t_ms.unwrap_or(0), 3),
+                        4 => (r.stats.avg_time_above_4t_ms.unwrap_or(0), 4),
+                        _ => (r.stats.avg_time_above_1t_ms.unwrap_or(0), 1),
                     };
                     let pct_above = if r.stats.avg_duration_ms > 0 {
                         (time_above_ms as f64 / r.stats.avg_duration_ms as f64) * 100.0
@@ -1081,12 +1096,12 @@ fn cmd_analyze(
                         0.0
                     };
                     let pct_at_p90 = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_at_p90_ms as f64 / r.stats.avg_duration_ms as f64) * 100.0
+                        (r.stats.avg_time_at_p90_ms.unwrap_or(0) as f64 / r.stats.avg_duration_ms as f64) * 100.0
                     } else {
                         0.0
                     };
                     let pct_near_peak = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_near_peak_ms as f64 / r.stats.avg_duration_ms as f64)
+                        (r.stats.avg_time_near_peak_ms.unwrap_or(0) as f64 / r.stats.avg_duration_ms as f64)
                             * 100.0
                     } else {
                         0.0
@@ -1101,10 +1116,10 @@ fn cmd_analyze(
                     );
                     println!(
                         "│  CPU:     peak: {:.2}x | P90: {:.2}x | P50: {:.2}x | avg: {:.2}x",
-                        r.stats.avg_peak_cpu,
-                        r.stats.avg_p90_cpu,
-                        r.stats.avg_p50_cpu,
-                        r.stats.avg_avg_cpu
+                        r.stats.avg_peak_cpu.unwrap_or(0.0),
+                        r.stats.avg_p90_cpu.unwrap_or(0.0),
+                        r.stats.avg_p50_cpu.unwrap_or(0.0),
+                        r.stats.avg_avg_cpu.unwrap_or(0.0)
                     );
                     println!(
                         "│  Time:    {} runs | {} | at P90: {:.0}% | near peak: {:.0}%",
@@ -1179,9 +1194,9 @@ fn cmd_analyze(
                         "  [{}] {} (peak: {:.2}x, P90: {:.2}x, avg: {:.2}x, {:.1}s)",
                         rules,
                         r.test_name,
-                        r.stats.avg_peak_cpu,
-                        r.stats.avg_p90_cpu,
-                        r.stats.avg_avg_cpu,
+                        r.stats.avg_peak_cpu.unwrap_or(0.0),
+                        r.stats.avg_p90_cpu.unwrap_or(0.0),
+                        r.stats.avg_avg_cpu.unwrap_or(0.0),
                         r.stats.avg_duration_ms as f64 / 1000.0
                     );
                 }
@@ -1531,20 +1546,40 @@ fn cmd_export(
             ];
             for t in &aggregated {
                 lines.push(format!(
-                    "\"{}\",{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{},{},{},{},{}",
+                    "\"{}\",{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{}",
                     t.test_name.replace('"', "\"\""),
                     t.run_count,
-                    t.avg_peak_cpu,
-                    t.avg_p90_cpu,
-                    t.avg_p50_cpu,
-                    t.avg_avg_cpu,
+                    t.avg_peak_cpu
+                        .map(|v| format!("{:.4}", v))
+                        .unwrap_or_default(),
+                    t.avg_p90_cpu
+                        .map(|v| format!("{:.4}", v))
+                        .unwrap_or_default(),
+                    t.avg_p50_cpu
+                        .map(|v| format!("{:.4}", v))
+                        .unwrap_or_default(),
+                    t.avg_avg_cpu
+                        .map(|v| format!("{:.4}", v))
+                        .unwrap_or_default(),
                     t.avg_duration_ms,
-                    t.avg_time_at_p90_ms,
-                    t.avg_time_near_peak_ms,
-                    t.avg_time_above_1t_ms,
-                    t.avg_time_above_2t_ms,
-                    t.avg_time_above_3t_ms,
-                    t.avg_time_above_4t_ms,
+                    t.avg_time_at_p90_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_time_near_peak_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_time_above_1t_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_time_above_2t_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_time_above_3t_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                    t.avg_time_above_4t_ms
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
                     t.max_peak_cpu,
                     t.max_duration_ms,
                     t.avg_peak_rss_bytes
