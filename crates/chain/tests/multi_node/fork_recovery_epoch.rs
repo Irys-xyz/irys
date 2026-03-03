@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error};
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
+async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(
     //     "RUST_LOG",

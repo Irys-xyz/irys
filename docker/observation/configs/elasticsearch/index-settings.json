@@ -1,7 +1,13 @@
 {
   "settings": {
     "index.lifecycle.name": "logs-retention",
+    "index.lifecycle.rollover_alias": "irys-logs",
     "number_of_shards": 1,
     "number_of_replicas": __ES_REPLICAS__
+  },
+  "aliases": {
+    "irys-logs": {
+      "is_write_index": true
+    }
   }
 }

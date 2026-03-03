@@ -3,7 +3,7 @@ use std::time::Duration;
 use tracing::warn;
 
 /// Maximum time allowed for graceful shutdown before forcing process abort.
-pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Spawns a watchdog thread that aborts the process after `GRACEFUL_SHUTDOWN_TIMEOUT`.
 pub fn spawn_shutdown_watchdog(reason: ShutdownReason) -> std::thread::JoinHandle<()> {

@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash, MEGABYTE,
-    TERABYTE,
+    ChunkDataPath, ChunkPathHash, DataRoot, MEGABYTE, PartitionChunkOffset, TERABYTE, TxPath,
+    TxPathHash,
 };
 use reth_db::{
+    ClientVersion, DatabaseEnv,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     transaction::{DbTx, DbTxMut},
-    ClientVersion, DatabaseEnv,
 };
 
 use crate::{
@@ -180,10 +180,10 @@ mod tests {
         open_or_create_db,
         submodule::tables::{DataRootInfo, SubmoduleTables},
     };
-    use irys_types::RelativeChunkOffset;
     use irys_types::H256;
-    use reth_db::transaction::DbTx as _;
+    use irys_types::RelativeChunkOffset;
     use reth_db::Database as _;
+    use reth_db::transaction::DbTx as _;
 
     #[test]
     fn db_compact_dataroot_info() -> eyre::Result<()> {

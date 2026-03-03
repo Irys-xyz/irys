@@ -1,6 +1,6 @@
+use eyre::Result;
 use eyre::bail;
 use eyre::eyre;
-use eyre::Result;
 
 use irys_database::database;
 use irys_database::db::IrysDatabaseExt as _;

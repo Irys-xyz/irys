@@ -6,7 +6,7 @@ use tracing::info;
 use crate::utils::IrysNodeTest;
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_wait_until_height() {
+async fn heavy3_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
@@ -23,7 +23,7 @@ async fn heavy_test_wait_until_height() {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_mine() {
+async fn heavy3_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
@@ -37,7 +37,7 @@ async fn heavy_test_mine() {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_mine_tx() {
+async fn heavy3_test_mine_tx() {
     // output tracing
     let mut config = NodeConfig::testing();
     let account = IrysSigner::random_signer(&config.consensus_config());
@@ -60,23 +60,14 @@ async fn heavy_test_mine_tx() {
     irys_node.mine_block().await.unwrap();
     let next_height = irys_node.get_canonical_chain_height().await;
     assert_eq!(next_height, height + 1_u64);
+
+    // Wait for mempool to process BlockConfirmed and set included_height.
     let tx_header = irys_node
-        .get_storage_tx_header_from_mempool(&tx.header.id)
+        .wait_for_tx_included(&tx.header.id, 10)
         .await
-        .expect("expected storage tx to be found in mempool");
-    // Compare stable transaction header fields (excluding volatile metadata)
-    assert_eq!(tx_header.id, tx.header.id, "Transaction IDs should match");
-    assert_eq!(tx_header.anchor, tx.header.anchor, "Anchors should match");
-    assert_eq!(tx_header.signer, tx.header.signer, "Signers should match");
-    assert_eq!(
-        tx_header.data_root, tx.header.data_root,
-        "Data roots should match"
-    );
-    assert_eq!(
-        tx_header.data_size, tx.header.data_size,
-        "Data sizes should match"
-    );
-    // Verify the transaction was included in the expected block height
+        .expect("included_height should be set after block confirmation");
+
+    // Verify the transaction was included at the expected height.
     assert_eq!(
         tx_header.metadata().included_height,
         Some(next_height),

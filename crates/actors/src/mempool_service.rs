@@ -17,37 +17,36 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus};
-use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
+use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
+use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
+use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{
-    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, SealedBlock, SystemLedger, Traced, UnixTimestamp, H256, U256,
+    BoundedFee, Config, H256, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    NodeConfig, SealedBlock, SystemLedger, Traced, U256, UnixTimestamp,
+    app_state::DatabaseProvider,
 };
 use irys_types::{
-    storage_pricing::{
-        calculate_term_fee,
-        phantoms::{Irys, NetworkFee},
-        Amount,
-    },
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
     MempoolConfig,
+    storage_pricing::{
+        Amount, calculate_term_fee,
+        phantoms::{Irys, NetworkFee},
+    },
 };
-use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
-use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -60,9 +59,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc::UnboundedReceiver, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug, error, info, instrument, trace, warn};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
@@ -175,9 +174,6 @@ pub async fn validate_commitment_transaction(
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
     pub config: Config,
-    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
-    /// instead of the actor executor runtime, while also providing some `QoL`
-    pub exec: TaskExecutor,
     pub irys_db: DatabaseProvider,
     pub reth_node_adapter: IrysRethNodeAdapter,
     pub mempool_state: AtomicMempoolState,
@@ -186,6 +182,7 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    max_concurrent_tasks: u32,
     /// Shared state handle for reading chunk ingress pending count
     pub chunk_ingress_state: ChunkIngressState,
 }
@@ -474,13 +471,19 @@ impl Inner {
         if old_enough && new_enough {
             Ok(true)
         } else if !old_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}"
+            );
             Ok(false)
         } else if !new_enough {
-            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            warn!(
+                "Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}"
+            );
             Ok(false)
         } else {
-            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+            eyre::bail!(
+                "SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}"
+            );
         }
     }
 
@@ -506,7 +509,10 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
+        debug!(
+            "ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}",
+            &ingress_proof.id()
+        );
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -514,7 +520,10 @@ impl Inner {
             Ok(true)
         } else {
             // TODO: recover the signer's address here? (or compute an ID)
-            warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+            warn!(
+                "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
+                &ingress_proof.data_root, &ingress_proof.signature
+            );
             Ok(false)
         }
     }
@@ -555,7 +564,9 @@ impl Inner {
 
             eyre::ensure!(
                 // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-                canonical.iter().any(|entry| entry.block_hash() == parent_block_hash),
+                canonical
+                    .iter()
+                    .any(|entry| entry.block_hash() == parent_block_hash),
                 "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
                 canonical.last().map(BlockTreeEntry::block_hash)
@@ -1397,11 +1408,11 @@ impl Inner {
                 // Final check - do we have enough total proofs?
                 if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
-                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
-                            &tx_header.id,
-                            final_proofs.len(),
-                            number_of_ingress_proofs_total
-                        );
+                        "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                        &tx_header.id,
+                        final_proofs.len(),
+                        number_of_ingress_proofs_total
+                    );
                     continue;
                 }
 
@@ -1444,10 +1455,8 @@ impl Inner {
         let guard = self.block_tree_read_guard.read();
         let mut block = guard.get_block(&block_hash).cloned();
 
-        if !include_chunk {
-            if let Some(ref mut b) = block {
-                b.poa.chunk = None
-            }
+        if !include_chunk && let Some(ref mut b) = block {
+            b.poa.chunk = None
         }
         block
     }
@@ -2666,7 +2675,7 @@ pub struct MempoolState {
 }
 
 /// Create a new instance of the mempool state passing in a reference
-/// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
+/// counted reference to a `DatabaseEnv` and the miner's signer
 pub fn create_state(
     config: &MempoolConfig,
     stake_and_pledge_whitelist: &[IrysAddress],
@@ -2767,10 +2776,10 @@ impl MempoolState {
         let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
-        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx_id) {
-                return Ok(()); // Duplicate, already have this commitment
-            }
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address)
+            && existing_txs.iter().any(|t| t.id() == tx_id)
+        {
+            return Ok(()); // Duplicate, already have this commitment
         }
 
         // Check if we need to create a new address entry
@@ -2792,8 +2801,7 @@ impl MempoolState {
                     );
                     return Err(TxIngressError::MempoolFull(format!(
                         "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
-                        new_value,
-                        evict_total_value
+                        new_value, evict_total_value
                     )));
                 }
 
@@ -2887,9 +2895,7 @@ pub enum TxIngressError {
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
     /// The commitment transaction version is below minimum required after hardfork activation
-    #[error(
-        "Commitment transaction version {version} is below minimum required version {minimum}"
-    )]
+    #[error("Commitment transaction version {version} is below minimum required version {minimum}")]
     InvalidVersion { version: u8, minimum: u8 },
     /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
     #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]
@@ -2985,7 +2991,17 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.mempool;
-        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let raw_max_concurrent = mempool_config.max_concurrent_mempool_tasks;
+        const MAX_PERMITS: usize = u32::MAX as usize;
+        const MIN_CONCURRENT: usize = 20;
+        let max_concurrent_mempool_tasks = raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
+        if max_concurrent_mempool_tasks != raw_max_concurrent {
+            warn!(
+                configured = raw_max_concurrent,
+                effective = max_concurrent_mempool_tasks,
+                "Adjusted max_concurrent_mempool_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
+            );
+        }
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
@@ -3009,7 +3025,6 @@ impl MempoolService {
                     inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
-                        exec: TaskExecutor::current(),
                         irys_db,
                         mempool_state,
                         reth_node_adapter,
@@ -3018,6 +3033,8 @@ impl MempoolService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        max_concurrent_tasks: u32::try_from(max_concurrent_mempool_tasks)
+                            .expect("clamped to u32::MAX above"),
                         chunk_ingress_state,
                     }),
                 };
@@ -3133,39 +3150,92 @@ impl MempoolService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
 
-        // Process remaining messages with timeout
-        let process_remaining = async {
+        async {
+            // Phase 1: drain queued messages, spawning concurrently when permits are available
             while let Ok(traced) = self.msg_rx.try_recv() {
                 let (msg, parent_span) = traced.into_parts();
-                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg.variant_name());
-                self.inner.handle_message(msg).instrument(span).await?;
+                let msg_type = msg.variant_name();
+                let span = tracing::info_span!(parent: &parent_span, "mempool_handle_message", msg_type = %msg_type);
+
+                let inner = Arc::clone(&self.inner);
+                match inner.message_handler_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        runtime_handle.spawn(async move {
+                            let _permit = permit;
+                            let task_info = format!("shutdown drain: {}", msg_type);
+                            if let Err(e) = wait_with_progress(
+                                inner.handle_message(msg),
+                                20,
+                                &task_info,
+                            ).await {
+                                tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                            }
+                        }.instrument(span));
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        tracing::error!("Semaphore closed during shutdown drain");
+                        break;
+                    }
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        let task_info = format!("shutdown drain (inline): {}", msg_type);
+                        if let Err(e) = wait_with_progress(
+                            inner.handle_message(msg),
+                            20,
+                            &task_info,
+                        )
+                        .instrument(span)
+                        .await
+                        {
+                            tracing::error!("Error handling message during shutdown drain: {:?}", e);
+                        }
+                    }
+                }
             }
-            Ok::<(), eyre::Error>(())
-        };
 
-        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
-            Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
-            Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
-            Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
+            // Phase 2: acquire all permits to wait for in-flight + drain-spawned handlers
+            let acquire_fut = self
+                .inner
+                .message_handler_semaphore
+                .acquire_many(self.inner.max_concurrent_tasks);
+            let handlers_quiesced = match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
+                Ok(Ok(permits)) => {
+                    tracing::debug!("All message handlers completed");
+                    let _all_permits = permits;
+                    true
+                }
+                Ok(Err(_)) => {
+                    tracing::error!("Semaphore closed during mempool shutdown drain");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!("Timed out waiting for in-flight mempool handlers; skipping persistence");
+                    false
+                }
+            };
+
+            if handlers_quiesced {
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    self.inner.persist_mempool_to_disk(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+                    Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+                    Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+                }
+            }
+
+            tracing::info!("shutting down Mempool service");
         }
+        .instrument(tracing::info_span!("mempool_shutdown"))
+        .await;
 
-        // Persist to disk with timeout
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            self.inner.persist_mempool_to_disk(),
-        )
-        .await
-        {
-            Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
-            Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
-            Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
-        }
-
-        tracing::info!("shutting down Mempool service");
         Ok(())
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn handle_broadcast_recv<T>(
     result: Result<T, broadcast::error::RecvError>,
     channel_name: &str,

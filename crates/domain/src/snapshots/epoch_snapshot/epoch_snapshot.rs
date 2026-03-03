@@ -1,16 +1,16 @@
 use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
-use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
+use crate::{EpochBlockData, PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{ExpiringPartitionInfo, Ledgers};
 use irys_types::Config;
 use irys_types::{
+    CommitmentStatus, DataLedger, H256, IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger,
     partition::{PartitionAssignment, PartitionHash},
-    CommitmentStatus, DataLedger, IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, IrysAddress,
-    PartitionChunkOffset,
+    CommitmentTransaction, ConsensusConfig, IrysAddress, PartitionChunkOffset,
+    partition_chunk_offset_ie,
 };
 use openssl::sha;
 use std::collections::{HashSet, VecDeque};
@@ -80,7 +80,9 @@ pub enum EpochSnapshotError {
     #[error("validation of epoch commitments failed: {0}")]
     InvalidCommitments(String),
     /// Unpledge targeted partition not found in assignments
-    #[error("unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments")]
+    #[error(
+        "unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments"
+    )]
     UnpledgeTargetNotFound {
         partition_hash: H256,
         signer: IrysAddress,
@@ -558,6 +560,7 @@ impl EpochSnapshot {
     /// Process slot needs for a given ledger, assigning partitions to each slot
     /// as needed. Accounts for not assigning the same mining address to multiple
     /// replicas of a single slot.
+    #[tracing::instrument(level = "trace", skip_all, fields(ledger = ?ledger))]
     pub fn process_slot_needs(
         &mut self,
         ledger: DataLedger,
@@ -671,8 +674,7 @@ impl EpochSnapshot {
             let next_part_hash = H256(hash_sha256(&prev_partition_hash.0).unwrap());
             trace!(
                 "Adding partition with hash: {} (prev: {})",
-                next_part_hash,
-                prev_partition_hash
+                next_part_hash, prev_partition_hash
             );
             self.all_active_partitions.push(next_part_hash);
             // All partition_hashes begin as unassigned capacity partitions
@@ -943,10 +945,10 @@ impl EpochSnapshot {
             self.add_to_unassigned_if_absent(ph);
 
             // Remove pledge entry by targeted partition hash (best-effort)
-            if let Some(entries) = self.commitment_state.pledge_commitments.get_mut(&signer) {
-                if let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph)) {
-                    entries.remove(pos);
-                }
+            if let Some(entries) = self.commitment_state.pledge_commitments.get_mut(&signer)
+                && let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph))
+            {
+                entries.remove(pos);
             }
 
             debug!(
@@ -1466,25 +1468,34 @@ mod tests {
             let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_few_commitments)
                 .expect_err("Expected error for too many commitments")
                 .to_string();
-            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 1 commitments provided");
+            assert_eq!(
+                &err_str,
+                "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 1 commitments provided"
+            );
 
             let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_many_commitments)
                 .expect_err("Expected error for too many commitments")
                 .to_string();
-            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 3 commitments provided");
+            assert_eq!(
+                &err_str,
+                "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 3 commitments provided"
+            );
 
             let err_str =
                 EpochSnapshot::validate_commitments(&mocked_block, &valid_count_but_invalid_id)
                     .expect_err("Expected error for the wrong commitment ids")
                     .to_string();
-            assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
+            assert_eq!(
+                err_str,
+                "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111"
+            );
         }
     }
 
     mod unpledge_processing {
         use super::*;
         use irys_types::CommitmentStatus;
-        use irys_types::{transaction::CommitmentTypeV2, U256};
+        use irys_types::{U256, transaction::CommitmentTypeV2};
 
         fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
             let mut snapshot = EpochSnapshot::default();
@@ -1564,10 +1575,12 @@ mod tests {
             snapshot.apply_unpledges(&[tx]).unwrap();
 
             // Removed from capacity map
-            assert!(!snapshot
-                .partition_assignments
-                .capacity_partitions
-                .contains_key(&ph));
+            assert!(
+                !snapshot
+                    .partition_assignments
+                    .capacity_partitions
+                    .contains_key(&ph)
+            );
 
             // Still present in active set
             assert!(snapshot.all_active_partitions.contains(&ph));
@@ -1594,10 +1607,12 @@ mod tests {
             snapshot.apply_unpledges(&[tx]).unwrap();
 
             // Removed from data map
-            assert!(!snapshot
-                .partition_assignments
-                .data_partitions
-                .contains_key(&ph));
+            assert!(
+                !snapshot
+                    .partition_assignments
+                    .data_partitions
+                    .contains_key(&ph)
+            );
 
             // Still present in active set
             assert!(snapshot.all_active_partitions.contains(&ph));

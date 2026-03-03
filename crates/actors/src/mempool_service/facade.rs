@@ -1,8 +1,8 @@
+use crate::MempoolReadGuard;
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError, TxReadError};
 use crate::services::ServiceSenders;
-use crate::MempoolReadGuard;
 use eyre::eyre;
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
 use irys_types::{IrysAddress, SendTraced as _, Traced, TxKnownStatus};
 use std::collections::HashSet;
 use tokio::sync::mpsc::UnboundedSender;

@@ -1,12 +1,12 @@
 use crate::metadata::MetadataKey;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
-    TxPathHash, H256,
+    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset,
+    TxPath, TxPathHash,
 };
 use paste::paste;
 use reth_codecs::Compact;
 use reth_db::table::TableInfo;
-use reth_db::{tables, TableSet};
+use reth_db::{TableSet, tables};
 use reth_db::{TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;

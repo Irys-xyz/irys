@@ -32,8 +32,9 @@ async fn wait_for_packing_worker_ready(base_url_v1: &str, timeout: Duration) -> 
 }
 
 #[tokio::test]
-pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+pub async fn packing_worker_full_node_test() -> eyre::Result<()> {
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
     let packing_config = PackingWorkerConfig {
         bind_port: 0,

@@ -1,8 +1,8 @@
 use dashmap::DashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::breaker::CircuitBreaker;
 use super::config::CircuitBreakerConfig;
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_cleanup_removes_stale_breakers() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
         let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = test_config_with_stale_timeout(Duration::from_millis(100));
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_cleanup_keeps_active_breakers() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
         let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = test_config_with_stale_timeout(Duration::from_millis(200));
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_capacity_enforcement_allows_after_cleanup() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
         let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = TestConfigBuilder::default()

@@ -15,7 +15,7 @@ use irys_types::{
     DataTransactionMetadata, IrysBlockHeader,
 };
 use reth_codecs::Compact;
-use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
+use reth_db::{DatabaseError, TableSet, table::DupSort, tables};
 use reth_db::{TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
@@ -109,6 +109,31 @@ impl_compression_for_compact!(
 
 use paste::paste;
 use reth_db::table::TableInfo;
+use reth_primitives_traits::ValueWithSubKey;
+
+impl ValueWithSubKey for CompactLedgerIndexItem {
+    type SubKey = DataLedger;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.0.ledger
+    }
+}
+
+impl ValueWithSubKey for CachedChunkIndexEntry {
+    type SubKey = u32;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.index.0
+    }
+}
+
+impl ValueWithSubKey for CompactCachedIngressProof {
+    type SubKey = IrysAddress;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.0.address
+    }
+}
 
 tables! {
 IrysTables;

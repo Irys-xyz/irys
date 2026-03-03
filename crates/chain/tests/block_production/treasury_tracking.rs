@@ -179,7 +179,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
 /// Test that verifies treasury is correctly initialized from genesis commitments
 #[tokio::test]
-async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
+async fn heavy_test_genesis_treasury_calculation() -> eyre::Result<()> {
     initialize_tracing();
 
     // Configure test network

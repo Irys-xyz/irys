@@ -81,10 +81,10 @@ impl RefreshManager {
             }
 
             // Record to database if recording is enabled
-            if state.is_recording {
-                if let Some(ref db_writer) = database_writer {
-                    Self::record_node_data(&url, &node_data, db_writer, state);
-                }
+            if state.is_recording
+                && let Some(db_writer) = database_writer
+            {
+                Self::record_node_data(&url, &node_data, db_writer, state);
             }
 
             if let Some(node_state) = state.nodes.get_mut(&url) {
@@ -116,17 +116,16 @@ impl RefreshManager {
             if let Ok(chunk_counts) = api_client
                 .get_all_partition_chunk_counts_url(&url, &cancel_token)
                 .await
+                && let Some(node_state) = state.nodes.get_mut(&url)
             {
-                if let Some(node_state) = state.nodes.get_mut(&url) {
-                    node_state.metrics.chunk_counts = chunk_counts;
-                }
+                node_state.metrics.chunk_counts = chunk_counts;
             }
 
             // Fetch total chunk offsets from blockchain
-            if let Ok(total_offsets) = api_client.get_total_chunk_offsets(url.as_str()).await {
-                if let Some(node_state) = state.nodes.get_mut(&url) {
-                    node_state.metrics.total_chunk_offsets = total_offsets;
-                }
+            if let Ok(total_offsets) = api_client.get_total_chunk_offsets(url.as_str()).await
+                && let Some(node_state) = state.nodes.get_mut(&url)
+            {
+                node_state.metrics.total_chunk_offsets = total_offsets;
             }
         }
 
@@ -152,16 +151,16 @@ impl RefreshManager {
             if let Ok(mempool_status) = api_client.get_mempool_status_url(&url, &cancel_token).await
             {
                 // Record to database if recording is enabled
-                if state.is_recording {
-                    if let Some(ref db_writer) = database_writer {
-                        let raw_json = serde_json::to_string(&mempool_status).unwrap_or_default();
-                        if let Err(e) = db_writer.record_mempool_status(
-                            url.as_str().to_string(),
-                            mempool_status.clone(),
-                            raw_json,
-                        ) {
-                            tracing::error!("Failed to record mempool status to database: {}", e);
-                        }
+                if state.is_recording
+                    && let Some(db_writer) = database_writer
+                {
+                    let raw_json = serde_json::to_string(&mempool_status).unwrap_or_default();
+                    if let Err(e) = db_writer.record_mempool_status(
+                        url.as_str().to_string(),
+                        mempool_status.clone(),
+                        raw_json,
+                    ) {
+                        tracing::error!("Failed to record mempool status to database: {}", e);
                     }
                 }
 
@@ -192,16 +191,16 @@ impl RefreshManager {
         for url in urls {
             if let Ok(mining_info) = api_client.get_mining_info_url(&url, &cancel_token).await {
                 // Record to database if recording is enabled
-                if state.is_recording {
-                    if let Some(ref db_writer) = database_writer {
-                        let raw_json = serde_json::to_string(&mining_info).unwrap_or_default();
-                        if let Err(e) = db_writer.record_mining_info(
-                            url.as_str().to_string(),
-                            mining_info.clone(),
-                            raw_json,
-                        ) {
-                            tracing::error!("Failed to record mining info to database: {}", e);
-                        }
+                if state.is_recording
+                    && let Some(db_writer) = database_writer
+                {
+                    let raw_json = serde_json::to_string(&mining_info).unwrap_or_default();
+                    if let Err(e) = db_writer.record_mining_info(
+                        url.as_str().to_string(),
+                        mining_info.clone(),
+                        raw_json,
+                    ) {
+                        tracing::error!("Failed to record mining info to database: {}", e);
                     }
                 }
 
@@ -228,28 +227,28 @@ impl RefreshManager {
                 .await
             {
                 // Record to database if recording is enabled
-                if state.is_recording {
-                    if let Some(ref db_writer) = database_writer {
-                        let raw_json = serde_json::to_string(&fork_info).unwrap_or_default();
+                if state.is_recording
+                    && let Some(db_writer) = database_writer
+                {
+                    let raw_json = serde_json::to_string(&fork_info).unwrap_or_default();
 
-                        // Calculate fork metrics
-                        let fork_count = fork_info.forks.len();
-                        let max_fork_depth =
-                            fork_info.forks.iter().map(|f| f.height).max().unwrap_or(0);
-                        let total_forked_blocks: usize =
-                            fork_info.forks.iter().map(|f| f.block_count).sum();
+                    // Calculate fork metrics
+                    let fork_count = fork_info.forks.len();
+                    let max_fork_depth =
+                        fork_info.forks.iter().map(|f| f.height).max().unwrap_or(0);
+                    let total_forked_blocks: usize =
+                        fork_info.forks.iter().map(|f| f.block_count).sum();
 
-                        if let Err(e) = db_writer.record_fork_data(
-                            url.as_str().to_string(),
-                            fork_info.current_tip_height,
-                            fork_info.current_tip_hash.clone(),
-                            fork_count,
-                            max_fork_depth,
-                            total_forked_blocks,
-                            raw_json,
-                        ) {
-                            tracing::error!("Failed to record fork data to database: {}", e);
-                        }
+                    if let Err(e) = db_writer.record_fork_data(
+                        url.as_str().to_string(),
+                        fork_info.current_tip_height,
+                        fork_info.current_tip_hash.clone(),
+                        fork_count,
+                        max_fork_depth,
+                        total_forked_blocks,
+                        raw_json,
+                    ) {
+                        tracing::error!("Failed to record fork data to database: {}", e);
                     }
                 }
 
@@ -267,10 +266,10 @@ impl RefreshManager {
         let cancel_token = CancellationToken::new();
 
         for url in urls {
-            if let Ok(config) = api_client.get_node_config_url(&url, &cancel_token).await {
-                if let Some(node_state) = state.nodes.get_mut(&url) {
-                    node_state.config = Some(config);
-                }
+            if let Ok(config) = api_client.get_node_config_url(&url, &cancel_token).await
+                && let Some(node_state) = state.nodes.get_mut(&url)
+            {
+                node_state.config = Some(config);
             }
         }
 
@@ -307,10 +306,10 @@ impl RefreshManager {
             data.peers = Some(p);
         }
 
-        if let Some(ref info) = data.info {
-            if let Ok(height) = info.height.parse::<u64>() {
-                data.chain_height = Some(ChainHeight { height });
-            }
+        if let Some(ref info) = data.info
+            && let Ok(height) = info.height.parse::<u64>()
+        {
+            data.chain_height = Some(ChainHeight { height });
         }
 
         data
@@ -368,49 +367,49 @@ impl RefreshManager {
         }
 
         // Also record data sync metrics if available
-        if let Some(ref info) = node_data.info {
-            if let Ok(sync_height) = info.current_sync_height.to_string().parse::<u64>() {
-                // Get chunk counts from node state if available
-                let (total_data_chunks, total_packed_chunks) =
-                    if let Some(node_state) = state.nodes.get(url) {
-                        let data_chunks = node_state.metrics.chunk_counts.publish_0.data
-                            + node_state.metrics.chunk_counts.submit_0.data
-                            + node_state.metrics.chunk_counts.submit_1.data;
-                        let packed_chunks = node_state.metrics.chunk_counts.publish_0.packed
-                            + node_state.metrics.chunk_counts.submit_0.packed
-                            + node_state.metrics.chunk_counts.submit_1.packed;
-                        (data_chunks, packed_chunks)
-                    } else {
-                        (0, 0)
-                    };
-
-                // Calculate sync progress (simplified)
-                let sync_progress = if let Ok(chain_height) = info.height.parse::<u64>() {
-                    if chain_height > 0 {
-                        (sync_height as f64 / chain_height as f64) * 100.0
-                    } else {
-                        0.0
-                    }
+        if let Some(ref info) = node_data.info
+            && let Ok(sync_height) = info.current_sync_height.to_string().parse::<u64>()
+        {
+            // Get chunk counts from node state if available
+            let (total_data_chunks, total_packed_chunks) =
+                if let Some(node_state) = state.nodes.get(url) {
+                    let data_chunks = node_state.metrics.chunk_counts.publish_0.data
+                        + node_state.metrics.chunk_counts.submit_0.data
+                        + node_state.metrics.chunk_counts.submit_1.data;
+                    let packed_chunks = node_state.metrics.chunk_counts.publish_0.packed
+                        + node_state.metrics.chunk_counts.submit_0.packed
+                        + node_state.metrics.chunk_counts.submit_1.packed;
+                    (data_chunks, packed_chunks)
                 } else {
-                    0.0
+                    (0, 0)
                 };
 
-                let raw_json = format!(
-                    r#"{{"sync_height":{}, "total_data_chunks":{}, "total_packed_chunks":{}, "sync_progress":{}}}"#,
-                    sync_height, total_data_chunks, total_packed_chunks, sync_progress
-                );
-
-                if let Err(e) = db_writer.record_data_sync(
-                    url.as_str().to_string(),
-                    sync_height,
-                    total_data_chunks,
-                    total_packed_chunks,
-                    sync_progress,
-                    0.0, // sync_speed_mbps - would need to calculate from historical data
-                    raw_json,
-                ) {
-                    tracing::error!("Failed to record data sync to database: {}", e);
+            // Calculate sync progress (simplified)
+            let sync_progress = if let Ok(chain_height) = info.height.parse::<u64>() {
+                if chain_height > 0 {
+                    (sync_height as f64 / chain_height as f64) * 100.0
+                } else {
+                    0.0
                 }
+            } else {
+                0.0
+            };
+
+            let raw_json = format!(
+                r#"{{"sync_height":{}, "total_data_chunks":{}, "total_packed_chunks":{}, "sync_progress":{}}}"#,
+                sync_height, total_data_chunks, total_packed_chunks, sync_progress
+            );
+
+            if let Err(e) = db_writer.record_data_sync(
+                url.as_str().to_string(),
+                sync_height,
+                total_data_chunks,
+                total_packed_chunks,
+                sync_progress,
+                0.0, // sync_speed_mbps - would need to calculate from historical data
+                raw_json,
+            ) {
+                tracing::error!("Failed to record data sync to database: {}", e);
             }
         }
 

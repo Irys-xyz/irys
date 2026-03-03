@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use super::config::CircuitBreakerConfig;
 use super::state::CircuitState;
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_half_open_transition_after_cooldown() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
 
         let _guard = TestTimeGuard::new(1_000_000_000);
 
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_half_open_limits_recovery_attempts() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
 
         let _guard = TestTimeGuard::new(1_000_000_000);
 
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_is_stale_after_timeout() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
 
         let _guard = TestTimeGuard::new(1_000_000_000);
 
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_is_available_updates_access_time() {
-        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
 
         let _guard = TestTimeGuard::new(1_000_000_000);
 

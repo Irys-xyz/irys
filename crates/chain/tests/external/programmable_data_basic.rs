@@ -41,7 +41,8 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 /// Run this test, until you see `waiting for tx header...`, then start the JS client test
 /// that's it!, just kill this test once the JS client test finishes.
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "info") };
 
     let mut config = NodeConfig::testing();
     let account1 = IrysSigner::random_signer(&config.consensus_config());

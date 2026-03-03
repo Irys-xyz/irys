@@ -11,7 +11,7 @@ openssl.workspace = true
 rand.workspace = true
 
 [build-dependencies]
-bindgen = "0.70.1"
+bindgen = "0.72.1"
 cc = "1.0"
 openssl-src = "300.3.2"
 pkg-config = "0.3.31"

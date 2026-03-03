@@ -1,8 +1,8 @@
 use crate::{
-    chain_sync_state::ChainSyncState, get_canonical_chain, BlockIndexReadGuard, BlockTreeReadGuard,
-    PeerList,
+    BlockIndexReadGuard, BlockTreeReadGuard, PeerList, chain_sync_state::ChainSyncState,
+    get_canonical_chain,
 };
-use irys_types::{NodeInfo, H256};
+use irys_types::{H256, NodeInfo};
 
 pub async fn get_node_info(
     block_index: &BlockIndexReadGuard,

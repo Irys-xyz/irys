@@ -2,7 +2,7 @@ use crate::chunk_ingress_service::{
     ChunkIngressError, ChunkIngressMessage, CriticalChunkIngressError, IngressProofError,
 };
 use crate::services::ServiceSenders;
-use irys_types::{chunk::UnpackedChunk, IngressProof, SendTraced as _, Traced};
+use irys_types::{IngressProof, SendTraced as _, Traced, chunk::UnpackedChunk};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Debug)]

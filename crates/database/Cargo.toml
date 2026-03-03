@@ -23,6 +23,7 @@ test-fuzz.workspace = true
 reth-db.workspace = true
 reth-db-api.workspace = true
 reth-codecs.workspace = true
+reth-primitives-traits.workspace = true
 paste.workspace = true
 strum.workspace = true
 

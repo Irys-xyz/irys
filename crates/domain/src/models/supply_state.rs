@@ -5,8 +5,8 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::Notify;
 use tracing::warn;
@@ -181,16 +181,15 @@ impl SupplyState {
                 .expect("supply state write lock poisoned");
 
             let is_first = data.first_migration_height.is_none();
-            if is_first {
-                if let Some(persisted_height) = self.persisted_backfill_height {
-                    if height <= persisted_height {
-                        eyre::bail!(
-                            "First migration height {} overlaps persisted backfill height {}",
-                            height,
-                            persisted_height
-                        );
-                    }
-                }
+            if is_first
+                && let Some(persisted_height) = self.persisted_backfill_height
+                && height <= persisted_height
+            {
+                eyre::bail!(
+                    "First migration height {} overlaps persisted backfill height {}",
+                    height,
+                    persisted_height
+                );
             }
             let first_migration = if is_first {
                 Some(height)

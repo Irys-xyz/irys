@@ -1,10 +1,10 @@
 use crate::{app::state::AppState, ui::logo::IrysLogo};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
-    Frame,
 };
 
 pub struct SplashScreen;

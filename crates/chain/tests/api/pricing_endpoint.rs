@@ -65,7 +65,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
+async fn pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -158,7 +158,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
+async fn pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -180,7 +180,7 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
+async fn pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -276,7 +276,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
 // We expect the pricing endpoint to choose the LOWER of the two EMAs
 // during the last quarter. This yields lower IRYS amounts (higher USD price -> lower IRYS).
 #[test_log::test(tokio::test)]
-async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
+async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
     // Setup: Configure with interval of 4 blocks
     // Last 25% = 1 block (position_in_interval == 3)
     let price_adjustment_interval = 4;
@@ -534,7 +534,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
 // We still expect the pricing endpoint to choose the LOWER of the two EMAs
 // during the last quarter. This yields higher IRYS amounts (lower USD price -> higher IRYS).
 #[test_log::test(tokio::test)]
-async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyre::Result<()> {
+async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyre::Result<()> {
     // Configure with interval of 4 blocks
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;

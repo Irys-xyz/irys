@@ -4,15 +4,15 @@ use std::{
 };
 
 use irys_domain::{
-    dummy_ema_snapshot, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
-    CommitmentSnapshot, EpochSnapshot,
+    BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,
+    dummy_ema_snapshot,
 };
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{
-    storage_pricing::TOKEN_SCALE, BlockBody, Config, IrysBlockHeader, IrysTokenPrice, SealedBlock,
-    H256,
+    BlockBody, Config, H256, IrysBlockHeader, IrysTokenPrice, SealedBlock,
+    storage_pricing::TOKEN_SCALE,
 };
-use reth::tasks::{TaskExecutor, TaskManager};
+use reth::tasks::TaskExecutor;
 use rust_decimal::Decimal;
 
 use crate::{
@@ -104,7 +104,6 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
 pub struct TestCtx {
     pub guard: BlockTreeReadGuard,
     pub config: Config,
-    pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
     pub service_senders: ServiceSenders,
     pub prices: Vec<PriceInfo>,
@@ -127,15 +126,13 @@ impl TestCtx {
         prices: Vec<PriceInfo>,
         config: Config,
     ) -> (Self, ServiceReceivers) {
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
-        let task_executor = task_manager.executor();
+        let task_executor = TaskExecutor::test();
         let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
 
         (
             Self {
                 guard: block_tree_guard,
                 config,
-                task_manager,
                 service_senders,
                 task_executor,
                 prices,

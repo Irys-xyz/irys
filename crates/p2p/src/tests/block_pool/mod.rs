@@ -385,8 +385,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 }
 
 #[tokio::test]
-async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives()
-{
+async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives() {
     let config = create_test_config();
 
     let gossip_server = FakeGossipServer::new();

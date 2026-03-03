@@ -39,7 +39,7 @@ fn insert_block_header_for_gossip_test(
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -110,11 +110,16 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     )?;
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -132,7 +137,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
+async fn heavy3_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -183,11 +188,16 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(&irys_block)?;
     peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
     peer_node.gossip_eth_block_to_peers(eth_payload_other.block())?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -204,7 +214,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
 #[test_log::test(tokio::test)]
-async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
+async fn heavy3_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub extra_tx: DataTransactionHeader,
@@ -282,11 +292,16 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -302,8 +317,9 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
+// "heavy3_" prefix: requires 3 CI threads (see .config/nextest.toml)
 #[test_log::test(tokio::test)]
-async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
+async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -384,11 +400,16 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     )?;
     peer_node.gossip_enable();
 
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
     peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -401,12 +422,15 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
-async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
-    std::env::set_var(
+#[test_log::test(tokio::test)]
+async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe {
+        std::env::set_var(
         "RUST_LOG",
         "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
+    }
     irys_testing_utils::initialize_tracing();
 
     struct EvilBlockProdStrategy {

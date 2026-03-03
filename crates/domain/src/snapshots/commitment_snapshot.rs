@@ -151,14 +151,13 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
                 // Check if this is the currently stored update
-                if let Some(commitments) = self.commitments.get(signer) {
-                    if commitments
+                if let Some(commitments) = self.commitments.get(signer)
+                    && commitments
                         .update_reward_address
                         .as_ref()
                         .is_some_and(|u| u.id() == txid)
-                    {
-                        return CommitmentSnapshotStatus::Accepted;
-                    }
+                {
+                    return CommitmentSnapshotStatus::Accepted;
                 }
                 CommitmentSnapshotStatus::Unknown
             }
@@ -385,10 +384,10 @@ impl CommitmentSnapshot {
 
     pub fn is_staked(&self, miner_address: IrysAddress) -> bool {
         let commitments_for_address = self.commitments.get_key_value(&miner_address);
-        if let Some((_, commitments)) = commitments_for_address {
-            if commitments.stake.is_some() {
-                return true;
-            }
+        if let Some((_, commitments)) = commitments_for_address
+            && commitments.stake.is_some()
+        {
+            return true;
         }
         false
     }
@@ -409,7 +408,7 @@ mod tests {
     use super::super::epoch_snapshot::commitment_state::{PledgeEntry, StakeEntry};
     use super::*;
     use irys_types::CommitmentStatus;
-    use irys_types::{partition::PartitionAssignment, IrysSignature, H256, U256};
+    use irys_types::{H256, IrysSignature, U256, partition::PartitionAssignment};
 
     fn create_test_commitment(
         signer: IrysAddress,

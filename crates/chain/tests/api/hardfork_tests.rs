@@ -149,23 +149,24 @@ async fn find_tx_in_blocks(
     tx_id: &IrysTransactionId,
     max_height: u64,
 ) -> Option<u64> {
+    let mut scanned = 0_u64;
+    let mut skipped = 0_u64;
     for height in 1..=max_height {
         if let Ok(block) = node.get_block_by_height(height).await {
+            scanned += 1;
             if block.commitment_tx_ids().contains(tx_id) {
                 return Some(height);
             }
         } else {
-            tracing::debug!(
-                "Block at height {} not yet available, stopping search",
-                height
-            );
-            break;
+            skipped += 1;
         }
     }
     tracing::debug!(
-        "Transaction {} not found in blocks 1..={}",
-        tx_id,
-        max_height
+        ?tx_id,
+        scanned,
+        skipped,
+        max_height,
+        "tx not found in {scanned} blocks ({skipped} heights failed to load)"
     );
     None
 }
@@ -215,7 +216,7 @@ mod single_version_acceptance {
     #[case::post_activation_v1_rejected(false, TxVersion::V1, false)]
     #[case::post_activation_v2_accepted(false, TxVersion::V2, true)]
     #[test_log::test(tokio::test)]
-    async fn heavy_test_aurora_tx_acceptance(
+    async fn test_aurora_tx_acceptance(
         #[case] pre_activation: bool,
         #[case] version: TxVersion,
         #[case] expect_accepted: bool,
@@ -409,7 +410,7 @@ mod edge_cases {
     /// and validators must reject blocks containing V1 transactions post-activation.
     /// This ensures consensus - all nodes agree on block validity.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
+    async fn test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -445,7 +446,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -476,7 +477,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -901,7 +902,7 @@ mod peer_sync_recovery {
     /// then blocks are mined with V1 commitments before activation and V2 after.
     /// After restart with Aurora enabled, verifies peer syncs correctly through the boundary.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
+    async fn slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
         initialize_tracing();
 
         // Step 1: Setup Configuration (Aurora disabled initially)
@@ -944,7 +945,7 @@ mod peer_sync_recovery {
         // Mine first epoch to get peer's partition assignments
         genesis_node.mine_blocks(NUM_BLOCKS_IN_EPOCH).await?;
         peer_node
-            .wait_until_height(NUM_BLOCKS_IN_EPOCH as u64, SECONDS_TO_WAIT)
+            .wait_for_block_at_height(NUM_BLOCKS_IN_EPOCH as u64, SECONDS_TO_WAIT)
             .await?;
 
         // Wait for peer to pack its storage module with partition data
@@ -991,7 +992,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height, pre_activation_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Pre-Aurora blocks migrated to height {}",
@@ -1100,7 +1101,7 @@ mod peer_sync_recovery {
             post_aurora_migrated_height, final_height, block_migration_depth
         );
         genesis_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .wait_for_block_in_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
             .await?;
         info!(
             "Post-Aurora blocks migrated to height {}",
@@ -1153,7 +1154,7 @@ mod peer_sync_recovery {
         // Step 6: Wait for Peer to Sync and Verify
         let peer_node = stopped_peer.start().await;
         peer_node
-            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_at_height(final_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!("Peer synced to height {}", final_height);
 
@@ -1174,7 +1175,7 @@ mod peer_sync_recovery {
 
         // Step 7: Wait for Peer Block Migration and Validate
         peer_node
-            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_in_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!(
             "Peer block index migrated to height {}",
@@ -1251,19 +1252,12 @@ mod peer_sync_recovery {
         let stopped_peer = peer_node.stop().await;
         info!("Peer stopped for additional restart test");
 
-        let peer_node = IrysNodeTest {
-            node_ctx: (),
-            cfg: stopped_peer.cfg.clone(),
-            temp_dir: stopped_peer.temp_dir,
-            name: stopped_peer.name,
-        }
-        .start()
-        .await;
+        let peer_node = stopped_peer.start().await;
         info!("Peer restarted after sync");
 
         // Wait for peer to reach the same height after restart
         peer_node
-            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .wait_for_block_at_height(final_height, SECONDS_TO_WAIT * 2)
             .await?;
         info!("Peer synced to height {} after restart", final_height);
 

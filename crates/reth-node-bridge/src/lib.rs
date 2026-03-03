@@ -3,7 +3,6 @@ pub mod dump;
 pub mod ext;
 pub mod genesis;
 pub mod node;
-pub mod signal;
 pub mod unwind;
 
 pub use adapter::IrysRethNodeAdapter;

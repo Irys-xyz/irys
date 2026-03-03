@@ -23,7 +23,7 @@ pub fn make_fmt_layer<S>() -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    use tracing_subscriber::{fmt::format::FmtSpan, Layer as _};
+    use tracing_subscriber::{Layer as _, fmt::format::FmtSpan};
 
     let use_json = std::env::var("IRYS_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

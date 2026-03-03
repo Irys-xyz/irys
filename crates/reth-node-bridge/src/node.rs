@@ -13,7 +13,7 @@ use reth::{
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
-use reth_db::init_db;
+use reth_db::{init_db, mdbx::MEGABYTE};
 use reth_node_builder::{
     rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
     NodeComponentsBuilder, NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
@@ -193,7 +193,19 @@ pub async fn run_node(
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
-    if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
+    let unwind_runtime =
+        reth::tasks::RuntimeBuilder::new(reth::tasks::RuntimeConfig::default().with_tokio(
+            reth::tasks::TokioConfig::existing_handle(tokio::runtime::Handle::current()),
+        ))
+        .build()?;
+    if let Err(e) = unwind_to(
+        &node_config,
+        chainspec.clone(),
+        latest_block,
+        unwind_runtime,
+    )
+    .await
+    {
         // hack to ignore trying to unwind future blocks
         // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
         if e.to_string().starts_with("Target block number") {
@@ -224,6 +236,11 @@ pub async fn run_node(
     reth_config.metrics = build_metric_args(irys_reth, bind_ip, random_ports)?;
 
     let db_args = DatabaseArgs::default();
+    // TODO: figure out if we shouldn't use smaller growth steps in production
+    let db_arguments = db_args
+        .database_args()
+        .with_growth_step((10 * MEGABYTE).into())
+        .with_shrink_threshold((20 * MEGABYTE).try_into()?);
 
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();
@@ -233,8 +250,7 @@ pub async fn run_node(
         custom.path = ?db_path,
         "Opening database"
     );
-    let database =
-        RethDbWrapper::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db_arguments)?.with_metrics());
 
     if random_ports {
         reth_config = reth_config.with_unused_ports();

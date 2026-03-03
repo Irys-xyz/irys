@@ -10,8 +10,8 @@ use irys_database::{
     db::IrysDatabaseExt as _, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, SealedBlock, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, H256, LedgerChunkOffset,
+    LedgerIndexItem, NodeConfig, SealedBlock,
 };
 use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;

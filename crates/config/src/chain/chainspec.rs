@@ -1,8 +1,8 @@
 use alloy_primitives::B256;
 use irys_types::{
-    partition::PartitionHash, DataLedger, DataTransactionLedger, GenesisConfig, H256List,
-    IrysBlockHeader, IrysBlockHeaderV1, IrysSignature, PoaData, UnixTimestampMs, VDFLimiterInfo,
-    H256, U256,
+    DataLedger, DataTransactionLedger, GenesisConfig, H256, H256List, IrysBlockHeader,
+    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestampMs, VDFLimiterInfo,
+    partition::PartitionHash,
 };
 
 pub fn build_unsigned_irys_genesis_block(

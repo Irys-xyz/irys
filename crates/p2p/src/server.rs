@@ -26,7 +26,8 @@ use irys_types::{
     PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
-use reth::{builder::Block as _, primitives::Block};
+use reth::builder::Block as _;
+use reth_ethereum_primitives::Block;
 use semver::Version;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;

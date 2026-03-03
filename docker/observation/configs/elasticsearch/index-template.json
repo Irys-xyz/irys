@@ -3,6 +3,7 @@
   "template": {
     "settings": {
       "index.lifecycle.name": "logs-retention",
+      "index.lifecycle.rollover_alias": "irys-logs",
       "index.highlight.max_analyzed_offset": 10000000,
       "index.default_pipeline": "add-flat-traceid",
       "index.mapping.ignore_malformed": true,

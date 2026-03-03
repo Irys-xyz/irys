@@ -5,8 +5,8 @@
 
 use eyre::Result;
 use opentelemetry::{
-    trace::{SpanId, TraceId, TracerProvider as _},
     KeyValue,
+    trace::{SpanId, TraceId, TracerProvider as _},
 };
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
+    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -155,8 +155,8 @@ impl IdGenerator for UuidV7IdGenerator {
 
         ID_RNG.with(|rng| {
             let mut rng = rng.borrow_mut();
-            let r0: u64 = rng.gen();
-            let r1: u64 = rng.gen();
+            let r0: u64 = rng.r#gen();
+            let r1: u64 = rng.r#gen();
 
             // High u64: 48-bit timestamp | version 7 nibble | 12 random bits
             let hi = (ts_ms << 16) | 0x7000 | (r0 & 0x0FFF);
@@ -176,7 +176,7 @@ impl IdGenerator for UuidV7IdGenerator {
         ID_RNG.with(|rng| {
             let mut rng = rng.borrow_mut();
             loop {
-                let v: u64 = rng.gen();
+                let v: u64 = rng.r#gen();
                 // zero span ID = no span (spec requirement)
                 if v != 0 {
                     return SpanId::from_bytes(v.to_be_bytes());
@@ -375,28 +375,28 @@ pub fn init_telemetry() -> Result<()> {
 pub fn flush_telemetry() -> Result<()> {
     let mut errors = Vec::new();
 
-    if let Some(logger) = LOGGER_PROVIDER.get() {
-        if let Err(e) = logger.force_flush() {
-            let err_msg = format!("Logger provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(logger) = LOGGER_PROVIDER.get()
+        && let Err(e) = logger.force_flush()
+    {
+        let err_msg = format!("Logger provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(tracer) = TRACER_PROVIDER.get() {
-        if let Err(e) = tracer.force_flush() {
-            let err_msg = format!("Tracer provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(tracer) = TRACER_PROVIDER.get()
+        && let Err(e) = tracer.force_flush()
+    {
+        let err_msg = format!("Tracer provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
-    if let Some(meter) = METER_PROVIDER.get() {
-        if let Err(e) = meter.force_flush() {
-            let err_msg = format!("Meter provider force flush error: {e:?}");
-            eprintln!("{err_msg}");
-            errors.push(err_msg);
-        }
+    if let Some(meter) = METER_PROVIDER.get()
+        && let Err(e) = meter.force_flush()
+    {
+        let err_msg = format!("Meter provider force flush error: {e:?}");
+        eprintln!("{err_msg}");
+        errors.push(err_msg);
     }
 
     if errors.is_empty() {
@@ -416,8 +416,8 @@ mod tests {
 
     #[test]
     fn uuid_v7_trace_id_has_correct_version_and_variant() {
-        let gen = UuidV7IdGenerator;
-        let trace_id = gen.new_trace_id();
+        let id_gen = UuidV7IdGenerator;
+        let trace_id = id_gen.new_trace_id();
         let bytes = trace_id.to_bytes();
 
         assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
@@ -426,10 +426,10 @@ mod tests {
 
     #[test]
     fn uuid_v7_trace_ids_are_time_ordered() {
-        let gen = UuidV7IdGenerator;
-        let id1 = gen.new_trace_id();
+        let id_gen = UuidV7IdGenerator;
+        let id1 = id_gen.new_trace_id();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let id2 = gen.new_trace_id();
+        let id2 = id_gen.new_trace_id();
 
         assert!(
             id1.to_bytes() < id2.to_bytes(),
@@ -439,8 +439,8 @@ mod tests {
 
     #[test]
     fn uuid_v7_span_id_is_nonzero() {
-        let gen = UuidV7IdGenerator;
-        let span_id = gen.new_span_id();
+        let id_gen = UuidV7IdGenerator;
+        let span_id = id_gen.new_span_id();
         assert_ne!(
             span_id.to_bytes(),
             [0_u8; 8],

@@ -9,12 +9,13 @@ use irys_types::{
     SendTraced as _,
 };
 use reth::builder::Block as _;
-use reth::primitives::{Block, BlockBody, Header};
+use reth::primitives::Header;
+use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
 use tracing::debug;
 
 #[tokio::test]
-async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
+async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
 
@@ -58,7 +59,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
+async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     let mut fixtures = vec![
         GossipServiceTestFixture::new(),
         GossipServiceTestFixture::new(),
@@ -125,7 +126,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 }
 
 #[tokio::test]
-async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
+async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -169,7 +170,7 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -211,7 +212,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
+async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let fixture2 = GossipServiceTestFixture::new();
 
@@ -237,7 +238,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
+async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -299,7 +300,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 }
 
 #[tokio::test]
-async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<()> {
+async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -354,7 +355,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 }
 
 #[tokio::test]
-async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
+async fn should_gossip_execution_payloads() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 

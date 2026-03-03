@@ -10,14 +10,14 @@ use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
     NodeMode, SyncMode,
 };
-use reth::rpc::eth::EthApiServer as _;
+use reth::rpc::types::BlockNumberOrTag;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info};
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
+async fn heavy3_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
     let mut genesis_config = NodeConfig::testing();
@@ -73,17 +73,11 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
 
     // sleep(Duration::from_millis(2_000)).await;
 
-    let a2 = p1ctx
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_hash(block_hash, false)
+    let a2 = peer1
+        .wait_for_reth_marker(BlockNumberOrTag::Number(block_number), block_hash, 10)
         .await?;
 
-    assert!(
-        a2.is_some_and(|b| b.header.hash == block_hash),
-        "Retrieved blocks hash is correct"
-    );
+    assert_eq!(a2, block_hash, "Retrieved block hash should match expected");
 
     peer1.stop().await;
     peer2.stop().await;
@@ -93,7 +87,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+async fn heavy3_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
     let peer_account = genesis_config.new_random_signer();
@@ -147,17 +141,11 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
         .assert_new_block_irys(block_hash, block_number)
         .await?;
 
-    let a2 = p1ctx
-        .rpc
-        .inner
-        .eth_api()
-        .block_by_hash(block_hash, false)
+    let a2 = peer1
+        .wait_for_reth_marker(BlockNumberOrTag::Number(block_number), block_hash, 10)
         .await?;
 
-    assert!(
-        a2.is_some_and(|b| b.header.hash == block_hash),
-        "Retrieved blocks hash is correct"
-    );
+    assert_eq!(a2, block_hash, "Retrieved block hash should match expected");
 
     peer1.stop().await;
     peer2.stop().await;
@@ -170,7 +158,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 #[test_log::test(tokio::test)]
-async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
+async fn heavy4_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let required_index_blocks_height: usize = 2;
     let max_seconds = 20;
 

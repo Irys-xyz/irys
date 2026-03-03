@@ -252,7 +252,7 @@ mod tests {
     use crate::versioning::Signable as _;
     use crate::{hash_sha256, validate_chunk, IrysAddress, H256};
     use rand::Rng as _;
-    use reth_primitives::transaction::recover_signer;
+    use reth_primitives_traits::crypto::secp256k1::recover_signer;
 
     use super::IrysSigner;
 

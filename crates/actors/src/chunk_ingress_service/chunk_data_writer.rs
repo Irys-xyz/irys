@@ -133,16 +133,21 @@ impl BackgroundWriter {
             }
 
             if !batch.is_empty() {
-                let _ = self.write_batch(&batch);
+                if let Err(e) = self.write_batch(&batch) {
+                    error!("ChunkDataWriter auto-drain write failed: {:?}", e);
+                }
                 batch.clear();
             }
         }
 
-        if !batch.is_empty() {
-            let _ = self.write_batch(&batch);
+        if !batch.is_empty()
+            && let Err(e) = self.write_batch(&batch)
+        {
+            error!("ChunkDataWriter shutdown-drain write failed: {:?}", e);
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(batch_size = batch.len()))]
     fn write_batch(&self, batch: &[Arc<UnpackedChunk>]) -> Result<(), QueueError> {
         if batch.is_empty() {
             return Ok(());

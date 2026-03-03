@@ -24,6 +24,7 @@ pub async fn init_state(
     config: NodeConfig,
     chainspec: Arc<ChainSpec>,
     state_path: PathBuf,
+    runtime: reth::tasks::Runtime,
 ) -> eyre::Result<()> {
     // read the expected state root from the file
     let state_dump = File::open(&state_path)?;
@@ -48,7 +49,7 @@ pub async fn init_state(
     cmd.env.chain = Arc::new(chainspec);
 
     // this initializes the genesis block & the state from the state dump
-    cmd.execute::<IrysEthereumNode>().await?;
+    cmd.execute::<IrysEthereumNode>(runtime).await?;
 
     Ok(())
 }

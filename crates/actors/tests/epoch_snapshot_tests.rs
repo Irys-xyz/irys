@@ -11,16 +11,16 @@ use irys_database::{
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
+use irys_types::irys::IrysSigner;
 use irys_types::{
-    partition::PartitionAssignment, BlockTransactions, DataLedger, IrysBlockHeader, SealedBlock,
-    H256,
-};
-use irys_types::{
-    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
+    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
+use irys_types::{
+    ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset, partition_chunk_offset_ie,
+};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
@@ -257,7 +257,8 @@ async fn add_slots_test() {
 
 #[tokio::test]
 async fn unique_addresses_per_slot_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
 
     let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -516,15 +517,13 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     let assign_submit_partition_hash = {
-        let partition_hash = epoch_snapshot
+        epoch_snapshot
             .partition_assignments
             .data_partitions
             .iter()
             .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
             .map(|(hash, _)| *hash)
-            .expect("There should be a partition assigned to submit ledger");
-
-        partition_hash
+            .expect("There should be a partition assigned to submit ledger")
     };
 
     let (publish_partition_hash, submit_partition_hash) = {
@@ -628,7 +627,11 @@ async fn partition_expiration_and_repacking_test() {
         );
         debug!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 
-        assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
+        assert_eq!(
+            sub_slots.len(),
+            3,
+            "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!"
+        );
         assert!(
             sub_slots[0].is_expired && sub_slots[0].partitions.is_empty(),
             "Slot 0 should have expired and have no assigned partition!"
@@ -927,7 +930,8 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[tokio::test]
 async fn partitions_assignment_determinism_test() {
-    std::env::set_var("RUST_LOG", "debug");
+    // SAFETY: test code; env var set before other threads spawn.
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;

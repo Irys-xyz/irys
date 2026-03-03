@@ -1,21 +1,21 @@
-use clap::{command, Parser, Subcommand};
-use eyre::{bail, OptionExt as _};
+use clap::{Parser, Subcommand};
+use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
 use irys_types::chainspec::irys_chain_spec;
-use irys_types::{Config, DatabaseProvider, NodeConfig, H256};
+use irys_types::{Config, DatabaseProvider, H256, NodeConfig};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
-use reth_provider::{providers::StaticFileProvider, ProviderFactory};
+use reth_provider::{ProviderFactory, providers::StaticFileProvider};
 use std::time::SystemTime;
 use std::{path::PathBuf, sync::Arc};
 use tracing::level_filters::LevelFilter;
 use tracing::{info, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
-use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
+use tracing_subscriber::{EnvFilter, Layer as _, Registry, layer::SubscriberExt as _};
 
 #[derive(Debug, Clone, Parser)]
 pub struct IrysCli {
@@ -105,7 +105,13 @@ async fn main() -> eyre::Result<()> {
                 std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
                     .as_secs();
             if timestamp_secs == 0 {
-                panic!("GENESIS TIMESTAMP MUST BE A CONCRETE VALUE FOR INIT STATE TO WORK! current time (ms) is: {}", &SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis())
+                panic!(
+                    "GENESIS TIMESTAMP MUST BE A CONCRETE VALUE FOR INIT STATE TO WORK! current time (ms) is: {}",
+                    &SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                )
             }
             info!("Using timestamp {} (secs)", &timestamp_secs);
             let chain_spec = irys_chain_spec(
@@ -114,7 +120,12 @@ async fn main() -> eyre::Result<()> {
                 &config.consensus.hardforks,
                 timestamp_secs,
             )?;
-            init_state(node_config, chain_spec, state_path).await
+            let runtime =
+                reth_tasks::RuntimeBuilder::new(reth_tasks::RuntimeConfig::default().with_tokio(
+                    reth_tasks::TokioConfig::existing_handle(tokio::runtime::Handle::current()),
+                ))
+                .build()?;
+            init_state(node_config, chain_spec, state_path, runtime).await
         }
         Commands::RollbackBlocks { mode } => {
             let node_config: NodeConfig = load_config()?;
@@ -142,11 +153,11 @@ async fn main() -> eyre::Result<()> {
                         // Search for the block hash in the index
                         let mut found_height = None;
                         for h in 0..num {
-                            if let Some(item) = block_index.get_item(h) {
-                                if item.block_hash == hash {
-                                    found_height = Some(h);
-                                    break;
-                                }
+                            if let Some(item) = block_index.get_item(h)
+                                && item.block_hash == hash
+                            {
+                                found_height = Some(h);
+                                break;
                             }
                         }
                         let height = found_height.ok_or_eyre(format!(
@@ -156,7 +167,10 @@ async fn main() -> eyre::Result<()> {
                         info!("Found block {} at height {}", &hash, &height);
                         height
                     } else {
-                        bail!("Invalid target {} - could not parse as a height or a valid irys block hash", &target)
+                        bail!(
+                            "Invalid target {} - could not parse as a height or a valid irys block hash",
+                            &target
+                        )
                     }
                 }
                 RollbackMode::Count { count } => latest.saturating_sub(count),
@@ -310,7 +324,24 @@ pub fn cli_init_reth_provider() -> eyre::Result<(
     let static_file_provider = StaticFileProvider::read_only(static_files_path, false)?;
 
     // Create provider factory
-    let provider_factory = ProviderFactory::new(reth_db.clone(), chain_spec, static_file_provider)?;
+    // No-op stub — we don't enable the `rocksdb` feature, so this compiles to a unit struct
+    // that ignores the path entirely (no filesystem access). Required by ProviderFactory::new.
+    const _: () = assert!(
+        size_of::<reth_provider::providers::RocksDBProvider>() == 0,
+        "RocksDBProvider must be the zero-sized stub (rocksdb feature must be disabled)"
+    );
+    let rocksdb_provider = reth_provider::providers::RocksDBProvider::new(&db_path)?;
+    let runtime = reth_tasks::RuntimeBuilder::new(reth_tasks::RuntimeConfig::default().with_tokio(
+        reth_tasks::TokioConfig::existing_handle(tokio::runtime::Handle::current()),
+    ))
+    .build()?;
+    let provider_factory = ProviderFactory::new(
+        reth_db.clone(),
+        chain_spec,
+        static_file_provider,
+        rocksdb_provider,
+        runtime,
+    )?;
 
     Ok((reth_db, provider_factory))
 }

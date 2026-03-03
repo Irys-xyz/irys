@@ -29,7 +29,7 @@ use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
-use reth_primitives::Header;
+use reth_primitives_traits::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1190,7 +1190,8 @@ pub struct SealedBlock {
 }
 
 impl SealedBlock {
-    pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+    pub fn new(header: impl Into<Arc<IrysBlockHeader>>, body: BlockBody) -> eyre::Result<Self> {
+        let header: Arc<IrysBlockHeader> = header.into();
         eyre::ensure!(
             header.is_signature_valid(),
             "Invalid block signature for block hash {:?}",
@@ -1216,7 +1217,7 @@ impl SealedBlock {
         )?;
 
         Ok(Self {
-            header: Arc::new(header),
+            header,
             transactions: Arc::new(transactions),
         })
     }

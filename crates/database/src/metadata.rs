@@ -1,6 +1,6 @@
 use crate::reth_db::{
-    table::{Decode, Encode},
     DatabaseError,
+    table::{Decode, Encode},
 };
 use serde::{Deserialize, Serialize};
 

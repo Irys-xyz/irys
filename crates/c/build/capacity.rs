@@ -43,6 +43,7 @@ pub(crate) fn bind_capacity(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
 
@@ -94,6 +95,7 @@ pub(crate) fn bind_capacity_cuda(c_src: &Path) {
         .header(c_src.join("capacity_cuda.h").to_string_lossy())
         .rustified_enum("entropy_chunk_errors")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
 
