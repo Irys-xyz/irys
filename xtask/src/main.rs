@@ -373,7 +373,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 sh,
             )?;
             {
-                // push -D warnings for just this command to mimic CI
+                // push -D warnings to mimic CI for both check and clippy so they
+                // share the same compilation cache (avoids a full recompile between steps)
                 let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
                 run_command(
                     Commands::Check {
@@ -381,8 +382,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     },
                     sh,
                 )?;
+                run_command(Commands::Clippy { args: vec![] }, sh)?;
             }
-            run_command(Commands::Clippy { args: vec![] }, sh)?;
             run_command(Commands::UnusedDeps, sh)?;
             run_command(Commands::Typos, sh)?;
             if with_tests {
