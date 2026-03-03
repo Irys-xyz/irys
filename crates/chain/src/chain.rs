@@ -890,7 +890,6 @@ impl IrysNode {
             tokio_runtime.handle().clone(),
             shutdown_token.clone(),
             pd_chunk_rx,
-            pd_chunk_tx.clone(),
         )?;
 
         let handle = tokio_runtime.handle().clone();
@@ -1100,7 +1099,6 @@ impl IrysNode {
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
         pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
-        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ) -> Result<oneshot::Receiver<()>, eyre::Error> {
         let span = tracing::Span::current();
         let (actor_done_tx, actor_done_rx) = oneshot::channel::<()>();
@@ -1135,7 +1133,6 @@ impl IrysNode {
                                 runtime_handle,
                                 shutdown_token.clone(),
                                 pd_chunk_rx,
-                                pd_chunk_sender,
                             )
                             .instrument(tracing::Span::current())
                             .await
@@ -1345,7 +1342,6 @@ impl IrysNode {
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
         pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
-        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -1659,7 +1655,6 @@ impl IrysNode {
             receivers.validation_service,
             runtime_handle.clone(),
             sync_state.clone(),
-            pd_chunk_sender.clone(),
         );
 
         // create the block reward curve

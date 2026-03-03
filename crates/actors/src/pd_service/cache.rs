@@ -66,6 +66,32 @@ impl ChunkCache {
         self.chunks.contains(key)
     }
 
+    /// Insert a chunk into the cache without any transaction reference.
+    ///
+    /// Used for on-demand storage loading (e.g., during block validation via GetChunk).
+    /// The chunk has no pinning references, so it can be evicted by LRU at any time.
+    /// This is safe because the caller holds an `Arc<Bytes>` to the data.
+    ///
+    /// Returns `true` if the chunk was newly inserted (not already present).
+    pub fn insert_unreferenced(&mut self, key: ChunkKey, data: Arc<Bytes>) -> bool {
+        if self.chunks.contains(&key) {
+            return false;
+        }
+
+        self.make_room_for_insert();
+
+        self.chunks.push(
+            key,
+            CachedChunkEntry {
+                data,
+                referencing_txs: HashSet::new(),
+                lock_count: 0,
+                cached_at: Instant::now(),
+            },
+        );
+        true
+    }
+
     /// Insert a chunk into the cache, referenced by the given transaction.
     ///
     /// If the cache is at capacity, unreferenced and unlocked entries may be

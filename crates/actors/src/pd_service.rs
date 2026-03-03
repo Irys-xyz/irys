@@ -362,9 +362,47 @@ impl PdService {
     }
 
     /// Get a chunk from the cache by ledger and offset.
+    ///
+    /// Falls back to loading from storage on cache miss (on-demand loading).
+    /// This enables block validation without pre-provisioning — the EVM's PD
+    /// precompile requests chunks via `GetChunk`, and the PD service transparently
+    /// loads them from storage if not already cached.
     fn handle_get_chunk(&mut self, ledger: u32, offset: u64) -> Option<Arc<Bytes>> {
         let key = ChunkKey { ledger, offset };
-        self.cache.get(&key)
+
+        // Fast path: cache hit
+        if let Some(chunk) = self.cache.get(&key) {
+            return Some(chunk);
+        }
+
+        // Cache miss — load from storage on demand
+        match self
+            .storage_provider
+            .get_unpacked_chunk_by_ledger_offset(ledger, offset)
+        {
+            Ok(Some(chunk)) => {
+                let data = Arc::new(chunk);
+                self.cache.insert_unreferenced(key, data.clone());
+                trace!(ledger, offset, "Loaded chunk from storage on cache miss");
+                Some(data)
+            }
+            Ok(None) => {
+                warn!(
+                    ledger,
+                    offset, "Chunk not found in storage during GetChunk (not available locally)"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    ledger,
+                    offset,
+                    error = %e,
+                    "Error loading chunk from storage during GetChunk"
+                );
+                None
+            }
+        }
     }
 
     /// Handle block state update — expire stale provisioning entries and track height.
