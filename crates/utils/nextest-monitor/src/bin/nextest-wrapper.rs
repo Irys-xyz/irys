@@ -16,11 +16,16 @@ use nextest_monitor::memory_monitor::MemoryMonitor;
 use nextest_monitor::types::{append_stats, CpuSample, MemorySample, TestStats};
 
 fn extract_test_name(args: &[String]) -> Option<String> {
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
         if arg.starts_with('-') {
             continue;
         }
         if arg.contains('/') || arg.contains('\\') {
+            continue;
+        }
+        // If the previous argument starts with '-', treat this token as an
+        // option value (e.g. the "1" after "--test-threads") and skip it.
+        if i > 0 && args[i - 1].starts_with('-') {
             continue;
         }
         return Some(arg.clone());
@@ -263,7 +268,9 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         },
     };
 
-    append_stats(output_path, stats)?;
+    if let Err(e) = append_stats(output_path, stats) {
+        eprintln!("Warning: failed to append telemetry stats: {e}");
+    }
 
     Ok(exit_code.unwrap_or(1))
 }
@@ -451,8 +458,22 @@ mod tests {
 
     #[test]
     fn test_extract_test_name_with_leading_flags() {
+        // Value immediately after a flag is treated as that flag's value, not
+        // the test name.
         let args = vec!["--some-flag".to_string(), "test_name".to_string()];
-        assert_eq!(extract_test_name(&args), Some("test_name".to_string()));
+        assert_eq!(extract_test_name(&args), None);
+    }
+
+    #[test]
+    fn test_extract_test_name_skips_option_values() {
+        // "--test-threads 1" should not cause "1" to be returned as the test name.
+        let args = vec![
+            "--test-threads".to_string(),
+            "1".to_string(),
+            "my_test".to_string(),
+            "--exact".to_string(),
+        ];
+        assert_eq!(extract_test_name(&args), Some("my_test".to_string()));
     }
 
     #[test]

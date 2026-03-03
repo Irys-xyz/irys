@@ -202,12 +202,12 @@ impl ClassificationConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
-        avg_cpu: f64,
+        avg_cpu: Option<f64>,
         duration_ms: u64,
-        time_above_1t_ms: u64,
-        time_above_2t_ms: u64,
-        time_above_3t_ms: u64,
-        time_above_4t_ms: u64,
+        time_above_1t_ms: Option<u64>,
+        time_above_2t_ms: Option<u64>,
+        time_above_3t_ms: Option<u64>,
+        time_above_4t_ms: Option<u64>,
         exceedance_pct: f64,
     ) -> SuggestedClassification {
         let mut thread_options: Vec<u32> = vec![self.default_threads];
@@ -225,7 +225,11 @@ impl ClassificationConfig {
                     2 => time_above_2t_ms,
                     3 => time_above_3t_ms,
                     4 => time_above_4t_ms,
-                    _ => 0,
+                    _ => None,
+                };
+                // If telemetry is missing, treat as fitting this bucket (don't upgrade)
+                let Some(time_above) = time_above else {
+                    return true;
                 };
                 let pct = time_above as f64 / duration;
                 pct <= exceedance_pct
@@ -234,11 +238,15 @@ impl ClassificationConfig {
             .unwrap_or_else(|| *thread_options.last().unwrap_or(&self.default_threads));
 
         // Sanity floor: if avg_cpu exceeds a bucket, don't use that bucket
-        let suggested_threads = thread_options
-            .iter()
-            .find(|&&t| t >= suggested_threads && (t as f64) >= avg_cpu)
-            .copied()
-            .unwrap_or(suggested_threads);
+        let suggested_threads = if let Some(avg_cpu) = avg_cpu {
+            thread_options
+                .iter()
+                .find(|&&t| t >= suggested_threads && (t as f64) >= avg_cpu)
+                .copied()
+                .unwrap_or(suggested_threads)
+        } else {
+            suggested_threads
+        };
 
         let mut timeout_options: Vec<u64> = vec![self.default_timeout_ms];
         timeout_options.extend(self.rules.iter().filter_map(|r| r.timeout_ms));
@@ -449,18 +457,12 @@ fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
             let avg_p90_cpu = avg_opt_f64(runs.iter().copied(), |r| r.p90_cpu);
             let avg_duration_ms =
                 runs.iter().map(|r| r.duration_ms).sum::<u64>() / run_count as u64;
-            let avg_time_at_p90_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_at_p90_ms);
-            let avg_time_near_peak_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_near_peak_ms);
-            let avg_time_above_1t_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_above_1t_ms);
-            let avg_time_above_2t_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_above_2t_ms);
-            let avg_time_above_3t_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_above_3t_ms);
-            let avg_time_above_4t_ms =
-                avg_opt_u64(runs.iter().copied(), |r| r.time_above_4t_ms);
+            let avg_time_at_p90_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_at_p90_ms);
+            let avg_time_near_peak_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_near_peak_ms);
+            let avg_time_above_1t_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_above_1t_ms);
+            let avg_time_above_2t_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_above_2t_ms);
+            let avg_time_above_3t_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_above_3t_ms);
+            let avg_time_above_4t_ms = avg_opt_u64(runs.iter().copied(), |r| r.time_above_4t_ms);
             let max_peak_cpu = runs
                 .iter()
                 .map(|r| r.peak_cpu.unwrap_or(0.0))
@@ -527,12 +529,12 @@ fn analyze_reclassifications(
     for test in aggregated {
         let current = config.classify(&test.test_name);
         let suggested = config.suggest_classification(
-            test.avg_avg_cpu.unwrap_or(0.0),
+            test.avg_avg_cpu,
             test.avg_duration_ms,
-            test.avg_time_above_1t_ms.unwrap_or(0),
-            test.avg_time_above_2t_ms.unwrap_or(0),
-            test.avg_time_above_3t_ms.unwrap_or(0),
-            test.avg_time_above_4t_ms.unwrap_or(0),
+            test.avg_time_above_1t_ms,
+            test.avg_time_above_2t_ms,
+            test.avg_time_above_3t_ms,
+            test.avg_time_above_4t_ms,
             DEFAULT_EXCEEDANCE_PCT,
         );
 
@@ -540,52 +542,55 @@ fn analyze_reclassifications(
 
         // Determine time above current allocation
         let (time_above_allocation_ms, allocation_threshold) = match current.effective_threads {
-            1 => (test.avg_time_above_1t_ms.unwrap_or(0), 1.0),
-            2 => (test.avg_time_above_2t_ms.unwrap_or(0), 2.0),
-            3 => (test.avg_time_above_3t_ms.unwrap_or(0), 3.0),
-            4 => (test.avg_time_above_4t_ms.unwrap_or(0), 4.0),
+            1 => (test.avg_time_above_1t_ms, 1.0),
+            2 => (test.avg_time_above_2t_ms, 2.0),
+            3 => (test.avg_time_above_3t_ms, 3.0),
+            4 => (test.avg_time_above_4t_ms, 4.0),
             t => {
                 if t < 2 {
-                    (test.avg_time_above_1t_ms.unwrap_or(0), 1.0)
+                    (test.avg_time_above_1t_ms, 1.0)
                 } else if t < 3 {
-                    (test.avg_time_above_2t_ms.unwrap_or(0), 2.0)
+                    (test.avg_time_above_2t_ms, 2.0)
                 } else if t < 4 {
-                    (test.avg_time_above_3t_ms.unwrap_or(0), 3.0)
+                    (test.avg_time_above_3t_ms, 3.0)
                 } else {
-                    (test.avg_time_above_4t_ms.unwrap_or(0), 4.0)
+                    (test.avg_time_above_4t_ms, 4.0)
                 }
             }
         };
 
-        let pct_above_allocation = if test.avg_duration_ms > 0 {
-            (time_above_allocation_ms as f64 / test.avg_duration_ms as f64) * 100.0
-        } else {
-            0.0
-        };
+        // Only check CPU classification if telemetry is available
+        if let Some(time_above_ms) = time_above_allocation_ms {
+            let pct_above_allocation = if test.avg_duration_ms > 0 {
+                (time_above_ms as f64 / test.avg_duration_ms as f64) * 100.0
+            } else {
+                0.0
+            };
 
-        // Check CPU classification using sustained exceedance
-        let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0;
-        if pct_above_allocation > exceedance_threshold {
-            issues.push(format!(
-                "CPU regularly exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
-                current.effective_threads,
-                pct_above_allocation,
-                exceedance_threshold,
-                test.avg_avg_cpu.unwrap_or(0.0),
-                test.avg_peak_cpu.unwrap_or(0.0),
-                allocation_threshold as u32,
-                time_above_allocation_ms as f64 / 1000.0,
-            ));
-        } else if suggested.threads_required < current.effective_threads
-            && current.effective_threads > config.default_threads
-        {
-            issues.push(format!(
-                "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
-                test.avg_avg_cpu.unwrap_or(0.0),
-                allocation_threshold as u32,
-                pct_above_allocation,
-                current.effective_threads,
-            ));
+            // Check CPU classification using sustained exceedance
+            let exceedance_threshold = DEFAULT_EXCEEDANCE_PCT * 100.0;
+            if pct_above_allocation > exceedance_threshold {
+                issues.push(format!(
+                    "CPU regularly exceeds {}T for {:.0}% of runtime (>{:.0}% threshold): avg={:.2}x, peak={:.2}x, above {}T for {:.1}s",
+                    current.effective_threads,
+                    pct_above_allocation,
+                    exceedance_threshold,
+                    test.avg_avg_cpu.unwrap_or(0.0),
+                    test.avg_peak_cpu.unwrap_or(0.0),
+                    allocation_threshold as u32,
+                    time_above_ms as f64 / 1000.0,
+                ));
+            } else if suggested.threads_required < current.effective_threads
+                && current.effective_threads > config.default_threads
+            {
+                issues.push(format!(
+                    "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
+                    test.avg_avg_cpu.unwrap_or(0.0),
+                    allocation_threshold as u32,
+                    pct_above_allocation,
+                    current.effective_threads,
+                ));
+            }
         }
 
         // Check timeout classification
@@ -1096,12 +1101,15 @@ fn cmd_analyze(
                         0.0
                     };
                     let pct_at_p90 = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_at_p90_ms.unwrap_or(0) as f64 / r.stats.avg_duration_ms as f64) * 100.0
+                        (r.stats.avg_time_at_p90_ms.unwrap_or(0) as f64
+                            / r.stats.avg_duration_ms as f64)
+                            * 100.0
                     } else {
                         0.0
                     };
                     let pct_near_peak = if r.stats.avg_duration_ms > 0 {
-                        (r.stats.avg_time_near_peak_ms.unwrap_or(0) as f64 / r.stats.avg_duration_ms as f64)
+                        (r.stats.avg_time_near_peak_ms.unwrap_or(0) as f64
+                            / r.stats.avg_duration_ms as f64)
                             * 100.0
                     } else {
                         0.0
