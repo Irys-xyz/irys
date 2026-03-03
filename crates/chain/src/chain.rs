@@ -1142,7 +1142,7 @@ impl IrysNode {
                 http_listener,
                 irys_db,
                 gossip_listener,
-                runtime_handle,
+                runtime_handle.clone(),
                 shutdown_token.clone(),
             )
             .in_current_span()
@@ -1152,7 +1152,7 @@ impl IrysNode {
         // Spawn the actix API server so its future gets polled and it accepts connections.
         // (The gossip server is spawned separately via spawn_p2p_server_watcher_task.)
         let api_server_handle = actix_server.handle();
-        let mut actix_task = tokio::spawn(actix_server);
+        let mut actix_task = runtime_handle.spawn(actix_server);
 
         // Send IrysNodeCtx back to start()
         irys_node_ctx_tx
