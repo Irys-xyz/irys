@@ -169,6 +169,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 if stats_path.exists() {
                     fs::remove_file(&stats_path)?;
                 }
+                // Also remove per-entry stats files in the stats.d/ directory
+                let mut stats_dir_name = stats_path.file_name().unwrap_or_default().to_os_string();
+                stats_dir_name.push(".d");
+                let stats_dir = stats_path.with_file_name(stats_dir_name);
+                if stats_dir.exists() {
+                    fs::remove_dir_all(&stats_dir)?;
+                }
             }
 
             if !no_update_failures {
