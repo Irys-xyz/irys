@@ -1970,9 +1970,9 @@ impl IrysNode {
             .base_directory
             .parent()
             .is_some_and(|p| p.ends_with(".tmp"));
-        let is_test_based_on_cfg_flag = cfg!(test);
+        let is_test_based_on_cfg_flag = cfg!(debug_assertions);
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
+            panic!("VDF core pinning: cfg!(debug_assertions) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
         }
         let span = tracing::Span::current();
         let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
