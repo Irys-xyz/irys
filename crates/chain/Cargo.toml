@@ -30,7 +30,6 @@ irys-p2p.workspace = true
 irys-api-client.workspace = true
 irys-reward-curve.workspace = true
 irys-utils.workspace = true
-irys-packing-worker.workspace = true
 
 base58.workspace = true
 tracing-error.workspace = true
@@ -38,7 +37,6 @@ eyre.workspace = true
 rand.workspace = true
 toml.workspace = true
 serde_json = "1"
-sha2.workspace = true
 actix-web.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -47,47 +45,19 @@ opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 modular-bitfield.workspace = true
 futures.workspace = true
-hex.workspace = true
 test-fuzz.workspace = true
 k256 = { version = "0.13", default-features = false, features = [
     "ecdsa",
     "serde",
 ] }
-alloy-sol-macro = { workspace = true, features = ["json"] }
-alloy-provider.workspace = true
 core_affinity = "0.8.1"
 reth-db.workspace = true
 reth.workspace = true
-reth-ethereum-primitives.workspace = true
-alloy-core.workspace = true
-alloy-genesis.workspace = true
-alloy-eips.workspace = true
-alloy-network.workspace = true
-alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
-reth-tracing.workspace = true
 alloy-contract.workspace = true
-alloy-rpc-types-eth.workspace = true
 reth-cli-util = { workspace = true, features = ["jemalloc"] }
 reqwest = { workspace = true, features = ["json"] }
 dotenvy = "0.15"
-
-[dev-dependencies]
-assert_matches = "1.5.0"
-actix-http.workspace = true
-irys-actors = { workspace = true, features = ["test-utils"] }
-test-log.workspace = true
-rstest.workspace = true
-rust_decimal.workspace = true
-rust_decimal_macros.workspace = true
-semver.workspace = true
-thiserror.workspace = true
-itertools.workspace = true
-alloy-rpc-types-trace.workspace = true
-serde = { workspace = true, features = ["derive"] }
-irys-macros-diag-slow.workspace = true
-alloy-consensus.workspace = true
-alloy-primitives.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]

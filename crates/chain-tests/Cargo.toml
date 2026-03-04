@@ -1,0 +1,78 @@
+[package]
+name = "irys-chain-tests"
+edition = "2021"
+version = "0.1.0"
+
+[features]
+nvidia = ["irys-actors/nvidia"]
+telemetry = ["irys-utils/telemetry", "irys-testing-utils/telemetry"]
+
+[dependencies]
+# Test utilities (utils.rs) need to compile outside cfg(test)
+# so test modules can use them via `crate::utils`.
+actix-http.workspace = true
+actix-web.workspace = true
+alloy-core.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+eyre.workspace = true
+futures.workspace = true
+irys-actors = { workspace = true, features = ["test-utils"] }
+irys-api-client.workspace = true
+irys-api-server.workspace = true
+irys-chain.workspace = true
+irys-database.workspace = true
+irys-domain.workspace = true
+irys-macros-diag-slow.workspace = true
+irys-p2p.workspace = true
+irys-packing.workspace = true
+irys-reth-node-bridge.workspace = true
+irys-storage.workspace = true
+irys-testing-utils.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-vdf.workspace = true
+itertools.workspace = true
+reth.workspace = true
+reth-db.workspace = true
+reth-ethereum-primitives.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Only needed by test modules themselves (gated behind #[cfg(test)])
+alloy-consensus.workspace = true
+alloy-contract.workspace = true
+alloy-genesis.workspace = true
+alloy-network.workspace = true
+alloy-provider.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-macro = { workspace = true, features = ["json"] }
+alloy-rpc-types-trace.workspace = true
+alloy-sol-types.workspace = true
+assert_matches.workspace = true
+hex.workspace = true
+irys-packing-worker.workspace = true
+irys-reward-curve.workspace = true
+irys-utils.workspace = true
+k256 = { version = "0.13", default-features = false, features = [
+    "ecdsa",
+    "serde",
+] }
+rand.workspace = true
+reth-tracing.workspace = true
+rstest.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+serde = { workspace = true, features = ["derive"] }
+test-log.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["alloy-sol-types"]
+
+[lints]
+workspace = true

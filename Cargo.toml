@@ -26,6 +26,7 @@ members = [
   "crates/tui",
   "crates/macros/integer-tagged",
   "crates/macros/diag-slow",
+  "crates/chain-tests",
 ]
 resolver = "2"
 
