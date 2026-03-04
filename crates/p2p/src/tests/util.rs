@@ -1016,6 +1016,7 @@ pub(crate) fn data_handler_stub(
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     ));
 
     info!("Created GossipDataHandler stub");

@@ -27,7 +27,11 @@ pub(crate) struct ChunkDataWriter {
 
 impl ChunkDataWriter {
     /// Spawn the background writer task and return the writer handle.
-    pub(crate) fn spawn(db: DatabaseProvider, buffer_size: usize, runtime_handle: &tokio::runtime::Handle) -> Self {
+    pub(crate) fn spawn(
+        db: DatabaseProvider,
+        buffer_size: usize,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         let pending_hashes = Arc::new(DashSet::new());
 

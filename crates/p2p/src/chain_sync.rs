@@ -945,7 +945,12 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
             .await?;
         }
 
-        spawn_block_pull_task(sync_state, gossip_data_handler, block.block_hash, runtime_handle);
+        spawn_block_pull_task(
+            sync_state,
+            gossip_data_handler,
+            block.block_hash,
+            runtime_handle,
+        );
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
@@ -1870,6 +1875,7 @@ mod tests {
                 10,
                 &config,
                 data_handler,
+                &tokio::runtime::Handle::current(),
             )
             .await
             .expect("to finish catching up");
@@ -1984,6 +1990,7 @@ mod tests {
                 start_from,
                 &config,
                 data_handler,
+                &tokio::runtime::Handle::current(),
             )
             .await
             .expect("to finish catching up");

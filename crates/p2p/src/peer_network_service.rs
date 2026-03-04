@@ -443,17 +443,19 @@ impl PeerNetworkService {
             )
         };
 
-        self.inner.runtime_handle.spawn(Self::announce_yourself_to_address_task(
-            gossip_client,
-            peer_api_addr,
-            peer_gossip_addr,
-            inner,
-            sender,
-            is_trusted_peer,
-            peer_filter_mode,
-            peer_list,
-            peers_limit,
-        ));
+        self.inner
+            .runtime_handle
+            .spawn(Self::announce_yourself_to_address_task(
+                gossip_client,
+                peer_api_addr,
+                peer_gossip_addr,
+                inner,
+                sender,
+                is_trusted_peer,
+                peer_filter_mode,
+                peer_list,
+                peers_limit,
+            ));
 
         self.inner.runtime_handle.spawn(async move {
             (reth_peer_sender)(reth_peer_info).await;
@@ -1212,6 +1214,7 @@ mod tests {
                 reth_sender,
                 peer_list,
                 sender,
+                tokio::runtime::Handle::current(),
             ));
             let (_shutdown_tx, shutdown_rx) = signal();
             let service = PeerNetworkService::new(shutdown_rx, receiver, inner.clone());

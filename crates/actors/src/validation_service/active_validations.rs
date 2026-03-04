@@ -285,7 +285,11 @@ pub(super) struct ValidationCoordinator {
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>, runtime_handle: tokio::runtime::Handle) -> Self {
+    pub(super) fn new(
+        block_tree_guard: BlockTreeReadGuard,
+        vdf_notify: Arc<Notify>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
         Self {
             vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify), runtime_handle),
             concurrent_tasks: JoinSet::new(),
@@ -671,7 +675,11 @@ mod tests {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let vdf_notify = Arc::new(Notify::new());
-        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), vdf_notify, tokio::runtime::Handle::current());
+        let coordinator = ValidationCoordinator::new(
+            block_tree_guard.clone(),
+            vdf_notify,
+            tokio::runtime::Handle::current(),
+        );
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
