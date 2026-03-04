@@ -153,7 +153,8 @@ mod tests {
 
         assert_eq!(remote_packed, local_packed);
 
-        tx.send(irys_types::ShutdownReason::TestComplete).await?;
+        tx.send(irys_types::ShutdownReason::ServiceCompleted("test".into()))
+            .await?;
         exit_handle.await??;
         Ok(())
     }

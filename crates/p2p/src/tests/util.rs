@@ -394,6 +394,7 @@ impl GossipServiceTestFixture {
             self.mining_address,
             self.config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
+            tokio::runtime::Handle::current(),
         );
         info!("Starting gossip service on port {}", self.gossip_port);
         let gossip_listener = TcpListener::bind(
@@ -1006,6 +1007,7 @@ pub(crate) fn data_handler_stub(
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     ));
 
     info!("Created GossipDataHandler stub");
@@ -1020,6 +1022,7 @@ pub(crate) fn data_handler_stub(
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
+            tokio::runtime::Handle::current(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,
@@ -1030,6 +1033,7 @@ pub(crate) fn data_handler_stub(
         config: config.clone(),
         started_at: std::time::Instant::now(),
         consensus_config_hash,
+        runtime_handle: tokio::runtime::Handle::current(),
     })
 }
 
@@ -1073,6 +1077,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
+            tokio::runtime::Handle::current(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,
@@ -1083,6 +1088,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         config: config.clone(),
         started_at: std::time::Instant::now(),
         consensus_config_hash,
+        runtime_handle: tokio::runtime::Handle::current(),
     })
 }
 

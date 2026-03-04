@@ -164,6 +164,7 @@ impl DataSyncServiceTestHarness {
             chunk_fetcher_factory,
             service_senders,
             config,
+            tokio::runtime::Handle::current(),
         );
 
         Self { inner, msg_rx: rx }

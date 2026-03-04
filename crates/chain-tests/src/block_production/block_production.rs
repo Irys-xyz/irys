@@ -1049,8 +1049,8 @@ async fn heavy3_staking_pledging_txs_included() -> eyre::Result<()> {
     } else {
         panic!("Third transaction should be pledge");
     }
-    genesis_node.stop().await;
     peer_node.stop().await;
+    genesis_node.stop().await;
 
     Ok(())
 }

@@ -132,6 +132,7 @@ where
     config: Config,
     service_senders: ServiceSenders,
     pub mempool_guard: MempoolReadGuard,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +407,7 @@ where
         config: Config,
         service_senders: ServiceSenders,
         mempool_guard: MempoolReadGuard,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             db,
@@ -419,6 +421,7 @@ where
             config,
             service_senders,
             mempool_guard,
+            runtime_handle,
         }
     }
 
@@ -857,7 +860,7 @@ where
         {
             let mempool = self.mempool.clone();
             let block_transactions = Arc::clone(block_transactions);
-            tokio::spawn(async move {
+            self.runtime_handle.spawn(async move {
                 for commitment_tx in
                     block_transactions.get_ledger_system_txs(SystemLedger::Commitment)
                 {
@@ -1040,7 +1043,7 @@ where
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
         let chain_sync_sender = self.sync_service_sender.clone();
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             match Self::pull_and_seal_execution_payload(
                 &execution_payload_provider,
                 &chain_sync_sender,

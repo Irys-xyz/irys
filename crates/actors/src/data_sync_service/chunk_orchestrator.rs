@@ -59,6 +59,7 @@ pub struct ChunkOrchestrator {
     ledger_id: u32,
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
+    runtime_handle: tokio::runtime::Handle,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -68,6 +69,7 @@ impl ChunkOrchestrator {
         service_senders: &ServiceSenders,
         chunk_fetcher: Arc<dyn ChunkFetcher>,
         config: NodeConfig,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let slot_index = storage_module
             .partition_assignment()
@@ -93,6 +95,7 @@ impl ChunkOrchestrator {
             slot_index,
             chunk_fetcher, // Store the chunk fetcher
             config,
+            runtime_handle,
         }
     }
 
@@ -387,7 +390,7 @@ impl ChunkOrchestrator {
         let storage_module_id = self.storage_module.id;
         let timeout = self.config.data_sync.chunk_request_timeout;
 
-        tokio::spawn(
+        self.runtime_handle.spawn(
             async move {
                 debug!("Fetching chunk {chunk_offset} from {api_addr}");
 

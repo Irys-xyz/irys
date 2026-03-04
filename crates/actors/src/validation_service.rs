@@ -184,6 +184,7 @@ impl ValidationService {
         let mut coordinator = active_validations::ValidationCoordinator::new(
             self.inner.block_tree_guard.clone(),
             Arc::clone(&self.vdf_notify),
+            tokio::runtime::Handle::current(),
         );
 
         // Create a timer for periodic pipeline logging

@@ -38,6 +38,8 @@ use crate::routes::anchor;
 
 /// API version prefix for all routes
 pub const API_VERSION: &str = "v1";
+/// Timeout for the embedded actix server's own graceful shutdown before workers are dropped.
+const API_SERVER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -70,6 +72,7 @@ impl ApiState {
 pub fn routes() -> impl HttpServiceFactory {
     web::scope(API_VERSION)
         .route("/", web::get().to(index::info_route))
+        .route("/ready", web::get().to(index::ready_route))
         .route(
             "/block/{block_tag}",
             web::get().to(block::get_block_without_poa),
@@ -179,9 +182,15 @@ pub fn routes() -> impl HttpServiceFactory {
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
-    info!(custom.port = ?port, "Starting API server");
+    let actix_workers = app_state.config.node_config.http.actix_workers.max(1);
+    info!(
+        custom.port = ?port,
+        shutdown_timeout_s = API_SERVER_SHUTDOWN_TIMEOUT_SECS,
+        actix_workers = ?actix_workers,
+        "Starting API server"
+    );
     let state = web::Data::new(app_state);
-    HttpServer::new(move || {
+    let mut server = HttpServer::new(move || {
         let span = tracing::info_span!(target: "irys-api-http", "api_server");
         let _guard = span.enter();
 
@@ -209,11 +218,13 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
     })
-    .listen(listener)
-    .unwrap()
-    .run()
-}
+    .disable_signals()
+    .shutdown_timeout(API_SERVER_SHUTDOWN_TIMEOUT_SECS);
 
+    server = server.workers(actix_workers);
+
+    server.listen(listener).unwrap().run()
+}
 // Adapted from /actix-web-4.9.0/src/server.rs create_listener
 // This is required as we need to access the TcpListener directly to figure out what port we've been assigned
 // if randomisation (requested port 0) is used.

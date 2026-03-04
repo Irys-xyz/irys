@@ -189,7 +189,8 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
     }
 
     // node.stop().await;
-    tx.send(irys_types::ShutdownReason::TestComplete).await?;
+    tx.send(irys_types::ShutdownReason::ServiceCompleted("test".into()))
+        .await?;
     exit_handle.await??;
     Ok(())
 }
