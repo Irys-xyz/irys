@@ -320,10 +320,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         tokio::runtime::Handle::current(),
     );
 
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
-    );
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = block2.clone();
@@ -509,10 +506,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         tokio::runtime::Handle::current(),
     );
 
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
-    );
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = Arc::new(RwLock::new(None));
@@ -760,10 +754,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         tokio::runtime::Handle::current(),
     );
 
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
-    );
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     let genesis = block_status_provider_mock.genesis_header();
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);

@@ -209,12 +209,18 @@ impl IrysNodeCtx {
         match handle {
             Some(jh) => {
                 let abort_handle = jh.abort_handle();
-                match tokio::time::timeout(RETH_THREAD_STOP_TIMEOUT, jh).await {
-                    Ok(Ok(reason)) => info!("Lifecycle task stopped: {}", reason),
-                    Ok(Err(e)) => error!("Lifecycle task panicked: {:?}", e),
-                    Err(_) => {
+                tokio::pin!(jh);
+                tokio::select! {
+                    result = &mut jh => {
+                        match result {
+                            Ok(reason) => info!("Lifecycle task stopped: {}", reason),
+                            Err(e) => error!("Lifecycle task panicked: {:?}", e),
+                        }
+                    }
+                    _ = tokio::time::sleep(RETH_THREAD_STOP_TIMEOUT) => {
                         error!("Lifecycle task did not stop within {RETH_THREAD_STOP_TIMEOUT:?}, aborting");
                         abort_handle.abort();
+                        let _ = jh.await;
                     }
                 }
             }
@@ -1165,9 +1171,7 @@ impl IrysNode {
                 Ok(result) => result,
                 Err(e) => {
                     error!("Failed to initialize services: {:?}", e);
-                    return ShutdownReason::FatalError(format!(
-                        "init_services failed: {e}"
-                    ));
+                    return ShutdownReason::FatalError(format!("init_services failed: {e}"));
                 }
             };
 
@@ -1313,19 +1317,24 @@ impl IrysNode {
         // (mirrors master's dedicated OS thread behavior)
         info!(shutdown.phase = "reth_shutdown", "Lifecycle shutdown phase");
         let reth_rt = reth_runtime.clone();
-        tokio::task::spawn_blocking(move || reth_rt.graceful_shutdown())
-            .await
-            .expect("reth graceful shutdown should not panic");
+        if let Err(e) = tokio::task::spawn_blocking(move || reth_rt.graceful_shutdown()).await {
+            error!(
+                shutdown.phase = "reth_shutdown",
+                "Reth graceful shutdown task failed: {e:?}"
+            );
+        }
 
         // Close reth DB (MDBX close is sync, use spawn_blocking)
         info!(shutdown.phase = "db_close", "Lifecycle shutdown phase");
         let reth_node_for_close = node_handle.node;
-        tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             reth_node_for_close.provider.database.db.close();
             reth_provider::cleanup_provider(&irys_provider);
         })
         .await
-        .expect("DB close task should not panic");
+        {
+            error!(shutdown.phase = "db_close", "DB close task failed: {e:?}");
+        }
 
         info!("Lifecycle task finished with reason: {}", shutdown_reason);
         shutdown_reason
