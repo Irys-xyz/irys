@@ -68,7 +68,7 @@ mod tests {
     use crate::{api::PackingWorkerInfo, worker::start_worker};
 
     #[tokio::test]
-    async fn heavy_packing_worker_standalone_test() -> eyre::Result<()> {
+    async fn heavy4_packing_worker_standalone_test() -> eyre::Result<()> {
         initialize_tracing();
         let config = PackingWorkerConfig {
             bind_port: 0,

@@ -718,7 +718,7 @@ mod tests {
     #[case::heavy3_high_concurrency(8)]
     #[test_log::test(tokio::test)]
     #[timeout(Duration::from_secs(10))]
-    async fn test_semaphore_permits_released(#[case] concurrency: u16) -> eyre::Result<()> {
+    async fn heavy4_test_semaphore_permits_released(#[case] concurrency: u16) -> eyre::Result<()> {
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_semaphore"), false);
         let config = create_test_config_with_chunks(&tmp_dir, concurrency, 5);
 
