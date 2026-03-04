@@ -245,6 +245,11 @@ pub fn generate_nextest_config(
         config_content.push_str("run-wrapper = 'xtask-monitor'\n");
     }
 
+    // Always inject the heap-profile scripts section so `--profile heap-profile` finds the wrapper
+    config_content.push_str("\n[[profile.heap-profile.scripts]]\n");
+    config_content.push_str("filter = 'all()'\n");
+    config_content.push_str("run-wrapper = 'xtask-monitor'\n");
+
     temp_file.write_all(config_content.as_bytes())?;
     temp_file.flush()?;
 
@@ -293,6 +298,7 @@ mod tests {
             time_above_500mb_ms: None,
             time_above_1gb_ms: None,
             memory_samples: None,
+            heap_profile_path: None,
         }
     }
 

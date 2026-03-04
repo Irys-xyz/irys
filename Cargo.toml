@@ -393,6 +393,10 @@ codegen-units = 1
 inherits = "release"
 debug = true
 
+[profile.heap-profile]
+inherits = "dev"
+debug = 2                  # Full DWARF debug info for meaningful heaptrack backtraces
+split-debuginfo = "off"    # Keep debug info in binary for heaptrack
 
 [profile.dev]
 panic = "unwind"

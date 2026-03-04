@@ -74,9 +74,7 @@ fn get_output_path() -> PathBuf {
         .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     if let Some(workspace_root) = find_workspace_root(&start_dir) {
-        return workspace_root
-            .join("target")
-            .join("nextest-monitor/stats");
+        return workspace_root.join("target").join("nextest-monitor/stats");
     }
 
     PathBuf::from("target").join("nextest-monitor/stats")
@@ -146,6 +144,11 @@ fn main() -> std::io::Result<()> {
     let monitor_memory = env_is_enabled("NEXTEST_MONITOR_MEMORY");
     let record_samples = env_is_enabled("NEXTEST_MONITOR_DETAILED");
 
+    #[cfg(feature = "heap-profile")]
+    let heap_profile = env_is_enabled("NEXTEST_MONITOR_HEAP_PROFILE");
+    #[cfg(not(feature = "heap-profile"))]
+    let heap_profile = false;
+
     let exit_code = run_with_monitoring(MonitorConfig {
         binary,
         test_args: &test_args,
@@ -155,6 +158,7 @@ fn main() -> std::io::Result<()> {
         monitor_memory,
         record_samples,
         test_name,
+        heap_profile,
     })?;
 
     std::process::exit(exit_code);
@@ -169,6 +173,33 @@ struct MonitorConfig<'a> {
     monitor_memory: bool,
     record_samples: bool,
     test_name: Option<String>,
+    heap_profile: bool,
+}
+
+/// Derive the heap profile output path from the test name.
+/// heaptrack will append `.heaptrack.zst` to this base path.
+#[cfg(feature = "heap-profile")]
+fn heap_profile_output_path(test_name: &Option<String>) -> Option<PathBuf> {
+    let name = test_name.as_deref().unwrap_or("unknown");
+    let sanitized = name.replace("::", "__");
+
+    let base_dir = if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        PathBuf::from(target_dir).join("nextest-monitor/heap-profiles")
+    } else {
+        let start_dir = env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        if let Some(workspace_root) = find_workspace_root(&start_dir) {
+            workspace_root
+                .join("target")
+                .join("nextest-monitor/heap-profiles")
+        } else {
+            PathBuf::from("target/nextest-monitor/heap-profiles")
+        }
+    };
+
+    fs::create_dir_all(&base_dir).ok()?;
+    Some(base_dir.join(sanitized))
 }
 
 fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
@@ -181,7 +212,41 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         monitor_memory,
         record_samples,
         test_name,
+        heap_profile,
     } = config;
+
+    #[cfg(feature = "heap-profile")]
+    let heap_profile_path = if heap_profile {
+        heap_profile_output_path(&test_name)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "heap-profile"))]
+    let heap_profile_path: Option<PathBuf> = None;
+
+    #[cfg(feature = "heap-profile")]
+    let mut child = if let Some(ref hp_path) = heap_profile_path {
+        eprintln!("[nextest-wrapper] heap profiling: {}", hp_path.display());
+        Command::new("heaptrack")
+            .arg("-o")
+            .arg(hp_path)
+            .arg("--")
+            .arg(binary)
+            .args(test_args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?
+    } else {
+        Command::new(binary)
+            .args(test_args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?
+    };
+
+    #[cfg(not(feature = "heap-profile"))]
     let mut child = Command::new(binary)
         .args(test_args)
         .stdin(Stdio::inherit())
@@ -196,14 +261,17 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     let mut cpu_samples = Vec::new();
     let mut memory_samples = Vec::new();
 
-    let monitoring_enabled = monitor_cpu || monitor_memory;
+    // Skip RSS monitoring when heap profiling to avoid measuring heaptrack's overhead
+    let effective_monitor_memory = monitor_memory && !heap_profile;
+
+    let monitoring_enabled = monitor_cpu || effective_monitor_memory;
 
     let mut cpu_monitor = if monitor_cpu {
         Some(CpuMonitor::new(pid))
     } else {
         None
     };
-    let memory_monitor = if monitor_memory {
+    let memory_monitor = if effective_monitor_memory {
         Some(MemoryMonitor::new(pid))
     } else {
         None
@@ -253,7 +321,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         None
     };
 
-    let mem_stats = if monitor_memory {
+    let mem_stats = if effective_monitor_memory {
         Some(calculate_memory_stats(&memory_samples, duration_ms))
     } else {
         None
@@ -288,11 +356,14 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         time_above_100mb_ms: mem_stats.as_ref().map(|s| s.time_above_100mb_ms),
         time_above_500mb_ms: mem_stats.as_ref().map(|s| s.time_above_500mb_ms),
         time_above_1gb_ms: mem_stats.as_ref().map(|s| s.time_above_1gb_ms),
-        memory_samples: if record_samples && monitor_memory {
+        memory_samples: if record_samples && effective_monitor_memory {
             Some(memory_samples)
         } else {
             None
         },
+        heap_profile_path: heap_profile_path.and_then(|hp_path| {
+            find_heaptrack_output(&hp_path).map(|p| p.to_string_lossy().to_string())
+        }),
     };
 
     if let Err(e) = append_stats(output_path, stats) {
@@ -300,6 +371,41 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     }
 
     Ok(exit_code.unwrap_or(1))
+}
+
+/// Find the actual heaptrack output file. heaptrack appends a suffix to the
+/// output path — the exact format varies by version:
+/// - v1.2.x: `<base>.zst`
+/// - v1.3+: `<base>.<pid>.heaptrack.zst` or `<base>.heaptrack.zst`
+fn find_heaptrack_output(base_path: &Path) -> Option<PathBuf> {
+    let parent = base_path.parent()?;
+    let base_name = base_path.file_name()?.to_str()?;
+
+    let entries = fs::read_dir(parent).ok()?;
+    let mut best: Option<PathBuf> = None;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(base_name) && name_str.ends_with(".zst") {
+            match (&best, entry.metadata().ok()) {
+                (None, _) => best = Some(entry.path()),
+                (Some(prev), Some(meta)) => {
+                    if let (Ok(prev_time), Ok(cur_time)) = (
+                        fs::metadata(prev).and_then(|m| m.modified()),
+                        meta.modified(),
+                    ) {
+                        if cur_time > prev_time {
+                            best = Some(entry.path());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best
 }
 
 struct CalculatedCpuStats {

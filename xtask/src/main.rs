@@ -39,6 +39,9 @@ enum Commands {
         /// Enable CPU and memory resource monitoring
         #[clap(long, default_value_t = false)]
         monitor: bool,
+        /// Enable heap profiling via heaptrack for individual tests (Linux only)
+        #[clap(long, default_value_t = false)]
+        heap_profile: bool,
         /// Arbitrary passthrough args
         #[clap(last = true)]
         args: Vec<String>,
@@ -95,14 +98,21 @@ enum Commands {
     },
 }
 
-/// Build the nextest-wrapper binary
-fn build_wrapper(sh: &Shell) -> eyre::Result<PathBuf> {
+/// Build the nextest-wrapper binary, optionally with additional features
+fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf> {
     println!("Building nextest-wrapper...");
-    cmd!(
-        sh,
-        "cargo build --package nextest-monitor --bin nextest-wrapper"
-    )
-    .remove_and_run()?;
+    let mut build_args = vec![
+        "build".to_string(),
+        "--package".to_string(),
+        "nextest-monitor".to_string(),
+        "--bin".to_string(),
+        "nextest-wrapper".to_string(),
+    ];
+    if let Some(feat) = features {
+        build_args.push("--features".to_string());
+        build_args.push(feat.to_string());
+    }
+    cmd!(sh, "cargo {build_args...}").remove_and_run()?;
 
     // Get the target directory
     let metadata = MetadataCommand::new().exec()?;
@@ -128,6 +138,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             clean,
             no_update_failures,
             monitor,
+            heap_profile,
         } => {
             println!("cargo test");
             let _ = cmd!(
@@ -200,9 +211,44 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 sh.set_var("NEXTEST_MONITOR_MEMORY", "0");
             }
 
+            // Heap profiling setup
+            if heap_profile {
+                if cmd!(sh, "which heaptrack")
+                    .quiet()
+                    .remove_and_run()
+                    .is_err()
+                {
+                    return Err(eyre::eyre!(
+                        "heaptrack not found. Install it with:\n  \
+                         Ubuntu/Debian: sudo apt-get install heaptrack\n  \
+                         Fedora: sudo dnf install heaptrack\n  \
+                         Arch: sudo pacman -S heaptrack"
+                    ));
+                }
+                sh.set_var("NEXTEST_MONITOR_HEAP_PROFILE", "1");
+
+                let heap_dir = get_stats_file_path()
+                    .parent()
+                    .unwrap()
+                    .join("heap-profiles");
+                fs::create_dir_all(&heap_dir)?;
+
+                println!("Heap profiling enabled via heaptrack");
+                println!("  Profiles will be written to: {}", heap_dir.display());
+                println!(
+                    "  Tip: use --test-threads 1 and target specific tests with -E 'test(name)'"
+                );
+            }
+
             // Build the wrapper binary and generate config
+            let wrapper_features: Option<&str> = if heap_profile {
+                Some("heap-profile")
+            } else {
+                None
+            };
+
             let config_file = {
-                let wrapper_path = build_wrapper(sh)?;
+                let wrapper_path = build_wrapper(sh, wrapper_features)?;
                 let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
 
                 generate_nextest_config(&wrapper_path_str, failed_tests_filter.as_deref())?
@@ -244,6 +290,16 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
                 nextest_args.push("--profile".to_string());
                 nextest_args.push("xtask-rerun-failures".to_string());
+            } else if heap_profile {
+                if user_has_profile {
+                    return Err(eyre::eyre!(
+                        "Do not pass --profile via xtask passthrough args when using --heap-profile; xtask selects the profile."
+                    ));
+                }
+                nextest_args.push("--profile".to_string());
+                nextest_args.push("heap-profile".to_string());
+                nextest_args.push("--cargo-profile".to_string());
+                nextest_args.push("heap-profile".to_string());
             }
 
             // Add user-provided args
@@ -412,6 +468,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         clean: false,
                         no_update_failures: false,
                         monitor: false,
+                        heap_profile: false,
                         args: vec![],
                     },
                     sh,

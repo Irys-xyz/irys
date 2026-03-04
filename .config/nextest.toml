@@ -43,6 +43,10 @@ priority = 70
 [scripts.wrapper.nextest-monitor]
 command = 'nextest-wrapper'
 
+[profile.heap-profile]
+test-threads = 1           # Reduce parallelism during profiling (less noise)
+slow-timeout = { period = "120s", terminate-after = 2 }  # Allow extra time for profiling overhead
+
 [profile.cpu-profile]
 # test-threads = 1
 test-threads = 12

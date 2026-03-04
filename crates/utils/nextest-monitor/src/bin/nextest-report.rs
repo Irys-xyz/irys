@@ -704,6 +704,20 @@ enum Commands {
 
     /// Clear the stats file
     Clear,
+
+    #[cfg(feature = "heap-profile")]
+    /// Show heap profiling results for a test
+    Heap {
+        /// Test name pattern to show heap profile for
+        pattern: String,
+        /// Number of top allocation sites to show
+        #[arg(short, long, default_value = "20")]
+        top: usize,
+    },
+
+    #[cfg(feature = "heap-profile")]
+    /// List available heap profiles
+    HeapList,
 }
 
 fn main() -> std::io::Result<()> {
@@ -746,6 +760,16 @@ fn main() -> std::io::Result<()> {
         Commands::Config => {
             cmd_config(&config);
         }
+        #[cfg(feature = "heap-profile")]
+        Commands::Heap { pattern, top } => {
+            let stats = load_stats(&cli.input)?;
+            cmd_heap(&stats, &pattern, top)?;
+        }
+        #[cfg(feature = "heap-profile")]
+        Commands::HeapList => {
+            let stats = load_stats(&cli.input)?;
+            cmd_heap_list(&stats);
+        }
         _ => {
             let stats = load_stats(&cli.input)?;
 
@@ -757,6 +781,8 @@ fn main() -> std::io::Result<()> {
                     cmd_export(&stats, &format, output.as_ref())?
                 }
                 Commands::Clear | Commands::Config => unreachable!(),
+                #[cfg(feature = "heap-profile")]
+                Commands::Heap { .. } | Commands::HeapList => unreachable!(),
             }
         }
     }
@@ -1625,4 +1651,225 @@ fn cmd_export(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Heap profiling commands (feature-gated)
+// ============================================================================
+
+#[cfg(feature = "heap-profile")]
+fn cmd_heap_list(stats: &AggregatedStats) {
+    let profiles: Vec<&TestStats> = stats
+        .tests
+        .iter()
+        .filter(|t| t.heap_profile_path.is_some())
+        .collect();
+
+    if profiles.is_empty() {
+        println!("No heap profiles found.");
+        println!("Run tests with --heap-profile to generate profiles.");
+        return;
+    }
+
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                         AVAILABLE HEAP PROFILES                             ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("{:<8} {:>10}  Test Name", "Status", "File Size");
+    println!("{}", "-".repeat(80));
+
+    for test in &profiles {
+        let name = test.test_name.as_deref().unwrap_or("<unknown>");
+        let status = if test.passed { "PASS" } else { "FAIL" };
+        let size = test
+            .heap_profile_path
+            .as_ref()
+            .and_then(|p| fs::metadata(p).ok())
+            .map(|m| format_bytes_heap(m.len()))
+            .unwrap_or_else(|| "missing".to_string());
+
+        println!("{:<8} {:>10}  {}", status, size, name);
+    }
+    println!();
+    println!("Use 'nextest-report heap <pattern>' to view allocation details.");
+    println!("Use 'heaptrack_gui <path>' for interactive analysis.");
+}
+
+#[cfg(feature = "heap-profile")]
+fn cmd_heap(stats: &AggregatedStats, pattern: &str, top: usize) -> std::io::Result<()> {
+    let matches: Vec<&TestStats> = stats
+        .tests
+        .iter()
+        .filter(|t| {
+            t.heap_profile_path.is_some()
+                && t.test_name.as_deref().is_some_and(|n| n.contains(pattern))
+        })
+        .collect();
+
+    if matches.is_empty() {
+        eprintln!("No heap profiles found matching '{}'.", pattern);
+        eprintln!("Run 'nextest-report heap-list' to see available profiles.");
+        std::process::exit(1);
+    }
+
+    for test in &matches {
+        let name = test.test_name.as_deref().unwrap_or("<unknown>");
+        let path = test.heap_profile_path.as_deref().unwrap();
+
+        println!(
+            "╔══════════════════════════════════════════════════════════════════════════════╗"
+        );
+        println!("║  Heap Profile: {:<61}║", truncate_str(name, 61));
+        println!(
+            "╚══════════════════════════════════════════════════════════════════════════════╝"
+        );
+        println!();
+        println!("Profile file: {}", path);
+        println!();
+
+        let output = std::process::Command::new("heaptrack_print")
+            .arg(path)
+            .output();
+
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                let stderr = String::from_utf8_lossy(&result.stderr);
+
+                if !result.status.success() {
+                    eprintln!("heaptrack_print failed for {}:", path);
+                    eprintln!("{}", stderr);
+                    continue;
+                }
+
+                display_heaptrack_summary(&stdout, top);
+
+                if !stderr.is_empty() {
+                    display_heaptrack_stats(&stderr);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to run heaptrack_print: {}", e);
+                eprintln!("Install heaptrack to view profiles:");
+                eprintln!("  Ubuntu/Debian: sudo apt-get install heaptrack");
+                eprintln!();
+                eprintln!("You can also use heaptrack_gui for interactive analysis:");
+                eprintln!("  heaptrack_gui {}", path);
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "heap-profile")]
+fn display_heaptrack_summary(output: &str, top: usize) {
+    let lines: Vec<&str> = output.lines().collect();
+
+    let mut in_section = false;
+    let mut section_name = String::new();
+    let mut section_lines: Vec<String> = Vec::new();
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+
+    for line in &lines {
+        if line.starts_with("MOST CALLS")
+            || line.starts_with("PEAK MEMORY")
+            || line.starts_with("TOTAL MEMORY")
+            || line.starts_with("MEMORY LEAKS")
+        {
+            if in_section && !section_lines.is_empty() {
+                sections.push((section_name.clone(), section_lines.clone()));
+            }
+            section_name = line.to_string();
+            section_lines.clear();
+            in_section = true;
+            continue;
+        }
+
+        if in_section {
+            if line.is_empty() && !section_lines.is_empty() {
+                sections.push((section_name.clone(), section_lines.clone()));
+                in_section = false;
+                section_lines.clear();
+            } else if !line.is_empty() {
+                section_lines.push(line.to_string());
+            }
+        }
+    }
+    if in_section && !section_lines.is_empty() {
+        sections.push((section_name, section_lines));
+    }
+
+    if sections.is_empty() {
+        println!("--- heaptrack_print output ---");
+        for (i, line) in lines.iter().enumerate() {
+            if top > 0 && i >= top * 3 {
+                println!("  ... ({} more lines)", lines.len() - i);
+                break;
+            }
+            println!("  {}", line);
+        }
+        return;
+    }
+
+    for (name, lines) in &sections {
+        println!("--- {} ---", name);
+        let limit = if top > 0 {
+            top.min(lines.len())
+        } else {
+            lines.len()
+        };
+        for line in &lines[..limit] {
+            println!("  {}", line);
+        }
+        if top > 0 && lines.len() > top {
+            println!("  ... ({} more entries)", lines.len() - top);
+        }
+        println!();
+    }
+}
+
+#[cfg(feature = "heap-profile")]
+fn display_heaptrack_stats(stderr: &str) {
+    let interesting_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| {
+            l.contains("total memory leaked")
+                || l.contains("peak heap memory")
+                || l.contains("total allocations")
+                || l.contains("peak RSS")
+                || l.contains("calls to allocation")
+        })
+        .collect();
+
+    if !interesting_lines.is_empty() {
+        println!("--- Summary ---");
+        for line in &interesting_lines {
+            println!("  {}", line.trim());
+        }
+        println!();
+    }
+}
+
+#[cfg(feature = "heap-profile")]
+fn format_bytes_heap(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+#[cfg(feature = "heap-profile")]
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
 }

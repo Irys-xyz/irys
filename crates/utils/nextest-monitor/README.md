@@ -152,8 +152,64 @@ run-wrapper = 'nextest-monitor'
 | `NEXTEST_MONITOR_MEMORY` | `0` | `1` to enable RSS memory sampling |
 | `NEXTEST_MONITOR_INTERVAL_MS` | `50` | Sampling interval in milliseconds |
 | `NEXTEST_MONITOR_DETAILED` | `0` | `1` to record every individual sample (needed for charts in `detail`) |
+| `NEXTEST_MONITOR_HEAP_PROFILE` | `0` | `1` to enable heaptrack profiling (requires `heap-profile` feature) |
 
 When neither CPU nor memory monitoring is enabled, the wrapper still records pass/fail, duration, and exit code for every test (used by `cargo xtask test` for failure tracking).
+
+## Heap profiling with heaptrack
+
+The `heap-profile` feature flag enables per-test heap profiling via [heaptrack](https://github.com/KDE/heaptrack). Each test binary is run under `heaptrack`, producing a `.zst` profile that can be analyzed with `heaptrack_print` (CLI) or `heaptrack_gui` (interactive).
+
+### Prerequisites
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install heaptrack
+
+# Fedora
+sudo dnf install heaptrack
+
+# Arch
+sudo pacman -S heaptrack
+```
+
+### Via xtask
+
+```bash
+# Run a specific test with heap profiling
+cargo xtask test --heap-profile -- -E 'test(my_test_name)'
+
+# Run all tests (slow — use sparingly)
+cargo xtask test --heap-profile
+```
+
+This automatically:
+- Builds the wrapper with the `heap-profile` feature
+- Uses the `heap-profile` cargo profile (full DWARF debug info for meaningful backtraces)
+- Uses the `heap-profile` nextest profile (single-threaded, extended timeouts)
+- Writes `.zst` profiles to `target/nextest-monitor/heap-profiles/`
+
+### Viewing results
+
+```bash
+# List all available heap profiles
+cargo run --bin nextest-report --features heap-profile -- heap-list
+
+# View allocation details for a specific test
+cargo run --bin nextest-report --features heap-profile -- heap my_test_name
+
+# Show top 10 allocation sites
+cargo run --bin nextest-report --features heap-profile -- heap my_test_name --top 10
+
+# Interactive GUI analysis (best experience)
+heaptrack_gui target/nextest-monitor/heap-profiles/my_test__name.*.zst
+```
+
+### Notes
+
+- RSS memory monitoring is automatically disabled during heap profiling to avoid measuring heaptrack's own overhead
+- The `heap-profile` cargo profile inherits from `dev` with `debug = 2` and `split-debuginfo = "off"` for full backtraces
+- heaptrack v1.3+ is recommended; v1.2.x has known bugs with large profiles
 
 ## Report commands
 
@@ -165,6 +221,8 @@ When neither CPU nor memory monitoring is enabled, the wrapper still records pas
 | `export` | Dump to CSV or JSON (`--format csv\|json`, `-o FILE`) |
 | `config` | Show parsed classification rules from `nextest.toml` |
 | `clear` | Delete the stats file |
+| `heap <pattern>` | Show heaptrack allocation details for matching tests (requires `--features heap-profile`) |
+| `heap-list` | List available heap profiles (requires `--features heap-profile`) |
 
 Global options: `--input <FILE>` (stats JSON), `--config <FILE>` (nextest.toml path).
 

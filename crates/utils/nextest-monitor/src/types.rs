@@ -82,6 +82,10 @@ pub struct TestStats {
     pub time_above_1gb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_samples: Option<Vec<MemorySample>>,
+
+    // -- Heap profiling (optional) --
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heap_profile_path: Option<String>,
 }
 
 /// Aggregated statistics across all tests
@@ -141,10 +145,7 @@ fn parse_stats_dir(dir: &Path) -> std::io::Result<Vec<TestStats>> {
                 }
             },
             Err(e) => {
-                eprintln!(
-                    "Warning: could not read stats file {}: {e}",
-                    path.display()
-                );
+                eprintln!("Warning: could not read stats file {}: {e}", path.display());
             }
         }
     }
@@ -206,6 +207,7 @@ mod tests {
             time_above_500mb_ms: Some(0),
             time_above_1gb_ms: Some(0),
             memory_samples: None,
+            heap_profile_path: None,
         };
 
         append_stats(&path, stats.clone()).unwrap();
