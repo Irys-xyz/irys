@@ -885,14 +885,12 @@ impl ConsensusConfig {
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
 
         Self {
-            chain_id: 1270,
+            chain_id: 1271,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
 
-            expected_genesis_hash: Some(H256::from_base58(
-                "CVqXN2QqETJYke83dKCMjBWEnxstrFGk6ySUqNho7QRr",
-            )),
+            expected_genesis_hash: Some(H256::zero()),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
@@ -912,10 +910,8 @@ impl ConsensusConfig {
 
             genesis: GenesisConfig {
                 timestamp_millis: 1764677430138,
-                miner_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
-                    .unwrap(),
-                reward_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
-                    .unwrap(),
+                miner_address: IrysAddress::from_base58("3AJSq15L7uEECUN1v5W6un3S5YSt").unwrap(),
+                reward_address: IrysAddress::from_base58("3AJSq15L7uEECUN1v5W6un3S5YSt").unwrap(),
                 last_epoch_hash: H256::from_base58("6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y"),
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
@@ -954,7 +950,26 @@ impl ConsensusConfig {
             },
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                alloc: BTreeMap::new(),
+                alloc: {
+                    let balance = U256::from(99_999_000_000_000_000_000_000_u128);
+                    let mut map = BTreeMap::new();
+                    for addr_hex in [
+                        "38ad1d5a45abdb277fff78fe8f481eedabfc26b6",
+                        "50203318ce9244cb6e977a7c207ca4bd9d7bfedd",
+                        "6abe5f13d6f5c612375a1ce0ef111f137ad14338",
+                        "9b116a6c6e7a9b6e3c443730eadff8f0226661e9",
+                        "f7e892100bd02e1b3be00b2fced778148ed33593",
+                    ] {
+                        map.insert(
+                            Address::from_slice(hex::decode(addr_hex).unwrap().as_slice()),
+                            GenesisAccount {
+                                balance,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    map
+                },
             },
             block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
@@ -977,7 +992,7 @@ impl ConsensusConfig {
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
-                // Borealis hardfork - disabled for testnet (controlled activation)
+                // Borealis hardfork - disabled for devnet (controlled activation)
                 borealis: None,
             },
         }

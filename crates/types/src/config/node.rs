@@ -1067,7 +1067,7 @@ impl NodeConfig {
                 .expect("valid hex"),
         )
         .expect("valid key");
-        let mut consensus = ConsensusConfig::testnet();
+        let mut consensus = ConsensusConfig::devnet();
         let signer = IrysSigner {
             signer: mining_key,
             chain_id: consensus.chain_id,
@@ -1112,7 +1112,7 @@ impl NodeConfig {
             // }],
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
-            peer_filter_mode: PeerFilterMode::Unrestricted,
+            peer_filter_mode: PeerFilterMode::TrustedOnly,
             network_defaults: NetworkDefaults {
                 public_ip: "127.0.0.1".to_string(),
                 bind_ip: "0.0.0.0".to_string(),
