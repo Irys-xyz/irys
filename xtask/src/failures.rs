@@ -14,8 +14,7 @@ const MONITOR_SUBDIR: &str = "nextest-monitor";
 /// Filename for the list of failed tests from previous runs
 const FAILURES_FILENAME: &str = "failures.json";
 
-/// Filename for the unified stats JSONL (written by nextest-wrapper)
-const STATS_FILENAME: &str = "stats.jsonl";
+const STATS_FILENAME: &str = "stats";
 
 /// Walk up the directory tree to find the workspace root (contains Cargo.lock)
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
@@ -315,7 +314,7 @@ mod tests {
     #[test]
     fn test_run_results_from_stats() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("stats.jsonl");
+        let path = temp_dir.path().join("stats");
 
         append_stats(&path, make_stats("test::one", true)).unwrap();
         append_stats(&path, make_stats("test::two", false)).unwrap();
@@ -333,7 +332,7 @@ mod tests {
     #[test]
     fn test_run_results_later_entries_override() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("stats.jsonl");
+        let path = temp_dir.path().join("stats");
 
         // test::one fails first, then passes — should end up only in passed
         append_stats(&path, make_stats("test::one", false)).unwrap();

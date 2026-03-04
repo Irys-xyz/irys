@@ -66,7 +66,7 @@ fn get_output_path() -> PathBuf {
     }
 
     if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
-        return PathBuf::from(target_dir).join("nextest-monitor/stats.jsonl");
+        return PathBuf::from(target_dir).join("nextest-monitor/stats");
     }
 
     let start_dir = env::var("CARGO_MANIFEST_DIR")
@@ -76,10 +76,10 @@ fn get_output_path() -> PathBuf {
     if let Some(workspace_root) = find_workspace_root(&start_dir) {
         return workspace_root
             .join("target")
-            .join("nextest-monitor/stats.jsonl");
+            .join("nextest-monitor/stats");
     }
 
-    PathBuf::from("target").join("nextest-monitor/stats.jsonl")
+    PathBuf::from("target").join("nextest-monitor/stats")
 }
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {

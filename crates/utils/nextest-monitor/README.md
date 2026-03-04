@@ -13,8 +13,8 @@ This crate provides two binaries and a shared library:
 ## How it works
 
 1. `cargo xtask test` (or manual nextest setup) tells nextest to run every test binary through `nextest-wrapper`.
-2. The wrapper spawns the real test, optionally polls CPU/memory while it runs, then appends a `TestStats` JSON entry to `target/nextest-monitor/stats.jsonl`.
-3. After the run, `xtask` reads that file to update its failure-tracking database, and you can run `nextest-report` to inspect resource usage.
+2. The wrapper spawns the real test, optionally polls CPU/memory while it runs, then writes a `TestStats` JSON file to `target/nextest-monitor/stats.d/`.
+3. After the run, `xtask` reads that directory to update its failure-tracking database, and you can run `nextest-report` to inspect resource usage.
 
 ## Quick start
 
@@ -119,7 +119,7 @@ If you want to use the wrapper directly without `cargo xtask`:
 cargo build -p nextest-monitor --bin nextest-wrapper
 
 # Set env vars
-export NEXTEST_MONITOR_OUTPUT="$PWD/target/nextest-monitor/stats.jsonl"
+export NEXTEST_MONITOR_OUTPUT="$PWD/target/nextest-monitor/stats"
 export NEXTEST_MONITOR_CPU=1
 export NEXTEST_MONITOR_MEMORY=1
 
@@ -147,7 +147,7 @@ run-wrapper = 'nextest-monitor'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NEXTEST_MONITOR_OUTPUT` | `<workspace>/target/nextest-monitor/stats.jsonl` | Output JSON path |
+| `NEXTEST_MONITOR_OUTPUT` | `<workspace>/target/nextest-monitor/stats` | Base path for stats output (writes to `<path>.d/`) |
 | `NEXTEST_MONITOR_CPU` | `0` | `1` to enable CPU sampling |
 | `NEXTEST_MONITOR_MEMORY` | `0` | `1` to enable RSS memory sampling |
 | `NEXTEST_MONITOR_INTERVAL_MS` | `50` | Sampling interval in milliseconds |

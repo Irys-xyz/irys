@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -91,43 +90,22 @@ pub struct AggregatedStats {
     pub tests: Vec<TestStats>,
 }
 
-fn parse_tests_from_str(s: &str) -> Vec<TestStats> {
-    let mut tests = Vec::new();
-    for line in s.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<TestStats>(line) {
-            Ok(stats) => tests.push(stats),
-            Err(e) => {
-                eprintln!("Warning: skipping malformed stats line: {e}");
-            }
-        }
-    }
-    tests
-}
-
 impl AggregatedStats {
-    /// Load stats from a JSONL file, propagating IO errors.
+    /// Load stats from the `.d/` directory, propagating IO errors.
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let content = fs::read_to_string(path)?;
-        Ok(AggregatedStats {
-            tests: parse_tests_from_str(&content),
-        })
+        let dir = stats_dir(path);
+        let mut tests = parse_stats_dir(&dir)?;
+        tests.sort_by_key(|t| t.started_at);
+        Ok(AggregatedStats { tests })
     }
 
-    /// Load stats from a JSONL file (one TestStats per line).
+    /// Load stats from the `.d/` directory, returning empty default if it
+    /// doesn't exist yet.
     pub fn load_or_default(path: &Path) -> Self {
-        if !path.exists() {
-            return Self::default();
-        }
-        let Ok(content) = fs::read_to_string(path) else {
-            return Self::default();
-        };
-        AggregatedStats {
-            tests: parse_tests_from_str(&content),
-        }
+        let dir = stats_dir(path);
+        let mut tests = parse_stats_dir(&dir).unwrap_or_default();
+        tests.sort_by_key(|t| t.started_at);
+        AggregatedStats { tests }
     }
 
     pub fn append(&mut self, stats: TestStats) {
@@ -135,24 +113,62 @@ impl AggregatedStats {
     }
 }
 
-/// Append a single test's stats as one JSON line (JSONL format).
+/// Directory that holds one JSON file per test stat entry.
 ///
-/// Uses O_APPEND so concurrent writers don't need external locking —
-/// each line is written atomically on Linux/macOS for typical payload sizes.
-pub fn append_stats(path: &Path, stats: TestStats) -> std::io::Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// Given a base path like `stats`, returns `stats.d/`.
+fn stats_dir(path: &Path) -> PathBuf {
+    let mut dir_name = path.file_name().unwrap_or_default().to_os_string();
+    dir_name.push(".d");
+    path.with_file_name(dir_name)
+}
+
+/// Read all individual stat files from the `.d/` directory.
+fn parse_stats_dir(dir: &Path) -> std::io::Result<Vec<TestStats>> {
+    let mut tests = Vec::new();
+    for entry in fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<TestStats>(&content) {
+                Ok(stats) => tests.push(stats),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: skipping malformed stats file {}: {e}",
+                        path.display()
+                    );
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not read stats file {}: {e}",
+                    path.display()
+                );
+            }
+        }
     }
+    Ok(tests)
+}
 
-    let mut line = serde_json::to_string(&stats)?;
-    line.push('\n');
+/// Write a single test's stats as an individual JSON file.
+///
+/// Each invocation creates a unique file under `{path}.d/`, keyed by PID and
+/// nanosecond timestamp. Because every writer targets a distinct file, there is
+/// no risk of interleaved output from concurrent processes.
+pub fn append_stats(path: &Path, stats: TestStats) -> std::io::Result<()> {
+    let dir = stats_dir(path);
+    fs::create_dir_all(&dir)?;
 
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(line.as_bytes())
+    let unique_name = format!(
+        "{}_{}.json",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let file_path = dir.join(unique_name);
+
+    let content = serde_json::to_string(&stats)?;
+    fs::write(&file_path, content)
 }
 
 #[cfg(test)]

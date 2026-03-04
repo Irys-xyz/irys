@@ -647,7 +647,7 @@ fn analyze_reclassifications(
 #[command(about = "Analyze CPU and memory usage statistics from nextest test runs")]
 struct Cli {
     /// Path to the stats JSON file
-    #[arg(short, long, default_value = "target/nextest-monitor/stats.jsonl")]
+    #[arg(short, long, default_value = "target/nextest-monitor/stats")]
     input: PathBuf,
 
     /// Path to nextest.toml config (default: .config/nextest.toml)
@@ -765,16 +765,6 @@ fn main() -> std::io::Result<()> {
 }
 
 fn load_stats(path: &std::path::Path) -> std::io::Result<AggregatedStats> {
-    if !path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "Stats file not found: {}. Run your tests with nextest-wrapper first.",
-                path.display()
-            ),
-        ));
-    }
-
     AggregatedStats::load(path)
 }
 
