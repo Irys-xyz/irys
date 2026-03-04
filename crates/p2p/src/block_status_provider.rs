@@ -354,18 +354,12 @@ impl BlockStatusProvider {
     #[cfg(test)]
     pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
         use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
-        use irys_types::{BlockBody, SealedBlock};
+        use irys_types::{BlockTransactions, SealedBlock};
 
-        let sealed = Arc::new(
-            SealedBlock::new(
-                block.clone(),
-                BlockBody {
-                    block_hash: block.block_hash,
-                    ..Default::default()
-                },
-            )
-            .expect("sealing block"),
-        );
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(block.clone()),
+            BlockTransactions::default(),
+        ));
 
         self.block_tree_read_guard
             .write()

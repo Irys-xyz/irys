@@ -95,7 +95,8 @@ pub use platform::MemoryMonitor;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(target_os = "linux")]
+    use super::MemoryMonitor;
 
     #[cfg(target_os = "linux")]
     #[test]
