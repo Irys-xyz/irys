@@ -1169,40 +1169,50 @@ impl IrysNode {
         let mut actix_task = runtime_handle.spawn(actix_server);
 
         // Send IrysNodeCtx back to start()
-        irys_node_ctx_tx
-            .send(irys_node_ctx)
-            .expect("irys node ctx sender should not be dropped");
+        let early_shutdown = match irys_node_ctx_tx.send(irys_node_ctx) {
+            Ok(()) => None,
+            Err(_) => {
+                error!("IrysNodeCtx receiver dropped before context could be sent");
+                Some(ShutdownReason::FatalError(
+                    "IrysNodeCtx receiver dropped".into(),
+                ))
+            }
+        };
 
         // Phase 3: Run until exit signal
         let mut service_set = std::pin::pin!(service_set);
         let task_manager_handle = reth_runtime.take_task_manager_handle();
         let reth_exit = std::pin::pin!(node_handle.node_exit_future);
 
-        let shutdown_reason = tokio::select! {
-            _ = &mut service_set => {
-                ShutdownReason::ServiceExited
-            },
-            res = async {
-                match task_manager_handle {
-                    Some(handle) => handle.await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
-                let _ = res;
-                ShutdownReason::RethTaskManager
-            },
-            _ = reth_exit => {
-                ShutdownReason::RethExit
-            },
-            _ = shutdown_token.cancelled() => {
-                ShutdownReason::CancellationToken
-            },
-            reason = shutdown_rx.recv() => {
-                reason.unwrap_or(ShutdownReason::ShutdownChannelClosed)
-            },
-            _ = tokio::signal::ctrl_c() => {
-                ShutdownReason::CtrlC
-            },
+        let shutdown_reason = if let Some(reason) = early_shutdown {
+            reason
+        } else {
+            tokio::select! {
+                _ = &mut service_set => {
+                    ShutdownReason::ServiceExited
+                },
+                res = async {
+                    match task_manager_handle {
+                        Some(handle) => handle.await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = res;
+                    ShutdownReason::RethTaskManager
+                },
+                _ = reth_exit => {
+                    ShutdownReason::RethExit
+                },
+                _ = shutdown_token.cancelled() => {
+                    ShutdownReason::CancellationToken
+                },
+                reason = shutdown_rx.recv() => {
+                    reason.unwrap_or(ShutdownReason::ShutdownChannelClosed)
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    ShutdownReason::CtrlC
+                },
+            }
         };
 
         info!("Lifecycle task shutting down: {}", shutdown_reason);
