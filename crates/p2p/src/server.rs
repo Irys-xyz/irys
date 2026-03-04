@@ -293,7 +293,8 @@ where
             );
         }
 
-        tokio::spawn(
+        let runtime_handle = server.data_handler.runtime_handle.clone();
+        runtime_handle.spawn(
             async move {
                 let block_hash_string = v2_request.data.block_hash;
                 if let Err(error) = server
@@ -363,8 +364,9 @@ where
         let block_hash = v2_request.data.block_hash;
 
         let handler = server.data_handler.clone();
+        let runtime_handle = handler.runtime_handle.clone();
 
-        tokio::spawn(
+        runtime_handle.spawn(
             async move {
                 if let Err(e) = handler
                     .handle_block_body(v2_request, source_socket_addr)
@@ -649,7 +651,8 @@ where
         let block_hash = v2_request.data.block_hash;
         let block_height = v2_request.data.height;
 
-        tokio::spawn(
+        let runtime_handle = server.data_handler.runtime_handle.clone();
+        runtime_handle.spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
@@ -714,7 +717,8 @@ where
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = v2_request.data.block_hash;
 
-        tokio::spawn(
+        let runtime_handle = server.data_handler.runtime_handle.clone();
+        runtime_handle.spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
