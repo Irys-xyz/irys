@@ -18,6 +18,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 clap = { workspace = true, features = ["derive"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+rand.workspace = true
+hex.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
 reth-node-core.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-reth.workspace = true

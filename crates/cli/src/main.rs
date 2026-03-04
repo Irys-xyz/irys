@@ -1,3 +1,5 @@
+use alloy_genesis::GenesisAccount;
+use alloy_primitives::{Address, U256};
 use clap::{Parser, Subcommand};
 use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
@@ -5,10 +7,17 @@ use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
 use irys_types::chainspec::irys_chain_spec;
-use irys_types::{Config, DatabaseProvider, H256, NodeConfig};
+use irys_types::{
+    Config, ConsensusConfig, ConsensusOptions, DatabaseProvider, H256, IrysAddress, NodeConfig,
+    NodeMode, PeerAddress, RethPeerInfo,
+};
+use k256::ecdsa::SigningKey;
+use rand::rngs::OsRng;
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{ProviderFactory, providers::StaticFileProvider};
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 use std::time::SystemTime;
 use std::{path::PathBuf, sync::Arc};
 use tracing::level_filters::LevelFilter;
@@ -33,6 +42,21 @@ pub enum Commands {
     RollbackBlocks {
         #[command(subcommand)]
         mode: RollbackMode,
+    },
+    #[command(
+        name = "gen-testing-node-configs",
+        about = "Generate config.toml files and keypairs for testing nodes"
+    )]
+    GenTestingNodeConfigs {
+        /// IP addresses for nodes, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        ips: Vec<String>,
+        /// Chain ID
+        #[arg(long, default_value = "1271")]
+        chain_id: u64,
+        /// Output directory
+        #[arg(long, default_value = "testing-node-configs")]
+        output_dir: PathBuf,
     },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
@@ -203,6 +227,137 @@ async fn main() -> eyre::Result<()> {
             rw_tx.commit()?;
 
             info!("Rollback complete. New tip is at height {}", target_height);
+            Ok(())
+        }
+        Commands::GenTestingNodeConfigs {
+            ips,
+            chain_id,
+            output_dir,
+        } => {
+            if ips.is_empty() {
+                bail!("At least one IP address is required");
+            }
+
+            // Generate keypairs for each node
+            let keys: Vec<SigningKey> = (0..ips.len())
+                .map(|_| SigningKey::random(&mut OsRng))
+                .collect();
+
+            let addresses: Vec<IrysAddress> =
+                keys.iter().map(IrysAddress::from_private_key).collect();
+
+            let genesis_address = addresses[0];
+
+            // Build consensus config from testnet defaults
+            let mut consensus = ConsensusConfig::testnet();
+            consensus.chain_id = chain_id;
+            consensus.genesis.miner_address = genesis_address;
+            consensus.genesis.reward_address = genesis_address;
+            consensus.expected_genesis_hash = Some(H256::zero());
+
+            // Add alloc balances for all nodes
+            let balance = U256::from(99_999_000_000_000_000_000_000_u128);
+            let mut alloc = BTreeMap::new();
+            for addr in &addresses {
+                let alloy_addr: Address = (*addr).into();
+                alloc.insert(
+                    alloy_addr,
+                    GenesisAccount {
+                        balance,
+                        ..Default::default()
+                    },
+                );
+            }
+            consensus.reth.alloc = alloc;
+
+            for (i, ip) in ips.iter().enumerate() {
+                // Validate IP
+                let _: IpAddr = ip.parse().expect("valid IP address");
+
+                // Build peer list: all other nodes
+                let trusted_peers: Vec<PeerAddress> = ips
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, peer_ip)| {
+                        let peer_ip: IpAddr = peer_ip.parse().expect("valid IP address");
+                        PeerAddress {
+                            gossip: SocketAddr::new(peer_ip, 9009),
+                            api: SocketAddr::new(peer_ip, 8080),
+                            execution: RethPeerInfo {
+                                peering_tcp_addr: SocketAddr::new(peer_ip, 9010),
+                                ..Default::default()
+                            },
+                        }
+                    })
+                    .collect();
+
+                let mut node_config = NodeConfig::testnet();
+                node_config.mining_key = keys[i].clone();
+                node_config.reward_address = addresses[i];
+                node_config.node_mode = if i == 0 {
+                    NodeMode::Genesis
+                } else {
+                    NodeMode::Peer
+                };
+                node_config.trusted_peers = trusted_peers;
+                node_config.consensus = ConsensusOptions::Custom(consensus.clone());
+                node_config.network_defaults.public_ip = ip.clone();
+
+                // Set gossip/http/reth ports
+                node_config.gossip.public_port = 9009;
+                node_config.gossip.bind_port = 9009;
+                node_config.http.public_port = 8080;
+                node_config.http.bind_port = 8080;
+                node_config.reth.network.public_port = 9010;
+                node_config.reth.network.bind_port = 9010;
+                node_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
+
+                // Set bind_ip to 0.0.0.0 for external accessibility
+                node_config.gossip.bind_ip = Some("0.0.0.0".to_string());
+                node_config.http.bind_ip = Some("0.0.0.0".to_string());
+
+                // Set public IPs
+                node_config.gossip.public_ip = Some(ip.clone());
+                node_config.http.public_ip = Some(ip.clone());
+                node_config.reth.network.public_ip = Some(ip.clone());
+
+                // Whitelist all addresses for staking/pledging on genesis node
+                if i == 0 {
+                    node_config.initial_stake_and_pledge_whitelist = addresses.clone();
+                }
+
+                let node_dir = output_dir.join(format!("node-{}", i + 1));
+                std::fs::create_dir_all(&node_dir)?;
+
+                let config_toml = toml::to_string_pretty(&node_config)?;
+                let config_path = node_dir.join("config.toml");
+                std::fs::write(&config_path, config_toml)?;
+
+                info!(
+                    "Node {} ({}): config written to {}",
+                    i + 1,
+                    ip,
+                    config_path.display()
+                );
+            }
+
+            // Print summary table
+            println!("\n{:<6} {:<20} {:<66} Address", "Node", "IP", "Mining Key");
+            println!("{}", "-".repeat(140));
+            for (i, ip) in ips.iter().enumerate() {
+                let key_hex = hex::encode(keys[i].to_bytes());
+                let mode = if i == 0 { "Genesis" } else { "Peer" };
+                println!(
+                    "{:<6} {:<20} {} {} ({})",
+                    i + 1,
+                    ip,
+                    key_hex,
+                    addresses[i],
+                    mode
+                );
+            }
+
             Ok(())
         }
         Commands::Tui {
