@@ -4,11 +4,11 @@ _Node Deployment Guide_
 
 # Requirements
 
-High level overview of the Irys Node Software requirements
+High-level overview of the Irys Node Software requirements
 
 ## Operating System
 
-The Irys node software is built for and tested on **Linux**, specifically on **Ubuntu 22/24.04**.
+The Irys node software is built for and tested on **Linux**, specifically on **Ubuntu 22.04/24.04**.
 
 While the source may be compiled for other targets, macOS or Windows, it is entirely untested on those platforms.
 
@@ -54,7 +54,7 @@ Runtime (i.e docker containers)
 
 See [the release dockerfile](../../docker/Dockerfile.release) for more info
 
-To build and enable NVIDIA GPU accelerated matrix packing you must have the latest CUDA toolkit (12.6+) and gcc-13 as well as g++ 13
+To build and enable NVIDIA GPU-accelerated matrix packing you must have the latest CUDA toolkit (12.6+) and gcc-13 as well as g++ 13
 
 See [.devcontainer/setup.sh](../../.devcontainer/setup.sh) for more information.
 
@@ -86,11 +86,11 @@ Custom:
 
 **Note:** GPU packing currently takes priority over CPU packing for bulk packing operations - future work will enable the node to use both simultaneously.
 
-**Note:** Multiple GPUs are currently unsupported - ensure your highest performance card shows up as the first entry in `nvidia-smi`
+**Note:** Multiple GPUs are currently unsupported - ensure your highest-performance card shows up as the first entry in `nvidia-smi`
 
 # Docker
 
-As part of our release process, we build a reproducible docker image containing the appropriate version of the node software. We currently only compile for x86. You can find these releases [here](https://github.com/Irys-xyz/irys/releases), and the source dockerfiles [here](../../docker/Dockerfile.release). Using them is as simple as mounting the config.toml and drives into the container.
+As part of our release process, we build a reproducible docker image containing the appropriate version of the node software. We currently only compile for x86. You can find these releases on the [Irys releases page](https://github.com/Irys-xyz/irys/releases), and the source [release Dockerfile here](../../docker/Dockerfile.release). Using them is as simple as mounting the config.toml and drives into the container.
 
 ## Node Configuration
 
@@ -114,8 +114,8 @@ The main things to configure in this section of the template are `mining_key`, `
 
 **IMPORTANT:** The `mining_key` and `reward_address` values shown above are placeholders and **must** be replaced with your own values before running a mainnet node. Using the example key would be insecure and any block rewards would be sent to the zero address.
 
-* `mining_key` is the hex encoded bytes of your node's private key which will be used for signing the blocks your node produces.
-* `reward_address` is the hex encoded address of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
+* `mining_key` is the hex-encoded bytes of your node's private key which will be used for signing the blocks your node produces.
+* `reward_address` is the hex-encoded address of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
 * `base_directory` is the path to the folder you want irys to store all its state in (consensus data). The node process/user will require full control over this folder and all subfolders.
 
 **Note:** Irys will not store any protocol (partition) data in this folder, instead it will symlink to locations provided in the `.irys_submodules.toml` (see [Storage Configuration](#storage-configuration))
@@ -223,7 +223,7 @@ submodule_paths = [
 
 The irys node will automatically create symlinks to the specified mount points in the `<base_dir>/storage_modules` folder.
 
-Ensure the user running the executable has read-write permissions for drive.
+Ensure the user running the executable has read-write permissions for the drives.
 
 # Running the node
 
