@@ -1119,7 +1119,7 @@ where
             return Ok(Some(Arc::clone(sealed.header())));
         }
 
-        irys_actors::block_header_lookup::get_block_header(
+        irys_actors::block_tree_service::get_block_header(
             self.block_status_provider.block_tree_read_guard(),
             &self.db,
             *block_hash,

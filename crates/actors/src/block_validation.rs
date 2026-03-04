@@ -1570,7 +1570,7 @@ async fn generate_expected_shadow_transactions(
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = crate::block_header_lookup::get_block_header(
+    let prev_block = crate::block_tree_service::get_block_header(
         block_tree_guard,
         db,
         block.previous_block_hash,
@@ -2969,7 +2969,7 @@ fn get_block_by_hash(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
-    crate::block_header_lookup::get_block_header(block_tree, db, *hash, false)
+    crate::block_tree_service::get_block_header(block_tree, db, *hash, false)
 }
 
 fn get_submit_ledger_slot_assignments(

@@ -336,7 +336,7 @@ impl BlockDiscoveryServiceInner {
         let reward_curve = Arc::clone(&self.reward_curve);
         let mempool_config = self.config.consensus.mempool.clone();
 
-        let previous_block_header = crate::block_header_lookup::get_block_header(
+        let previous_block_header = crate::block_tree_service::get_block_header(
             &block_tree_guard,
             &db,
             parent_block_hash,

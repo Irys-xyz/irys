@@ -5,7 +5,7 @@ use actix_web::{
     Result,
 };
 use base58::{FromBase58 as _, ToBase58 as _};
-use irys_actors::block_header_lookup;
+use irys_actors::block_tree_service;
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ fn get_block_by_hash(
     with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let irys_header =
-        block_header_lookup::get_block_header(&state.block_tree, &state.db, block_hash, with_poa)
+        block_tree_service::get_block_header(&state.block_tree, &state.db, block_hash, with_poa)
             .map_err(|e| {
                 tracing::error!("Error looking up block header: {}", e);
                 ApiError::Internal {

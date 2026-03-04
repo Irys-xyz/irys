@@ -1,6 +1,5 @@
 pub mod anchor_validation;
 pub mod block_discovery;
-pub mod block_header_lookup;
 pub mod block_migration_service;
 pub mod block_producer;
 pub mod block_tree_service;

@@ -63,7 +63,7 @@ async fn evm_block_hash_from_block_hash(
     debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
     let irys_header =
-        crate::block_header_lookup::get_block_header(block_tree, db, irys_hash, true)?
+        crate::block_tree_service::get_block_header(block_tree, db, irys_hash, false)?
             .ok_or_else(|| eyre!("Block header not found for hash {}", irys_hash))?;
     debug!(
         block.hash = %irys_hash,

@@ -438,7 +438,7 @@ pub trait BlockProdStrategy {
 
     /// Fetches a block header from mempool or database
     async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
-        crate::block_header_lookup::get_block_header(
+        crate::block_tree_service::get_block_header(
             &self.inner().block_tree_guard,
             &self.inner().db,
             block_hash,

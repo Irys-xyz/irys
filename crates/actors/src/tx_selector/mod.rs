@@ -1011,7 +1011,7 @@ async fn get_pending_submit_ledger_txs(
     // retrieve block from block tree or database
     // be aware that genesis starts its life immediately in the database
     let mut block =
-        crate::block_header_lookup::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
+        crate::block_tree_service::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
             .ok_or_else(|| {
                 eyre::eyre!(
                     "No block header found for hash {} ({})",
@@ -1049,7 +1049,7 @@ async fn get_pending_submit_ledger_txs(
         }
 
         // Move to the parent block and continue the traversal backwards
-        let parent_block = crate::block_header_lookup::get_block_header(
+        let parent_block = crate::block_tree_service::get_block_header(
             ctx.block_tree,
             ctx.db,
             block.previous_block_hash,

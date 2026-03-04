@@ -490,7 +490,7 @@ impl GossipServiceTestFixture {
     }
 
     /// Persist a block header to the fixture's MDBX database so that
-    /// `block_header_lookup::get_block_header` (block tree → DB fallback) can find it.
+    /// `block_tree_service::get_block_header` (block tree → DB fallback) can find it.
     pub(crate) fn persist_block_header_to_db(&self, block: &IrysBlockHeader) {
         use irys_database::{db::IrysDatabaseExt as _, insert_block_header};
         self.db

@@ -1,7 +1,7 @@
 use crate::{error::ApiError, ApiState};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
-use irys_actors::block_header_lookup;
+use irys_actors::block_tree_service;
 use irys_types::{u64_stringify, BlockHash, IrysAddress, U256};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
@@ -75,7 +75,7 @@ pub async fn get_balance(
             (balance, resolved_block_num)
         }
         BlockParameter::IrysBlockHash(irys_block_hash) => {
-            let irys_block_header = block_header_lookup::get_block_header(
+            let irys_block_header = block_tree_service::get_block_header(
                 &state.block_tree,
                 &state.db,
                 irys_block_hash,
