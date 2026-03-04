@@ -75,7 +75,7 @@ Once you’ve installed the dependencies you can compile the build with
 * `OTEL_SERVICE_NAME` — service name reported in telemetry (default: `irys-node`).
 * `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — optional override endpoint for traces.
 * `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` — optional override endpoint for logs.
-* `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — optional override endpoint for metrics.\
+* `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — optional override endpoint for metrics.
 
 Custom:
 * `AXIOM_LOGS_ENDPOINT` — optional additional Axiom OTLP endpoint. When set, logs are sent to both the primary logs endpoint and Axiom.
