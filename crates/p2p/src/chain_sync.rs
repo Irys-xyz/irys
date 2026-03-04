@@ -443,13 +443,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
     pub fn spawn_service(
         inner: ChainSyncServiceInner<B, M>,
         rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
-        runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning sync service");
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let handle = runtime_handle.spawn(
+        let handle = inner.runtime_handle.clone().spawn(
             async move {
                 let service = Self {
                     shutdown: shutdown_rx,

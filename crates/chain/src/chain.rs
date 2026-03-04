@@ -1145,7 +1145,7 @@ impl IrysNode {
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
-            Self::init_services(
+            match Self::init_services(
                 &config,
                 genesis_hash,
                 reth_node,
@@ -1161,7 +1161,15 @@ impl IrysNode {
             )
             .in_current_span()
             .await
-            .expect("initializing services should not fail");
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    error!("Failed to initialize services: {:?}", e);
+                    return ShutdownReason::FatalError(format!(
+                        "init_services failed: {e}"
+                    ));
+                }
+            };
 
         // Spawn the actix API server so its future gets polled and it accepts connections.
         // (The gossip server is spawned separately via spawn_p2p_server_watcher_task.)
@@ -2275,7 +2283,7 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
+        let handle = ChainSyncService::spawn_service(inner, rx);
 
         (facade, handle)
     }

@@ -29,7 +29,7 @@ where
         tokio::select! {
             _ = ctrl_c => {
                 trace!("Received ctrl-c");
-                Ok(irys_types::ShutdownReason::SigInt)
+                Ok(irys_types::ShutdownReason::CtrlC)
             },
             _ = sigterm => {
                 trace!("Received SIGTERM");
@@ -61,7 +61,7 @@ where
         tokio::select! {
             _ = ctrl_c => {
                 trace!("Received ctrl-c");
-                return Ok(irys_types::ShutdownReason::SigInt)
+                return Ok(irys_types::ShutdownReason::CtrlC)
 
             },
             reason = channel.recv() => {

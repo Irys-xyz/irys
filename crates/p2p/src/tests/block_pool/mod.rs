@@ -323,7 +323,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let sync_service_handle = ChainSyncService::spawn_service(
         sync_service_inner,
         sync_receiver,
-        tokio::runtime::Handle::current(),
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
@@ -513,7 +512,6 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     let sync_service_handle = ChainSyncService::spawn_service(
         sync_service_inner,
         sync_receiver,
-        tokio::runtime::Handle::current(),
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
@@ -765,7 +763,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let sync_service_handle = ChainSyncService::spawn_service(
         sync_service_inner,
         sync_receiver,
-        tokio::runtime::Handle::current(),
     );
 
     let genesis = block_status_provider_mock.genesis_header();
