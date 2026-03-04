@@ -364,8 +364,12 @@ impl Inner {
         let tx_id = tx.id();
         let anchor = tx.anchor();
 
-        let latest_height =
-            crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
+        let latest_height = self
+            .block_tree_read_guard
+            .latest_block_height()
+            .ok_or_else(|| {
+                TxIngressError::Other("empty canonical chain in block tree".to_owned())
+            })?;
 
         // let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 

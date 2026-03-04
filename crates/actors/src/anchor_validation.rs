@@ -50,17 +50,6 @@ pub fn get_anchor_height(
     }
 }
 
-/// Returns the height of the latest block on the canonical chain.
-pub fn get_latest_block_height(block_tree: &BlockTreeReadGuard) -> Result<u64, TxIngressError> {
-    // TODO: `get_canonical_chain` clones the entire canonical chain, we can make do with a ref here
-    let canon_chain = block_tree.read().get_canonical_chain();
-    let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
-        "unable to get canonical chain from block tree".to_owned(),
-    ))?;
-
-    Ok(latest.height())
-}
-
 /// Validates that a transaction's anchor falls within `[min_anchor_height, max_anchor_height]`.
 /// Returns `Ok(true)` if valid, `Ok(false)` if out of range.
 #[tracing::instrument(level = "trace", skip_all)]

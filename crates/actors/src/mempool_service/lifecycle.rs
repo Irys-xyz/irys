@@ -103,8 +103,12 @@ impl Inner {
     /// and are block-height-independent.
     #[instrument(skip_all)]
     pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
-        let current_height =
-            crate::anchor_validation::get_latest_block_height(&self.block_tree_read_guard)?;
+        let current_height = self
+            .block_tree_read_guard
+            .latest_block_height()
+            .ok_or_else(|| {
+                TxIngressError::Other("empty canonical chain in block tree".to_owned())
+            })?;
 
         // Pre-fetch commitment snapshot (sync block tree read, before acquiring mempool lock)
         let (commitment_snapshot, epoch_snapshot) = {
@@ -195,15 +199,10 @@ impl Inner {
     /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
-        let current_height = match crate::anchor_validation::get_latest_block_height(
-            &self.block_tree_read_guard,
-        ) {
-            Ok(height) => height,
-            Err(e) => {
-                error!(
-                    "Error getting latest block height from the block tree for anchor expiry: {:?}",
-                    &e
-                );
+        let current_height = match self.block_tree_read_guard.latest_block_height() {
+            Some(height) => height,
+            None => {
+                error!("Empty canonical chain in block tree during anchor expiry pruning");
                 return;
             }
         };

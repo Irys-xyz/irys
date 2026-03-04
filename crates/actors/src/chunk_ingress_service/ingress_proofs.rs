@@ -138,11 +138,8 @@ impl ChunkIngressServiceInner {
         config: &Config,
         ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
-        let latest_height = crate::anchor_validation::get_latest_block_height(
-            block_tree_read_guard,
-        )
-        .map_err(|_e| {
-            IngressProofError::Other("unable to get canonical chain from block tree ".to_owned())
+        let latest_height = block_tree_read_guard.latest_block_height().ok_or_else(|| {
+            IngressProofError::Other("unable to get canonical chain from block tree".to_owned())
         })?;
 
         // TODO: add an ingress proof invalid LRU, like we have for txs
