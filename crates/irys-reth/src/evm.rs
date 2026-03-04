@@ -988,8 +988,7 @@ where
                         keys: new_keys.into_iter().collect(),
                         response: resp_tx,
                     });
-                    if let Ok(new_chunks) =
-                        tokio::task::block_in_place(|| resp_rx.blocking_recv())
+                    if let Ok(new_chunks) = tokio::task::block_in_place(|| resp_rx.blocking_recv())
                     {
                         self.context.extend_chunk_table(new_chunks);
                         tracing::debug!(
