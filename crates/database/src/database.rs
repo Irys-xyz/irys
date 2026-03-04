@@ -111,6 +111,34 @@ pub fn block_header_by_hash<T: DbTx>(
     Ok(block)
 }
 
+/// Resolves a block hash to its height, verifying canonical membership.
+///
+/// Looks up the hash in [`IrysBlockHeaders`] to get the height, then cross-checks
+/// [`MigratedBlockHashes`] to confirm the canonical block at that height matches
+/// the requested hash. Returns `None` if the block is unknown or non-canonical
+/// (e.g., an orphan from a resolved fork).
+///
+/// Both reads happen in the same MDBX read transaction to avoid split-view races
+/// during concurrent migration or rollback.
+pub fn canonical_block_height_by_hash<T: DbTx>(
+    tx: &T,
+    block_hash: &BlockHash,
+) -> eyre::Result<Option<u64>> {
+    let Some(hdr) = tx
+        .get::<IrysBlockHeaders>(*block_hash)?
+        .map(IrysBlockHeader::from)
+    else {
+        return Ok(None);
+    };
+
+    let canonical_hash = tx.get::<MigratedBlockHashes>(hdr.height)?;
+    if canonical_hash == Some(*block_hash) {
+        Ok(Some(hdr.height))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
     Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)

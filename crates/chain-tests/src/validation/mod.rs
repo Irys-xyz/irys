@@ -1,3 +1,4 @@
+mod anchor_canonical_reorg;
 mod blobs_rejected;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;

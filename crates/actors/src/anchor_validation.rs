@@ -7,10 +7,13 @@ use tracing::{debug, warn};
 
 /// Resolves an anchor (block hash) to its height.
 /// If the anchor is not found, returns `Ok(None)`.
-/// Set `canonical` to `true` to enforce that the anchor must be on the current canonical chain.
-// TODO(correctness): DB fallback does not verify canonical status — orphan-fork anchors
-// could be accepted when canonical=true. The DB fallback should either return None when
-// canonical is required, or verify the block is on the canonical chain.
+///
+/// When `canonical=true`: checks the block tree's canonical chain first, then falls back
+/// to the database with a `MigratedBlockHashes` cross-check to ensure the block is
+/// actually canonical (not an orphan from a resolved fork).
+///
+/// When `canonical=false`: checks the block tree for any known block, then falls back to
+/// `IrysBlockHeaders` without canonical verification (used by mempool expiry).
 #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
 pub fn get_anchor_height(
     block_tree: &BlockTreeReadGuard,
@@ -18,7 +21,7 @@ pub fn get_anchor_height(
     anchor: H256,
     canonical: bool,
 ) -> eyre::Result<Option<u64>> {
-    // check the block tree, then DB
+    // Fast path: check the in-memory block tree first.
     if let Some(height) = {
         let guard = block_tree.read();
         if canonical {
@@ -32,13 +35,18 @@ pub fn get_anchor_height(
             guard.get_block(&anchor).map(|h| h.height)
         }
     } {
-        Ok(Some(height))
-    } else if let Some(hdr) =
-        db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
-    {
-        Ok(Some(hdr.height))
+        return Ok(Some(height));
+    }
+
+    // Slow path: consult the database for blocks pruned from the tree.
+    if canonical {
+        // Cross-check IrysBlockHeaders against MigratedBlockHashes in one
+        // read transaction to ensure the block is actually canonical.
+        db.view_eyre(|tx| irys_database::canonical_block_height_by_hash(tx, &anchor))
     } else {
-        Ok(None)
+        // Non-canonical lookup (e.g. mempool expiry): accept any known block.
+        let hdr = db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?;
+        Ok(hdr.map(|h| h.height))
     }
 }
 
@@ -137,3 +145,7 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
         Ok(false)
     }
 }
+
+#[cfg(test)]
+#[path = "anchor_validation_tests.rs"]
+mod tests;

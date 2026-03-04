@@ -138,7 +138,9 @@ impl ValueWithSubKey for CompactCachedIngressProof {
 tables! {
 IrysTables;
 
-/// Stores block headers keyed by their hash (canonical chain).
+/// Stores block headers keyed by their hash.
+/// NOTE: may contain orphaned headers after reorgs. Use `MigratedBlockHashes`
+/// as the authoritative canonical source.
 table IrysBlockHeaders {
     type Key = H256;
     type Value = CompactIrysBlockHeader;
