@@ -205,6 +205,7 @@ impl P2PService {
             config.clone(),
             service_senders,
             mempool_guard,
+            self.runtime_handle.clone(),
         );
 
         let arc_pool = Arc::new(block_pool);
