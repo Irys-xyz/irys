@@ -14,7 +14,8 @@ use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, get_optimistic_chain,
+    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
+    get_optimistic_chain,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
@@ -28,6 +29,7 @@ use reth::rpc::types::BlockId;
 use reth_db::Database as _;
 use reth_db::cursor::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::{debug, info, instrument, trace, warn};
 
 /// Borrowed dependencies for transaction selection.
@@ -583,6 +585,7 @@ pub async fn select_best_txs(
         &submit_tx,
         current_height,
         current_timestamp,
+        &epoch_snapshot,
     )
     .await?;
 
@@ -645,6 +648,7 @@ async fn get_publish_txs_and_proofs(
     submit_tx: &[DataTransactionHeader],
     current_height: u64,
     current_timestamp: UnixTimestamp,
+    epoch_snapshot: &Arc<EpochSnapshot>,
 ) -> Result<PublishLedgerWithTxs, eyre::Error> {
     let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
     let mut publish_proofs: Vec<IngressProof> = Vec::new();
@@ -730,8 +734,6 @@ async fn get_publish_txs_and_proofs(
             acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
             acc
         });
-
-        let epoch_snapshot = ctx.block_tree.read().canonical_epoch_snapshot();
 
         for tx_header in &tx_headers {
             debug!(
