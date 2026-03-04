@@ -207,13 +207,17 @@ impl IrysNodeCtx {
         // Await lifecycle task completion (with timeout)
         let handle = self.lifecycle_handle.lock().unwrap().take();
         match handle {
-            Some(jh) => match tokio::time::timeout(RETH_THREAD_STOP_TIMEOUT, jh).await {
-                Ok(Ok(reason)) => info!("Lifecycle task stopped: {}", reason),
-                Ok(Err(e)) => error!("Lifecycle task panicked: {:?}", e),
-                Err(_) => {
-                    error!("Lifecycle task did not stop within {RETH_THREAD_STOP_TIMEOUT:?}")
+            Some(jh) => {
+                let abort_handle = jh.abort_handle();
+                match tokio::time::timeout(RETH_THREAD_STOP_TIMEOUT, jh).await {
+                    Ok(Ok(reason)) => info!("Lifecycle task stopped: {}", reason),
+                    Ok(Err(e)) => error!("Lifecycle task panicked: {:?}", e),
+                    Err(_) => {
+                        error!("Lifecycle task did not stop within {RETH_THREAD_STOP_TIMEOUT:?}, aborting");
+                        abort_handle.abort();
+                    }
                 }
-            },
+            }
             None => debug!("Lifecycle handle already consumed"),
         }
         debug!("Lifecycle task stopped");
@@ -1124,10 +1128,21 @@ impl IrysNode {
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
         let (node_handle, reth_node) =
-            start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height)
+            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height)
                 .in_current_span()
                 .await
-                .expect("to be able to start the reth node");
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(
+                        "Failed to start reth node at block height {}: {:?}",
+                        latest_block_height, e
+                    );
+                    return ShutdownReason::FatalError(format!(
+                        "start_reth_node failed at block height {latest_block_height}: {e}"
+                    ));
+                }
+            };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =

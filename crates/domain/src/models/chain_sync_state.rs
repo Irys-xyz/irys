@@ -548,16 +548,16 @@ impl ChainSyncState {
             } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
                 // didn't make any progress in the last `progress_timeout` duration
                 warn!(
-                    "Did not make sync process from {} in {}ms",
-                    &hpb,
-                    &progress_timeout.as_millis()
+                    "Did not make sync progress from {} in {}ms",
+                    hpb,
+                    progress_timeout.as_millis()
                 );
                 break; // progression timeout
             } else {
                 if made_progress {
                     debug!(
                         "Progressed: {} -> {} (target: {})",
-                        &prev_hpb, &hpb, &target
+                        prev_hpb, hpb, target
                     );
                     last_made_progress = Instant::now();
                     prev_hpb = hpb;
