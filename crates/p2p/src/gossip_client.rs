@@ -2639,8 +2639,8 @@ mod tests {
             (peer_id, mining_addr, peer)
         }
 
-        #[test]
-        fn test_handle_data_retrieval_score_success_cases() {
+        #[tokio::test]
+        async fn test_handle_data_retrieval_score_success_cases() {
             let test_cases = vec![
                 (Duration::from_millis(300), true),
                 (Duration::from_millis(499), true),
@@ -2679,8 +2679,8 @@ mod tests {
             }
         }
 
-        #[test]
-        fn test_handle_data_retrieval_score_slow_response() {
+        #[tokio::test]
+        async fn test_handle_data_retrieval_score_slow_response() {
             const EXPECTED_DECREASE_OF_ONE: u16 = 1;
             let test_cases = vec![
                 (Duration::from_secs(3), EXPECTED_DECREASE_OF_ONE),
@@ -2715,8 +2715,8 @@ mod tests {
             }
         }
 
-        #[test]
-        fn test_handle_data_retrieval_score_failed_response() {
+        #[tokio::test]
+        async fn test_handle_data_retrieval_score_failed_response() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
             let fixture = TestFixture::new();
             let (peer_id, _, peer) = create_test_peer(1);
@@ -2741,8 +2741,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_multiple_score_updates_in_sequence() {
+        #[tokio::test]
+        async fn test_multiple_score_updates_in_sequence() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
             let fixture = TestFixture::new();
             let (peer_id, _, peer) = create_test_peer(1);
