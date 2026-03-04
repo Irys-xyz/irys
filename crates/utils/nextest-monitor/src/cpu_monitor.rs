@@ -11,7 +11,7 @@ mod platform {
         let content = fs::read_to_string(&stat_path).ok()?;
 
         // Find the end of comm field (it's in parentheses and may contain spaces)
-        let comm_end = content.find(')')?;
+        let comm_end = content.rfind(')')?;
         let after_comm = &content[comm_end + 2..];
         // utime is field index 11, stime is field index 12
         let mut iter = after_comm.split_whitespace();

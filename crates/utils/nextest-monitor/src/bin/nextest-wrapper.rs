@@ -387,7 +387,9 @@ fn find_heaptrack_output(base_path: &Path) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with(base_name) && name_str.ends_with(".zst") {
+        let is_match = name_str.as_ref() == format!("{base_name}.zst")
+            || name_str.starts_with(&format!("{base_name}."));
+        if is_match && name_str.ends_with(".zst") {
             match (&best, entry.metadata().ok()) {
                 (None, _) => best = Some(entry.path()),
                 (Some(prev), Some(meta)) => {

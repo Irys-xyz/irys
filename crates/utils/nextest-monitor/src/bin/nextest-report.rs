@@ -235,7 +235,7 @@ impl ClassificationConfig {
                 pct <= exceedance_pct
             })
             .copied()
-            .unwrap_or_else(|| *thread_options.last().unwrap_or(&self.default_threads));
+            .unwrap_or(self.default_threads);
 
         // Sanity floor: if avg_cpu exceeds a bucket, don't use that bucket
         let suggested_threads = if let Some(avg_cpu) = avg_cpu {
