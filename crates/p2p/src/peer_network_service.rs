@@ -199,6 +199,7 @@ impl PeerNetworkServiceInner {
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
                 config.peer_id(),
+                tokio::runtime::Handle::current(),
             ),
             chain_id: config.consensus.chain_id,
             peer_address,

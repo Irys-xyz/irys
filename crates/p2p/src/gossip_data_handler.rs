@@ -83,6 +83,7 @@ where
     pub started_at: Instant,
     /// Precomputed hash of the consensus config to avoid recomputing on every handshake
     pub consensus_config_hash: H256,
+    pub runtime_handle: tokio::runtime::Handle,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -106,6 +107,7 @@ where
             config: self.config.clone(),
             started_at: self.started_at,
             consensus_config_hash: self.consensus_config_hash,
+            runtime_handle: self.runtime_handle.clone(),
         }
     }
 }

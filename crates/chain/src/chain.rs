@@ -1445,6 +1445,7 @@ impl IrysNode {
             config.node_config.miner_address(),
             config.peer_id(),
             receivers.gossip_broadcast,
+            runtime_handle.clone(),
         );
         let sync_state = p2p_service.sync_state.clone();
 

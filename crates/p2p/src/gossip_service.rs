@@ -109,6 +109,7 @@ pub struct P2PService {
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl P2PService {
@@ -129,11 +130,17 @@ impl P2PService {
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
         broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout, mining_address, peer_id);
+        let client = GossipClient::new(
+            client_timeout,
+            mining_address,
+            peer_id,
+            runtime_handle.clone(),
+        );
 
         Self {
             client,
@@ -141,6 +148,7 @@ impl P2PService {
             broadcast_data_receiver: Some(broadcast_data_receiver),
             sync_state: ChainSyncState::new(true, false),
             gossip_cfg: P2PGossipConfig::default(),
+            runtime_handle,
         }
     }
 
@@ -217,6 +225,7 @@ impl P2PService {
             config: config.clone(),
             started_at,
             consensus_config_hash,
+            runtime_handle: self.runtime_handle.clone(),
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),
@@ -238,6 +247,9 @@ impl P2PService {
         // Load gossip config from NodeConfig
         self.gossip_cfg = config.node_config.p2p_gossip;
 
+        // Capture runtime_handle before moving self into Arc
+        let runtime_handle = self.runtime_handle.clone();
+
         // Wrap the service in an Arc so we can spawn a detached broadcast per message
         let service_arc = Arc::new(self);
 
@@ -246,6 +258,7 @@ impl P2PService {
             Arc::clone(&service_arc),
             task_executor,
             peer_list,
+            runtime_handle,
         );
 
         debug!("Started gossip service");
@@ -355,6 +368,7 @@ fn spawn_broadcast_task(
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
+    runtime_handle: tokio::runtime::Handle,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
@@ -370,7 +384,7 @@ fn spawn_broadcast_task(
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
                                 let peer_list = peer_list.clone(); // clone: shared across spawned tasks
-                                tokio::spawn(async move {
+                                runtime_handle.spawn(async move {
                                     if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
                                         warn!("Failed to broadcast data: {}", error);
                                     }

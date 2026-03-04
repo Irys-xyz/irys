@@ -98,6 +98,7 @@ pub struct GossipClient {
     pub peer_id: IrysPeerId,
     client: Client,
     circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 fn gossip_error_type(err: &GossipError) -> &'static str {
@@ -121,12 +122,18 @@ impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
     #[must_use]
-    pub fn new(timeout: Duration, mining_address: IrysAddress, peer_id: IrysPeerId) -> Self {
+    pub fn new(
+        timeout: Duration,
+        mining_address: IrysAddress,
+        peer_id: IrysPeerId,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
         Self::with_circuit_breaker_config(
             timeout,
             mining_address,
             peer_id,
             CircuitBreakerConfig::p2p_defaults(),
+            runtime_handle,
         )
     }
 
@@ -136,6 +143,7 @@ impl GossipClient {
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
         circuit_config: CircuitBreakerConfig,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let circuit_breaker = CircuitBreakerManager::new(circuit_config);
 
@@ -147,6 +155,7 @@ impl GossipClient {
                 .build()
                 .expect("Failed to create reqwest client"),
             circuit_breaker,
+            runtime_handle,
         }
     }
 
@@ -946,7 +955,7 @@ impl GossipClient {
         let peer = peer.1.clone();
         let span = tracing::Span::current();
 
-        tokio::spawn(
+        self.runtime_handle.spawn(
             async move {
                 if let Err(e) = client.check_circuit_breaker(&peer_id) {
                     record_gossip_outbound_error(gossip_error_type(&e));
@@ -1303,7 +1312,7 @@ impl GossipClient {
         let peer_id = *peer.0;
         let peer = peer.1.clone();
 
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             if let Err(e) = client
                 .send_data_and_update_score_internal((&peer_id, &peer), &data, &peer_list)
                 .await
@@ -1325,7 +1334,7 @@ impl GossipClient {
         let client = self.clone();
         let peer = peer.1.clone();
 
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             if let Err(e) = client.send_data(&peer, &data).await {
                 record_gossip_outbound_error(gossip_error_type(&e));
                 error!("Error sending data to peer: {}", e);
@@ -1345,7 +1354,7 @@ impl GossipClient {
         let peer_id = *peer.0;
         let peer = peer.1.clone();
 
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             let result = client.send_data(&peer, &data).await;
             match &result {
                 Ok(_) => {
@@ -2215,6 +2224,7 @@ mod tests {
                     IrysAddress::from([1_u8; 20]),
                     IrysPeerId::from([1_u8; 20]),
                     CircuitBreakerConfig::testing(),
+                    tokio::runtime::Handle::current(),
                 ),
             }
         }
@@ -2226,6 +2236,7 @@ mod tests {
                     IrysAddress::from([1_u8; 20]),
                     IrysPeerId::from([1_u8; 20]),
                     CircuitBreakerConfig::testing(),
+                    tokio::runtime::Handle::current(),
                 ),
             }
         }

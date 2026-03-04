@@ -2942,6 +2942,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             Duration::from_secs(5),
             self.node_ctx.config.node_config.miner_address(),
             self.node_ctx.config.peer_id(),
+            tokio::runtime::Handle::current(),
         )
     }
 
