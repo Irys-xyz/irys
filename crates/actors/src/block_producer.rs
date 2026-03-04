@@ -1343,7 +1343,9 @@ pub trait BlockProdStrategy {
         block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
-        let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        let mut mempool_txs = self
+            .fetch_best_mempool_txs(prev_block_header, block_timestamp)
+            .await?;
         // Sort txs to be of deterministic order
         mempool_txs
             .submit_tx
@@ -1435,6 +1437,7 @@ pub trait BlockProdStrategy {
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxs> {
         let ctx = crate::tx_selector::TxSelectionContext {
             block_tree: &self.inner().block_tree_guard,
@@ -1444,7 +1447,12 @@ pub trait BlockProdStrategy {
             mempool_state: self.inner().mempool_guard.atomic_state(),
             chunk_ingress_state: &self.inner().chunk_ingress_state,
         };
-        crate::tx_selector::select_best_txs(prev_block_header.block_hash, &ctx).await
+        crate::tx_selector::select_best_txs(
+            prev_block_header.block_hash,
+            block_timestamp.to_secs(),
+            &ctx,
+        )
+        .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

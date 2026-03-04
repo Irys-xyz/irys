@@ -2099,7 +2099,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             mempool_state: self.node_ctx.mempool_guard.atomic_state(),
             chunk_ingress_state: &self.node_ctx.chunk_ingress_state,
         };
-        irys_actors::tx_selector::select_best_txs(parent_block_hash, &ctx).await
+        irys_actors::tx_selector::select_best_txs(
+            parent_block_hash,
+            irys_types::UnixTimestamp::now().expect("valid system time"),
+            &ctx,
+        )
+        .await
     }
 
     // get account reth balance at specific block

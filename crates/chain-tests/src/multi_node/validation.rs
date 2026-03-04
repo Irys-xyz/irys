@@ -447,6 +447,7 @@ async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<
         async fn fetch_best_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<MempoolTxs> {
             Ok(self.txs.lock().unwrap().clone())
         }

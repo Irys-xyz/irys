@@ -44,6 +44,7 @@ pub struct TxSelectionContext<'a> {
 #[instrument(skip(ctx), fields(block.parent_block_hash = ?parent_block_hash), err)]
 pub async fn select_best_txs(
     parent_block_hash: BlockHash,
+    new_block_timestamp: UnixTimestamp,
     ctx: &TxSelectionContext<'_>,
 ) -> eyre::Result<MempoolTxs> {
     let mempool_state = ctx.mempool_state;
@@ -68,7 +69,6 @@ pub async fn select_best_txs(
         commitment_snapshot,
         epoch_snapshot,
         ema_snapshot,
-        block_timestamp_secs,
     ) = {
         let tree = ctx.block_tree.read();
 
@@ -92,8 +92,6 @@ pub async fn select_best_txs(
         // Extract only the data we need before the tree guard is dropped
         let block_height = block.height;
         let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
-        // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
-        let block_timestamp_secs = block.timestamp_secs();
 
         let ema_snapshot = tree
             .get_ema_snapshot(&parent_block_hash)
@@ -118,14 +116,13 @@ pub async fn select_best_txs(
             commitment_snapshot,
             epoch_snapshot,
             ema_snapshot,
-            block_timestamp_secs,
         )
     };
 
     let current_height = parent_block_height;
     let next_block_height = parent_block_height + 1;
-    // Use parent block's timestamp for hardfork params (seconds since epoch)
-    let current_timestamp = block_timestamp_secs;
+    // Use the new block's timestamp for hardfork params, matching what the validator uses
+    let current_timestamp = new_block_timestamp;
     let min_anchor_height = current_height.saturating_sub(
         (ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64)
             .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
@@ -163,12 +160,11 @@ pub async fn select_best_txs(
     sorted_commitments.sort();
 
     // Filter out commitment transactions with versions below the hardfork minimum
-    // Use current time (not parent block timestamp) because the new block will have
-    // a timestamp of approximately now(), and validators check versions against block timestamp
+    // Use the new block's timestamp to match what the validator enforces
     ctx.config
         .consensus
         .hardforks
-        .retain_valid_commitment_versions(&mut sorted_commitments, UnixTimestamp::now()?);
+        .retain_valid_commitment_versions(&mut sorted_commitments, new_block_timestamp);
 
     balances.extend(
         helpers::fetch_balances_for_transactions(
