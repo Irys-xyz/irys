@@ -48,6 +48,7 @@ struct PeerNetworkServiceInner {
     peer_list: PeerList,
     state: Mutex<PeerNetworkServiceState>,
     sender: PeerNetworkSender,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 struct PeerNetworkServiceState {
@@ -181,6 +182,7 @@ impl PeerNetworkServiceInner {
         reth_peer_sender: RethPeerSender,
         peer_list: PeerList,
         sender: PeerNetworkSender,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let peer_address = build_peer_address(&config);
         let peers_limit = config.node_config.p2p_handshake.max_peers_per_response;
@@ -199,7 +201,7 @@ impl PeerNetworkServiceInner {
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
                 config.peer_id(),
-                tokio::runtime::Handle::current(),
+                runtime_handle.clone(),
             ),
             chain_id: config.consensus.chain_id,
             peer_address,
@@ -215,6 +217,7 @@ impl PeerNetworkServiceInner {
             peer_list,
             state: Mutex::new(state),
             sender,
+            runtime_handle,
         }
     }
 
@@ -372,7 +375,7 @@ impl PeerNetworkService {
             let client = gossip_client.clone();
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
-            tokio::spawn(
+            sender_inner.runtime_handle.spawn(
                 async move {
                     match client
                         .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
@@ -440,7 +443,7 @@ impl PeerNetworkService {
             )
         };
 
-        tokio::spawn(Self::announce_yourself_to_address_task(
+        self.inner.runtime_handle.spawn(Self::announce_yourself_to_address_task(
             gossip_client,
             peer_api_addr,
             peer_gossip_addr,
@@ -452,7 +455,7 @@ impl PeerNetworkService {
             peers_limit,
         ));
 
-        tokio::spawn(async move {
+        self.inner.runtime_handle.spawn(async move {
             (reth_peer_sender)(reth_peer_info).await;
         });
     }
@@ -534,7 +537,7 @@ impl PeerNetworkService {
 
     fn spawn_handshake_task(&self, task: HandshakeTask) {
         let semaphore = task.semaphore.clone();
-        tokio::spawn(async move {
+        self.inner.runtime_handle.spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
             Self::announce_yourself_to_address_task(
                 task.gossip_client,
@@ -612,7 +615,7 @@ impl PeerNetworkService {
 
         if let Some(delay) = retry_backoff {
             let sender = self.inner.sender();
-            tokio::spawn(async move {
+            self.inner.runtime_handle.spawn(async move {
                 sleep(delay).await;
                 send_message_and_log_error(
                     &sender,
@@ -643,7 +646,7 @@ impl PeerNetworkService {
             )
         };
 
-        tokio::spawn(async move {
+        self.inner.runtime_handle.spawn(async move {
             let result = Self::request_data_from_network_task(
                 gossip_client,
                 peer_list,
@@ -1109,6 +1112,7 @@ pub(crate) fn spawn_peer_network_service_with_client(
         reth_peer_sender,
         peer_list.clone(),
         service_sender,
+        runtime_handle.clone(),
     ));
 
     let (shutdown_tx, shutdown_rx) = signal();
