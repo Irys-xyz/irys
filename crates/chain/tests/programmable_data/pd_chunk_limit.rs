@@ -59,7 +59,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
 
     // Build access list with 80 chunks (4 keys * 20 chunks each)
     let storage_keys = (0..4).map(|_i| ChunkRangeSpecifier {
-        partition_index: U200::from(0_u64),
+        partition_index: U200::MAX,
         offset: 0,
         chunk_count: 20,
     });

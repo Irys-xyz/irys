@@ -2498,9 +2498,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build storage keys for the specified number of chunks
+        // Build storage keys for the specified number of chunks.
+        // Use U200::MAX as a sentinel partition_index: it overflows u64 in specs_to_keys(),
+        // producing an empty chunk key set. This means PdService marks the tx as Ready
+        // (0 required chunks) without needing real data uploaded. Tests that need real
+        // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
         let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
-            partition_index: alloy_primitives::aliases::U200::from(0_u64),
+            partition_index: alloy_primitives::aliases::U200::MAX,
             offset: offset_base + i as u32,
             chunk_count: 1,
         });
