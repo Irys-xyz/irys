@@ -908,7 +908,7 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     Ok(())
 }
 
-pub async fn send_unpledge_all(
+pub(crate) async fn send_unpledge_all(
     seconds_to_wait: usize,
     genesis_node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     peer_node: &IrysNodeTest<irys_chain::IrysNodeCtx>,

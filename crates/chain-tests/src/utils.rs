@@ -1561,7 +1561,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// * `Err` - On timeout or channel closure
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// let reorg_future = node.wait_for_reorg(30);
     /// peer.mine_competing_block().await?;
     /// let reorg = reorg_future.await?;
