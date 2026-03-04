@@ -853,6 +853,15 @@ async fn heavy3_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Unstake must NOT be in commitment snapshot of second block while pledge is active",
     );
 
+    // Wait for reth to index the second block before reading account state by EVM hash.
+    genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Number(second_block_header.height),
+            second_block_header.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
     // Balance should remain at expected_balance (no additional changes from unstake)
     assert_balance(
         &genesis_node,
