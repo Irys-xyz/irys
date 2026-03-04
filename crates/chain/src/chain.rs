@@ -2289,7 +2289,7 @@ impl IrysNode {
             gossip_data_handler,
             Some(reth_service),
             is_vdf_mining_enabled,
-            runtime_handle.clone(),
+            runtime_handle,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx);
