@@ -670,8 +670,8 @@ mod tests {
     /// Expected: Extension blocks (4-5) become Fork, fork blocks (3-5) become Canonical,
     ///          remaining fork blocks (6-10) become CanonicalExtension.
     /// Verifies: calculate_priority() correctly determines block priorities after reorg.
-    #[test]
-    fn test_priority_calculation_after_fork_becomes_canonical() {
+    #[tokio::test]
+    async fn test_priority_calculation_after_fork_becomes_canonical() {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let vdf_notify = Arc::new(Notify::new());
