@@ -555,10 +555,7 @@ impl ChainSyncState {
                 break; // progression timeout
             } else {
                 if made_progress {
-                    debug!(
-                        "Progressed: {} -> {} (target: {})",
-                        prev_hpb, hpb, target
-                    );
+                    debug!("Progressed: {} -> {} (target: {})", prev_hpb, hpb, target);
                     last_made_progress = Instant::now();
                     prev_hpb = hpb;
                 };

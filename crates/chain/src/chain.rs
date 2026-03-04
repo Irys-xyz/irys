@@ -906,8 +906,7 @@ impl IrysNode {
         );
         if let Err(err) = Self::wait_for_api_ready(api_probe_addr, API_SERVER_READY_TIMEOUT).await {
             error!(error = ?err, "API server failed readiness check during startup");
-            ctx.stop(ShutdownReason::Signal("api_readiness_failed".to_string()))
-                .await;
+            ctx.stop(ShutdownReason::ApiReadinessFailed).await;
             return Err(err.wrap_err("API server did not become ready during node startup"));
         }
 
@@ -1181,27 +1180,27 @@ impl IrysNode {
 
         let shutdown_reason = tokio::select! {
             _ = &mut service_set => {
-                ShutdownReason::Signal("service_exited".to_string())
+                ShutdownReason::ServiceExited
             },
-            res = async {
+            _ = async {
                 match task_manager_handle {
-                    Some(handle) => handle.await.ok(),
+                    Some(handle) => { handle.await.ok() },
                     None => std::future::pending().await,
                 }
             } => {
-                ShutdownReason::Signal(format!("reth_task_manager: {:?}", res))
+                ShutdownReason::RethTaskManager
             },
             _ = reth_exit => {
-                ShutdownReason::Signal("reth_exit".to_string())
+                ShutdownReason::RethExit
             },
             _ = shutdown_token.cancelled() => {
-                ShutdownReason::Signal("cancellation_token".to_string())
+                ShutdownReason::CancellationToken
             },
             reason = shutdown_rx.recv() => {
-                reason.unwrap_or(ShutdownReason::Signal("shutdown_channel_closed".to_string()))
+                reason.unwrap_or(ShutdownReason::ShutdownChannelClosed)
             },
             _ = tokio::signal::ctrl_c() => {
-                ShutdownReason::Signal("ctrl_c".to_string())
+                ShutdownReason::CtrlC
             },
         };
 

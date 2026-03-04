@@ -2474,7 +2474,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let db_inner = Arc::clone(&self.node_ctx.db.0);
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
-            .stop(irys_types::ShutdownReason::TestComplete)
+            .stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))
             .await;
         info!("Node subsystem stop completed");
         // Drain DB refs here after runtime teardown because this wrapper owns the
