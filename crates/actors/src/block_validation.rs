@@ -2348,8 +2348,7 @@ pub async fn data_txs_are_valid(
 
             // Validate assigned ingress proofs and get counts
             let (assigned_proofs, assigned_miners) =
-                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config)
-                    .await?;
+                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config)?;
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
@@ -2844,7 +2843,7 @@ fn process_block_ledgers_with_states(
     Ok(())
 }
 
-pub async fn get_assigned_ingress_proofs(
+pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
     block_tree: &BlockTreeReadGuard,

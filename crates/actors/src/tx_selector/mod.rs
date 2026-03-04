@@ -861,9 +861,7 @@ async fn get_publish_txs_and_proofs(
                 ctx.block_tree,
                 ctx.db,
                 ctx.config,
-            )
-            .await
-            {
+            ) {
                 Ok(result) => result,
                 Err(e) => {
                     warn!(
