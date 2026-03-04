@@ -1,20 +1,31 @@
-# Irys Mainnet Beta 
+# Irys Mainnet Beta
+
 _Node Deployment Guide_
+
 # Requirements
+
 High level overview of the Irys Node Software requirements
+
 ## Operating System
-The Irys node software is built for and tested on __Linux__, specifically on __Ubuntu 22/24.04__.
 
-While the source may be compiled for other targets, MacOS or Windows, it is entirely untested on those platforms.
+The Irys node software is built for and tested on **Linux**, specifically on **Ubuntu 22/24.04**.
+
+While the source may be compiled for other targets, macOS or Windows, it is entirely untested on those platforms.
+
 ## CPU
-The Irys node uses multiple CPU cores; more cores mean better performance on compute-heavy tasks. One core is dedicated to computing the VDF hashes used in mining. You’ll want a high-performance core (ideally with SHA extensions) to stay competitive with the network and mine efficiently.
 
-**Note:** the Irys node will pin core 0 for its VDF calculations. This is expected to take up 100% of this core, almost constantly.
+The Irys node uses multiple CPU cores; more cores mean better performance on compute-heavy tasks. One core is dedicated to computing the VDF hashes used in mining. You'll want a high-performance core (ideally with SHA extensions) to stay competitive with the network and mine efficiently.
 
-We recommend CPUs like the __AMD Ryzen 9 3900__ or __AMD EPYC 4344P__ as both have high enough single core performance.
+**Note:** the Irys node will pin a dedicated core for its VDF calculations (typically the first available core). This is expected to take up 100% of this core, almost constantly.
+
+We recommend CPUs like the **AMD Ryzen 9 3900** or **AMD EPYC 4344P** as both have high enough single-core performance.
+
 ## GPU
-Irys supports GPU-based packing to speed up the preparation of storage for the protocol. Currently, this requires an NVIDIA CUDA-capable GPU, and packing speed scales with the number of CUDA cores. This has been tested on __NVIDIA 3090__ and __5090__ cards, and all modern NVIDIA GPUs should work.
+
+Irys supports GPU-based packing to speed up the preparation of storage for the protocol. Currently, this requires an NVIDIA CUDA-capable GPU, and packing speed scales with the number of CUDA cores. This has been tested on **NVIDIA 3090** and **5090** cards, and all modern NVIDIA GPUs should work.
+
 ## Storage
+
 Miners provide storage to the network in the form of partitions. These partitions are optimized to take advantage of __22TB HDDs__.  The read speeds required to mine a partition are capped at ~100MB/s, well within the range of HDD transfer speeds so by design there is no advantage to deploying SSD storage.
 
 The minimum amount of storage a miner can provide to the protocol is a full 22TB partition with the ability to pledge multiple partitions to the protocol.
@@ -22,33 +33,59 @@ The minimum amount of storage a miner can provide to the protocol is a full 22TB
 We recommend formatting your drives with XFS - it has demonstrated the best characteristics (fast I/O, low space overhead) out of the suitable mainline file systems.
 # Building from source
 First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases (tagged mainnet-\*, DO NOT use the testnet-\* tagged releases!)
+
 ## Dependencies
-* clang & a C/C++ build toolchain (some of the packing routines are written in C/C++)
-* gmp
+Buildtime:
+* C++ compiler (10.2+)
 * pkg-config
+* clang
+* cmake
+* git
+* libgmp-dev
+* m4
+* Rust toolchain
+
+Runtime (i.e docker containers)
+* libgmp10
+* glibc
+
+See [the release dockerfile](../../docker/Dockerfile.release) for more info
 
 To build and enable NVIDIA GPU accelerated matrix packing you must have the latest CUDA toolkit (12.6+) and gcc-13 as well as g++ 13
 
-See `.devcontainer/setup.sh` for more information.
+See [.devcontainer/setup.sh](../../.devcontainer/setup.sh) for more information.
 ## Compiling
 Once you’ve installed the dependencies you can compile the build with
 
 `cargo build --bin irys --release`
 
-**Note:** the default configuration is to aggressively optimize for the machine (CPU & GPU) the compiler is operating on. For this reason, we heavily recommend compiling the binary on each distinct machine (non-identical CPU & GPU) instead of passing around the built binary
+**Note:** the default configuration is to aggressively optimize for the machine (CPU & GPU) the compiler is operating on. For this reason, we heavily recommend compiling the binary on each distinct machine (non-identical CPU & GPU) instead of passing around the built binary.
 ## Compile feature flags
-`telemetry` - enables exporting of opentelemetry log & span collection.
-*  Use the canonical `OTEL_EXPORTER_OTLP_ENDPOINT` env var to configure the opentelemetry endpoint to send both spans and logs to.
-* Optionally, specify the `AXIOM_API_TOKEN` and `AXIOM_DATASET` env vars to configure support for Axiom. \
+`telemetry` - enables exporting of opentelemetry log, span, and metrics collection. Telemetry activates automatically when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, or can be explicitly enabled with `ENABLE_TELEMETRY=true`.
+
+
+* `OTEL_EXPORTER_OTLP_ENDPOINT` — base OTLP endpoint (default: `http://localhost:4317`). Signal-specific endpoints derive from this with paths appended (e.g. `/v1/logs`).
+* `OTEL_SERVICE_NAME` — service name reported in telemetry (default: `irys-node`).
+* `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — optional override endpoint for traces.
+* `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` — optional override endpoint for logs.
+* `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — optional override endpoint for metrics.\
+
+Custom: 
+* `AXIOM_LOGS_ENDPOINT` — optional additional Axiom OTLP endpoint. When set, logs are sent to both the primary logs endpoint and Axiom.
+
+**Note:** This repository contains a full observability stack (with Irys-specific dashboards), which you are welcome to use. See [README.md](../../docker/observation/README.md) for more details.
 
 `nvidia` - enables CUDA accelerated packing. 
 
 **Note:** GPU packing currently takes priority over CPU packing for bulk packing operations - future work will enable the node to use both simultaneously.
 
 **Note:** Multiple GPUs are currently unsupported - ensure your highest performance card shows up as the first entry in `nvidia-smi` 
+# Docker
+As part of our release process, we build a reproducible docker image containing the appropriate version of the node software. We currently only compile for x86. You can find these releases [here](https://github.com/Irys-xyz/irys/releases), and the source dockerfiles [here](../../docker/Dockerfile.release). Using them is as simple as mounting the config.toml and drives into the container.
+
 ## Node Configuration
-When it starts the Irys node will load its configuration from `./config.toml`, you can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it  in the directory where you will run the executable.
-Additionally, you can specify the full path to the configuration using the `CONFIG` env var.
+When it starts the Irys node will load its configuration from `${PWD}/config.toml`, you can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it  in the directory where you will run the executable.
+Additionally, you can specify the full path to the configuration using the `CONFIG` env var, if you want the PWD to be separate.
 
 Note that the “consensus” values that are in some of the other template configs are absent in the mainnet template. This is intentional as the “consensus” values for mainnet are hard coded into the node software itself.  It’s very important that all nodes operating on the network use the same set of hard coded consensus values.
 
@@ -58,7 +95,6 @@ Note that the “consensus” values that are in some of the other template conf
  sync_mode = "Full"
  base_directory = ".irys"
  mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
- initial_stake_and_pledge_whitelist = []
  reward_address = "0x0000000000000000000000000000000000000000"
  stake_pledge_drives = false
  genesis_peer_discovery_timeout_millis = 10000
@@ -67,9 +103,10 @@ Note that the “consensus” values that are in some of the other template conf
 The main things to configure in this section of the template are `mining_key`, `reward_address`, `base_directory`
 
 * `mining_key` is the hex encoded bytes of your node's private key which will be used for signing the blocks your node produces.
-* `reward_address` is the hex encoded actress of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
-* `base_directory` is the path to the folder you want irys to store all it’s state in (consensus data)
-**Note:** Irys will not store any protocol data in this folder, instead it will symlink to locations provided in the `submodules.toml` (see [Storage Configuration](#storage-configuration))
+* `reward_address` is the hex encoded address of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
+* `base_directory` is the path to the folder you want irys to store all its state in (consensus data). The node process/user will require full control over this folder and all subfolders.
+
+**Note:** Irys will not store any protocol (partition) data in this folder, instead it will symlink to locations provided in the `.irys_submodules.toml` (see [Storage Configuration](#storage-configuration))
 
 Next, you will notice a set of entries for "trusted peers" that look like the following:
 ```toml
@@ -98,32 +135,35 @@ Do not add random nodes to the trusted peers list. You generally shouldn’t rem
 
 Next is the section for configuring networking:
 ```toml
- [gossip]
+ # Default network configuration used by all services (http, gossip, reth)
+ # Individual services can override these values if needed
+ [network_defaults]
  public_ip = "127.0.0.1"
- public_port = 8081
  bind_ip = "0.0.0.0"
+
+ [gossip]
+ public_port = 8081
  bind_port = 8081
 
  [http]
- public_ip = "127.0.0.1"
  public_port = 8080
- bind_ip = "0.0.0.0"
  bind_port = 8080
 
  [reth.network]
  use_random_ports = false
- public_ip = "127.0.0.1"
  public_port = 30303
- bind_ip = "0.0.0.0"
  bind_port = 30303
 ```
+The `[network_defaults]` section sets the shared IP configuration for all services. Each service then specifies its own port.
+
 The Irys node exposes three web services, each on its own port:
 * `[http]` for user transactions and node discovery
 * `[gossip]` for peer handshakes and p2p communication
 * `[reth.network]` for Reth peering (EVM P2P)
-They should share the same IP, but each must run on a unique port to avoid conflicts.
+They should share the same IP, but each must run on a unique port to avoid conflicts. You can deviate from these default ports freely.
+You should allow both TCP and UDP for all these ports.
 
-**Note:** Reverse proxies are not currently supported, they will cause your node to have difficulty joining the network.
+**Note:** Asymmetric NAT/Reverse proxies are not currently supported, they will cause your node to have difficulty joining the network.
 
 ```toml
  [packing.local]
@@ -149,13 +189,12 @@ parallel_verification_thread_limit = 4
 ```toml
 [[oracles]]
 ```
-<!-- TODO: update below & config template once mainnet is updated with https://github.com/Irys-xyz/irys/pull/1046 -->
 The `[[oracles]]` sections control the $IRYS price oracles your node will consult when producing a block. By default, the `mock` oracle is specified, but we support both Coingecko and Coinmarketcap as price sources - simply fill out the api_key and other configuration parameters and then uncomment the block to activate the oracle. Multiple oracles are supported, and the node will use the most recent price info out of all of them.
 
 ## Storage Configuration
 To participate in mining on Irys you must provide drives for your assigned partitions to be stored on. Once provided and pledged the protocol will assign a partition hash which your node will use to pack your partition. Once packed the Irys node software will begin to mine the storage and you will be able to earn block rewards for any blocks you produce.
 
-To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base directory>/irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
+To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base directory>/.irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
 
 ```toml
 submodule_paths = [
@@ -169,7 +208,7 @@ The irys node will automatically create symlinks to the specified mount points i
 
 Ensure the user running the executable has read-write permissions for drive.
 # Running the node
-Once you’ve configured the `./config.toml` file and `<base dir>/irys_submodules.toml` file, it’s time to run the node.
+Once you’ve configured the `./config.toml` file and `<base dir>/.irys_submodules.toml` file, it’s time to run the node.
 
 `cargo run --bin irys --release`
 
@@ -183,5 +222,5 @@ The node supports the conventional `RUST_LOG` environment variable to configure 
 ## Full node (non-mining)
 A full node that tracks the current network state without participating in mining follows the same setup as a mining node with two exceptions:
 
-1. Since the node will not provide storage, the `irys_submodules.toml` file should remain empty.
-2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.
+1. Since the node will not provide storage, the `.irys_submodules.toml` file should remain empty.
+2. The `stake_pledge_drives` parameter in `config.toml` should be set to `false`.
