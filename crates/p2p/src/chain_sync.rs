@@ -125,6 +125,7 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     /// An atomic bool to enable or disable VDF mining when sync is in progress
     is_vdf_mining_enabled: Arc<AtomicBool>,
     is_update_whitelist_task_running: Arc<AtomicBool>,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -171,6 +172,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
         reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             sync_state,
@@ -183,6 +185,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             reth_service,
             is_vdf_mining_enabled,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
+            runtime_handle,
         }
     }
 
@@ -221,8 +224,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let reth_service = self.reth_service.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
         let start_sync_from_height = self.block_index.read().latest_height();
+        let runtime_handle = self.runtime_handle.clone();
 
-        tokio::spawn(
+        self.runtime_handle.spawn(
             async move {
                 debug!("Starting sync from height: {}", start_sync_from_height);
 
@@ -258,6 +262,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                         .expect("Expected to be able to convert u64 to usize"),
                     &config,
                     gossip_data_handler,
+                    &runtime_handle,
                 )
                 .await;
 
@@ -354,7 +359,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
         }
         let handler = self.gossip_data_handler.clone();
-        tokio::spawn(
+        self.runtime_handle.spawn(
             async move {
                 match handler.pull_and_process_stake_and_pledge_whitelist().await {
                     Ok(()) => {
@@ -544,7 +549,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 let inner = self.inner.clone();
                 // Check for whitelist updates after every block validation
                 self.inner.spawn_stake_and_pledge_update_task();
-                tokio::spawn(
+                self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.process_orphaned_ancestors(block_hash).await;
                         if let Some(sender) = response {
@@ -565,7 +570,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     parent_block_hash
                 );
                 let inner = self.inner.clone();
-                tokio::spawn(
+                self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.request_parent_block(parent_block_hash).await;
                         if let Some(sender) = response {
@@ -587,7 +592,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     evm_block_hash
                 );
                 let inner = self.inner.clone();
-                tokio::spawn(
+                self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner
                             .gossip_data_handler
@@ -609,7 +614,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     block_hash
                 );
                 let inner = self.inner.clone();
-                tokio::spawn(async move {
+                self.inner.runtime_handle.spawn(async move {
                     // Get cached block header from block_pool
                     if let Some(cached_block) = inner.block_pool.get_cached_block(&block_hash).await
                     {
@@ -711,6 +716,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
     gossip_data_handler: Arc<GossipDataHandler<M, B>>,
+    runtime_handle: &tokio::runtime::Handle,
 ) -> ChainSyncResult<()> {
     let gossip_client = &gossip_data_handler.gossip_client;
     let params = SyncParams::from_config(config);
@@ -751,6 +757,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
             &gossip_data_handler,
             block_queue,
             start_sync_from_height,
+            runtime_handle,
         )
         .await?;
     }
@@ -920,6 +927,7 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
     gossip_data_handler: &Arc<GossipDataHandler<M, B>>,
     mut block_queue: VecDeque<BlockIndexItem>,
     start_sync_from_height: usize,
+    runtime_handle: &tokio::runtime::Handle,
 ) -> ChainSyncResult<()> {
     let mut blocks_to_request = block_queue.len();
     let mut sync_target = sync_state.sync_target_height() + block_queue.len();
@@ -937,7 +945,7 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
             .await?;
         }
 
-        spawn_block_pull_task(sync_state, gossip_data_handler, block.block_hash);
+        spawn_block_pull_task(sync_state, gossip_data_handler, block.block_hash, runtime_handle);
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
@@ -1003,11 +1011,12 @@ fn spawn_block_pull_task<B: BlockDiscoveryFacade, M: MempoolFacade>(
     sync_state: &ChainSyncState,
     gossip_data_handler: &Arc<GossipDataHandler<M, B>>,
     block_hash: BlockHash,
+    runtime_handle: &tokio::runtime::Handle,
 ) {
     let sync_state = sync_state.clone();
     let data_handler = gossip_data_handler.clone();
 
-    tokio::spawn(
+    runtime_handle.spawn(
         async move {
             debug!(
                 "Sync task: Requesting block {:?} (sync target height is {}) from the network",

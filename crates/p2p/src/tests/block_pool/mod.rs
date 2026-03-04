@@ -315,6 +315,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         data_handler,
         None,
         is_vdf_mining_enabled,
+        tokio::runtime::Handle::current(),
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -503,6 +504,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         data_handler,
         None,
         is_vdf_mining_enabled,
+        tokio::runtime::Handle::current(),
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -752,6 +754,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         data_handler,
         None,
         is_vdf_mining_enabled,
+        tokio::runtime::Handle::current(),
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
