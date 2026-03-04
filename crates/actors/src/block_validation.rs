@@ -192,6 +192,8 @@ pub enum PreValidationError {
     PublishTxProofLengthMismatch,
     #[error("Block EMA snapshot not found for block {block_hash}")]
     BlockEmaSnapshotNotFound { block_hash: BlockHash },
+    #[error("Parent epoch snapshot not found for block {block_hash}")]
+    ParentEpochSnapshotNotFound { block_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
     #[error("Failed to fetch transactions: {0}")]
@@ -2030,6 +2032,15 @@ pub async fn data_txs_are_valid(
             block_hash: block.previous_block_hash,
         })?;
 
+    // Get the parent block's epoch snapshot for ingress proof validation
+    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation)
+    let parent_epoch_snapshot = block_tree_guard
+        .read()
+        .get_epoch_snapshot(&block.previous_block_hash)
+        .ok_or(PreValidationError::ParentEpochSnapshotNotFound {
+            block_hash: block.previous_block_hash,
+        })?;
+
     // Extract publish ledger for ingress proofs validation
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
@@ -2313,9 +2324,7 @@ pub async fn data_txs_are_valid(
         // Compute the expected total number of proofs based on the number of
         // publish_tx and the number of proofs_per_tx
         let expected_proof_count = {
-            let total_miners = block_tree_guard
-                .read()
-                .canonical_epoch_snapshot()
+            let total_miners = parent_epoch_snapshot
                 .commitment_state
                 .stake_commitments
                 .len();
@@ -2348,7 +2357,7 @@ pub async fn data_txs_are_valid(
 
             // Validate assigned ingress proofs and get counts
             let (assigned_proofs, assigned_miners) =
-                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config)?;
+                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config, &parent_epoch_snapshot)?;
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
@@ -2849,6 +2858,7 @@ pub fn get_assigned_ingress_proofs(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
+    epoch_snapshot: &EpochSnapshot,
 ) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
@@ -2895,7 +2905,7 @@ pub fn get_assigned_ingress_proofs(
         }
 
         //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree);
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
 
         // d) Get the ledger ranges of the slot indexes
         let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
@@ -2913,7 +2923,7 @@ pub fn get_assigned_ingress_proofs(
             .collect();
 
         // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree);
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
 
         //  f) are there any intersections of block and slot ranges?
         let mut is_intersected = false;
@@ -2973,9 +2983,8 @@ fn get_block_by_hash(
 
 fn get_submit_ledger_slot_assignments(
     address: &IrysAddress,
-    block_tree_guard: &BlockTreeReadGuard,
+    epoch_snapshot: &EpochSnapshot,
 ) -> Vec<usize> {
-    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
     partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
     partition_assignments
@@ -2986,9 +2995,8 @@ fn get_submit_ledger_slot_assignments(
 
 fn get_submit_ledger_slot_addresses(
     slot_indexes: &Vec<usize>,
-    block_tree_guard: &BlockTreeReadGuard,
+    epoch_snapshot: &EpochSnapshot,
 ) -> HashMap<usize, usize> {
-    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
     let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
 
