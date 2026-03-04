@@ -38,6 +38,7 @@ pub struct DataSyncServiceInner {
     pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
+    pub runtime_handle: tokio::runtime::Handle,
 }
 
 pub enum DataSyncServiceMessage {
@@ -73,6 +74,7 @@ impl DataSyncServiceInner {
         chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: ServiceSenders,
         config: Config,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let mut data_sync = Self {
             block_tree,
@@ -83,6 +85,7 @@ impl DataSyncServiceInner {
             chunk_orchestrators: Default::default(),
             service_senders,
             config,
+            runtime_handle,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -482,6 +485,7 @@ impl DataSyncServiceInner {
                 &self.service_senders,
                 chunk_fetcher,
                 self.config.node_config.clone(),
+                self.runtime_handle.clone(),
             );
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);
@@ -588,6 +592,7 @@ impl DataSyncService {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let runtime_handle_clone = runtime_handle.clone();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -601,6 +606,7 @@ impl DataSyncService {
                         chunk_fetcher_factory,
                         service_senders,
                         config,
+                        runtime_handle_clone,
                     ),
                 };
                 data_sync_service
