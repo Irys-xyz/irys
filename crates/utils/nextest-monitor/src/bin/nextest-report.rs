@@ -1055,13 +1055,21 @@ fn cmd_analyze(
                         "time_above_4t_ms": r.stats.avg_time_above_4t_ms,
                         "run_count": r.stats.run_count,
                     });
-                    stats_json["avg_peak_rss_bytes"] = r.stats.avg_peak_rss_bytes
+                    stats_json["avg_peak_rss_bytes"] = r
+                        .stats
+                        .avg_peak_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    stats_json["avg_avg_rss_bytes"] = r.stats.avg_avg_rss_bytes
+                    stats_json["avg_avg_rss_bytes"] = r
+                        .stats
+                        .avg_avg_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    stats_json["avg_p90_rss_bytes"] = r.stats.avg_p90_rss_bytes
+                    stats_json["avg_p90_rss_bytes"] = r
+                        .stats
+                        .avg_p90_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    stats_json["max_peak_rss_bytes"] = r.stats.max_peak_rss_bytes
+                    stats_json["max_peak_rss_bytes"] = r
+                        .stats
+                        .max_peak_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
 
                     serde_json::json!({
@@ -1537,13 +1545,17 @@ fn cmd_export(
                         "max_duration_ms": t.max_duration_ms,
                     });
 
-                    json["avg_peak_rss_bytes"] = t.avg_peak_rss_bytes
+                    json["avg_peak_rss_bytes"] = t
+                        .avg_peak_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    json["avg_avg_rss_bytes"] = t.avg_avg_rss_bytes
+                    json["avg_avg_rss_bytes"] = t
+                        .avg_avg_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    json["avg_p90_rss_bytes"] = t.avg_p90_rss_bytes
+                    json["avg_p90_rss_bytes"] = t
+                        .avg_p90_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
-                    json["max_peak_rss_bytes"] = t.max_peak_rss_bytes
+                    json["max_peak_rss_bytes"] = t
+                        .max_peak_rss_bytes
                         .map_or(serde_json::Value::Null, |v| serde_json::json!(v));
 
                     json
