@@ -2601,6 +2601,56 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
+    /// Wait for reth to commit a tx by polling `get_transaction_receipt`.
+    ///
+    /// `mine_block_without_gossip()` returns before reth imports the block.
+    /// This helper polls until the receipt is available, then asserts the expected status.
+    pub async fn wait_for_reth_receipt(
+        &self,
+        tx_hash: alloy_primitives::FixedBytes<32>,
+        expect_success: bool,
+    ) -> eyre::Result<()> {
+        use alloy_provider::Provider as _;
+        let rpc_url: reqwest::Url = format!(
+            "http://127.0.0.1:{}/v1/execution-rpc",
+            self.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()?;
+        let provider = alloy_provider::ProviderBuilder::new().connect_http(rpc_url);
+        for attempt in 1..=30 {
+            match provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(r)) => {
+                    info!(
+                        "Reth tx receipt found on attempt {}: status={:?}, gas_used={:?}",
+                        attempt,
+                        r.status(),
+                        r.gas_used
+                    );
+                    assert_eq!(
+                        r.status(),
+                        expect_success,
+                        "tx receipt status mismatch (expected success={})",
+                        expect_success,
+                    );
+                    return Ok(());
+                }
+                Ok(None) if attempt < 30 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(None) => {
+                    return Err(eyre!(
+                        "tx receipt not found after {} attempts — reth did not commit the block",
+                        attempt
+                    ));
+                }
+                Err(e) => {
+                    return Err(eyre!("Failed to query tx receipt: {:?}", e));
+                }
+            }
+        }
+        unreachable!()
+    }
+
     /// Build and inject a tx that calls a contract function with PD chunk access.
     /// Prepends a PD header to the ABI calldata so the EVM strips it before execution,
     /// while the preloading gate detects the PD header and preloads chunks.

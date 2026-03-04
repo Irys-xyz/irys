@@ -2,7 +2,7 @@ use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
-use alloy_provider::{Provider as _, ProviderBuilder};
+use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall as _;
@@ -251,37 +251,7 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
     let _ = node.mine_block_without_gossip().await?;
 
     // Wait for reth to commit the block (reth imports asynchronously after mine returns)
-    let receipt = {
-        let mut receipt = None;
-        for attempt in 1..=20 {
-            match alloy_provider.get_transaction_receipt(tx_hash).await? {
-                Some(r) => {
-                    info!(
-                        "PD tx receipt found on attempt {}: status={:?}, gas_used={:?}",
-                        attempt,
-                        r.status(),
-                        r.gas_used
-                    );
-                    receipt = Some(r);
-                    break;
-                }
-                None if attempt < 20 => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                None => {
-                    panic!(
-                        "PD tx receipt not found after {} attempts — reth did not commit the block",
-                        attempt
-                    );
-                }
-            }
-        }
-        receipt.unwrap()
-    };
-    assert!(
-        receipt.status(),
-        "PD tx should have succeeded (not reverted)"
-    );
+    node.wait_for_reth_receipt(tx_hash, true).await?;
 
     // Verify stored bytes match the original message
     let stored_bytes = contract.getStorage().call().await?;

@@ -1043,8 +1043,9 @@ where
 
             // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
             // Layout: [magic][version:u16][borsh header][rest]
-            if let Some((pd_header, consumed)) =
-                crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
+            let pd_header_result = crate::pd_tx::detect_and_decode_pd_header(&tx.data)
+                .map_err(|e| EVMError::Custom(format!("PD header parse error: {e}")))?;
+            if let Some((pd_header, consumed)) = pd_header_result
             {
                 // Compute PD fees based on header values. Always derive PD chunk count from access list.
                 let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
@@ -1141,7 +1142,9 @@ where
                 let mut tx = tx;
                 tx.data = stripped;
 
-                let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+                // PD fee transfers. On error, the outer executor discards the entire
+                // journal via catch_error/discard_tx. On success, transfers are committed
+                // with the rest of the transaction. No checkpoint needed.
                 {
                     // Deduct fees from payer. Balance was pre-validated above, so OutOfFunds
                     // should not occur. OverflowPayment is theoretically possible but extremely
@@ -1167,7 +1170,6 @@ where
                         )));
                     }
                 }
-                self.inner.ctx.journaled_state.checkpoint_commit();
 
                 let res = if self.inspect {
                     self.inner.inspect_tx(tx)

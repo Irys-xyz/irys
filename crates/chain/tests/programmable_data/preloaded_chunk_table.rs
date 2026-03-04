@@ -194,50 +194,6 @@ async fn upload_data_and_get_offset(
     Ok(offset_before)
 }
 
-/// Wait for reth to commit a tx by polling `get_transaction_receipt`.
-///
-/// `mine_block_without_gossip()` returns before reth has finished importing the block.
-/// This helper polls the receipt until reth commits the block and the receipt is available.
-async fn wait_for_reth_tx(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-    tx_hash: alloy_primitives::FixedBytes<32>,
-) {
-    use alloy_provider::Provider as _;
-    let rpc_url: reqwest::Url = format!(
-        "http://127.0.0.1:{}/v1/execution-rpc",
-        node.node_ctx.config.node_config.http.bind_port
-    )
-    .parse()
-    .expect("valid URL");
-    let provider = ProviderBuilder::new().connect_http(rpc_url);
-    for attempt in 1..=30 {
-        match provider.get_transaction_receipt(tx_hash).await {
-            Ok(Some(r)) => {
-                info!(
-                    "PD tx receipt found on attempt {}: status={:?}, gas_used={:?}",
-                    attempt,
-                    r.status(),
-                    r.gas_used
-                );
-                assert!(r.status(), "PD tx should have succeeded (not reverted)");
-                return;
-            }
-            Ok(None) if attempt < 30 => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(None) => {
-                panic!(
-                    "PD tx receipt not found after {} attempts — reth did not commit the block",
-                    attempt
-                );
-            }
-            Err(e) => {
-                panic!("Failed to query tx receipt: {:?}", e);
-            }
-        }
-    }
-}
-
 /// Decompose a global ledger chunk offset into `(partition_index, local_offset)`.
 ///
 /// The mapping is: `global = partition_index * num_chunks_in_partition + local_offset`.
@@ -335,7 +291,7 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
     let _ = node.mine_block_without_gossip().await?;
 
     // Wait for reth to commit the block (reth imports asynchronously after mine returns)
-    wait_for_reth_tx(&node, tx_hash).await;
+    node.wait_for_reth_receipt(tx_hash, true).await?;
 
     // Verify stored bytes match original
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
@@ -354,14 +310,14 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
     Ok(())
 }
 
-/// Test that multiple chunks are preloaded correctly by uploading data spanning
-/// 3 chunks (96 bytes with chunk_size=32), reading all via the contract, and
-/// verifying the stored bytes match.
+/// Test that multiple chunks (3) are preloaded correctly within a single PD
+/// transaction by uploading data spanning 96 bytes (chunk_size=32), reading
+/// all via the contract, and verifying the stored bytes match.
 ///
 /// Padding pushes test data to a non-zero offset within partition 0,
 /// verifying that multi-chunk reads work with partition-relative addressing.
 #[test_log::test(tokio::test)]
-async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
+async fn heavy_test_pd_multi_chunk_read() -> eyre::Result<()> {
     let num_chunks_in_partition: u64 = 10;
     let chunk_size: u64 = 32;
     let padding_chunks: u64 = 4;
@@ -436,7 +392,7 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
     let _ = node.mine_block_without_gossip().await?;
 
     // Wait for reth to commit the block (reth imports asynchronously after mine returns)
-    wait_for_reth_tx(&node, tx_hash).await;
+    node.wait_for_reth_receipt(tx_hash, true).await?;
 
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
@@ -722,7 +678,10 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             .abi_encode()
             .into();
 
-    // Reference a non-existent chunk (partition 0, offset 9999)
+    // Reference a non-existent chunk (partition 0, offset 9999).
+    // inject_pd_contract_call returns Ok only if reth's mempool accepted the tx.
+    // This proves the tx entered the mempool — if it's absent from the block,
+    // it's because the readiness gate filtered it, not because injection failed.
     let tx_hash = node
         .inject_pd_contract_call(
             &data_account,
@@ -743,6 +702,11 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             0,
         )
         .await?;
+    assert_ne!(
+        tx_hash,
+        alloy_primitives::FixedBytes::ZERO,
+        "tx should have been accepted into mempool"
+    );
 
     info!("Missing-chunk PD call injected: {:?}", tx_hash);
 
