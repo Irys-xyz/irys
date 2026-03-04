@@ -94,8 +94,7 @@ As part of our release process, we build a reproducible docker image containing 
 
 ## Node Configuration
 
-When it starts the Irys node will load its configuration from `${PWD}/config.toml`, you can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it  in the directory where you will run the executable.
-Additionally, you can specify the full path to the configuration using the `CONFIG` env var, if you want the PWD to be separate.
+When it starts the Irys node will load its configuration from `${PWD}/config.toml`. You can copy the template mainnet configuration from `crates/config/templates/mainnet_config.toml` and rename it in the directory where you will run the executable. If you want `PWD` to be different, you can provide a full path to the configuration file via the `CONFIG` env var.
 
 Note that the “consensus” values that are in some of the other template configs are absent in the mainnet template. This is intentional as the “consensus” values for mainnet are hard coded into the node software itself.  It’s very important that all nodes operating on the network use the same set of hard coded consensus values.
 
@@ -211,7 +210,7 @@ The `[[oracles]]` sections control the $IRYS price oracles your node will consul
 
 To participate in mining on Irys you must provide drives for your assigned partitions to be stored on. Once provided and pledged the protocol will assign a partition hash which your node will use to pack your partition. Once packed the Irys node software will begin to mine the storage and you will be able to earn block rewards for any blocks you produce.
 
-To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base directory>/.irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
+To tell the Irys Node Software what drives to use for partitions you must first configure them in the `<base_directory>/.irys_submodules.toml` (where `base_directory` is the one in your `config.toml`) - this file has a simple format:
 
 ```toml
 submodule_paths = [
@@ -221,13 +220,13 @@ submodule_paths = [
 ]
 ```
 
-The irys node will automatically create symlinks to the specified mount points in the `<base_dir>/storage_modules` folder.
+The irys node will automatically create symlinks to the specified mount points in the `<base_directory>/storage_modules` folder.
 
 Ensure the user running the executable has read-write permissions for the drives.
 
 # Running the node
 
-Once you’ve configured the `./config.toml` file and `<base dir>/.irys_submodules.toml` file, it’s time to run the node.
+Once you’ve configured the `./config.toml` file and `<base_directory>/.irys_submodules.toml` file, it’s time to run the node.
 
 `cargo run --bin irys --release`
 
@@ -241,7 +240,7 @@ By default your mining address needs to be staked before your storage modules ca
 
 ## Logs
 
-The node supports the conventional `RUST_LOG` environment variable to configure logging. By default, the logging level is set to `info`. Note that levels “below” info (`debug`, `trace`) are very high volume, but debug is recommended if you can support it, as it means we’ll be able to diagnose any issues you’re having faster.
+The node supports the conventional `RUST_LOG` environment variable to configure logging. By default, the logging level is set to `info`. Note that levels below info (`debug`, `trace`) generate high volumes; use `debug` when feasible, as it helps diagnose issues more quickly.
 
 ## Full node (non-mining)
 
