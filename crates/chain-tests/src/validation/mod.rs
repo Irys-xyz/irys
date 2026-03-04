@@ -36,7 +36,7 @@ use irys_types::{
 use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
 // Helper function to send a block directly to the block tree service for validation
-pub async fn send_block_to_block_tree(
+pub(crate) async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<SealedBlock>,
     skip_vdf_validation: bool,
@@ -60,7 +60,7 @@ pub async fn send_block_to_block_tree(
 ///
 /// This avoids a race condition where the block could be validated and discarded before
 /// the event subscription is created, causing the discard event to be missed.
-pub async fn send_block_and_read_state(
+pub(crate) async fn send_block_and_read_state(
     node_ctx: &IrysNodeCtx,
     block: Arc<SealedBlock>,
     skip_vdf_validation: bool,
