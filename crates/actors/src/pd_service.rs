@@ -275,8 +275,10 @@ impl PdService {
         debug!(
             tx_hash = %tx_hash,
             fetched,
+            missing = tx_state.missing_chunks.len(),
             total = total_chunks,
             cached_chunks = self.cache.len(),
+            state = ?tx_state.state,
             "PD chunk provisioning complete"
         );
     }
@@ -354,12 +356,20 @@ impl PdService {
     /// Batch-fetch chunks by (ledger, offset), reusing the per-key `handle_get_chunk` logic.
     /// Missing chunks are silently omitted — the precompile will return `ChunkNotFound`.
     fn handle_get_chunks_batch(&mut self, keys: Vec<(u32, u64)>) -> ChunkTable {
-        let mut table = HashMap::with_capacity(keys.len());
-        for (ledger, offset) in keys {
-            if let Some(data) = self.handle_get_chunk(ledger, offset) {
-                table.insert((ledger, offset), data);
+        let requested = keys.len();
+        let mut table = HashMap::with_capacity(requested);
+        for (ledger, offset) in &keys {
+            if let Some(data) = self.handle_get_chunk(*ledger, *offset) {
+                table.insert((*ledger, *offset), data);
             }
         }
+        debug!(
+            requested,
+            found = table.len(),
+            missing = requested - table.len(),
+            ?keys,
+            "GetChunksBatch: batch fetch complete"
+        );
         table
     }
 

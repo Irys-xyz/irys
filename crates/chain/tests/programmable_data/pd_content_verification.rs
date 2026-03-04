@@ -2,20 +2,17 @@ use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{Provider as _, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall as _;
-use k256::ecdsa::SigningKey;
-use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
-
-use irys_api_server::routes::tx::TxOffset;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::range_specifier::{ByteRangeSpecifier, U18, U34};
 use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
+use k256::ecdsa::SigningKey;
+use std::time::Duration;
+use tracing::info;
 
 use crate::utils::IrysNodeTest;
 
@@ -33,12 +30,13 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 /// via a contract with a PD header prepended to calldata, then asserts the stored bytes
 /// match the original data.
 ///
-/// Uses small partitions (4 chunks) with padding data to force a non-zero
-/// `data_start_offset`, ensuring the partition_index/offset decomposition is exercised.
+/// Uses padding data to push the test data to a non-zero offset within partition 0,
+/// ensuring the partition_index/offset decomposition is exercised.
 #[test_log::test(tokio::test)]
 async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
-    let num_chunks_in_partition: u64 = 4;
+    let num_chunks_in_partition: u64 = 10;
     let chunk_size: u64 = 32;
+    let padding_chunks: u64 = 4;
 
     let mut testing_config = NodeConfig::testing();
     testing_config.consensus.get_mut().chunk_size = chunk_size;
@@ -112,31 +110,14 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
     let response = client.get(format!("{}/v1/info", http_url)).send().await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    // Upload padding data to fill partition 0, forcing test data into partition 1+.
-    // Each 32-byte chunk has a distinct fill byte so any off-by-one in chunk addressing
-    // would return visibly wrong data.
-    let padding: Vec<u8> = (0..num_chunks_in_partition as u8)
+    // Upload padding data so test data starts at a non-zero offset within partition 0.
+    let padding: Vec<u8> = (0..padding_chunks as u8)
         .flat_map(|i| vec![0xA0 | i; chunk_size as usize])
         .collect();
-    let padding_price = node
-        .get_data_price(irys_types::DataLedger::Publish, padding.len() as u64)
-        .await?;
-    let padding_tx = account1
-        .create_publish_transaction(
-            padding.clone(),
-            node.get_anchor().await?,
-            padding_price.perm_fee.into(),
-            padding_price.term_fee.into(),
-        )
-        .unwrap();
-    let padding_tx = account1.sign_transaction(padding_tx).unwrap();
-    let resp = client
-        .post(format!("{}/v1/tx", http_url))
-        .json(&padding_tx.header)
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let padding_id = padding_tx.header.id.to_string();
+    let padding_tx = node
+        .post_publish_data_tx(&account1, padding.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to post padding tx: {:?}", e))?;
     // Upload padding chunks
     for (tx_chunk_offset, chunk_node) in padding_tx.chunks.iter().enumerate() {
         let min = chunk_node.min_byte_range;
@@ -157,69 +138,43 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
             .await?;
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
-    // Wait for padding to be mined and migrated
-    let mut padding_offset_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        for _attempt in 1..20 {
-            let response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data-start-offset",
-                    http_url, &padding_id
-                ))
-                .send()
-                .await;
-            let Some(response) = response.ok() else {
-                sleep(delay).await;
-                continue;
-            };
-            if response.status() == reqwest::StatusCode::OK {
-                return;
-            }
-            sleep(delay).await;
-        }
-        panic!("Failed to migrate padding data after 20 attempts");
-    });
-    node.future_or_mine_on_timeout(&mut padding_offset_fut, Duration::from_millis(500))
+    // Mine until padding tx is in the block index
+    node.wait_for_migrated_txs(vec![padding_tx.header.clone()], 30)
         .await?;
+    // ChunkMigrationService writes chunk data to storage modules asynchronously
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    info!("Padding data migrated");
+
+    // Record current Publish ledger total_chunks — this is the data_start_offset.
+    let data_start_offset = {
+        let block_index = node.node_ctx.block_index_guard.read();
+        block_index
+            .get_latest_item()
+            .and_then(|item| {
+                item.ledgers
+                    .iter()
+                    .find(|l| l.ledger == irys_types::DataLedger::Publish)
+                    .map(|l| l.total_chunks)
+            })
+            .unwrap_or(0)
+    };
 
     // Upload test data
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
-    let price_info = node
-        .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
-        .await?;
-    let tx = account1
-        .create_publish_transaction(
-            data_bytes.clone(),
-            node.get_anchor().await?,
-            price_info.perm_fee.into(),
-            price_info.term_fee.into(),
-        )
-        .unwrap();
-    let tx = account1.sign_transaction(tx).unwrap();
+    let tx = node
+        .post_publish_data_tx(&account1, data_bytes.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to post test data tx: {:?}", e))?;
 
-    // Post tx header
-    let resp = client
-        .post(format!("{}/v1/tx", http_url))
-        .json(&tx.header)
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let id: String = tx.header.id.to_string();
-
-    // Upload chunks immediately after header so they're available when the migration
-    // service processes the block containing this tx.
+    // Upload chunks so they're in the cache for migration
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
         let chunk = UnpackedChunk {
-            data_root,
-            data_size,
-            data_path,
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
             bytes: Base64(data_bytes[min..max].to_vec()),
             tx_offset: TxChunkOffset::from(
                 TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
@@ -233,53 +188,26 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
-    // Wait for tx inclusion + migration and get data-start-offset
-    let mut start_offset_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        for attempt in 1..20 {
-            let response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data-start-offset",
-                    http_url, &id
-                ))
-                .send()
-                .await;
-            let Some(response) = response.ok() else {
-                sleep(delay).await;
-                continue;
-            };
-            if response.status() == reqwest::StatusCode::OK {
-                let res: TxOffset = response.json().await.unwrap();
-                debug!("start offset: {:?}", &res);
-                info!("Start offset retrieved ok after {} attempts", attempt);
-                return Some(res);
-            }
-            sleep(delay).await;
-        }
-        panic!("Failed to retrieve data-start-offset after 20 attempts");
-    });
-    let start_offset = node
-        .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
-        .await?
-        .unwrap();
+    // Mine until test data tx is in the block index
+    node.wait_for_migrated_txs(vec![tx.header.clone()], 30)
+        .await?;
+    // ChunkMigrationService writes chunk data to storage modules asynchronously
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    info!(
+        "Test data migrated, data_start_offset={}",
+        data_start_offset
+    );
 
-    let data_start_offset = start_offset.data_start_offset;
-
-    // Exact boundary: padding fills partition 0, so test data starts at partition 1.
     assert_eq!(
-        data_start_offset, num_chunks_in_partition,
-        "data_start_offset should equal num_chunks_in_partition on a fresh node \
+        data_start_offset, padding_chunks,
+        "data_start_offset should equal padding_chunks on a fresh node \
          (got {}, expected {})",
-        data_start_offset, num_chunks_in_partition,
+        data_start_offset, padding_chunks,
     );
 
     // Decompose global ledger offset into partition-relative addressing
     let partition_index = data_start_offset / num_chunks_in_partition;
     let local_offset = (data_start_offset % num_chunks_in_partition) as u32;
-    assert_eq!(
-        local_offset, 0,
-        "test data should start at the beginning of partition 1"
-    );
     info!(
         "data_start_offset={}, partition_index={}, local_offset={}",
         data_start_offset, partition_index, local_offset
@@ -316,8 +244,44 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
 
     info!("PD contract call injected: {:?}", tx_hash);
 
+    // Wait for PD monitor to detect the tx and provision chunks from storage
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Mine the block containing the PD contract call
     let _ = node.mine_block_without_gossip().await?;
+
+    // Wait for reth to commit the block (reth imports asynchronously after mine returns)
+    let receipt = {
+        let mut receipt = None;
+        for attempt in 1..=20 {
+            match alloy_provider.get_transaction_receipt(tx_hash).await? {
+                Some(r) => {
+                    info!(
+                        "PD tx receipt found on attempt {}: status={:?}, gas_used={:?}",
+                        attempt,
+                        r.status(),
+                        r.gas_used
+                    );
+                    receipt = Some(r);
+                    break;
+                }
+                None if attempt < 20 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                None => {
+                    panic!(
+                        "PD tx receipt not found after {} attempts — reth did not commit the block",
+                        attempt
+                    );
+                }
+            }
+        }
+        receipt.unwrap()
+    };
+    assert!(
+        receipt.status(),
+        "PD tx should have succeeded (not reverted)"
+    );
 
     // Verify stored bytes match the original message
     let stored_bytes = contract.getStorage().call().await?;

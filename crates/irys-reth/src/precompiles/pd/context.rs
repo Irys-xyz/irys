@@ -103,11 +103,17 @@ impl PdContext {
     ///
     /// This is a pure table lookup with no blocking I/O.
     pub fn get_chunk(&self, ledger: u32, offset: u64) -> eyre::Result<Option<Bytes>> {
-        Ok(self
-            .chunk_table
-            .read()
-            .get(&(ledger, offset))
-            .map(|arc| (**arc).clone()))
+        let table = self.chunk_table.read();
+        let result = table.get(&(ledger, offset)).map(|arc| (**arc).clone());
+        tracing::trace!(
+            ledger,
+            offset,
+            table_size = table.len(),
+            found = result.is_some(),
+            result_len = result.as_ref().map(Bytes::len),
+            "PdContext::get_chunk lookup"
+        );
+        Ok(result)
     }
 
     pub fn update_access_list(&self, access_list: Vec<AccessListItem>) {

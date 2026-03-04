@@ -572,12 +572,30 @@ impl Iterator for CombinedTransactionIterator {
                 {
                     // Use blocking recv since we're in a sync iterator context.
                     // block_in_place is required when called from within a tokio runtime.
-                    if let Ok(false) = tokio::task::block_in_place(|| resp_rx.blocking_recv()) {
-                        tracing::debug!(
-                            tx_hash = %tx_hash,
-                            "Skipping PD transaction: chunks not ready"
-                        );
-                        continue; // Skip this transaction, try next
+                    match tokio::task::block_in_place(|| resp_rx.blocking_recv()) {
+                        Ok(false) => {
+                            tracing::warn!(
+                                tx_hash = %tx_hash,
+                                pd_chunks = chunks,
+                                "Skipping PD transaction: chunks not ready (IsReady=false)"
+                            );
+                            continue; // Skip this transaction, try next
+                        }
+                        Ok(true) => {
+                            tracing::debug!(
+                                tx_hash = %tx_hash,
+                                pd_chunks = chunks,
+                                "PD transaction chunks ready"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tx_hash = %tx_hash,
+                                error = %e,
+                                "PD readiness check failed (channel error), skipping"
+                            );
+                            continue;
+                        }
                     }
                 }
 

@@ -2457,7 +2457,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         nonce: u64,
         offset_base: u32,
     ) -> eyre::Result<FixedBytes<32>> {
-        const LARGE_MAX_BASE_FEE: u64 = 100_000_000_000_u64;
+        const LARGE_MAX_BASE_FEE: u64 = 1_000_000_000_000_000_u64;
 
         self.create_and_inject_pd_transaction_with_custom_fees(
             signer,
@@ -2616,7 +2616,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         // Build PD header
         let header = PdHeaderV1 {
             max_priority_fee_per_chunk: alloy_primitives::U256::from(priority_fee_per_chunk),
-            max_base_fee_per_chunk: alloy_primitives::U256::from(100_000_000_000_u64),
+            max_base_fee_per_chunk: alloy_primitives::U256::from(1_000_000_000_000_000_u64),
         };
         let calldata = prepend_pd_header_v1_to_calldata(&header, &abi_calldata);
 

@@ -531,11 +531,22 @@ impl IrysEvmConfig {
             }
         }
 
+        tracing::debug!(
+            keys_count = keys.len(),
+            ?keys,
+            "preload_chunks_for_payload: collected chunk keys from payload txs"
+        );
+
         if keys.is_empty() {
             return Arc::new(HashMap::new());
         }
 
-        self.batch_load_chunks(keys)
+        let table = self.batch_load_chunks(keys);
+        tracing::debug!(
+            table_size = table.len(),
+            "preload_chunks_for_payload: chunk table loaded"
+        );
+        table
     }
 
     /// Pre-load all PD chunks referenced by transactions in a sealed block.
@@ -976,11 +987,25 @@ where
             {
                 let chunk_config = self.context.chunk_config();
                 let existing_keys = self.context.chunk_table_keys();
-                let new_keys: HashSet<(u32, u64)> = extract_pd_chunk_specs(&tx.access_list)
-                    .into_iter()
-                    .flat_map(|spec| specs_to_ledger_offsets(&spec, &chunk_config))
+                let specs = extract_pd_chunk_specs(&tx.access_list);
+                let all_keys: Vec<(u32, u64)> = specs
+                    .iter()
+                    .flat_map(|spec| specs_to_ledger_offsets(spec, &chunk_config))
+                    .collect();
+                let new_keys: HashSet<(u32, u64)> = all_keys
+                    .iter()
+                    .copied()
                     .filter(|k| !existing_keys.contains(k))
                     .collect();
+
+                tracing::debug!(
+                    specs_count = specs.len(),
+                    all_keys_count = all_keys.len(),
+                    existing_keys_count = existing_keys.len(),
+                    new_keys_count = new_keys.len(),
+                    ?new_keys,
+                    "PD per-tx preload: extracted chunk keys"
+                );
 
                 if !new_keys.is_empty() {
                     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -988,12 +1013,21 @@ where
                         keys: new_keys.into_iter().collect(),
                         response: resp_tx,
                     });
-                    if let Ok(new_chunks) = tokio::task::block_in_place(|| resp_rx.blocking_recv())
-                    {
-                        self.context.extend_chunk_table(new_chunks);
-                        tracing::debug!(
-                            "Pre-loaded PD chunks for transaction during payload building"
-                        );
+                    match tokio::task::block_in_place(|| resp_rx.blocking_recv()) {
+                        Ok(new_chunks) => {
+                            let loaded_count = new_chunks.len();
+                            self.context.extend_chunk_table(new_chunks);
+                            tracing::debug!(
+                                loaded_count,
+                                "PD per-tx preload: loaded chunks into table"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "PD per-tx preload: failed to receive chunks from PD service"
+                            );
+                        }
                     }
                 }
             }

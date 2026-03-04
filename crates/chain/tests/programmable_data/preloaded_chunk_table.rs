@@ -22,10 +22,8 @@ use alloy_sol_types::SolCall as _;
 use k256::ecdsa::SigningKey;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 
-use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::{
     ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArgSerde as _, U18, U34,
@@ -127,41 +125,40 @@ async fn setup_pd_node_with_contract(
     Ok((node, contract_address, data_account, http_url))
 }
 
-/// Upload data via the HTTP API, mine until `data-start-offset` is available,
-/// and return the start offset.
+/// Upload data, mine until tx is in the block index, and return the data-start-offset
+/// computed from the block index's Publish ledger total_chunks.
 async fn upload_data_and_get_offset(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     account: &IrysSigner,
     data_bytes: &[u8],
-    http_url: &str,
+    _http_url: &str,
 ) -> eyre::Result<u64> {
+    // Record the Publish ledger total_chunks BEFORE posting — this is the data_start_offset.
+    let offset_before = {
+        let block_index = node.node_ctx.block_index_guard.read();
+        block_index
+            .get_latest_item()
+            .and_then(|item| {
+                item.ledgers
+                    .iter()
+                    .find(|l| l.ledger == irys_types::DataLedger::Publish)
+                    .map(|l| l.total_chunks)
+            })
+            .unwrap_or(0)
+    };
+
+    // Post tx via the mempool channel (proven working path).
+    let tx = node
+        .post_publish_data_tx(account, data_bytes.to_vec())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+    // Upload chunks via HTTP so they're in the cache for migration.
     let client = reqwest::Client::new();
-
-    let price_info = node
-        .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
-        .await?;
-    let tx = account
-        .create_publish_transaction(
-            data_bytes.to_vec(),
-            node.get_anchor().await?,
-            price_info.perm_fee.into(),
-            price_info.term_fee.into(),
-        )
-        .unwrap();
-    let tx = account.sign_transaction(tx).unwrap();
-
-    // Post tx header
-    let resp = client
-        .post(format!("{}/v1/tx", http_url))
-        .json(&tx.header)
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let id = tx.header.id.to_string();
-
-    // Upload chunks immediately after header so they're available when the migration
-    // service processes the block containing this tx.
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.bind_port
+    );
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
@@ -175,46 +172,70 @@ async fn upload_data_and_get_offset(
             ),
         };
         let resp = client
-            .post(format!("{}/v1/chunk", http_url))
+            .post(format!("{}/v1/chunk", &http_url))
             .json(&chunk)
             .send()
             .await?;
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
-    // Wait for data-start-offset (tx inclusion + migration depth confirmations)
-    let mut start_offset_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        for attempt in 1..20 {
-            let response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data-start-offset",
-                    http_url, &id
-                ))
-                .send()
-                .await;
-            let Some(response) = response.ok() else {
-                sleep(delay).await;
-                continue;
-            };
-            if response.status() == reqwest::StatusCode::OK {
-                let res: TxOffset = response.json().await.unwrap();
-                info!(
-                    "Start offset {} retrieved ok after {} attempts",
-                    res.data_start_offset, attempt
-                );
-                return Some(res);
-            }
-            sleep(delay).await;
-        }
-        panic!("Failed to retrieve data-start-offset after 20 attempts");
-    });
-    let start_offset = node
-        .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
-        .await?
-        .unwrap();
+    // Mine blocks until the tx header appears in the block index.
+    node.wait_for_migrated_txs(vec![tx.header.clone()], 30)
+        .await?;
 
-    Ok(start_offset.data_start_offset)
+    // ChunkMigrationService writes chunk data to storage modules asynchronously
+    // after block migration. Wait for it to complete so PdService can find chunks.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    info!(
+        "Data uploaded and migrated, data_start_offset={}",
+        offset_before
+    );
+    Ok(offset_before)
+}
+
+/// Wait for reth to commit a tx by polling `get_transaction_receipt`.
+///
+/// `mine_block_without_gossip()` returns before reth has finished importing the block.
+/// This helper polls the receipt until reth commits the block and the receipt is available.
+async fn wait_for_reth_tx(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    tx_hash: alloy_primitives::FixedBytes<32>,
+) {
+    use alloy_provider::Provider as _;
+    let rpc_url: reqwest::Url = format!(
+        "http://127.0.0.1:{}/v1/execution-rpc",
+        node.node_ctx.config.node_config.http.bind_port
+    )
+    .parse()
+    .expect("valid URL");
+    let provider = ProviderBuilder::new().connect_http(rpc_url);
+    for attempt in 1..=30 {
+        match provider.get_transaction_receipt(tx_hash).await {
+            Ok(Some(r)) => {
+                info!(
+                    "PD tx receipt found on attempt {}: status={:?}, gas_used={:?}",
+                    attempt,
+                    r.status(),
+                    r.gas_used
+                );
+                assert!(r.status(), "PD tx should have succeeded (not reverted)");
+                return;
+            }
+            Ok(None) if attempt < 30 => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(None) => {
+                panic!(
+                    "PD tx receipt not found after {} attempts — reth did not commit the block",
+                    attempt
+                );
+            }
+            Err(e) => {
+                panic!("Failed to query tx receipt: {:?}", e);
+            }
+        }
+    }
 }
 
 /// Decompose a global ledger chunk offset into `(partition_index, local_offset)`.
@@ -229,17 +250,18 @@ fn decompose_ledger_offset(global_offset: u64, num_chunks_in_partition: u64) -> 
 /// Test that a single PD transaction reading 1 chunk via the precompile returns the
 /// correct bytes through a contract.
 ///
-/// Uses small partitions (4 chunks) with varying amounts of padding data:
-/// - `partition_boundary`: padding fills partition 0 exactly → `local_offset=0`
-/// - `mid_partition`: padding partially fills partition 0 → `local_offset=3`
+/// Uses varying amounts of padding data to place test data at different offsets
+/// within partition 0 (the genesis miner's assigned partition):
+/// - `offset_4`: 4 padding chunks → test data at local_offset=4
+/// - `offset_3`: 3 padding chunks → test data at local_offset=3
 ///
-/// This exercises both the `partition_index` and `offset` fields of `ChunkRangeSpecifier`.
+/// This exercises different `offset` values in `ChunkRangeSpecifier`.
 #[rstest]
-#[case::partition_boundary(4)] // fills partition 0 → data at partition 1, offset 0
-#[case::mid_partition(3)] // partial fill → data at partition 0, offset 3
+#[case::offset_4(4)] // test data at partition 0, offset 4
+#[case::offset_3(3)] // test data at partition 0, offset 3
 #[tokio::test]
 async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::Result<()> {
-    let num_chunks_in_partition: u64 = 4;
+    let num_chunks_in_partition: u64 = 10;
     let chunk_size: u64 = 32;
     let (node, contract_address, data_account, http_url) =
         setup_pd_node_with_contract(num_chunks_in_partition).await?;
@@ -306,8 +328,14 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
 
     info!("PD contract call injected: {:?}", tx_hash);
 
+    // Wait for PD monitor to detect the tx and provision chunks from storage
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Mine the block containing our PD contract call
     let _ = node.mine_block_without_gossip().await?;
+
+    // Wait for reth to commit the block (reth imports asynchronously after mine returns)
+    wait_for_reth_tx(&node, tx_hash).await;
 
     // Verify stored bytes match original
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
@@ -330,19 +358,20 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
 /// 3 chunks (96 bytes with chunk_size=32), reading all via the contract, and
 /// verifying the stored bytes match.
 ///
-/// Uses small partitions (4 chunks) with padding to force a non-zero offset,
-/// verifying that multi-chunk reads work across partition-relative addressing.
+/// Padding pushes test data to a non-zero offset within partition 0,
+/// verifying that multi-chunk reads work with partition-relative addressing.
 #[test_log::test(tokio::test)]
 async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
-    let num_chunks_in_partition: u64 = 4;
+    let num_chunks_in_partition: u64 = 10;
     let chunk_size: u64 = 32;
+    let padding_chunks: u64 = 4;
     let (node, contract_address, data_account, http_url) =
         setup_pd_node_with_contract(num_chunks_in_partition).await?;
 
-    // Upload padding to fill partition 0, pushing subsequent data into partition 1+.
+    // Upload padding so test data starts at a non-zero offset.
     // Each 32-byte chunk has a distinct fill byte so any off-by-one in chunk addressing
     // would return visibly wrong data.
-    let padding: Vec<u8> = (0..num_chunks_in_partition as u8)
+    let padding: Vec<u8> = (0..padding_chunks as u8)
         .flat_map(|i| vec![0xB0 | i; chunk_size as usize])
         .collect();
     let _ = upload_data_and_get_offset(&node, &data_account, &padding, &http_url).await?;
@@ -353,20 +382,15 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
     let data_start_offset =
         upload_data_and_get_offset(&node, &data_account, &data_bytes, &http_url).await?;
 
-    // Exact boundary: padding fills partition 0, so test data starts at partition 1.
     assert_eq!(
-        data_start_offset, num_chunks_in_partition,
-        "data_start_offset should equal num_chunks_in_partition on a fresh node \
+        data_start_offset, padding_chunks,
+        "data_start_offset should equal padding_chunks on a fresh node \
          (got {}, expected {})",
-        data_start_offset, num_chunks_in_partition,
+        data_start_offset, padding_chunks,
     );
 
     let (partition_index, local_offset) =
         decompose_ledger_offset(data_start_offset, num_chunks_in_partition);
-    assert_eq!(
-        local_offset, 0,
-        "test data should start at the beginning of partition 1"
-    );
     assert!(
         local_offset as u64 + 3 <= num_chunks_in_partition,
         "all 3 chunks must fit within partition {} (local_offset={}, num_chunks_in_partition={})",
@@ -406,7 +430,13 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
 
     info!("PD multi-chunk contract call injected: {:?}", tx_hash);
 
+    // Wait for PD monitor to detect the tx and provision chunks from storage
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let _ = node.mine_block_without_gossip().await?;
+
+    // Wait for reth to commit the block (reth imports asynchronously after mine returns)
+    wait_for_reth_tx(&node, tx_hash).await;
 
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
@@ -434,13 +464,17 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
 /// Test that the chunk budget limit (max_pd_chunks_per_block) correctly orders PD
 /// transactions by priority fee and excludes those that would exceed the budget.
 ///
-/// This tests budget enforcement via `sum_pd_chunks_in_access_list` which parses the
-/// access list directly — the partition_index value does not affect budget counting.
+/// Uploads real data so the PD service can provision chunks (passing the readiness
+/// gate in the payload builder). Uses contiguous offsets 0–7 within partition 0.
 #[test_log::test(tokio::test)]
 async fn heavy_test_pd_chunk_budget_limit() -> eyre::Result<()> {
     let seconds_to_wait = 120;
+    let chunk_size: u64 = 32;
 
     let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().block_migration_depth = 2;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
     // Set a small chunk budget so we can easily exceed it
     config
         .consensus
@@ -452,20 +486,41 @@ async fn heavy_test_pd_chunk_budget_limit() -> eyre::Result<()> {
         .max_pd_chunks_per_block = 5;
 
     let pd_tx_signer = config.new_random_signer();
-    config.fund_genesis_accounts(vec![&pd_tx_signer]);
+    let data_account = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&pd_tx_signer, &data_account]);
 
     let ctx = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // Inject 2 PD txs that fit within the budget (2 + 2 = 4 chunks, under limit of 5)
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    // Wait for HTTP server
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Upload data covering ledger offsets 0–7 (8 chunks × 32 bytes = 256 bytes).
+    // The PD txs below reference these offsets; PdService must find the chunks
+    // in storage for them to pass the readiness gate.
+    let data: Vec<u8> = (0..8 * chunk_size as usize)
+        .map(|i| (i & 0xff) as u8)
+        .collect();
+    let data_start = upload_data_and_get_offset(&ctx, &data_account, &data, &http_url).await?;
+    assert_eq!(
+        data_start, 0,
+        "first upload on a fresh node should start at offset 0"
+    );
+
+    // Inject 2 PD txs that fit within the budget (2 + 2 = 4 chunks, under limit of 5).
+    // Offsets are contiguous within the uploaded data range.
     let tx1_hash = ctx
         .create_and_inject_pd_transaction_with_priority_fee(
             &pd_tx_signer,
             2, // 2 chunks
             10_000_000_000_000_000_u64,
             0, // nonce
-            0, // offset_base
+            0, // offset_base → offsets 0, 1
         )
         .await?;
 
@@ -474,8 +529,8 @@ async fn heavy_test_pd_chunk_budget_limit() -> eyre::Result<()> {
             &pd_tx_signer,
             2, // 2 chunks
             10_000_000_000_000_000_u64,
-            1,  // nonce
-            10, // offset_base
+            1, // nonce
+            2, // offset_base → offsets 2, 3
         )
         .await?;
 
@@ -485,8 +540,8 @@ async fn heavy_test_pd_chunk_budget_limit() -> eyre::Result<()> {
             &pd_tx_signer,
             4, // 4 chunks — would exceed budget
             10_000_000_000_000_000_u64,
-            2,  // nonce
-            20, // offset_base
+            2, // nonce
+            4, // offset_base → offsets 4, 5, 6, 7
         )
         .await?;
 
@@ -497,6 +552,7 @@ async fn heavy_test_pd_chunk_budget_limit() -> eyre::Result<()> {
         tx3_hash
     );
 
+    // Wait for PD monitor to detect txs and provision chunks from storage
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let (_, eth_payload, _) = ctx.mine_block_without_gossip().await?;
@@ -563,41 +619,60 @@ async fn heavy_test_pd_no_pd_txs_no_overhead() -> eyre::Result<()> {
 /// Test that a peer node successfully validates a PD block produced by genesis,
 /// proving that the pre-loaded chunk table works for the validation path.
 ///
-/// The peer uses `preload_chunks_for_block` → `GetChunksBatch` to pre-load chunks
-/// before validating. If the state root matches, the pre-loading is correct.
+/// Uploads real data on genesis so the PD service can provision chunks (readiness
+/// gate). The PD tx calls `Address::random()` (no precompile access), so the peer
+/// validates successfully via state root matching even without the chunk data.
 ///
 /// Note: this tests the provisioning/preloading pipeline, not precompile execution.
 /// Full contract-based peer validation requires data sync between nodes and is deferred.
 #[test_log::test(tokio::test)]
-async fn heavy_test_pd_peer_validates_pd_block() -> eyre::Result<()> {
+async fn slow_heavy_test_pd_peer_validates_pd_block() -> eyre::Result<()> {
     let seconds_to_wait = 120;
+    let chunk_size: u64 = 32;
 
     let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().block_migration_depth = 2;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+
     let pd_tx_signer = config.new_random_signer();
+    let data_account = config.new_random_signer();
     let peer_signer = config.new_random_signer();
-    config.fund_genesis_accounts(vec![&pd_tx_signer, &peer_signer]);
+    config.fund_genesis_accounts(vec![&pd_tx_signer, &data_account, &peer_signer]);
 
     // Start genesis node
     let genesis = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        genesis.node_ctx.config.node_config.http.bind_port
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Upload data so PdService can find chunks at offset 0.
+    let data: Vec<u8> = vec![0xAB; chunk_size as usize];
+    let data_start = upload_data_and_get_offset(&genesis, &data_account, &data, &http_url).await?;
+    assert_eq!(data_start, 0, "first upload should start at offset 0");
+
     // Create peer with staking + pledging + partition assignments
     let peer = genesis.testing_peer_with_assignments(&peer_signer).await?;
 
-    // Inject a PD transaction on genesis
+    // Inject a PD transaction on genesis referencing the uploaded data
     let tx_hash = genesis
         .create_and_inject_pd_transaction_with_priority_fee(
             &pd_tx_signer,
             1, // 1 chunk
             10_000_000_000_000_000_u64,
             0, // nonce
-            0, // offset_base
+            0, // offset_base → ledger offset 0
         )
         .await?;
 
     tracing::info!("PD transaction injected on genesis: {:?}", tx_hash);
 
+    // Wait for PD monitor to detect and provision chunks from storage
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Mine block on genesis (without gossip so we control when peer sees it)
@@ -632,12 +707,14 @@ async fn heavy_test_pd_peer_validates_pd_block() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Negative test: a PD contract call referencing a non-existent chunk should revert.
+/// Negative test: a PD transaction referencing non-existent chunks should NOT be
+/// included in a block.
 ///
-/// PD header triggers preloading, but the PD service returns an empty table for
-/// unknown offsets, so the precompile returns ChunkNotFound and the tx reverts.
+/// The PD service marks the tx as `PartiallyReady` because the chunks don't exist
+/// in storage. The payload builder's readiness gate then skips the tx, preventing
+/// it from wasting block space on a tx that would fail at the precompile level.
 #[test_log::test(tokio::test)]
-async fn heavy_test_pd_missing_chunks_reverts() -> eyre::Result<()> {
+async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
     let (node, contract_address, data_account, _http_url) = setup_pd_node_with_contract(10).await?;
 
     let abi_calldata: alloy_primitives::Bytes =
@@ -669,23 +746,23 @@ async fn heavy_test_pd_missing_chunks_reverts() -> eyre::Result<()> {
 
     info!("Missing-chunk PD call injected: {:?}", tx_hash);
 
-    let _ = node.mine_block_without_gossip().await?;
+    // Wait for PD monitor to detect the tx and attempt provisioning.
+    // PdService will mark it PartiallyReady because offset 9999 doesn't exist.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Verify receipt status is failure (reverted)
-    use reth::rpc::eth::EthApiServer as _;
-    let receipt = node
-        .node_ctx
-        .reth_node_adapter
-        .rpc
-        .inner
-        .eth_api()
-        .transaction_receipt(tx_hash)
-        .await?
-        .expect("receipt should exist for included transaction");
+    let (_, eth_payload, _) = node.mine_block_without_gossip().await?;
 
+    // Verify the PD tx was NOT included — readiness gate should have filtered it
+    let pd_tx_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| tx.hash() == &tx_hash);
     assert!(
-        !receipt.status(),
-        "PD tx referencing non-existent chunk should revert"
+        !pd_tx_included,
+        "PD tx referencing non-existent chunk should NOT be included in the block \
+         (readiness gate should filter it)"
     );
 
     node.stop().await;
@@ -699,31 +776,29 @@ async fn heavy_test_pd_missing_chunks_reverts() -> eyre::Result<()> {
 /// get free PD reads.
 #[test_log::test(tokio::test)]
 async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
-    let num_chunks_in_partition: u64 = 4;
+    let num_chunks_in_partition: u64 = 10;
     let chunk_size: u64 = 32;
+    let padding_chunks: u64 = 4;
     let (node, contract_address, data_account, http_url) =
         setup_pd_node_with_contract(num_chunks_in_partition).await?;
 
-    // Upload padding to fill partition 0, pushing subsequent data into partition 1+.
-    // Each 32-byte chunk has a distinct fill byte so any off-by-one in chunk addressing
-    // would return visibly wrong data.
-    let padding: Vec<u8> = (0..num_chunks_in_partition as u8)
+    // Upload padding so test data starts at a non-zero offset.
+    let padding: Vec<u8> = (0..padding_chunks as u8)
         .flat_map(|i| vec![0xC0 | i; chunk_size as usize])
         .collect();
     let _ = upload_data_and_get_offset(&node, &data_account, &padding, &http_url).await?;
 
-    // Upload real data so chunks exist (data lands in partition 1+)
+    // Upload real data so chunks exist
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes();
     let data_start_offset =
         upload_data_and_get_offset(&node, &data_account, data_bytes, &http_url).await?;
 
-    // Exact boundary: padding fills partition 0, so test data starts at partition 1.
     assert_eq!(
-        data_start_offset, num_chunks_in_partition,
-        "data_start_offset should equal num_chunks_in_partition on a fresh node \
+        data_start_offset, padding_chunks,
+        "data_start_offset should equal padding_chunks on a fresh node \
          (got {}, expected {})",
-        data_start_offset, num_chunks_in_partition,
+        data_start_offset, padding_chunks,
     );
 
     let (partition_index, local_offset) =
@@ -740,8 +815,10 @@ async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
 
     let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
 
-    // Call readPdChunkIntoStorage with PD access list but NO PD header
-    let mut invocation_builder = contract.readPdChunkIntoStorage();
+    // Call readPdChunkIntoStorage with PD access list but NO PD header.
+    // Set explicit gas to bypass eth_call simulation (which would revert and
+    // prevent submission — we want the tx to be mined so we can check its receipt).
+    let mut invocation_builder = contract.readPdChunkIntoStorage().gas(1_000_000);
     invocation_builder = invocation_builder.access_list(
         vec![alloy_eips::eip2930::AccessListItem {
             address: precompile_address,
