@@ -260,6 +260,58 @@ mod tests {
     }
 
     #[test]
+    fn cmp_fee_then_id_orders_by_fee_ascending() {
+        let low = BoundedFee::from_u64(10);
+        let high = BoundedFee::from_u64(20);
+        let id = H256::zero();
+
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&low, &id), (&high, &id)),
+            Ordering::Less
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&high, &id), (&low, &id)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&low, &id), (&low, &id)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn cmp_fee_then_id_breaks_ties_by_tx_id() {
+        let fee = BoundedFee::from_u64(100);
+        let id_low = H256::from_low_u64_be(1);
+        let id_high = H256::from_low_u64_be(2);
+
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&fee, &id_low), (&fee, &id_high)),
+            Ordering::Less
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&fee, &id_high), (&fee, &id_low)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn cmp_fee_then_id_reverse_yields_opposite() {
+        let low = BoundedFee::from_u64(5);
+        let high = BoundedFee::from_u64(50);
+        let id_a = H256::from_low_u64_be(1);
+        let id_b = H256::from_low_u64_be(2);
+
+        // Different fees
+        let fwd = BoundedFee::cmp_fee_then_id((&low, &id_a), (&high, &id_b));
+        assert_eq!(fwd.reverse(), Ordering::Greater);
+
+        // Same fee, different ids
+        let fwd = BoundedFee::cmp_fee_then_id((&low, &id_a), (&low, &id_b));
+        assert_eq!(fwd.reverse(), Ordering::Greater);
+    }
+
+    #[test]
     fn test_rlp_encoding_matches_u256() {
         use alloy_rlp::{Decodable as _, Encodable as _};
 
