@@ -3,8 +3,9 @@
 //! Wraps [`U256`] to ensure `term_fee + perm_fee` saturates at MAX instead
 //! of wrapping to zero, which would bypass balance checks.
 
-use crate::U256;
+use crate::{H256, U256};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
@@ -52,6 +53,13 @@ impl BoundedFee {
     #[inline]
     pub const fn max_value() -> Self {
         Self(U256::MAX)
+    }
+
+    /// Compare two (fee, tx_id) pairs by fee ascending, breaking ties by tx id.
+    /// Use `.reverse()` on the result for descending fee order.
+    #[inline]
+    pub fn cmp_fee_then_id(a: (&Self, &H256), b: (&Self, &H256)) -> Ordering {
+        a.0.cmp(b.0).then_with(|| a.1.cmp(b.1))
     }
 }
 

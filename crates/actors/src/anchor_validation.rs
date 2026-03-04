@@ -65,7 +65,7 @@ pub fn validate_anchor_for_inclusion(
 ) -> eyre::Result<bool> {
     let tx_id = tx.id();
     let anchor = tx.anchor();
-    // ingress proof anchors must be canonical for inclusion
+    // transaction anchors must be canonical for inclusion
     let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
         TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {

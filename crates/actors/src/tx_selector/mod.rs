@@ -20,7 +20,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
-    BlockHash, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
+    BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
 };
 use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
@@ -374,9 +374,8 @@ pub async fn select_best_txs(
 
     // Sort data transactions by fee (highest first) to maximize revenue
     // The miner will get proportionally higher rewards for higher term fee values
-    submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
-        std::cmp::Ordering::Equal => a.id.cmp(&b.id),
-        fee_ordering => fee_ordering,
+    submit_ledger_txs.sort_by(|a, b| {
+        BoundedFee::cmp_fee_then_id((&a.user_fee(), &a.id), (&b.user_fee(), &b.id)).reverse()
     });
 
     // Apply block size constraint and funding checks to data transactions

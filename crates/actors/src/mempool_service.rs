@@ -1555,9 +1555,7 @@ impl MempoolState {
         self.valid_submit_ledger_tx
             .iter()
             .min_by(|(id_a, tx_a), (id_b, tx_b)| {
-                tx_a.user_fee()
-                    .cmp(&tx_b.user_fee())
-                    .then_with(|| id_a.cmp(id_b))
+                BoundedFee::cmp_fee_then_id((&tx_a.user_fee(), id_a), (&tx_b.user_fee(), id_b))
             })
             .map(|(id, wrapped_tx)| (*id, wrapped_tx.user_fee()))
     }
