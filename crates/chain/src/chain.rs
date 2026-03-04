@@ -906,7 +906,8 @@ impl IrysNode {
         );
         if let Err(err) = Self::wait_for_api_ready(api_probe_addr, API_SERVER_READY_TIMEOUT).await {
             error!(error = ?err, "API server failed readiness check during startup");
-            ctx.stop(ShutdownReason::ApiReadinessFailed).await;
+            ctx.stop(ShutdownReason::ApiReadinessFailed)
+                .await;
             return Err(err.wrap_err("API server did not become ready during node startup"));
         }
 
@@ -1182,12 +1183,13 @@ impl IrysNode {
             _ = &mut service_set => {
                 ShutdownReason::ServiceExited
             },
-            _ = async {
+            res = async {
                 match task_manager_handle {
-                    Some(handle) => { handle.await.ok() },
+                    Some(handle) => handle.await.ok(),
                     None => std::future::pending().await,
                 }
             } => {
+                let _ = res;
                 ShutdownReason::RethTaskManager
             },
             _ = reth_exit => {
