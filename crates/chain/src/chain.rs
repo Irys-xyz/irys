@@ -906,8 +906,7 @@ impl IrysNode {
         );
         if let Err(err) = Self::wait_for_api_ready(api_probe_addr, API_SERVER_READY_TIMEOUT).await {
             error!(error = ?err, "API server failed readiness check during startup");
-            ctx.stop(ShutdownReason::ApiReadinessFailed)
-                .await;
+            ctx.stop(ShutdownReason::ApiReadinessFailed).await;
             return Err(err.wrap_err("API server did not become ready during node startup"));
         }
 

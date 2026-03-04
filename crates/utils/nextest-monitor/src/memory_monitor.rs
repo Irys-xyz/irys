@@ -95,7 +95,6 @@ pub use platform::MemoryMonitor;
 
 #[cfg(test)]
 mod tests {
-    
 
     #[cfg(target_os = "linux")]
     #[test]
