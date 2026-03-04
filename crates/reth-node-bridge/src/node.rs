@@ -167,7 +167,7 @@ pub async fn run_node(
     reth_config.txpool.disable_blobs_support = true;
 
     if cfg!(debug_assertions) {
-        reth_config.engine.cross_block_cache_size = 10 * MEGABYTE;
+        reth_config.engine.cross_block_cache_size = 10;
     } else {
         reth_config.txpool.additional_validation_tasks = 2;
     }
