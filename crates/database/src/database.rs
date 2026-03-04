@@ -47,7 +47,7 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
             .with_growth_step((10 * MEGABYTE).into())
             .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-            .with_sync_mode(if cfg!(test) {
+            .with_sync_mode(if cfg!(debug_assertions) {
                 Some(SyncMode::UtterlyNoSync)
             } else {
                 Some(SyncMode::Durable)
@@ -76,7 +76,7 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
             // so trade durability for write throughput by skipping fsync operations.
             // SafeNoSync preserves DB integrity on crash (rolls back to last steady
             // commit) — only recent uncommitted transactions are lost.
-            .with_sync_mode(if cfg!(test) {
+            .with_sync_mode(if cfg!(debug_assertions) {
                 Some(SyncMode::UtterlyNoSync)
             } else {
                 Some(SyncMode::SafeNoSync)

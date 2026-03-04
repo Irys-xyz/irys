@@ -166,7 +166,7 @@ pub async fn run_node(
     // important: keep blobs disabled in our mempool
     reth_config.txpool.disable_blobs_support = true;
 
-    if cfg!(test) {
+    if cfg!(debug_assertions) {
         reth_config.engine.cross_block_cache_size = 10 * MEGABYTE;
     } else {
         reth_config.txpool.additional_validation_tasks = 2;
@@ -194,7 +194,7 @@ pub async fn run_node(
         .database_args()
         .with_growth_step((10 * MEGABYTE).into())
         .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-        .with_sync_mode(if cfg!(test) {
+        .with_sync_mode(if cfg!(debug_assertions) {
             Some(SyncMode::UtterlyNoSync)
         } else {
             Some(SyncMode::Durable)
