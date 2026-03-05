@@ -8,6 +8,7 @@ mod gossip_data_handler;
 mod gossip_fixture_tests;
 mod gossip_service;
 mod metrics;
+pub(crate) mod wire_types;
 mod peer_network_service;
 mod rate_limiting;
 mod server;
