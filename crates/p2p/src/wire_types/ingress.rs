@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngressProof {
     pub version: u8,
-    pub signature: IrysSignature,
+    pub anchor: H256,
+    pub chain_id: u64,
     pub data_root: H256,
     pub proof: H256,
-    pub chain_id: u64,
-    pub anchor: H256,
+    pub signature: IrysSignature,
 }
 
 impl From<&irys_types::IngressProof> for IngressProof {
@@ -32,15 +32,13 @@ impl TryFrom<IngressProof> for irys_types::IngressProof {
     type Error = eyre::Report;
     fn try_from(p: IngressProof) -> eyre::Result<Self> {
         match p.version {
-            1 => Ok(irys_types::IngressProof::V1(
-                irys_types::ingress::IngressProofV1 {
-                    signature: p.signature,
-                    data_root: p.data_root,
-                    proof: p.proof,
-                    chain_id: p.chain_id,
-                    anchor: p.anchor,
-                },
-            )),
+            1 => Ok(Self::V1(irys_types::ingress::IngressProofV1 {
+                signature: p.signature,
+                data_root: p.data_root,
+                proof: p.proof,
+                chain_id: p.chain_id,
+                anchor: p.anchor,
+            })),
             v => Err(eyre::eyre!("Unknown IngressProof version: {}", v)),
         }
     }

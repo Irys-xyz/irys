@@ -1,17 +1,21 @@
-pub mod block;
-pub mod chunk;
-pub mod commitment;
-pub mod gossip;
-pub mod handshake;
-pub mod ingress;
-pub mod response;
-pub mod transaction;
+pub(crate) mod block;
+pub(crate) mod chunk;
+pub(crate) mod commitment;
+pub(crate) mod gossip;
+pub(crate) mod handshake;
+pub(crate) mod ingress;
+pub(crate) mod response;
+pub(crate) mod transaction;
 
-pub use block::*;
-pub use chunk::*;
-pub use commitment::*;
-pub use gossip::*;
-pub use handshake::*;
-pub use ingress::*;
-pub use response::*;
-pub use transaction::*;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use block::*;
+pub(crate) use chunk::*;
+pub(crate) use commitment::*;
+pub(crate) use gossip::*;
+pub(crate) use handshake::*;
+pub(crate) use ingress::*;
+#[cfg(test)]
+pub(crate) use response::*;
+pub(crate) use transaction::*;

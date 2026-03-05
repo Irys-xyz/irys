@@ -31,7 +31,7 @@ pub enum GossipDataV2 {
     IngressProof(IngressProof),
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV1 {
     ExecutionPayload(B256),
     Block(BlockHash),
@@ -39,7 +39,7 @@ pub enum GossipDataRequestV1 {
     Transaction(H256),
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV2 {
     ExecutionPayload(B256),
     BlockHeader(BlockHash),
@@ -118,9 +118,7 @@ impl From<&irys_types::gossip::v2::GossipDataV2> for GossipDataV2 {
             irys_types::gossip::v2::GossipDataV2::ExecutionPayload(p) => {
                 Self::ExecutionPayload(p.clone())
             }
-            irys_types::gossip::v2::GossipDataV2::IngressProof(p) => {
-                Self::IngressProof(p.into())
-            }
+            irys_types::gossip::v2::GossipDataV2::IngressProof(p) => Self::IngressProof(p.into()),
         }
     }
 }

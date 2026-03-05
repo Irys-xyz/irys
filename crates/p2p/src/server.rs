@@ -4,6 +4,7 @@
 )]
 use crate::block_pool::CriticalBlockPoolError;
 use crate::types::{GossipResponse, GossipRoutes, HandshakeRequirementReason, RejectionReason};
+use crate::wire_types;
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -21,9 +22,9 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
-    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem,
-    PeerScore, ProtocolVersion, UnpackedChunk,
+    GossipRequest, GossipRequestV2, HandshakeResponseV1, HandshakeResponseV2, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem, PeerScore, ProtocolVersion,
+    UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -91,14 +92,58 @@ where
         }
     }
 
+    /// Convert a wire V2 request to a canonical V2 request.
+    /// Returns an HTTP error response if the wire data cannot be converted.
+    fn convert_wire_v2<W, C>(
+        wire_req: wire_types::GossipRequestV2<W>,
+    ) -> Result<GossipRequestV2<C>, HttpResponse>
+    where
+        C: TryFrom<W>,
+        <C as TryFrom<W>>::Error: std::fmt::Display,
+    {
+        let data = wire_req.data.try_into().map_err(|e| {
+            error!("Failed to convert wire type to canonical: {}", e);
+            HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+        })?;
+        Ok(GossipRequestV2 {
+            peer_id: wire_req.peer_id,
+            miner_address: wire_req.miner_address,
+            data,
+        })
+    }
+
+    /// Convert a wire V1 request to a canonical V1 request.
+    fn convert_wire_v1<W, C>(
+        wire_req: wire_types::GossipRequestV1<W>,
+    ) -> Result<GossipRequest<C>, HttpResponse>
+    where
+        C: TryFrom<W>,
+        <C as TryFrom<W>>::Error: std::fmt::Display,
+    {
+        let data = wire_req.data.try_into().map_err(|e| {
+            error!("Failed to convert wire type to canonical: {}", e);
+            HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+        })?;
+        Ok(GossipRequest {
+            miner_address: wire_req.miner_address,
+            data,
+        })
+    }
+
     async fn handle_chunk_v1(
         server: Data<Self>,
-        unpacked_chunk_json: web::Json<GossipRequest<UnpackedChunk>>,
+        unpacked_chunk_json: web::Json<wire_types::GossipRequestV1<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<wire_types::UnpackedChunk, UnpackedChunk>(
+            unpacked_chunk_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let chunk_hash = unpacked_chunk_json.0.data.chunk_path_hash();
+            let chunk_hash = v1_request.data.chunk_path_hash();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
                 node_id, chunk_hash
@@ -107,7 +152,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = unpacked_chunk_json.0;
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
@@ -252,12 +296,18 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_block_header_v1(
         server: Data<Self>,
-        irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
+        irys_block_header_json: web::Json<wire_types::GossipRequestV1<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<wire_types::IrysBlockHeader, IrysBlockHeader>(
+            irys_block_header_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = irys_block_header_json.0.data.block_hash;
+            let block_hash = v1_request.data.block_hash;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring block header {:?}",
                 node_id, block_hash
@@ -266,7 +316,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = irys_block_header_json.0;
         let source_miner_address = v1_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
@@ -330,12 +379,18 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_block_body_v1(
         server: Data<Self>,
-        block_body_request_json: web::Json<GossipRequest<BlockBody>>,
+        block_body_request_json: web::Json<wire_types::GossipRequestV1<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<wire_types::BlockBody, BlockBody>(
+            block_body_request_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = block_body_request_json.0.data.block_hash;
+            let block_hash = v1_request.data.block_hash;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring block body {:?}",
                 node_id, block_hash
@@ -344,7 +399,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = block_body_request_json.0;
         let source_miner_address = v1_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
@@ -396,12 +450,17 @@ where
 
     async fn handle_execution_payload_v1(
         server: Data<Self>,
-        irys_execution_payload_json: web::Json<GossipRequest<Block>>,
+        irys_execution_payload_json: web::Json<wire_types::GossipRequestV1<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<Block, Block>(irys_execution_payload_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let evm_block_hash = irys_execution_payload_json.0.data.seal_slow().hash();
+            let evm_block_hash = v1_request.data.seal_slow().hash();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the execution payload for block {:?}",
                 node_id, evm_block_hash
@@ -410,7 +469,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = irys_execution_payload_json.0;
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
@@ -438,12 +496,22 @@ where
 
     async fn handle_transaction_v1(
         server: Data<Self>,
-        irys_transaction_header_json: web::Json<GossipRequest<DataTransactionHeader>>,
+        irys_transaction_header_json: web::Json<
+            wire_types::GossipRequestV1<wire_types::DataTransactionHeader>,
+        >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<
+            wire_types::DataTransactionHeader,
+            DataTransactionHeader,
+        >(irys_transaction_header_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = irys_transaction_header_json.0.data.id;
+            let tx_id = v1_request.data.id;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring transaction {:?}",
                 node_id, tx_id
@@ -452,7 +520,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = irys_transaction_header_json.0;
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
@@ -476,12 +543,22 @@ where
 
     async fn handle_commitment_tx_v1(
         server: Data<Self>,
-        commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
+        commitment_tx_json: web::Json<
+            wire_types::GossipRequestV1<wire_types::CommitmentTransaction>,
+        >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<
+            wire_types::CommitmentTransaction,
+            CommitmentTransaction,
+        >(commitment_tx_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = commitment_tx_json.0.data.id();
+            let tx_id = v1_request.data.id();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
                 node_id, tx_id
@@ -490,7 +567,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = commitment_tx_json.0;
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
@@ -514,12 +590,17 @@ where
 
     async fn handle_ingress_proof_v1(
         server: Data<Self>,
-        proof_json: web::Json<GossipRequest<IngressProof>>,
+        proof_json: web::Json<wire_types::GossipRequestV1<wire_types::IngressProof>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v1_request =
+            match Self::convert_wire_v1::<wire_types::IngressProof, IngressProof>(proof_json.0) {
+                Ok(r) => r,
+                Err(resp) => return resp,
+            };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = v1_request.data.data_root;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -528,7 +609,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = proof_json.0;
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
@@ -556,12 +636,18 @@ where
 
     async fn handle_chunk_v2(
         server: Data<Self>,
-        unpacked_chunk_json: web::Json<GossipRequestV2<UnpackedChunk>>,
+        unpacked_chunk_json: web::Json<wire_types::GossipRequestV2<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<wire_types::UnpackedChunk, UnpackedChunk>(
+            unpacked_chunk_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let chunk_hash = unpacked_chunk_json.0.data.chunk_path_hash();
+            let chunk_hash = v2_request.data.chunk_path_hash();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
                 node_id, chunk_hash
@@ -570,7 +656,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v2_request = unpacked_chunk_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -613,12 +698,18 @@ where
     )]
     async fn handle_block_header_v2(
         server: Data<Self>,
-        irys_block_header_json: web::Json<GossipRequestV2<IrysBlockHeader>>,
+        irys_block_header_json: web::Json<wire_types::GossipRequestV2<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<wire_types::IrysBlockHeader, IrysBlockHeader>(
+            irys_block_header_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = irys_block_header_json.0.data.block_hash;
+            let block_hash = v2_request.data.block_hash;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring block header {}",
                 node_id, block_hash
@@ -627,8 +718,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = irys_block_header_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
@@ -680,12 +769,18 @@ where
     )]
     async fn handle_block_body_v2(
         server: Data<Self>,
-        block_body_request_json: web::Json<GossipRequestV2<BlockBody>>,
+        block_body_request_json: web::Json<wire_types::GossipRequestV2<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<wire_types::BlockBody, BlockBody>(
+            block_body_request_json.0,
+        ) {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = block_body_request_json.0.data.block_hash;
+            let block_hash = v2_request.data.block_hash;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring block body {}",
                 node_id, block_hash
@@ -694,8 +789,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = block_body_request_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
@@ -742,12 +835,17 @@ where
 
     async fn handle_execution_payload_v2(
         server: Data<Self>,
-        irys_execution_payload_json: web::Json<GossipRequestV2<Block>>,
+        irys_execution_payload_json: web::Json<wire_types::GossipRequestV2<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<Block, Block>(irys_execution_payload_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = irys_execution_payload_json.0.data.hash_slow();
+            let block_hash = v2_request.data.hash_slow();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring execution payload for block: {:?}",
                 node_id, block_hash
@@ -756,8 +854,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = irys_execution_payload_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -789,12 +885,22 @@ where
 
     async fn handle_transaction_v2(
         server: Data<Self>,
-        irys_transaction_header_json: web::Json<GossipRequestV2<DataTransactionHeader>>,
+        irys_transaction_header_json: web::Json<
+            wire_types::GossipRequestV2<wire_types::DataTransactionHeader>,
+        >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<
+            wire_types::DataTransactionHeader,
+            DataTransactionHeader,
+        >(irys_transaction_header_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = irys_transaction_header_json.0.data.id;
+            let tx_id = v2_request.data.id;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring transaction {}",
                 node_id, tx_id
@@ -803,8 +909,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = irys_transaction_header_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -832,12 +936,22 @@ where
 
     async fn handle_commitment_tx_v2(
         server: Data<Self>,
-        commitment_tx_json: web::Json<GossipRequestV2<CommitmentTransaction>>,
+        commitment_tx_json: web::Json<
+            wire_types::GossipRequestV2<wire_types::CommitmentTransaction>,
+        >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request = match Self::convert_wire_v2::<
+            wire_types::CommitmentTransaction,
+            CommitmentTransaction,
+        >(commitment_tx_json.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let commitment_tx_id = commitment_tx_json.0.data.id();
+            let commitment_tx_id = v2_request.data.id();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring commitment transaction {}",
                 node_id, commitment_tx_id
@@ -846,8 +960,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = commitment_tx_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -875,12 +987,17 @@ where
 
     async fn handle_ingress_proof_v2(
         server: Data<Self>,
-        proof_json: web::Json<GossipRequestV2<IngressProof>>,
+        proof_json: web::Json<wire_types::GossipRequestV2<wire_types::IngressProof>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
+        let v2_request =
+            match Self::convert_wire_v2::<wire_types::IngressProof, IngressProof>(proof_json.0) {
+                Ok(r) => r,
+                Err(resp) => return resp,
+            };
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = v2_request.data.data_root;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -889,8 +1006,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-
-        let v2_request = proof_json.0;
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
 
@@ -1002,7 +1117,7 @@ where
     async fn handle_handshake_v1(
         server: Data<Self>,
         req: actix_web::HttpRequest,
-        body: web::Json<HandshakeRequest>,
+        body: web::Json<wire_types::HandshakeRequestV1>,
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
@@ -1016,7 +1131,8 @@ where
             ));
         };
 
-        let version_request = body.into_inner();
+        let wire_req = body.into_inner();
+        let version_request: irys_types::HandshakeRequestV1 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
             return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
@@ -1106,7 +1222,7 @@ where
     async fn handle_handshake_v2(
         server: Data<Self>,
         req: actix_web::HttpRequest,
-        body: web::Json<HandshakeRequestV2>,
+        body: web::Json<wire_types::HandshakeRequestV2>,
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
@@ -1120,7 +1236,8 @@ where
             ));
         };
 
-        let version_request = body.into_inner();
+        let wire_req = body.into_inner();
+        let version_request: irys_types::HandshakeRequestV2 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
             return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
@@ -1294,26 +1411,38 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_data_request_v1(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = data_request.0;
+        let v1_request =
+            match Self::convert_wire_v1::<wire_types::GossipDataRequestV1, GossipDataRequestV1>(
+                data_request.0,
+            ) {
+                Ok(r) => r,
+                Err(resp) => return resp,
+            };
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
         let v2_request = GossipRequest {
             miner_address: v1_request.miner_address,
             data: v2_data_request,
         };
 
-        Self::handle_data_request(server, web::Json(v2_request), req).await
+        Self::handle_data_request_inner(server, v2_request, req).await
     }
 
     #[tracing::instrument(skip_all)]
     async fn handle_pull_data_v1(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = data_request.0;
+        let v1_request =
+            match Self::convert_wire_v1::<wire_types::GossipDataRequestV1, GossipDataRequestV1>(
+                data_request.0,
+            ) {
+                Ok(r) => r,
+                Err(resp) => return resp,
+            };
         let request_for_logging = v1_request.clone();
         let source_miner_address = v1_request.miner_address;
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
@@ -1338,8 +1467,8 @@ where
             Ok(maybe_data) => match maybe_data {
                 Some(data_v2) => match data_v2.to_v1() {
                     Some(data_v1) => {
-                        let maybe_data_v1 = Some(data_v1);
-                        HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data_v1))
+                        let wire_v1: wire_types::GossipDataV1 = (&data_v1).into();
+                        HttpResponse::Ok().json(GossipResponse::Accepted(Some(wire_v1)))
                     }
                     None => {
                         error!(
@@ -1362,25 +1491,45 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
+        data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v1_request = match Self::convert_wire_v1::<
+            wire_types::GossipDataRequestV2,
+            irys_types::v2::GossipDataRequestV2,
+        >(data_request.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
+        Self::handle_data_request_inner(server, v1_request, req).await
+    }
+
+    async fn handle_data_request_inner(
+        server: Data<Self>,
+        v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled()
             || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
         {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let request_id = match &data_request.0.data {
-                GossipDataRequestV2::BlockHeader(hash) => format!("block header {:?}", hash),
-                GossipDataRequestV2::ExecutionPayload(hash) => {
+            let request_id = match &v1_request.data {
+                irys_types::v2::GossipDataRequestV2::BlockHeader(hash) => {
+                    format!("block header {:?}", hash)
+                }
+                irys_types::v2::GossipDataRequestV2::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
                 }
-                GossipDataRequestV2::Chunk(chunk_path_hash) => {
+                irys_types::v2::GossipDataRequestV2::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
-                GossipDataRequestV2::BlockBody(block_hash) => {
+                irys_types::v2::GossipDataRequestV2::BlockBody(block_hash) => {
                     format!("block body {:?}", block_hash)
                 }
-                GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
+                irys_types::v2::GossipDataRequestV2::Transaction(hash) => {
+                    format!("transaction {:?}", hash)
+                }
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -1390,7 +1539,6 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let v1_request = data_request.0;
         let source_miner_address = v1_request.miner_address;
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
             Ok(peer) => peer,
@@ -1421,10 +1569,17 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_pull_data(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
+        data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = data_request.0;
+        let v1_request = match Self::convert_wire_v1::<
+            wire_types::GossipDataRequestV2,
+            irys_types::v2::GossipDataRequestV2,
+        >(data_request.0)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
@@ -1440,7 +1595,11 @@ where
             .in_current_span()
             .await
         {
-            Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),
+            Ok(maybe_data) => {
+                let wire_data: Option<wire_types::GossipDataV2> =
+                    maybe_data.as_ref().map(Into::into);
+                HttpResponse::Ok().json(GossipResponse::Accepted(wire_data))
+            }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::Ok()

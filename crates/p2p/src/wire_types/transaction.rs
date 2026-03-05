@@ -32,10 +32,10 @@ pub enum DataTransactionHeader {
 
 impl Serialize for DataTransactionHeader {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
+        use serde::ser::SerializeMap as _;
         let (version, inner_value) = match self {
             Self::V1(inner) => (
-                1u8,
+                1_u8,
                 serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
             ),
         };
@@ -60,8 +60,7 @@ impl<'de> Deserialize<'de> for DataTransactionHeader {
             let mut fields = serde_json::Map::new();
             for (key, val) in obj {
                 if key == "version" {
-                    version =
-                        Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
+                    version = Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
                 } else {
                     fields.insert(key, val);
                 }
@@ -73,10 +72,7 @@ impl<'de> Deserialize<'de> for DataTransactionHeader {
                             .map_err(serde::de::Error::custom)?;
                     Ok(Self::V1(inner))
                 }
-                Some(v) => Err(serde::de::Error::custom(format!(
-                    "unknown version: {}",
-                    v
-                ))),
+                Some(v) => Err(serde::de::Error::custom(format!("unknown version: {}", v))),
                 None => Err(serde::de::Error::missing_field("version")),
             }
         } else {
@@ -90,22 +86,20 @@ impl<'de> Deserialize<'de> for DataTransactionHeader {
 impl From<&irys_types::DataTransactionHeader> for DataTransactionHeader {
     fn from(h: &irys_types::DataTransactionHeader) -> Self {
         match h {
-            irys_types::DataTransactionHeader::V1(wm) => {
-                Self::V1(DataTransactionHeaderV1Inner {
-                    id: wm.tx.id,
-                    anchor: wm.tx.anchor,
-                    signer: wm.tx.signer,
-                    data_root: wm.tx.data_root,
-                    data_size: wm.tx.data_size,
-                    header_size: wm.tx.header_size,
-                    term_fee: wm.tx.term_fee,
-                    ledger_id: wm.tx.ledger_id,
-                    chain_id: wm.tx.chain_id,
-                    signature: wm.tx.signature,
-                    bundle_format: wm.tx.bundle_format,
-                    perm_fee: wm.tx.perm_fee,
-                })
-            }
+            irys_types::DataTransactionHeader::V1(wm) => Self::V1(DataTransactionHeaderV1Inner {
+                id: wm.tx.id,
+                anchor: wm.tx.anchor,
+                signer: wm.tx.signer,
+                data_root: wm.tx.data_root,
+                data_size: wm.tx.data_size,
+                header_size: wm.tx.header_size,
+                term_fee: wm.tx.term_fee,
+                ledger_id: wm.tx.ledger_id,
+                chain_id: wm.tx.chain_id,
+                signature: wm.tx.signature,
+                bundle_format: wm.tx.bundle_format,
+                perm_fee: wm.tx.perm_fee,
+            }),
         }
     }
 }
@@ -114,7 +108,7 @@ impl TryFrom<DataTransactionHeader> for irys_types::DataTransactionHeader {
     type Error = eyre::Report;
     fn try_from(h: DataTransactionHeader) -> eyre::Result<Self> {
         match h {
-            DataTransactionHeader::V1(inner) => Ok(irys_types::DataTransactionHeader::V1(
+            DataTransactionHeader::V1(inner) => Ok(Self::V1(
                 irys_types::DataTransactionHeaderV1WithMetadata {
                     tx: irys_types::DataTransactionHeaderV1 {
                         id: inner.id,

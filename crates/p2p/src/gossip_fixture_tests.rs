@@ -10,21 +10,15 @@
 //! versions.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 
 use irys_types::{
-    block::{BlockBody, IrysBlockHeader, IrysBlockHeaderV1, PoaData, VDFLimiterInfo},
+    block::{IrysBlockHeader, IrysBlockHeaderV1, PoaData, VDFLimiterInfo},
     chunk::UnpackedChunk,
     commitment_common::{
         CommitmentTransaction, CommitmentV1WithMetadata, CommitmentV2WithMetadata,
     },
     commitment_v1::{CommitmentTransactionV1, CommitmentTypeV1},
     commitment_v2::{CommitmentTransactionV2, CommitmentTypeV2},
-    gossip::{
-        v1::{GossipDataRequestV1, GossipDataV1},
-        v2::{GossipDataRequestV2, GossipDataV2},
-        GossipRequestV1, GossipRequestV2,
-    },
     ingress::{IngressProof, IngressProofV1},
     serialization::{Base64, H256List},
     storage_pricing::Amount,
@@ -32,10 +26,7 @@ use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
-    version::{
-        HandshakeRequestV1, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, NodeInfo,
-        PeerAddress, ProtocolVersion,
-    },
+    version::{NodeInfo, PeerAddress, ProtocolVersion},
     CommitmentTransactionMetadata, DataTransactionLedger, IrysAddress, IrysPeerId, IrysSignature,
     RethPeerInfo, Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
@@ -43,7 +34,7 @@ use reth::revm::primitives::B256;
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
+use crate::wire_types as wire;
 
 // =============================================================================
 // Deterministic test value constructors
@@ -89,14 +80,15 @@ fn test_unix_timestamp() -> UnixTimestampMs {
     UnixTimestampMs::from(1_700_000_000_000_u128)
 }
 
-fn fixture_unpacked_chunk() -> UnpackedChunk {
-    UnpackedChunk {
+fn fixture_unpacked_chunk() -> wire::UnpackedChunk {
+    let canonical = UnpackedChunk {
         data_root: test_h256(0xAA),
         data_size: 262144,
         data_path: test_base64(&[0xDE, 0xAD, 0xBE, 0xEF]),
         bytes: test_base64(&[0xCA, 0xFE, 0xBA, 0xBE]),
         tx_offset: TxChunkOffset(0),
-    }
+    };
+    (&canonical).into()
 }
 
 fn fixture_data_tx_header_v1() -> DataTransactionHeaderV1 {
@@ -116,15 +108,16 @@ fn fixture_data_tx_header_v1() -> DataTransactionHeaderV1 {
     }
 }
 
-fn fixture_data_tx_header() -> DataTransactionHeader {
-    DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+fn fixture_data_tx_header() -> wire::DataTransactionHeader {
+    let canonical = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: fixture_data_tx_header_v1(),
         metadata: DataTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v1_stake() -> CommitmentTransaction {
-    CommitmentTransaction::V1(CommitmentV1WithMetadata {
+fn fixture_commitment_v1_stake() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V1(CommitmentV1WithMetadata {
         tx: CommitmentTransactionV1 {
             id: test_h256(0x10),
             anchor: test_h256(0x11),
@@ -136,11 +129,12 @@ fn fixture_commitment_v1_stake() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v1_pledge() -> CommitmentTransaction {
-    CommitmentTransaction::V1(CommitmentV1WithMetadata {
+fn fixture_commitment_v1_pledge() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V1(CommitmentV1WithMetadata {
         tx: CommitmentTransactionV1 {
             id: test_h256(0x20),
             anchor: test_h256(0x21),
@@ -154,11 +148,12 @@ fn fixture_commitment_v1_pledge() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v1_unpledge() -> CommitmentTransaction {
-    CommitmentTransaction::V1(CommitmentV1WithMetadata {
+fn fixture_commitment_v1_unpledge() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V1(CommitmentV1WithMetadata {
         tx: CommitmentTransactionV1 {
             id: test_h256(0x30),
             anchor: test_h256(0x31),
@@ -173,11 +168,12 @@ fn fixture_commitment_v1_unpledge() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v1_unstake() -> CommitmentTransaction {
-    CommitmentTransaction::V1(CommitmentV1WithMetadata {
+fn fixture_commitment_v1_unstake() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V1(CommitmentV1WithMetadata {
         tx: CommitmentTransactionV1 {
             id: test_h256(0x40),
             anchor: test_h256(0x41),
@@ -189,11 +185,12 @@ fn fixture_commitment_v1_unstake() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v2_stake() -> CommitmentTransaction {
-    CommitmentTransaction::V2(CommitmentV2WithMetadata {
+fn fixture_commitment_v2_stake() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V2(CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
             id: test_h256(0x50),
             anchor: test_h256(0x51),
@@ -205,11 +202,12 @@ fn fixture_commitment_v2_stake() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v2_pledge() -> CommitmentTransaction {
-    CommitmentTransaction::V2(CommitmentV2WithMetadata {
+fn fixture_commitment_v2_pledge() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V2(CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
             id: test_h256(0x60),
             anchor: test_h256(0x61),
@@ -223,11 +221,12 @@ fn fixture_commitment_v2_pledge() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v2_unpledge() -> CommitmentTransaction {
-    CommitmentTransaction::V2(CommitmentV2WithMetadata {
+fn fixture_commitment_v2_unpledge() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V2(CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
             id: test_h256(0x70),
             anchor: test_h256(0x71),
@@ -242,11 +241,12 @@ fn fixture_commitment_v2_unpledge() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v2_unstake() -> CommitmentTransaction {
-    CommitmentTransaction::V2(CommitmentV2WithMetadata {
+fn fixture_commitment_v2_unstake() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V2(CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
             id: test_h256(0x80),
             anchor: test_h256(0x81),
@@ -258,11 +258,12 @@ fn fixture_commitment_v2_unstake() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_commitment_v2_update_reward_address() -> CommitmentTransaction {
-    CommitmentTransaction::V2(CommitmentV2WithMetadata {
+fn fixture_commitment_v2_update_reward_address() -> wire::CommitmentTransaction {
+    let canonical = CommitmentTransaction::V2(CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
             id: test_h256(0x90),
             anchor: test_h256(0x91),
@@ -276,11 +277,12 @@ fn fixture_commitment_v2_update_reward_address() -> CommitmentTransaction {
             signature: test_signature(),
         },
         metadata: CommitmentTransactionMetadata::new(),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_block_header() -> IrysBlockHeader {
-    IrysBlockHeader::V1(IrysBlockHeaderV1 {
+fn fixture_block_header() -> wire::IrysBlockHeader {
+    let canonical = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: test_h256(0xBB),
         signature: test_signature(),
         height: 42,
@@ -333,21 +335,23 @@ fn fixture_block_header() -> IrysBlockHeader {
         oracle_irys_price: Amount::new(U256::from(100_u64)),
         ema_irys_price: Amount::new(U256::from(95_u64)),
         treasury: U256::from(999_999_u64),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_ingress_proof() -> IngressProof {
-    IngressProof::V1(IngressProofV1 {
+fn fixture_ingress_proof() -> wire::IngressProof {
+    let canonical = IngressProof::V1(IngressProofV1 {
         signature: test_signature(),
         data_root: test_h256(0xDD),
         proof: test_h256(0xDE),
         chain_id: 1270,
         anchor: test_h256(0xDF),
-    })
+    });
+    (&canonical).into()
 }
 
-fn fixture_block_body() -> BlockBody {
-    BlockBody {
+fn fixture_block_body() -> wire::BlockBody {
+    wire::BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![fixture_data_tx_header()],
         commitment_transactions: vec![fixture_commitment_v2_stake()],
@@ -399,184 +403,195 @@ fn generate_fixture_json() {
         // V1 Gossip Data variants
         (
             "v1_gossip_data_chunk",
-            serde_json::to_string_pretty(&GossipDataV1::Chunk(fixture_unpacked_chunk())).unwrap(),
-        ),
-        (
-            "v1_gossip_data_transaction",
-            serde_json::to_string_pretty(&GossipDataV1::Transaction(fixture_data_tx_header()))
+            serde_json::to_string_pretty(&wire::GossipDataV1::Chunk(fixture_unpacked_chunk()))
                 .unwrap(),
         ),
         (
+            "v1_gossip_data_transaction",
+            serde_json::to_string_pretty(
+                &wire::GossipDataV1::Transaction(fixture_data_tx_header()),
+            )
+            .unwrap(),
+        ),
+        (
             "v1_gossip_data_commitment_stake",
-            serde_json::to_string_pretty(&GossipDataV1::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_stake(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_pledge",
-            serde_json::to_string_pretty(&GossipDataV1::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_pledge(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_unpledge",
-            serde_json::to_string_pretty(&GossipDataV1::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_unpledge(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_unstake",
-            serde_json::to_string_pretty(&GossipDataV1::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_unstake(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_block",
-            serde_json::to_string_pretty(&GossipDataV1::Block(Arc::new(fixture_block_header())))
+            serde_json::to_string_pretty(&wire::GossipDataV1::Block(fixture_block_header()))
                 .unwrap(),
         ),
         (
             "v1_gossip_data_ingress_proof",
-            serde_json::to_string_pretty(&GossipDataV1::IngressProof(fixture_ingress_proof()))
-                .unwrap(),
+            serde_json::to_string_pretty(
+                &wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
+            )
+            .unwrap(),
         ),
         // V1 Data Requests
         (
             "v1_data_request_execution_payload",
-            serde_json::to_string_pretty(&GossipDataRequestV1::ExecutionPayload(B256::from(
+            serde_json::to_string_pretty(&wire::GossipDataRequestV1::ExecutionPayload(B256::from(
                 [0xEE; 32],
             )))
             .unwrap(),
         ),
         (
             "v1_data_request_block",
-            serde_json::to_string_pretty(&GossipDataRequestV1::Block(test_h256(0xBB))).unwrap(),
+            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Block(test_h256(0xBB)))
+                .unwrap(),
         ),
         (
             "v1_data_request_chunk",
-            serde_json::to_string_pretty(&GossipDataRequestV1::Chunk(test_h256(0xCC))).unwrap(),
+            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Chunk(test_h256(0xCC)))
+                .unwrap(),
         ),
         (
             "v1_data_request_transaction",
-            serde_json::to_string_pretty(&GossipDataRequestV1::Transaction(test_h256(0xDD)))
+            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Transaction(test_h256(0xDD)))
                 .unwrap(),
         ),
         // V1 Request Wrapper
         (
             "v1_gossip_request",
-            serde_json::to_string_pretty(&GossipRequestV1 {
+            serde_json::to_string_pretty(&wire::GossipRequestV1 {
                 miner_address: test_address(0xAA),
-                data: GossipDataV1::Chunk(fixture_unpacked_chunk()),
+                data: wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
             })
             .unwrap(),
         ),
         // V2 Gossip Data variants
         (
             "v2_gossip_data_chunk",
-            serde_json::to_string_pretty(&GossipDataV2::Chunk(Arc::new(fixture_unpacked_chunk())))
+            serde_json::to_string_pretty(&wire::GossipDataV2::Chunk(fixture_unpacked_chunk()))
                 .unwrap(),
         ),
         (
             "v2_gossip_data_transaction",
-            serde_json::to_string_pretty(&GossipDataV2::Transaction(fixture_data_tx_header()))
-                .unwrap(),
+            serde_json::to_string_pretty(
+                &wire::GossipDataV2::Transaction(fixture_data_tx_header()),
+            )
+            .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_stake",
-            serde_json::to_string_pretty(&GossipDataV2::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_stake(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_pledge",
-            serde_json::to_string_pretty(&GossipDataV2::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_pledge(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_unpledge",
-            serde_json::to_string_pretty(&GossipDataV2::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_unpledge(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_unstake",
-            serde_json::to_string_pretty(&GossipDataV2::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_unstake(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_update_reward_address",
-            serde_json::to_string_pretty(&GossipDataV2::CommitmentTransaction(
+            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_update_reward_address(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_block_header",
-            serde_json::to_string_pretty(&GossipDataV2::BlockHeader(Arc::new(
-                fixture_block_header(),
-            )))
-            .unwrap(),
+            serde_json::to_string_pretty(&wire::GossipDataV2::BlockHeader(fixture_block_header()))
+                .unwrap(),
         ),
         (
             "v2_gossip_data_block_body",
-            serde_json::to_string_pretty(&GossipDataV2::BlockBody(Arc::new(fixture_block_body())))
+            serde_json::to_string_pretty(&wire::GossipDataV2::BlockBody(fixture_block_body()))
                 .unwrap(),
         ),
         (
             "v2_gossip_data_ingress_proof",
-            serde_json::to_string_pretty(&GossipDataV2::IngressProof(fixture_ingress_proof()))
-                .unwrap(),
+            serde_json::to_string_pretty(
+                &wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
+            )
+            .unwrap(),
         ),
         // V2 Data Requests
         (
             "v2_data_request_execution_payload",
-            serde_json::to_string_pretty(&GossipDataRequestV2::ExecutionPayload(B256::from(
+            serde_json::to_string_pretty(&wire::GossipDataRequestV2::ExecutionPayload(B256::from(
                 [0xEE; 32],
             )))
             .unwrap(),
         ),
         (
             "v2_data_request_block_header",
-            serde_json::to_string_pretty(&GossipDataRequestV2::BlockHeader(test_h256(0xBB)))
+            serde_json::to_string_pretty(&wire::GossipDataRequestV2::BlockHeader(test_h256(0xBB)))
                 .unwrap(),
         ),
         (
             "v2_data_request_block_body",
-            serde_json::to_string_pretty(&GossipDataRequestV2::BlockBody(test_h256(0xBB))).unwrap(),
+            serde_json::to_string_pretty(&wire::GossipDataRequestV2::BlockBody(test_h256(0xBB)))
+                .unwrap(),
         ),
         (
             "v2_data_request_chunk",
-            serde_json::to_string_pretty(&GossipDataRequestV2::Chunk(test_h256(0xCC))).unwrap(),
+            serde_json::to_string_pretty(&wire::GossipDataRequestV2::Chunk(test_h256(0xCC)))
+                .unwrap(),
         ),
         (
             "v2_data_request_transaction",
-            serde_json::to_string_pretty(&GossipDataRequestV2::Transaction(test_h256(0xDD)))
+            serde_json::to_string_pretty(&wire::GossipDataRequestV2::Transaction(test_h256(0xDD)))
                 .unwrap(),
         ),
         // V2 Request Wrapper
         (
             "v2_gossip_request",
-            serde_json::to_string_pretty(&GossipRequestV2 {
+            serde_json::to_string_pretty(&wire::GossipRequestV2 {
                 peer_id: test_peer_id(0xBB),
                 miner_address: test_address(0xAA),
-                data: GossipDataV2::Chunk(Arc::new(fixture_unpacked_chunk())),
+                data: wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
             })
             .unwrap(),
         ),
         // Handshake V1
         (
             "handshake_request_v1",
-            serde_json::to_string_pretty(&HandshakeRequestV1 {
+            serde_json::to_string_pretty(&wire::HandshakeRequestV1 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V1,
                 mining_address: test_address(0xAA),
@@ -590,7 +605,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_request_v2",
-            serde_json::to_string_pretty(&HandshakeRequestV2 {
+            serde_json::to_string_pretty(&wire::HandshakeRequestV2 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V2,
                 mining_address: test_address(0xAA),
@@ -606,7 +621,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_response_v1",
-            serde_json::to_string_pretty(&HandshakeResponseV1 {
+            serde_json::to_string_pretty(&wire::HandshakeResponseV1 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V1,
                 peers: vec![test_peer_address()],
@@ -617,7 +632,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_response_v2",
-            serde_json::to_string_pretty(&HandshakeResponseV2 {
+            serde_json::to_string_pretty(&wire::HandshakeResponseV2 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V2,
                 peers: vec![test_peer_address()],
@@ -630,95 +645,95 @@ fn generate_fixture_json() {
         // GossipResponse variants
         (
             "gossip_response_accepted",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Accepted(())).unwrap(),
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Accepted(())).unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_none",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(None),
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::HandshakeRequired(None),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_not_in_peer_list",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(Some(
-                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::HandshakeRequired(Some(
+                    wire::HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
                 )),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_origin_mismatch",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(Some(
-                    HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::HandshakeRequired(Some(
+                    wire::HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
                 )),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_unknown_miner",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(Some(
-                    HandshakeRequirementReason::MinerAddressIsUnknown,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::HandshakeRequired(Some(
+                    wire::HandshakeRequirementReason::MinerAddressIsUnknown,
                 )),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_gossip_disabled",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::GossipDisabled,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::GossipDisabled,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_invalid_data",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::InvalidData,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::InvalidData,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_rate_limited",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::RateLimited,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::RateLimited,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unable_to_verify_origin",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::UnableToVerifyOrigin,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::UnableToVerifyOrigin,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_invalid_credentials",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::InvalidCredentials,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::InvalidCredentials,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_protocol_mismatch",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::ProtocolMismatch,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::ProtocolMismatch,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unsupported_protocol_version",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::UnsupportedProtocolVersion(99),
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::UnsupportedProtocolVersion(99),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unsupported_feature",
-            serde_json::to_string_pretty(&GossipResponse::<()>::Rejected(
-                RejectionReason::UnsupportedFeature,
+            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+                wire::RejectionReason::UnsupportedFeature,
             ))
             .unwrap(),
         ),
@@ -758,7 +773,7 @@ fn generate_fixture_json() {
 #[test]
 fn fixture_v1_gossip_data_chunk() {
     assert_json_fixture(
-        &GossipDataV1::Chunk(fixture_unpacked_chunk()),
+        &wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
         FIXTURE_V1_GOSSIP_DATA_CHUNK,
         "v1_gossip_data_chunk",
     );
@@ -767,7 +782,7 @@ fn fixture_v1_gossip_data_chunk() {
 #[test]
 fn fixture_v1_gossip_data_transaction() {
     assert_json_fixture(
-        &GossipDataV1::Transaction(fixture_data_tx_header()),
+        &wire::GossipDataV1::Transaction(fixture_data_tx_header()),
         FIXTURE_V1_GOSSIP_DATA_TRANSACTION,
         "v1_gossip_data_transaction",
     );
@@ -776,7 +791,7 @@ fn fixture_v1_gossip_data_transaction() {
 #[test]
 fn fixture_v1_gossip_data_commitment_stake() {
     assert_json_fixture(
-        &GossipDataV1::CommitmentTransaction(fixture_commitment_v1_stake()),
+        &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_stake()),
         FIXTURE_V1_GOSSIP_DATA_COMMITMENT_STAKE,
         "v1_gossip_data_commitment_stake",
     );
@@ -785,7 +800,7 @@ fn fixture_v1_gossip_data_commitment_stake() {
 #[test]
 fn fixture_v1_gossip_data_commitment_pledge() {
     assert_json_fixture(
-        &GossipDataV1::CommitmentTransaction(fixture_commitment_v1_pledge()),
+        &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_pledge()),
         FIXTURE_V1_GOSSIP_DATA_COMMITMENT_PLEDGE,
         "v1_gossip_data_commitment_pledge",
     );
@@ -794,7 +809,7 @@ fn fixture_v1_gossip_data_commitment_pledge() {
 #[test]
 fn fixture_v1_gossip_data_commitment_unpledge() {
     assert_json_fixture(
-        &GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unpledge()),
+        &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unpledge()),
         FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNPLEDGE,
         "v1_gossip_data_commitment_unpledge",
     );
@@ -803,7 +818,7 @@ fn fixture_v1_gossip_data_commitment_unpledge() {
 #[test]
 fn fixture_v1_gossip_data_commitment_unstake() {
     assert_json_fixture(
-        &GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unstake()),
+        &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unstake()),
         FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNSTAKE,
         "v1_gossip_data_commitment_unstake",
     );
@@ -812,7 +827,7 @@ fn fixture_v1_gossip_data_commitment_unstake() {
 #[test]
 fn fixture_v1_gossip_data_block() {
     assert_json_fixture(
-        &GossipDataV1::Block(Arc::new(fixture_block_header())),
+        &wire::GossipDataV1::Block(fixture_block_header()),
         FIXTURE_V1_GOSSIP_DATA_BLOCK,
         "v1_gossip_data_block",
     );
@@ -821,7 +836,7 @@ fn fixture_v1_gossip_data_block() {
 #[test]
 fn fixture_v1_gossip_data_ingress_proof() {
     assert_json_fixture(
-        &GossipDataV1::IngressProof(fixture_ingress_proof()),
+        &wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
         FIXTURE_V1_GOSSIP_DATA_INGRESS_PROOF,
         "v1_gossip_data_ingress_proof",
     );
@@ -834,7 +849,7 @@ fn fixture_v1_gossip_data_ingress_proof() {
 #[test]
 fn fixture_v1_data_request_execution_payload() {
     assert_json_fixture(
-        &GossipDataRequestV1::ExecutionPayload(B256::from([0xEE; 32])),
+        &wire::GossipDataRequestV1::ExecutionPayload(B256::from([0xEE; 32])),
         FIXTURE_V1_DATA_REQUEST_EXECUTION_PAYLOAD,
         "v1_data_request_execution_payload",
     );
@@ -843,7 +858,7 @@ fn fixture_v1_data_request_execution_payload() {
 #[test]
 fn fixture_v1_data_request_block() {
     assert_json_fixture(
-        &GossipDataRequestV1::Block(test_h256(0xBB)),
+        &wire::GossipDataRequestV1::Block(test_h256(0xBB)),
         FIXTURE_V1_DATA_REQUEST_BLOCK,
         "v1_data_request_block",
     );
@@ -852,7 +867,7 @@ fn fixture_v1_data_request_block() {
 #[test]
 fn fixture_v1_data_request_chunk() {
     assert_json_fixture(
-        &GossipDataRequestV1::Chunk(test_h256(0xCC)),
+        &wire::GossipDataRequestV1::Chunk(test_h256(0xCC)),
         FIXTURE_V1_DATA_REQUEST_CHUNK,
         "v1_data_request_chunk",
     );
@@ -861,7 +876,7 @@ fn fixture_v1_data_request_chunk() {
 #[test]
 fn fixture_v1_data_request_transaction() {
     assert_json_fixture(
-        &GossipDataRequestV1::Transaction(test_h256(0xDD)),
+        &wire::GossipDataRequestV1::Transaction(test_h256(0xDD)),
         FIXTURE_V1_DATA_REQUEST_TRANSACTION,
         "v1_data_request_transaction",
     );
@@ -874,9 +889,9 @@ fn fixture_v1_data_request_transaction() {
 #[test]
 fn fixture_v1_gossip_request() {
     assert_json_fixture(
-        &GossipRequestV1 {
+        &wire::GossipRequestV1 {
             miner_address: test_address(0xAA),
-            data: GossipDataV1::Chunk(fixture_unpacked_chunk()),
+            data: wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
         },
         FIXTURE_V1_GOSSIP_REQUEST,
         "v1_gossip_request",
@@ -890,7 +905,7 @@ fn fixture_v1_gossip_request() {
 #[test]
 fn fixture_v2_gossip_data_chunk() {
     assert_json_fixture(
-        &GossipDataV2::Chunk(Arc::new(fixture_unpacked_chunk())),
+        &wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
         FIXTURE_V2_GOSSIP_DATA_CHUNK,
         "v2_gossip_data_chunk",
     );
@@ -899,7 +914,7 @@ fn fixture_v2_gossip_data_chunk() {
 #[test]
 fn fixture_v2_gossip_data_transaction() {
     assert_json_fixture(
-        &GossipDataV2::Transaction(fixture_data_tx_header()),
+        &wire::GossipDataV2::Transaction(fixture_data_tx_header()),
         FIXTURE_V2_GOSSIP_DATA_TRANSACTION,
         "v2_gossip_data_transaction",
     );
@@ -908,7 +923,7 @@ fn fixture_v2_gossip_data_transaction() {
 #[test]
 fn fixture_v2_gossip_data_commitment_v2_stake() {
     assert_json_fixture(
-        &GossipDataV2::CommitmentTransaction(fixture_commitment_v2_stake()),
+        &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_stake()),
         FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_STAKE,
         "v2_gossip_data_commitment_v2_stake",
     );
@@ -917,7 +932,7 @@ fn fixture_v2_gossip_data_commitment_v2_stake() {
 #[test]
 fn fixture_v2_gossip_data_commitment_v2_pledge() {
     assert_json_fixture(
-        &GossipDataV2::CommitmentTransaction(fixture_commitment_v2_pledge()),
+        &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_pledge()),
         FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_PLEDGE,
         "v2_gossip_data_commitment_v2_pledge",
     );
@@ -926,7 +941,7 @@ fn fixture_v2_gossip_data_commitment_v2_pledge() {
 #[test]
 fn fixture_v2_gossip_data_commitment_v2_unpledge() {
     assert_json_fixture(
-        &GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unpledge()),
+        &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unpledge()),
         FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNPLEDGE,
         "v2_gossip_data_commitment_v2_unpledge",
     );
@@ -935,7 +950,7 @@ fn fixture_v2_gossip_data_commitment_v2_unpledge() {
 #[test]
 fn fixture_v2_gossip_data_commitment_v2_unstake() {
     assert_json_fixture(
-        &GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unstake()),
+        &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unstake()),
         FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNSTAKE,
         "v2_gossip_data_commitment_v2_unstake",
     );
@@ -944,7 +959,7 @@ fn fixture_v2_gossip_data_commitment_v2_unstake() {
 #[test]
 fn fixture_v2_gossip_data_commitment_v2_update_reward_address() {
     assert_json_fixture(
-        &GossipDataV2::CommitmentTransaction(fixture_commitment_v2_update_reward_address()),
+        &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_update_reward_address()),
         FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UPDATE_REWARD_ADDRESS,
         "v2_gossip_data_commitment_v2_update_reward_address",
     );
@@ -953,7 +968,7 @@ fn fixture_v2_gossip_data_commitment_v2_update_reward_address() {
 #[test]
 fn fixture_v2_gossip_data_block_header() {
     assert_json_fixture(
-        &GossipDataV2::BlockHeader(Arc::new(fixture_block_header())),
+        &wire::GossipDataV2::BlockHeader(fixture_block_header()),
         FIXTURE_V2_GOSSIP_DATA_BLOCK_HEADER,
         "v2_gossip_data_block_header",
     );
@@ -962,7 +977,7 @@ fn fixture_v2_gossip_data_block_header() {
 #[test]
 fn fixture_v2_gossip_data_block_body() {
     assert_json_fixture(
-        &GossipDataV2::BlockBody(Arc::new(fixture_block_body())),
+        &wire::GossipDataV2::BlockBody(fixture_block_body()),
         FIXTURE_V2_GOSSIP_DATA_BLOCK_BODY,
         "v2_gossip_data_block_body",
     );
@@ -971,7 +986,7 @@ fn fixture_v2_gossip_data_block_body() {
 #[test]
 fn fixture_v2_gossip_data_ingress_proof() {
     assert_json_fixture(
-        &GossipDataV2::IngressProof(fixture_ingress_proof()),
+        &wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
         FIXTURE_V2_GOSSIP_DATA_INGRESS_PROOF,
         "v2_gossip_data_ingress_proof",
     );
@@ -984,7 +999,7 @@ fn fixture_v2_gossip_data_ingress_proof() {
 #[test]
 fn fixture_v2_data_request_execution_payload() {
     assert_json_fixture(
-        &GossipDataRequestV2::ExecutionPayload(B256::from([0xEE; 32])),
+        &wire::GossipDataRequestV2::ExecutionPayload(B256::from([0xEE; 32])),
         FIXTURE_V2_DATA_REQUEST_EXECUTION_PAYLOAD,
         "v2_data_request_execution_payload",
     );
@@ -993,7 +1008,7 @@ fn fixture_v2_data_request_execution_payload() {
 #[test]
 fn fixture_v2_data_request_block_header() {
     assert_json_fixture(
-        &GossipDataRequestV2::BlockHeader(test_h256(0xBB)),
+        &wire::GossipDataRequestV2::BlockHeader(test_h256(0xBB)),
         FIXTURE_V2_DATA_REQUEST_BLOCK_HEADER,
         "v2_data_request_block_header",
     );
@@ -1002,7 +1017,7 @@ fn fixture_v2_data_request_block_header() {
 #[test]
 fn fixture_v2_data_request_block_body() {
     assert_json_fixture(
-        &GossipDataRequestV2::BlockBody(test_h256(0xBB)),
+        &wire::GossipDataRequestV2::BlockBody(test_h256(0xBB)),
         FIXTURE_V2_DATA_REQUEST_BLOCK_BODY,
         "v2_data_request_block_body",
     );
@@ -1011,7 +1026,7 @@ fn fixture_v2_data_request_block_body() {
 #[test]
 fn fixture_v2_data_request_chunk() {
     assert_json_fixture(
-        &GossipDataRequestV2::Chunk(test_h256(0xCC)),
+        &wire::GossipDataRequestV2::Chunk(test_h256(0xCC)),
         FIXTURE_V2_DATA_REQUEST_CHUNK,
         "v2_data_request_chunk",
     );
@@ -1020,7 +1035,7 @@ fn fixture_v2_data_request_chunk() {
 #[test]
 fn fixture_v2_data_request_transaction() {
     assert_json_fixture(
-        &GossipDataRequestV2::Transaction(test_h256(0xDD)),
+        &wire::GossipDataRequestV2::Transaction(test_h256(0xDD)),
         FIXTURE_V2_DATA_REQUEST_TRANSACTION,
         "v2_data_request_transaction",
     );
@@ -1033,10 +1048,10 @@ fn fixture_v2_data_request_transaction() {
 #[test]
 fn fixture_v2_gossip_request() {
     assert_json_fixture(
-        &GossipRequestV2 {
+        &wire::GossipRequestV2 {
             peer_id: test_peer_id(0xBB),
             miner_address: test_address(0xAA),
-            data: GossipDataV2::Chunk(Arc::new(fixture_unpacked_chunk())),
+            data: wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
         },
         FIXTURE_V2_GOSSIP_REQUEST,
         "v2_gossip_request",
@@ -1050,7 +1065,7 @@ fn fixture_v2_gossip_request() {
 #[test]
 fn fixture_handshake_request_v1() {
     assert_json_fixture(
-        &HandshakeRequestV1 {
+        &wire::HandshakeRequestV1 {
             version: Version::new(1, 2, 3),
             protocol_version: ProtocolVersion::V1,
             mining_address: test_address(0xAA),
@@ -1068,7 +1083,7 @@ fn fixture_handshake_request_v1() {
 #[test]
 fn fixture_handshake_request_v2() {
     assert_json_fixture(
-        &HandshakeRequestV2 {
+        &wire::HandshakeRequestV2 {
             version: Version::new(1, 2, 3),
             protocol_version: ProtocolVersion::V2,
             mining_address: test_address(0xAA),
@@ -1088,7 +1103,7 @@ fn fixture_handshake_request_v2() {
 #[test]
 fn fixture_handshake_response_v1() {
     assert_json_fixture(
-        &HandshakeResponseV1 {
+        &wire::HandshakeResponseV1 {
             version: Version::new(1, 2, 3),
             protocol_version: ProtocolVersion::V1,
             peers: vec![test_peer_address()],
@@ -1103,7 +1118,7 @@ fn fixture_handshake_response_v1() {
 #[test]
 fn fixture_handshake_response_v2() {
     assert_json_fixture(
-        &HandshakeResponseV2 {
+        &wire::HandshakeResponseV2 {
             version: Version::new(1, 2, 3),
             protocol_version: ProtocolVersion::V2,
             peers: vec![test_peer_address()],
@@ -1123,7 +1138,7 @@ fn fixture_handshake_response_v2() {
 #[test]
 fn fixture_gossip_response_accepted() {
     assert_json_fixture(
-        &GossipResponse::<()>::Accepted(()),
+        &wire::GossipResponse::<()>::Accepted(()),
         FIXTURE_GOSSIP_RESPONSE_ACCEPTED,
         "gossip_response_accepted",
     );
@@ -1132,7 +1147,7 @@ fn fixture_gossip_response_accepted() {
 #[test]
 fn fixture_gossip_response_rejected_handshake_required_none() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(None)),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(None)),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NONE,
         "gossip_response_rejected_handshake_required_none",
     );
@@ -1141,8 +1156,8 @@ fn fixture_gossip_response_rejected_handshake_required_none() {
 #[test]
 fn fixture_gossip_response_rejected_handshake_required_not_in_peer_list() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
+            wire::HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
         ))),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NOT_IN_PEER_LIST,
         "gossip_response_rejected_handshake_required_not_in_peer_list",
@@ -1152,8 +1167,8 @@ fn fixture_gossip_response_rejected_handshake_required_not_in_peer_list() {
 #[test]
 fn fixture_gossip_response_rejected_handshake_required_origin_mismatch() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
+            wire::HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
         ))),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_ORIGIN_MISMATCH,
         "gossip_response_rejected_handshake_required_origin_mismatch",
@@ -1163,8 +1178,8 @@ fn fixture_gossip_response_rejected_handshake_required_origin_mismatch() {
 #[test]
 fn fixture_gossip_response_rejected_handshake_required_unknown_miner() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::MinerAddressIsUnknown,
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
+            wire::HandshakeRequirementReason::MinerAddressIsUnknown,
         ))),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_UNKNOWN_MINER,
         "gossip_response_rejected_handshake_required_unknown_miner",
@@ -1174,7 +1189,7 @@ fn fixture_gossip_response_rejected_handshake_required_unknown_miner() {
 #[test]
 fn fixture_gossip_response_rejected_gossip_disabled() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::GossipDisabled),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::GossipDisabled),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_GOSSIP_DISABLED,
         "gossip_response_rejected_gossip_disabled",
     );
@@ -1183,7 +1198,7 @@ fn fixture_gossip_response_rejected_gossip_disabled() {
 #[test]
 fn fixture_gossip_response_rejected_invalid_data() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::InvalidData),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidData),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_DATA,
         "gossip_response_rejected_invalid_data",
     );
@@ -1192,7 +1207,7 @@ fn fixture_gossip_response_rejected_invalid_data() {
 #[test]
 fn fixture_gossip_response_rejected_rate_limited() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::RateLimited),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::RateLimited),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_RATE_LIMITED,
         "gossip_response_rejected_rate_limited",
     );
@@ -1201,7 +1216,7 @@ fn fixture_gossip_response_rejected_rate_limited() {
 #[test]
 fn fixture_gossip_response_rejected_unable_to_verify_origin() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::UnableToVerifyOrigin),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnableToVerifyOrigin),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_UNABLE_TO_VERIFY_ORIGIN,
         "gossip_response_rejected_unable_to_verify_origin",
     );
@@ -1210,7 +1225,7 @@ fn fixture_gossip_response_rejected_unable_to_verify_origin() {
 #[test]
 fn fixture_gossip_response_rejected_invalid_credentials() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::InvalidCredentials),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidCredentials),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_CREDENTIALS,
         "gossip_response_rejected_invalid_credentials",
     );
@@ -1219,7 +1234,7 @@ fn fixture_gossip_response_rejected_invalid_credentials() {
 #[test]
 fn fixture_gossip_response_rejected_protocol_mismatch() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::ProtocolMismatch),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::ProtocolMismatch),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_PROTOCOL_MISMATCH,
         "gossip_response_rejected_protocol_mismatch",
     );
@@ -1228,7 +1243,9 @@ fn fixture_gossip_response_rejected_protocol_mismatch() {
 #[test]
 fn fixture_gossip_response_rejected_unsupported_protocol_version() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::UnsupportedProtocolVersion(99)),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedProtocolVersion(
+            99,
+        )),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_PROTOCOL_VERSION,
         "gossip_response_rejected_unsupported_protocol_version",
     );
@@ -1237,7 +1254,7 @@ fn fixture_gossip_response_rejected_unsupported_protocol_version() {
 #[test]
 fn fixture_gossip_response_rejected_unsupported_feature() {
     assert_json_fixture(
-        &GossipResponse::<()>::Rejected(RejectionReason::UnsupportedFeature),
+        &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedFeature),
         FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_FEATURE,
         "gossip_response_rejected_unsupported_feature",
     );
