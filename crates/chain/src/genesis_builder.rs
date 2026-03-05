@@ -158,7 +158,8 @@ pub async fn build_signed_genesis_block(
         &config.consensus.genesis,
         reth_chain_spec.genesis_hash(),
         number_of_ingress_proofs_total,
-    );
+        config.consensus.hardforks.cascade.as_ref(),
+    )?;
 
     // 4. Set timestamp fields
     if config.consensus.genesis.last_epoch_hash != H256::zero() {
