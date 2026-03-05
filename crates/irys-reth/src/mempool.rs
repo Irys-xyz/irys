@@ -7,8 +7,8 @@ use alloy_consensus::Transaction as _;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
 use irys_types::UnixTimestamp;
-use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
 use irys_types::hardfork_config::IrysHardforkConfig;
+use irys_types::pd_handle::PdHandle;
 use reth::{
     api::FullNodeTypes,
     builder::{BuilderContext, components::PoolBuilder},
@@ -41,33 +41,33 @@ use crate::IrysEthereumNode;
 pub struct IrysPoolBuilder {
     /// Hardfork configuration for checking Sprite activation.
     hardfork_config: Arc<IrysHardforkConfig>,
-    /// PD chunk sender for mempool monitoring.
+    /// PD handle for mempool monitoring.
     /// The pool builder will spawn a monitoring task to detect
-    /// PD transactions and send messages to the PdChunkManager.
-    pd_chunk_sender: PdChunkSender,
+    /// PD transactions and provision/release chunks via the PdHandle.
+    pd_handle: PdHandle,
 }
 
 impl std::fmt::Debug for IrysPoolBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysPoolBuilder")
             .field("hardfork_config", &self.hardfork_config)
-            .field("pd_chunk_sender", &"<sender>")
+            .field("pd_handle", &self.pd_handle)
             .finish()
     }
 }
 
 impl IrysPoolBuilder {
     /// Creates a new pool builder with the given hardfork configuration.
-    pub fn new(hardfork_config: Arc<IrysHardforkConfig>, pd_chunk_sender: PdChunkSender) -> Self {
+    pub fn new(hardfork_config: Arc<IrysHardforkConfig>, pd_handle: PdHandle) -> Self {
         Self {
             hardfork_config,
-            pd_chunk_sender,
+            pd_handle,
         }
     }
 
-    /// Sets the PD chunk sender for mempool monitoring.
-    pub fn with_pd_chunk_sender(mut self, sender: PdChunkSender) -> Self {
-        self.pd_chunk_sender = sender;
+    /// Sets the PD handle for mempool monitoring.
+    pub fn with_pd_handle(mut self, handle: PdHandle) -> Self {
+        self.pd_handle = handle;
         self
     }
 }
@@ -205,12 +205,14 @@ where
         // Spawn PD transaction monitoring task
         {
             let pool_clone = transaction_pool.clone();
-            let sender = self.pd_chunk_sender;
+            let pd_handle = self.pd_handle;
             let hardfork_clone = hardfork_for_pd_monitor;
             ctx.task_executor()
                 .spawn_critical_with_graceful_shutdown_signal(
                     "pd transaction monitoring task",
-                    |shutdown| pd_transaction_monitor(pool_clone, sender, hardfork_clone, shutdown),
+                    |shutdown| {
+                        pd_transaction_monitor(pool_clone, pd_handle, hardfork_clone, shutdown)
+                    },
                 );
             info!(target: "reth::cli", "PD transaction monitoring task spawned");
         }
@@ -456,7 +458,7 @@ where
 /// - Performs cleanup of stale tracking data every 60s
 async fn pd_transaction_monitor<P>(
     pool: P,
-    chunk_sender: PdChunkSender,
+    pd_handle: PdHandle,
     hardfork_config: Arc<IrysHardforkConfig>,
     mut shutdown: GracefulShutdown,
 ) where
@@ -518,10 +520,7 @@ async fn pd_transaction_monitor<P>(
                                     chunk_specs_count = chunk_specs.len(),
                                     "New PD transaction detected, sending to chunk manager"
                                 );
-                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                    tx_hash,
-                                    chunk_specs,
-                                });
+                                pd_handle.store().provision_chunks(tx_hash, chunk_specs);
                             }
                         }
                     }
@@ -546,10 +545,7 @@ async fn pd_transaction_monitor<P>(
                                     chunk_specs_count = chunk_specs.len(),
                                     "New queued PD transaction detected, sending to chunk manager"
                                 );
-                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                    tx_hash,
-                                    chunk_specs,
-                                });
+                                pd_handle.store().provision_chunks(tx_hash, chunk_specs);
                             }
                         }
                     }
@@ -567,7 +563,7 @@ async fn pd_transaction_monitor<P>(
                         tx_hash = %tx_hash,
                         "PD transaction removed from pool, notifying chunk manager"
                     );
-                    let _ = chunk_sender.send(PdChunkMessage::TransactionRemoved { tx_hash });
+                    pd_handle.store().release_chunks(&tx_hash);
                 }
 
                 // Update known transactions

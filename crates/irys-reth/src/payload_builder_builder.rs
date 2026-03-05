@@ -1,9 +1,9 @@
 //! Payload component configuration for the Ethereum node.
 //! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
-use crate::evm::ConfigurePdChunkSender;
-use irys_types::chunk_provider::PdChunkSender;
+use crate::evm::ConfigurePdHandle;
 use irys_types::hardfork_config::IrysHardforkConfig;
+use irys_types::pd_handle::PdHandle;
 use reth_chainspec::{EthChainSpec as _, EthereumHardforks};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::EthPrimitives;
@@ -22,8 +22,8 @@ use crate::{IrysBuiltPayload, IrysPayloadAttributes, IrysPayloadBuilderAttribute
 pub struct IrysPayloadBuilderBuilder {
     pub max_pd_chunks_per_block: u64,
     pub hardforks: Arc<IrysHardforkConfig>,
-    /// PD chunk sender for querying readiness.
-    pub pd_chunk_sender: PdChunkSender,
+    /// PD handle for querying readiness.
+    pub pd_handle: PdHandle,
 }
 
 impl std::fmt::Debug for IrysPayloadBuilderBuilder {
@@ -31,7 +31,7 @@ impl std::fmt::Debug for IrysPayloadBuilderBuilder {
         f.debug_struct("IrysPayloadBuilderBuilder")
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
-            .field("pd_chunk_sender", &"<sender>")
+            .field("pd_handle", &self.pd_handle)
             .finish()
     }
 }
@@ -44,7 +44,7 @@ where
     Evm: ConfigureEvm<
             Primitives = PrimitivesTy<Types>,
             NextBlockEnvCtx = reth_evm::NextBlockEnvAttributes,
-        > + ConfigurePdChunkSender
+        > + ConfigurePdHandle
         + 'static,
     Types::Payload: PayloadTypes<
             BuiltPayload = IrysBuiltPayload,
@@ -64,10 +64,10 @@ where
         let chain = ctx.chain_spec().chain();
         let gas_limit = conf.gas_limit_for(chain);
 
-        // Configure evm_config for payload building — use PdChunkManager for chunk fetching.
+        // Configure evm_config for payload building — use PdHandle for chunk fetching.
         // Reth's ComponentsBuilder already cloned this config before passing it here, so
         // mutating it only affects the payload builder's copy (the executor retains None).
-        let evm_config = evm_config.with_pd_chunk_sender(self.pd_chunk_sender.clone());
+        let evm_config = evm_config.with_pd_handle(self.pd_handle.clone());
 
         Ok(crate::payload::IrysPayloadBuilder::new(
             ctx.provider().clone(),
@@ -76,7 +76,7 @@ where
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.max_pd_chunks_per_block,
             self.hardforks,
-            self.pd_chunk_sender,
+            self.pd_handle,
         ))
     }
 }

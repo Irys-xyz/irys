@@ -2,7 +2,7 @@
 
 use alloy_eips::eip2930::AccessListItem;
 use bytes::Bytes;
-use irys_types::chunk_provider::{ChunkConfig, ChunkTable, PdChunkSender};
+use irys_types::chunk_provider::{ChunkConfig, ChunkTable};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,9 +17,6 @@ pub struct PdContext {
     chunk_table: Arc<RwLock<Arc<ChunkTable>>>,
     /// Chunk configuration (size, etc.)
     chunk_config: ChunkConfig,
-    /// Optional sender for fetching chunks on demand (used during payload building).
-    /// Shared via Arc so it can be set after construction.
-    pd_chunk_sender: Arc<RwLock<Option<PdChunkSender>>>,
 }
 
 // Default Clone uses Arc::clone to share the same access_list storage
@@ -30,7 +27,6 @@ impl Clone for PdContext {
             access_list: Arc::clone(&self.access_list),
             chunk_table: Arc::clone(&self.chunk_table),
             chunk_config: self.chunk_config,
-            pd_chunk_sender: Arc::clone(&self.pd_chunk_sender),
         }
     }
 }
@@ -43,21 +39,18 @@ impl PdContext {
             access_list: Arc::new(RwLock::new(Vec::new())),
             chunk_table: Arc::new(RwLock::new(Arc::new(ChunkTable::new()))),
             chunk_config,
-            pd_chunk_sender: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Creates an independent clone with a NEW Arc<RwLock> for use in a new EVM instance.
     /// This ensures each EVM has its own access list storage (no cross-EVM contamination).
     /// The chunk table is cloned as a new Arc<RwLock> wrapping a clone of the inner Arc.
-    /// The pd_chunk_sender is shared (cloned Arc) so all EVMs use the same channel.
     #[must_use = "cloned context should be used for new EVM instance"]
     pub fn clone_for_new_evm(&self) -> Self {
         Self {
             access_list: Arc::new(RwLock::new(self.access_list.read().clone())),
             chunk_table: Arc::new(RwLock::new(Arc::clone(&*self.chunk_table.read()))),
             chunk_config: self.chunk_config,
-            pd_chunk_sender: Arc::clone(&self.pd_chunk_sender),
         }
     }
 
@@ -87,16 +80,6 @@ impl PdContext {
     /// Return the set of keys currently in the chunk table (for dedup in payload builder).
     pub fn chunk_table_keys(&self) -> HashSet<(u32, u64)> {
         self.chunk_table.read().keys().copied().collect()
-    }
-
-    /// Set the PD chunk sender for on-demand chunk fetching during payload building.
-    pub fn set_pd_chunk_sender(&self, sender: PdChunkSender) {
-        *self.pd_chunk_sender.write() = Some(sender);
-    }
-
-    /// Get a clone of the PD chunk sender if one is set.
-    pub fn pd_chunk_sender(&self) -> Option<PdChunkSender> {
-        self.pd_chunk_sender.read().clone()
     }
 
     /// Get chunk from the pre-loaded chunk table.

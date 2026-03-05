@@ -15,7 +15,7 @@ use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256, keccak256};
 use std::sync::LazyLock;
 
-use irys_types::chunk_provider::{ChunkTable, PdChunkMessage};
+use irys_types::chunk_provider::ChunkTable;
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::TxEnv;
@@ -407,8 +407,8 @@ pub struct IrysEvmConfig {
     pub inner: EthEvmConfig<ChainSpec, EthEvmFactory>,
     pub executor_factory: IrysBlockExecutorFactory,
     pub assembler: IrysBlockAssembler,
-    /// PD chunk sender for pre-loading chunks before block execution.
-    pub pd_chunk_sender: Option<irys_types::chunk_provider::PdChunkSender>,
+    /// PD handle for pre-loading chunks before block execution.
+    pub pd_handle: Option<irys_types::pd_handle::PdHandle>,
 }
 
 impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
@@ -424,7 +424,7 @@ impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
         payload: &'a ExecutionData,
     ) -> Result<reth_evm::ExecutionCtxFor<'a, Self>, Self::Error> {
         let inner = self.inner.context_for_payload(payload)?;
-        let chunk_table = self.preload_chunks_for_payload(payload);
+        let chunk_table = self.resolve_chunk_table_for_payload(payload);
         Ok(IrysBlockExecutionCtx { inner, chunk_table })
     }
 
@@ -468,7 +468,7 @@ impl ConfigureEvm for IrysEvmConfig {
         block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
     ) -> Result<IrysBlockExecutionCtx<'a>, Infallible> {
         let inner = self.inner.context_for_block(block)?;
-        let chunk_table = self.preload_chunks_for_block(block);
+        let chunk_table = self.resolve_chunk_table_for_block(block);
         Ok(IrysBlockExecutionCtx { inner, chunk_table })
     }
 
@@ -486,28 +486,41 @@ impl ConfigureEvm for IrysEvmConfig {
 }
 
 impl IrysEvmConfig {
-    /// Store the PD chunk sender for use in chunk pre-loading.
-    pub fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        // Also wire the sender into the EVM factory so per-tx preloading works during
-        // payload building (IrysEvm::transact_raw uses context.pd_chunk_sender()).
-        self.executor_factory
-            .evm_factory()
-            .set_pd_chunk_sender(sender.clone());
+    /// Store the PD handle for use in chunk pre-loading.
+    pub fn with_pd_handle(self, handle: irys_types::pd_handle::PdHandle) -> Self {
         Self {
-            pd_chunk_sender: Some(sender),
+            pd_handle: Some(handle),
             ..self
         }
     }
 
-    /// Pre-load all PD chunks referenced by transactions in a payload.
-    /// Used for the new_payload validation path.
-    fn preload_chunks_for_payload(&self, payload: &ExecutionData) -> Arc<ChunkTable> {
+    /// Resolve the chunk table for a payload.
+    /// First tries the ChunkTableStore side-channel (inserted by CL before engine API call),
+    /// then falls back to extracting keys from transactions and batch-loading.
+    fn resolve_chunk_table_for_payload(&self, payload: &ExecutionData) -> Arc<ChunkTable> {
         let timestamp = irys_types::UnixTimestamp::from_secs(payload.payload.timestamp());
         let hardfork_config = self.executor_factory.evm_factory().hardfork_config();
         if !hardfork_config.is_sprite_active(timestamp) {
             return Arc::new(HashMap::new());
         }
 
+        let Some(pd_handle) = &self.pd_handle else {
+            return Arc::new(HashMap::new());
+        };
+
+        // Compute the block hash from the payload for side-channel lookup.
+        // Try the ChunkTableStore first (populated by CL in block validation / production).
+        let block_hash = payload.payload.block_hash();
+        if let Some(table) = pd_handle.chunk_table_store().get(&block_hash) {
+            tracing::debug!(
+                table_size = table.len(),
+                %block_hash,
+                "resolve_chunk_table_for_payload: found in ChunkTableStore side-channel"
+            );
+            return table;
+        }
+
+        // Fallback: extract keys from payload transactions and batch-load.
         let chunk_config = self.executor_factory.evm_factory().context.chunk_config();
         let mut keys = HashSet::new();
         for raw_tx in payload.payload.transactions() {
@@ -534,24 +547,25 @@ impl IrysEvmConfig {
         tracing::debug!(
             keys_count = keys.len(),
             ?keys,
-            "preload_chunks_for_payload: collected chunk keys from payload txs"
+            "resolve_chunk_table_for_payload: collected chunk keys from payload txs (fallback)"
         );
 
         if keys.is_empty() {
             return Arc::new(HashMap::new());
         }
 
-        let table = self.batch_load_chunks(keys);
+        let keys_vec: Vec<(u32, u64)> = keys.into_iter().collect();
+        let table = pd_handle.store().get_chunks_batch(&keys_vec);
         tracing::debug!(
             table_size = table.len(),
-            "preload_chunks_for_payload: chunk table loaded"
+            "resolve_chunk_table_for_payload: chunk table loaded (fallback)"
         );
-        table
+        Arc::new(table)
     }
 
-    /// Pre-load all PD chunks referenced by transactions in a sealed block.
-    /// Used for the execute_block validation path.
-    fn preload_chunks_for_block(
+    /// Resolve the chunk table for a sealed block.
+    /// First tries the ChunkTableStore side-channel, then falls back to batch-loading.
+    fn resolve_chunk_table_for_block(
         &self,
         block: &SealedBlock<alloy_consensus::Block<TransactionSigned>>,
     ) -> Arc<ChunkTable> {
@@ -561,6 +575,22 @@ impl IrysEvmConfig {
             return Arc::new(HashMap::new());
         }
 
+        let Some(pd_handle) = &self.pd_handle else {
+            return Arc::new(HashMap::new());
+        };
+
+        // Try the ChunkTableStore first.
+        let block_hash = block.hash();
+        if let Some(table) = pd_handle.chunk_table_store().get(&block_hash) {
+            tracing::debug!(
+                table_size = table.len(),
+                %block_hash,
+                "resolve_chunk_table_for_block: found in ChunkTableStore side-channel"
+            );
+            return table;
+        }
+
+        // Fallback: extract keys from block transactions and batch-load.
         let chunk_config = self.executor_factory.evm_factory().context.chunk_config();
         let mut keys = HashSet::new();
         for tx in &block.body().transactions {
@@ -585,39 +615,23 @@ impl IrysEvmConfig {
             return Arc::new(HashMap::new());
         }
 
-        self.batch_load_chunks(keys)
-    }
-
-    /// Batch-fetch chunks by (ledger, offset) from the PD chunk manager.
-    fn batch_load_chunks(&self, keys: HashSet<(u32, u64)>) -> Arc<ChunkTable> {
-        match &self.pd_chunk_sender {
-            Some(sender) => {
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                let _ = sender.send(PdChunkMessage::GetChunksBatch {
-                    keys: keys.into_iter().collect(),
-                    response: resp_tx,
-                });
-                Arc::new(
-                    tokio::task::block_in_place(|| resp_rx.blocking_recv()).unwrap_or_default(),
-                )
-            }
-            None => Arc::new(HashMap::new()),
-        }
+        let keys_vec: Vec<(u32, u64)> = keys.into_iter().collect();
+        Arc::new(pd_handle.store().get_chunks_batch(&keys_vec))
     }
 }
 
-/// Marker trait for EVM configurations that can be switched to manager-mode PD chunk fetching.
+/// Marker trait for EVM configurations that can be configured with a PdHandle.
 ///
 /// Implement this for your EVM config type to allow the payload builder builder to wire
-/// the [`PdChunkSender`] after receiving the (cloned) EVM config from reth's component system.
-pub trait ConfigurePdChunkSender: Sized {
-    /// Configure `self` to use the given sender for PD chunk fetching.
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self;
+/// the [`PdHandle`] after receiving the (cloned) EVM config from reth's component system.
+pub trait ConfigurePdHandle: Sized {
+    /// Configure `self` to use the given PdHandle for PD chunk fetching.
+    fn with_pd_handle(self, handle: irys_types::pd_handle::PdHandle) -> Self;
 }
 
-impl ConfigurePdChunkSender for IrysEvmConfig {
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        Self::with_pd_chunk_sender(self, sender)
+impl ConfigurePdHandle for IrysEvmConfig {
+    fn with_pd_handle(self, handle: irys_types::pd_handle::PdHandle) -> Self {
+        Self::with_pd_handle(self, handle)
     }
 }
 
@@ -649,12 +663,6 @@ impl IrysEvmFactory {
     /// Provides access to the hardfork config.
     pub fn hardfork_config(&self) -> &irys_types::hardfork_config::IrysHardforkConfig {
         &self.hardfork_config
-    }
-
-    /// Set the PD chunk sender on the factory's shared context.
-    /// All EVMs created by this factory will inherit this sender.
-    pub fn set_pd_chunk_sender(&self, sender: irys_types::chunk_provider::PdChunkSender) {
-        self.context.set_pd_chunk_sender(sender);
     }
 
     /// Creates a new factory for testing with Sprite hardfork enabled from genesis.
@@ -976,61 +984,9 @@ where
 
         // PD (Programmable Data) features are only available when Sprite hardfork is active
         if self.is_sprite_active {
-            // Incremental per-tx chunk preloading for payload building.
-            // When a pd_chunk_sender is available (payload builder path), we detect PD
-            // transactions and fetch any chunks not already in the chunk table.
-            if let Some(sender) = self.context.pd_chunk_sender()
-                && detect_and_decode_pd_header(&tx.data)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            {
-                let chunk_config = self.context.chunk_config();
-                let existing_keys = self.context.chunk_table_keys();
-                let specs = extract_pd_chunk_specs(&tx.access_list);
-                let all_keys: Vec<(u32, u64)> = specs
-                    .iter()
-                    .flat_map(|spec| specs_to_ledger_offsets(spec, &chunk_config))
-                    .collect();
-                let new_keys: HashSet<(u32, u64)> = all_keys
-                    .iter()
-                    .copied()
-                    .filter(|k| !existing_keys.contains(k))
-                    .collect();
-
-                tracing::debug!(
-                    specs_count = specs.len(),
-                    all_keys_count = all_keys.len(),
-                    existing_keys_count = existing_keys.len(),
-                    new_keys_count = new_keys.len(),
-                    ?new_keys,
-                    "PD per-tx preload: extracted chunk keys"
-                );
-
-                if !new_keys.is_empty() {
-                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                    let _ = sender.send(PdChunkMessage::GetChunksBatch {
-                        keys: new_keys.into_iter().collect(),
-                        response: resp_tx,
-                    });
-                    match tokio::task::block_in_place(|| resp_rx.blocking_recv()) {
-                        Ok(new_chunks) => {
-                            let loaded_count = new_chunks.len();
-                            self.context.extend_chunk_table(new_chunks);
-                            tracing::debug!(
-                                loaded_count,
-                                "PD per-tx preload: loaded chunks into table"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "PD per-tx preload: failed to receive chunks from PD service"
-                            );
-                        }
-                    }
-                }
-            }
+            // All PD chunks are now pre-loaded before block execution via
+            // resolve_chunk_table_for_payload / resolve_chunk_table_for_block.
+            // No per-tx incremental loading needed.
 
             // Update EVM's PdContext with transaction access_list for PD precompile
             // Each EVM has its own PdContext (via clone), so this is thread-safe
@@ -1045,8 +1001,7 @@ where
             // Layout: [magic][version:u16][borsh header][rest]
             let pd_header_result = crate::pd_tx::detect_and_decode_pd_header(&tx.data)
                 .map_err(|e| EVMError::Custom(format!("PD header parse error: {e}")))?;
-            if let Some((pd_header, consumed)) = pd_header_result
-            {
+            if let Some((pd_header, consumed)) = pd_header_result {
                 // Compute PD fees based on header values. Always derive PD chunk count from access list.
                 let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
                 let chunks = U256::from(chunks_u64);
