@@ -705,7 +705,7 @@ async fn get_publish_txs_and_proofs(
             .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
 
         // Loop through all the pending tx to see which haven't been promoted
-        let txs = get_data_txs(ctx, publish_txids.clone()).await;
+        let txs = get_data_txs(ctx, publish_txids.clone()).await?;
 
         // Note: get_data_tx_in_parallel_inner() read from both the mempool and
         //       db as publishing can happen to a tx that is no longer in the mempool
@@ -1079,7 +1079,7 @@ async fn get_pending_submit_ledger_txs(
 async fn get_data_txs(
     ctx: &TxSelectionContext<'_>,
     txids: Vec<H256>,
-) -> Vec<Option<DataTransactionHeader>> {
+) -> eyre::Result<Vec<Option<DataTransactionHeader>>> {
     // Batch mempool lookup: single READ lock for all txids
     let mempool_results = ctx
         .mempool_state
@@ -1096,31 +1096,29 @@ async fn get_data_txs(
         }
 
         // Fall back to DB for txs not in mempool
-        let db_result = ctx
+        let inner_result = ctx
             .db
             .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
             .map_err(|e| {
                 warn!("Failed to open DB read transaction: {}", e);
-                e
-            })
-            .ok()
-            .and_then(|result| match result {
-                Ok(Some(tx_header)) => {
-                    trace!("Got tx {} from DB", tx_id);
-                    Some(tx_header)
-                }
-                Ok(None) => {
-                    debug!("Tx {} not found in DB", tx_id);
-                    None
-                }
-                Err(e) => {
-                    warn!("DB error reading tx {}: {}", tx_id, e);
-                    None
-                }
-            });
+                eyre::eyre!("Failed to open DB read transaction: {}", e)
+            })?;
 
-        found_txs.push(db_result);
+        match inner_result {
+            Ok(Some(tx_header)) => {
+                trace!("Got tx {} from DB", tx_id);
+                found_txs.push(Some(tx_header));
+            }
+            Ok(None) => {
+                debug!("Tx {} not found in DB", tx_id);
+                found_txs.push(None);
+            }
+            Err(e) => {
+                warn!("DB error reading tx {}: {}", tx_id, e);
+                return Err(eyre::eyre!("DB error reading tx {}: {}", tx_id, e));
+            }
+        }
     }
 
-    found_txs
+    Ok(found_txs)
 }
