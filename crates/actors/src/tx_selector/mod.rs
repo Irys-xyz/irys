@@ -1076,50 +1076,55 @@ async fn get_data_txs(
         .batch_valid_submit_ledger_tx_cloned(&txids)
         .await;
 
+    // Single DB read transaction for all txids. Even mempool hits may need fresh
+    // metadata (included/promoted heights) from DB because confirmation metadata
+    // is written to DB first, while mempool updates arrive asynchronously via a
+    // queued BlockConfirmed message.
+    let db_results: Vec<Result<Option<DataTransactionHeader>, _>> = ctx
+        .db
+        .view(|read_tx| {
+            txids
+                .iter()
+                .map(|tx_id| tx_header_by_txid(read_tx, tx_id))
+                .collect::<Vec<_>>()
+        })
+        .map_err(|e| {
+            warn!("Failed to open DB read transaction: {}", e);
+            eyre::eyre!("Failed to open DB read transaction: {}", e)
+        })?;
+
     let mut found_txs: Vec<Option<DataTransactionHeader>> = Vec::with_capacity(txids.len());
+    for ((tx_id, mempool_result), db_result) in txids
+        .iter()
+        .zip(mempool_results.into_iter())
+        .zip(db_results.into_iter())
+    {
+        let db_header = match db_result {
+            Ok(header) => header,
+            Err(e) => {
+                warn!("DB error reading tx {}: {}", tx_id, e);
+                return Err(eyre::eyre!("DB error reading tx {}: {}", tx_id, e));
+            }
+        };
 
-    // Collect indices and tx_ids for mempool misses that need DB fallback
-    let mut db_miss_indices = Vec::new();
-    for (i, (tx_id, mempool_result)) in txids.iter().zip(mempool_results).enumerate() {
-        if let Some(tx_header) = mempool_result {
-            trace!("Got tx {} from mempool", tx_id);
-            found_txs.push(Some(tx_header));
-        } else {
-            db_miss_indices.push(i);
-            found_txs.push(None); // placeholder, filled below
-        }
-    }
-
-    // Batch DB fallback: single read transaction for all misses
-    if !db_miss_indices.is_empty() {
-        let miss_ids: Vec<H256> = db_miss_indices.iter().map(|&i| txids[i]).collect();
-        let db_results: Vec<Result<Option<DataTransactionHeader>, _>> = ctx
-            .db
-            .view(|read_tx| {
-                miss_ids
-                    .iter()
-                    .map(|tx_id| tx_header_by_txid(read_tx, tx_id))
-                    .collect::<Vec<_>>()
-            })
-            .map_err(|e| {
-                warn!("Failed to open DB read transaction: {}", e);
-                eyre::eyre!("Failed to open DB read transaction: {}", e)
-            })?;
-
-        for (&idx, result) in db_miss_indices.iter().zip(db_results) {
-            let tx_id = &txids[idx];
-            match result {
-                Ok(Some(tx_header)) => {
-                    trace!("Got tx {} from DB", tx_id);
-                    found_txs[idx] = Some(tx_header);
-                }
-                Ok(None) => {
-                    debug!("Tx {} not found in DB", tx_id);
-                }
-                Err(e) => {
-                    warn!("DB error reading tx {}: {}", tx_id, e);
-                    return Err(eyre::eyre!("DB error reading tx {}: {}", tx_id, e));
-                }
+        match (mempool_result, db_header) {
+            (Some(mut mempool_header), Some(db_header)) => {
+                trace!("Got tx {} from mempool; overlaying DB metadata", tx_id);
+                let merged = mempool_header.metadata().merge(db_header.metadata());
+                mempool_header.set_metadata(merged);
+                found_txs.push(Some(mempool_header));
+            }
+            (Some(mempool_header), None) => {
+                trace!("Got tx {} from mempool", tx_id);
+                found_txs.push(Some(mempool_header));
+            }
+            (None, Some(db_header)) => {
+                trace!("Got tx {} from DB", tx_id);
+                found_txs.push(Some(db_header));
+            }
+            (None, None) => {
+                debug!("Tx {} not found in DB", tx_id);
+                found_txs.push(None);
             }
         }
     }
