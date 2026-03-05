@@ -90,7 +90,17 @@ pub async fn select_best_txs(
         );
 
         // Truncate to only include entries up to and including the parent block
-        let canonical = full_canonical[..=parent_pos.unwrap()].to_vec();
+        let parent_pos = parent_pos.unwrap();
+        if parent_pos != full_canonical.len() - 1 {
+            warn!(
+                block.parent_block_hash = ?parent_block_hash,
+                block.canonical_tip = ?full_canonical.last().map(BlockTreeEntry::block_hash),
+                block.parent_pos = parent_pos,
+                block.canonical_len = full_canonical.len(),
+                "parent_block_hash is not the canonical tip, truncating chain for consistent state"
+            );
+        }
+        let canonical = full_canonical[..=parent_pos].to_vec();
 
         let block = tree
             .get_block(&parent_block_hash)
