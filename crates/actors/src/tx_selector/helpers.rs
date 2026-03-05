@@ -60,6 +60,8 @@ pub(crate) async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     let signers: Vec<IrysAddress> = txs
         .iter()
         .map(irys_types::IrysTransactionCommon::signer)
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
     reth_adapter
         .reth_node
