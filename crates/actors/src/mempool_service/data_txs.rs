@@ -262,8 +262,9 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        // Get the authoritative EMA pricing and latest block timestamp from canonical tip
-        let (ema_snapshot, latest_block_timestamp_secs) = {
+        // Get the authoritative EMA pricing, latest block timestamp, and height from canonical tip
+        // All captured from the same read guard to avoid mixing data from different chain states.
+        let (ema_snapshot, latest_block_timestamp_secs, latest_height) = {
             let tree = self.block_tree_read_guard.read();
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical
@@ -272,20 +273,12 @@ impl Inner {
             let ema = tree
                 .get_ema_snapshot(&last_block_entry.block_hash())
                 .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
-            // Convert block timestamp from millis to seconds
             let timestamp_secs = last_block_entry.header().timestamp_secs();
-            (ema, timestamp_secs)
+            let height = last_block_entry.height();
+            (ema, timestamp_secs, height)
         };
 
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
-
-        // Calculate expected fees using the authoritative EMA price
-        let latest_height = self
-            .block_tree_read_guard
-            .latest_block_height()
-            .ok_or_else(|| {
-                TxIngressError::Other("empty canonical chain in block tree".to_owned())
-            })?;
         let next_block_height = latest_height + 1;
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
             next_block_height,

@@ -74,18 +74,23 @@ pub async fn select_best_txs(
     ) = {
         let tree = ctx.block_tree.read();
 
-        // Get the canonical chain for use in get_publish_txs_and_proofs
-        let (canonical, _) = tree.get_canonical_chain();
+        // Get the canonical chain bounded by the parent block to avoid including
+        // blocks beyond the parent when building on a non-tip parent.
+        let (full_canonical, _) = tree.get_canonical_chain();
+
+        let parent_pos = full_canonical
+            .iter()
+            .position(|entry| entry.block_hash() == parent_block_hash);
 
         eyre::ensure!(
-            // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
-            canonical
-                .iter()
-                .any(|entry| entry.block_hash() == parent_block_hash),
+            parent_pos.is_some(),
             "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
             parent_block_hash,
-            canonical.last().map(BlockTreeEntry::block_hash)
+            full_canonical.last().map(BlockTreeEntry::block_hash)
         );
+
+        // Truncate to only include entries up to and including the parent block
+        let canonical = full_canonical[..=parent_pos.unwrap()].to_vec();
 
         let block = tree
             .get_block(&parent_block_hash)
@@ -285,7 +290,7 @@ pub async fn select_best_txs(
                 tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
                 tx.validation_failed_reason = "insufficient_funds",
-                "Data transaction failed funding check"
+                "Commitment failed funding check"
             );
             continue;
         }
@@ -716,8 +721,7 @@ async fn get_publish_txs_and_proofs(
             },
             ctx.db,
         )
-        .await
-        .unwrap_or(vec![]);
+        .await?;
 
         // Sort the resulting publish_txs & proofs
         tx_headers.sort_by(|a, b| a.id.cmp(&b.id));

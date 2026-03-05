@@ -1481,10 +1481,15 @@ impl IrysNode {
             .send_traced(RethServiceMessage::GetPeeringInfo {
                 response: peering_tx,
             })
-            .expect("Reth service channel should be open");
-        let reth_peering = peering_rx
-            .await
-            .expect("Reth service to respond with peering info")?;
+            .map_err(|e| eyre::eyre!("Failed to send GetPeeringInfo to Reth service: {}", e))?;
+        let reth_peering = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            peering_rx,
+        )
+        .await
+        .map_err(|_| eyre::eyre!("Timed out waiting for Reth peering info (30s)"))?
+        .map_err(|_| eyre::eyre!("Reth service channel closed before responding with peering info"))?
+        ?;
 
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here

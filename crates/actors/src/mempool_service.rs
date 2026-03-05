@@ -564,7 +564,7 @@ pub(crate) fn validate_tx_signature<
     tx: &T,
 ) -> Result<(), TxIngressError> {
     if tx.is_signature_valid() {
-        info!(
+        debug!(
             "Tx {} signature is valid for signer {}",
             &tx.id(),
             &tx.signer()

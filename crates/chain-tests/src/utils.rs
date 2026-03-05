@@ -2126,6 +2126,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
+        // Derive the timestamp from the parent block rather than wall-clock time
+        // to avoid test/production divergence.
+        let parent_timestamp = {
+            let tree = self.node_ctx.block_tree_guard.read();
+            tree.get_block(&parent_block_hash)
+                .expect("parent block should exist in block tree")
+                .timestamp_secs()
+        };
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &self.node_ctx.block_tree_guard,
             db: &self.node_ctx.db,
@@ -2136,7 +2144,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         irys_actors::tx_selector::select_best_txs(
             parent_block_hash,
-            irys_types::UnixTimestamp::now().expect("valid system time"),
+            parent_timestamp,
             &ctx,
         )
         .await

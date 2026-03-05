@@ -2864,6 +2864,44 @@ pub fn get_assigned_ingress_proofs(
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
 
+    //  a) Get the block hashes from the cached data_root (invariant across all proofs)
+    let block_hashes = db
+        .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+        .map_err(|e| PreValidationError::DatabaseError {
+            error: format!(
+                "Failed to open DB read tx for data_root {} (tx_id {}): {}",
+                tx_header.data_root, tx_header.id, e
+            ),
+        })?
+        .map_err(|e| PreValidationError::DatabaseError {
+            error: format!(
+                "DB query failed for data_root {} (tx_id {}): {}",
+                tx_header.data_root, tx_header.id, e
+            ),
+        })?
+        .ok_or_else(|| PreValidationError::DatabaseError {
+            error: format!(
+                "CachedDataRoot not found for data_root {} (tx_id {})",
+                tx_header.data_root, tx_header.id
+            ),
+        })?
+        .block_set;
+
+    //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
+    let mut block_ranges = Vec::new();
+    for block_hash in block_hashes.iter() {
+        match get_ledger_range(block_hash, block_tree, db) {
+            Ok(Some(block_range)) => block_ranges.push(block_range),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                    "Failed to get ledger range for block {}: {}",
+                    block_hash, e
+                )));
+            }
+        }
+    }
+
     // Loop through all the ingress proofs for the published transaction and pre-validate them
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
@@ -2875,34 +2913,6 @@ pub fn get_assigned_ingress_proofs(
             })?;
 
         // 1.) is the proof from a miner assigned to store the data in the submit ledger?
-
-        //  a) Get the block hashes from the cached data_root
-        let block_hashes = db
-            .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
-            .expect("creating a read tx should succeed")
-            .expect("db query should succeed")
-            .unwrap_or_else(|| {
-                panic!(
-                    "CachedDataRoot should be found for data_root {} (tx_id {})",
-                    tx_header.data_root, tx_header.id
-                )
-            })
-            .block_set;
-
-        //  b) Get the submit ledger offset intervals for each of the blocks
-        let mut block_ranges = Vec::new();
-        for block_hash in block_hashes.iter() {
-            match get_ledger_range(block_hash, block_tree, db) {
-                Ok(Some(block_range)) => block_ranges.push(block_range),
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(PreValidationError::BlockBoundsLookupError(format!(
-                        "Failed to get ledger range for block {}: {}",
-                        block_hash, e
-                    )));
-                }
-            }
-        }
 
         //  c) Get the slots the proof address is assigned to store
         let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
@@ -2956,19 +2966,28 @@ fn get_ledger_range(
     };
     let prev_block_hash = block.previous_block_hash;
 
+    let block_total_chunks = block.data_ledgers[DataLedger::Submit].total_chunks;
+
     if block.height == 0 {
+        if block_total_chunks == 0 {
+            return Ok(None);
+        }
         Ok(Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(0),
-            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+            LedgerChunkOffset::from(block_total_chunks - 1),
         ))))
     } else {
         let prev_block = match get_block_by_hash(&prev_block_hash, block_tree, db)? {
             Some(b) => b,
             None => return Ok(None),
         };
+        let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
+        if block_total_chunks == 0 || block_total_chunks <= prev_total_chunks {
+            return Ok(None);
+        }
         Ok(Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
-            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+            LedgerChunkOffset::from(prev_total_chunks),
+            LedgerChunkOffset::from(block_total_chunks - 1),
         ))))
     }
 }
