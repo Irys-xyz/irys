@@ -827,10 +827,7 @@ mod tests {
         insert_commitment_tx, tables::IrysTables,
     };
 
-    use super::{
-        insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid,
-        tx_header_by_txid_canonical,
-    };
+    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
@@ -998,7 +995,10 @@ mod tests {
             let result = db
                 .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
                 .unwrap();
-            assert!(result.is_none(), "tx at unmigrated height should be rejected");
+            assert!(
+                result.is_none(),
+                "tx at unmigrated height should be rejected"
+            );
         }
     }
 }
