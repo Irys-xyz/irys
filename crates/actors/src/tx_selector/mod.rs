@@ -824,15 +824,10 @@ async fn get_publish_txs_and_proofs(
             }
 
             // Check for minimum number of ingress proofs
-            let total_miners = epoch_snapshot.commitment_state.stake_commitments.len();
-
-            // Take the smallest value, the configured total proofs count or the number
-            // of staked miners that can produce a valid proof.
             let number_of_ingress_proofs_total = ctx
                 .config
                 .number_of_ingress_proofs_total_at(current_timestamp);
-            let proofs_per_tx =
-                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
+            let proofs_per_tx = number_of_ingress_proofs_total as usize;
 
             if all_proofs.len() < proofs_per_tx {
                 info!(

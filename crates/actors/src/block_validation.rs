@@ -2327,19 +2327,10 @@ pub async fn data_txs_are_valid(
         // Compute the expected total number of proofs based on the number of
         // publish_tx and the number of proofs_per_tx
         let expected_proof_count = {
-            let total_miners = parent_epoch_snapshot
-                .commitment_state
-                .stake_commitments
-                .len();
-
-            // Take the smallest value, the configured proof count or the number
-            // of staked miners that can produce a valid proof.
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            let proofs_per_tx =
-                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
-            publish_txs.len() * proofs_per_tx
+            publish_txs.len() * number_of_ingress_proofs_total as usize
         };
 
         if proofs_list.len() != expected_proof_count {
