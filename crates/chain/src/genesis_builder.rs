@@ -17,11 +17,9 @@ use serde::{Deserialize, Serialize};
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
-    calculate_initial_difficulty,
-    chainspec::irys_chain_spec,
-    irys::IrysSigner,
-    CommitmentTransaction, Config, H256, H256List, IrysBlockHeader, SystemLedger,
-    SystemTransactionLedger, UnixTimestamp, UnixTimestampMs, U256,
+    calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
+    CommitmentTransaction, Config, H256List, IrysBlockHeader, SystemLedger,
+    SystemTransactionLedger, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -152,8 +150,8 @@ pub async fn build_signed_genesis_block(
     )?;
 
     // 3. Build unsigned genesis block
-    let number_of_ingress_proofs_total = config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
+    let number_of_ingress_proofs_total =
+        config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
     let mut genesis_block = build_unsigned_irys_genesis_block(
         &config.consensus.genesis,
         reth_chain_spec.genesis_hash(),

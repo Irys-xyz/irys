@@ -31,8 +31,8 @@ use irys_actors::{
 };
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::db::RethDbWrapper;
 use irys_database::database;
+use irys_database::db::RethDbWrapper;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -59,8 +59,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256,
-    app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
@@ -576,7 +575,7 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
-        use crate::genesis_builder::{GenesisMinerEntry, build_signed_genesis_block};
+        use crate::genesis_builder::{build_signed_genesis_block, GenesisMinerEntry};
 
         // Build a single-miner entry from the node's own config
         let storage_submodule_config =

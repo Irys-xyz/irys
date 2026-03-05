@@ -73,7 +73,7 @@ pub fn load_genesis_commitments_from_disk(
 ) -> std::io::Result<Vec<CommitmentTransaction>> {
     let file = File::open(Path::new(base_directory).join(GENESIS_COMMITMENTS_FILENAME))?;
     let reader = std::io::BufReader::new(file);
-    let commitments: Vec<CommitmentTransaction> = serde_json::from_reader(reader)
-        .expect("genesis_commitments.json should be valid JSON");
+    let commitments: Vec<CommitmentTransaction> =
+        serde_json::from_reader(reader).expect("genesis_commitments.json should be valid JSON");
     Ok(commitments)
 }
