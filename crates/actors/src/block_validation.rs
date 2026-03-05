@@ -2896,13 +2896,13 @@ pub fn get_assigned_ingress_proofs(
         })?
         .block_set;
 
+    // Empty block_set is valid for single-block promotion: the data_root hasn't
+    // been included in any confirmed block yet.  With no block_ranges, no proofs
+    // will be classified as "assigned" and assigned_miners stays 0.  The caller
+    // clamps expected_assigned_proofs to 0, so all proofs count as unassigned and
+    // only the total-proof-count gate applies.
     if block_hashes.is_empty() {
-        return Err(PreValidationError::DatabaseError {
-            error: format!(
-                "block_set is empty for data_root {} (tx_id {}), cannot determine assigned miners",
-                tx_header.data_root, tx_header.id
-            ),
-        });
+        return Ok((vec![], 0));
     }
 
     //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
