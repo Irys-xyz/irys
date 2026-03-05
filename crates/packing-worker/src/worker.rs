@@ -68,7 +68,7 @@ mod tests {
     use crate::{api::PackingWorkerInfo, worker::start_worker};
 
     #[tokio::test]
-    async fn heavy_packing_worker_standalone_test() -> eyre::Result<()> {
+    async fn heavy4_packing_worker_standalone_test() -> eyre::Result<()> {
         initialize_tracing();
         let config = PackingWorkerConfig {
             bind_port: 0,
@@ -153,7 +153,8 @@ mod tests {
 
         assert_eq!(remote_packed, local_packed);
 
-        tx.send(irys_types::ShutdownReason::TestComplete).await?;
+        tx.send(irys_types::ShutdownReason::ServiceCompleted("test".into()))
+            .await?;
         exit_handle.await??;
         Ok(())
     }

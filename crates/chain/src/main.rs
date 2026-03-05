@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
+use tokio::time::sleep;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -19,6 +22,11 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 async fn main() -> eyre::Result<()> {
     // Load .env file if present (silently ignore if not found)
     let _ = dotenvy::dotenv();
+
+    if cfg!(debug_assertions) {
+        eprintln!("WARNING: cfg!(debug_assertions) is TRUE. this setting toggles certain performance and durability settings to improve test performance, which is detrimental to production usecases. RECOMPILE WITH --release, or wait 5 seconds.");
+        sleep(Duration::from_secs(5)).await;
+    }
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
@@ -60,23 +68,21 @@ async fn main() -> eyre::Result<()> {
         .await?;
     handle.start_mining()?;
 
-    // Await reth thread completion asynchronously
-    // Brief non-contended lock to extract the oneshot receiver.
+    // Await lifecycle task completion asynchronously
+    // Brief non-contended lock to extract the JoinHandle.
     // std::sync::Mutex is intentional: held only for .take(), no contention.
-    let reth_done_rx = handle.reth_done_rx.lock().unwrap().take();
-    let shutdown_reason = match reth_done_rx {
-        Some(rx) => match rx.await {
+    let lifecycle_handle = handle.lifecycle_handle.lock().unwrap().take();
+    let shutdown_reason = match lifecycle_handle {
+        Some(jh) => match jh.await {
             Ok(reason) => reason,
-            Err(_) => {
-                error!("Reth completion sender dropped without sending (thread may have panicked)");
-                ShutdownReason::FatalError(
-                    "Reth completion sender dropped without sending".to_string(),
-                )
+            Err(e) => {
+                error!("Lifecycle task panicked: {:?}", e);
+                ShutdownReason::FatalError("Lifecycle task panicked".to_string())
             }
         },
         None => {
-            error!("Reth completion receiver was None");
-            ShutdownReason::FatalError("Reth completion receiver was None".to_string())
+            error!("Lifecycle handle was None");
+            ShutdownReason::FatalError("Lifecycle handle was None".to_string())
         }
     };
 

@@ -29,11 +29,11 @@ where
         tokio::select! {
             _ = ctrl_c => {
                 trace!("Received ctrl-c");
-                Ok(irys_types::ShutdownReason::Signal("SIGINT".to_string()))
+                Ok(irys_types::ShutdownReason::CtrlC)
             },
             _ = sigterm => {
                 trace!("Received SIGTERM");
-                Ok(irys_types::ShutdownReason::Signal("SIGTERM".to_string()))
+                Ok(irys_types::ShutdownReason::SigTerm)
             },
             reason = termination_message => {
                 if let Some(reason) = reason {
@@ -41,7 +41,7 @@ where
                     Ok(reason)
                 } else {
                     trace!("Received termination message (channel closed)");
-                    Ok(irys_types::ShutdownReason::Signal("channel closed".to_string()))
+                    Ok(irys_types::ShutdownReason::ShutdownChannelClosed)
                 }
             },
             res = fut => {
@@ -61,7 +61,7 @@ where
         tokio::select! {
             _ = ctrl_c => {
                 trace!("Received ctrl-c");
-                return Ok(irys_types::ShutdownReason::Signal("SIGINT".to_string()))
+                return Ok(irys_types::ShutdownReason::CtrlC)
 
             },
             reason = channel.recv() => {
@@ -70,7 +70,7 @@ where
                     return Ok(reason)
                 } else {
                     trace!("Received shutdown message (channel closed)");
-                    return Ok(irys_types::ShutdownReason::Signal("channel closed".to_string()))
+                    return Ok(irys_types::ShutdownReason::ShutdownChannelClosed)
                 }
             },
             res = fut =>  {
