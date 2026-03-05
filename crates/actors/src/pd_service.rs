@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod provisioning;
+pub mod store;
 
 use cache::{ChunkCache, ChunkKey};
 use irys_types::chunk_provider::{ChunkTable, PdChunkMessage, PdChunkReceiver, RethChunkProvider};
