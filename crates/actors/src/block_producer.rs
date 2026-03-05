@@ -183,6 +183,8 @@ pub struct BlockProducerInner {
     pub block_index: BlockIndex,
     /// Read guard for mempool state
     pub mempool_guard: MempoolReadGuard,
+    /// PD handle for pre-building chunk tables before new_payload
+    pub pd_handle: Option<irys_types::pd_handle::PdHandle>,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
@@ -1004,6 +1006,21 @@ pub trait BlockProdStrategy {
                     evm_block_hash, e
                 )
             });
+        // Pre-build the chunk table so the EVM re-execution finds it in the side-channel.
+        if let Some(pd_handle) = &self.inner().pd_handle {
+            let chunk_config = pd_handle.store().config();
+            irys_reth::pd_tx::prebuild_chunk_table(
+                pd_handle,
+                evm_block_hash,
+                &payload
+                    .execution_payload
+                    .payload_inner
+                    .payload_inner
+                    .transactions,
+                &chunk_config,
+            );
+        }
+
         let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),

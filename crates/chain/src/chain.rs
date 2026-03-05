@@ -1645,6 +1645,50 @@ impl IrysNode {
         )));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
+        // Create PdHandle early so it's available for both the validation service and reth.
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+        let chunk_table_store = irys_types::chunk_provider::ChunkTableStore::new();
+        let pd_chunk_store = irys_actors::pd_service::store::PdChunkStoreHandle::new(
+            irys_actors::pd_service::store::PdChunkStore::new(chunk_provider.clone()),
+        );
+        let pd_handle =
+            irys_types::pd_handle::PdHandle::new(chunk_table_store, Arc::new(pd_chunk_store));
+
+        // Send PdHandle to the reth thread (it's awaiting this before starting the node).
+        pd_handle_tx
+            .send(pd_handle.clone())
+            .expect("PdHandle receiver must not be dropped");
+        debug!("PD handle initialized and sent to reth thread");
+
+        // Spawn a lightweight block-height expiration task (replaces old PdService).
+        {
+            let pd_handle_for_expiry = pd_handle.clone();
+            let mut block_state_rx = service_senders.subscribe_block_state_updates();
+            runtime_handle.spawn(async move {
+                loop {
+                    match block_state_rx.recv().await {
+                        Ok(event) if !event.discarded => {
+                            pd_handle_for_expiry.store().expire_at_height(event.height);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // Spawn periodic ChunkTableStore TTL cleanup (evicts stale entries every 60s).
+        {
+            let cts = pd_handle.chunk_table_store().clone();
+            runtime_handle.spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    cts.evict_stale(std::time::Duration::from_secs(120));
+                }
+            });
+        }
+
         // Spawn the validation service
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
@@ -1657,6 +1701,7 @@ impl IrysNode {
             irys_db.clone(),
             execution_payload_cache.clone(),
             receivers.validation_service,
+            Some(pd_handle.clone()),
             runtime_handle.clone(),
             sync_state.clone(),
         );
@@ -1738,6 +1783,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             block_index,
+            Some(pd_handle.clone()),
             runtime_handle.clone(),
         );
 
@@ -1781,40 +1827,6 @@ impl IrysNode {
             sync_state.clone(),
             shutdown_token.clone(),
         );
-
-        // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
-
-        // Create PdHandle with real ChunkProvider and send to reth thread.
-        let chunk_table_store = irys_types::chunk_provider::ChunkTableStore::new();
-        let pd_chunk_store = irys_actors::pd_service::store::PdChunkStoreHandle::new(
-            irys_actors::pd_service::store::PdChunkStore::new(chunk_provider.clone()),
-        );
-        let pd_handle =
-            irys_types::pd_handle::PdHandle::new(chunk_table_store, Arc::new(pd_chunk_store));
-
-        // Send PdHandle to the reth thread (it's awaiting this before starting the node).
-        pd_handle_tx
-            .send(pd_handle.clone())
-            .expect("PdHandle receiver must not be dropped");
-
-        // Spawn a lightweight block-height expiration task (replaces old PdService).
-        {
-            let pd_handle_for_expiry = pd_handle.clone();
-            let mut block_state_rx = service_senders.subscribe_block_state_updates();
-            runtime_handle.spawn(async move {
-                loop {
-                    match block_state_rx.recv().await {
-                        Ok(event) if !event.discarded => {
-                            pd_handle_for_expiry.store().expire_at_height(event.height);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        _ => {}
-                    }
-                }
-            });
-        }
-        debug!("PD handle initialized and sent to reth thread");
 
         // set up sync service
         let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
@@ -2184,6 +2196,7 @@ impl IrysNode {
         block_producer_rx: UnboundedReceiver<Traced<BlockProducerCommand>>,
         reth_provider: NodeProvider,
         block_index: BlockIndex,
+        pd_handle: Option<irys_types::pd_handle::PdHandle>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -2201,6 +2214,7 @@ impl IrysNode {
             reth_provider,
             consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
+            pd_handle,
         });
 
         // Spawn the service and get the handle

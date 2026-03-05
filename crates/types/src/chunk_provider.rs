@@ -6,9 +6,6 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
-
-use crate::range_specifier::ChunkRangeSpecifier;
 
 /// Pre-loaded chunk data for EVM execution. Key: (ledger, ledger_offset).
 pub type ChunkTable = HashMap<(u32, u64), Arc<Bytes>>;
@@ -92,42 +89,6 @@ pub trait RethChunkProvider: Send + Sync + std::fmt::Debug {
     #[must_use]
     fn config(&self) -> ChunkConfig;
 }
-
-// ============================================================================
-// PD Chunk Manager Message Types
-// ============================================================================
-
-/// Messages for the unified PD chunk manager.
-///
-/// The manager handles the full lifecycle per PD transaction:
-/// Pending → Provisioning → Ready → Completed
-#[derive(Debug)]
-pub enum PdChunkMessage {
-    /// New PD transaction detected - start provisioning chunks.
-    NewTransaction {
-        tx_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
-    },
-    /// Transaction removed from mempool (included in block or evicted).
-    TransactionRemoved { tx_hash: B256 },
-    /// Query if chunks for a transaction are ready (response via channel).
-    IsReady {
-        tx_hash: B256,
-        response: oneshot::Sender<bool>,
-    },
-    /// Batch-fetch chunks by (ledger, offset). Returns the loaded table.
-    /// Cache hits are instant; cache misses fall back to storage.
-    GetChunksBatch {
-        keys: Vec<(u32, u64)>,
-        response: oneshot::Sender<ChunkTable>,
-    },
-}
-
-/// Sender for PD chunk messages.
-pub type PdChunkSender = mpsc::UnboundedSender<PdChunkMessage>;
-
-/// Receiver for PD chunk messages.
-pub type PdChunkReceiver = mpsc::UnboundedReceiver<PdChunkMessage>;
 
 /// Mock chunk provider that returns zero-filled chunks.
 #[cfg(any(test, feature = "test-utils"))]

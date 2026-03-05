@@ -101,6 +101,8 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// Chain sync state for recording diagnostic info
     pub(crate) chain_sync_state: ChainSyncState,
+    /// PD handle for pre-building chunk tables before Reth submission
+    pub(crate) pd_handle: Option<irys_types::pd_handle::PdHandle>,
 }
 
 impl ValidationService {
@@ -117,6 +119,7 @@ impl ValidationService {
         db: DatabaseProvider,
         execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
+        pd_handle: Option<irys_types::pd_handle::PdHandle>,
         runtime_handle: tokio::runtime::Handle,
         chain_sync_state: ChainSyncState,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
@@ -154,6 +157,7 @@ impl ValidationService {
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
                         chain_sync_state,
+                        pd_handle,
                     }),
                 };
 
