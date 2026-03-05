@@ -2256,12 +2256,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
-        // Check mempool metadata first
-        if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
-            return Ok(meta.promoted_height().is_some());
-        }
-
-        // Fall back to DB
+        // Check DB first (authoritative source)
         match self
             .node_ctx
             .db
@@ -2271,7 +2266,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                 debug!("{:?}", tx_header);
                 Ok(tx_header.promoted_height().is_some())
             }
-            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Ok(None) => {
+                // Fall back to mempool metadata
+                if let Some(meta) =
+                    self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await
+                {
+                    return Ok(meta.promoted_height().is_some());
+                }
+                Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
+            }
             Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
         }
     }

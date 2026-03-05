@@ -119,19 +119,40 @@ pub async fn get_data_txs_best_effort(
         .batch_valid_submit_ledger_tx_cloned(tx_ids)
         .await;
 
-    tx_ids
+    // Collect tx_ids that were not found in the mempool so we can fetch them
+    // in a single DB read transaction instead of one per miss.
+    let missing_ids: Vec<(usize, &IrysTransactionId)> = mempool_results
         .iter()
-        .zip(mempool_results)
-        .map(|(tx_id, mempool_result)| {
-            mempool_result.or_else(|| {
-                match db.view_eyre(|read_tx| tx_header_by_txid(read_tx, tx_id)) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        tracing::warn!(tx.id = %tx_id, error = %e, "DB fallback failed in get_data_txs_best_effort");
-                        None
-                    }
+        .enumerate()
+        .filter(|(_, result)| result.is_none())
+        .map(|(i, _)| (i, &tx_ids[i]))
+        .collect();
+
+    let db_lookup: HashMap<IrysTransactionId, DataTransactionHeader> = if missing_ids.is_empty() {
+        HashMap::new()
+    } else {
+        match db.view_eyre(|read_tx| {
+            let mut map = HashMap::with_capacity(missing_ids.len());
+            for &(_, tx_id) in &missing_ids {
+                if let Some(header) = tx_header_by_txid(read_tx, tx_id)? {
+                    map.insert(*tx_id, header);
                 }
-            })
+            }
+            Ok(map)
+        }) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(error = %e, "DB fallback failed in get_data_txs_best_effort");
+                HashMap::new()
+            }
+        }
+    };
+
+    mempool_results
+        .into_iter()
+        .enumerate()
+        .map(|(i, mempool_result)| {
+            mempool_result.or_else(|| db_lookup.get(&tx_ids[i]).cloned())
         })
         .collect()
 }

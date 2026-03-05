@@ -13,10 +13,7 @@ use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
-use irys_domain::{
-    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
-    get_optimistic_chain,
-};
+use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
@@ -30,7 +27,7 @@ use reth_db::Database as _;
 use reth_db::cursor::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 /// Borrowed dependencies for transaction selection.
 pub struct TxSelectionContext<'a> {
@@ -382,7 +379,8 @@ pub async fn select_best_txs(
     }
 
     // Prepare data transactions for inclusion after commitments
-    let mut submit_ledger_txs = get_pending_submit_ledger_txs(ctx).await?;
+    let mut submit_ledger_txs =
+        get_pending_submit_ledger_txs(parent_block_hash, ctx).await?;
     let total_data_available = submit_ledger_txs.len();
 
     // Sort data transactions by fee (highest first) to maximize revenue
@@ -732,10 +730,7 @@ async fn get_publish_txs_and_proofs(
             ctx.db,
         )
         .await
-        .unwrap_or_else(|e| {
-            error!("Failed to fetch publish tx headers: {}", e);
-            vec![]
-        });
+        .map_err(|e| eyre!("Failed to fetch publish tx headers: {}", e))?;
 
         // Sort the resulting publish_txs & proofs
         tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1005,35 +1000,25 @@ async fn get_publish_txs_and_proofs(
 /// - Only considers Submit ledger transactions (filters out Publish, etc.)
 /// - Only examines blocks within the configured `anchor_expiry_depth`
 async fn get_pending_submit_ledger_txs(
+    parent_block_hash: BlockHash,
     ctx: &TxSelectionContext<'_>,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
-    // Get the current canonical chain head to establish our starting point for block traversal
-    // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
-    let optimistic = get_optimistic_chain(ctx.block_tree.clone()).await?;
-    let (canonical, _) = ctx.block_tree.read().get_canonical_chain();
-    let canonical_head_entry = canonical.last().ok_or_eyre("canonical chain is empty")?;
+    // Start traversal from the parent block, not the canonical tip.
+    // This ensures we only consider history up to the parent when building
+    // on a non-tip parent, avoiding inclusion of post-parent transactions.
+    let block_hash = parent_block_hash;
+    let parent_entry = crate::block_tree_service::get_block_header(
+        ctx.block_tree,
+        ctx.db,
+        block_hash,
+        false,
+    )?
+    .ok_or_else(|| {
+        eyre::eyre!("No block header found for parent hash {}", block_hash)
+    })?;
+    let block_height = parent_entry.height;
 
-    // This is just here to catch any oddities in the debug log. The optimistic
-    // and canonical should always have the same results from my reading of the code.
-    // if the tests are stable and this hasn't come up it can be removed.
-    if optimistic.last().map(|o| o.0) != Some(canonical_head_entry.block_hash()) {
-        debug!("Optimistic and Canonical have different heads");
-    }
-
-    let block_hash = canonical_head_entry.block_hash();
-    let block_height = canonical_head_entry.height();
-
-    // retrieve block from block tree or database
-    // be aware that genesis starts its life immediately in the database
-    let mut block =
-        crate::block_tree_service::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "No block header found for hash {} ({})",
-                    block_hash,
-                    block_height
-                )
-            })?;
+    let mut block = parent_entry;
 
     // Calculate the minimum block height we need to check for transaction conflicts
     // Only transactions anchored within this depth window are considered valid

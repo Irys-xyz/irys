@@ -2898,7 +2898,12 @@ pub fn get_assigned_ingress_proofs(
     for block_hash in block_hashes.iter() {
         match get_ledger_range(block_hash, block_tree, db) {
             Ok(Some(block_range)) => block_ranges.push(block_range),
-            Ok(None) => {}
+            Ok(None) => {
+                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                    "get_ledger_range returned None for block {}, assigned_miners would remain unset (tx_id {})",
+                    block_hash, tx_header.id
+                )));
+            }
             Err(e) => {
                 return Err(PreValidationError::BlockBoundsLookupError(format!(
                     "Failed to get ledger range for block {}: {}",
