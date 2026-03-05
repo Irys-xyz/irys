@@ -127,7 +127,7 @@ async fn get_block_by_hash(
         None => {
             return Err(ApiError::Internal {
                 err: String::from("db error"),
-            })
+            });
         }
     };
 

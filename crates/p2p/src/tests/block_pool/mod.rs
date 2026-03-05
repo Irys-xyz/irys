@@ -179,6 +179,7 @@ async fn should_process_block() {
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     );
 
     let genesis = block_status_provider_mock.genesis_header();
@@ -302,6 +303,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     ));
 
     let data_handler = data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
@@ -315,13 +317,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
         data_handler,
         None,
         is_vdf_mining_enabled,
-    );
-
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
         tokio::runtime::Handle::current(),
     );
+
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = block2.clone();
@@ -484,6 +483,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     ));
 
     let data_handler = data_handler_with_stubbed_pool(
@@ -503,13 +503,10 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         data_handler,
         None,
         is_vdf_mining_enabled,
-    );
-
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
         tokio::runtime::Handle::current(),
     );
+
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = Arc::new(RwLock::new(None));
@@ -625,6 +622,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     );
 
     let genesis = block_status_provider_mock.genesis_header();
@@ -739,6 +737,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     ));
 
     let data_handler = data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
@@ -752,13 +751,10 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         data_handler,
         None,
         is_vdf_mining_enabled,
-    );
-
-    let sync_service_handle = ChainSyncService::spawn_service(
-        sync_service_inner,
-        sync_receiver,
         tokio::runtime::Handle::current(),
     );
+
+    let sync_service_handle = ChainSyncService::spawn_service(sync_service_inner, sync_receiver);
 
     let genesis = block_status_provider_mock.genesis_header();
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);
@@ -888,6 +884,7 @@ async fn should_not_fast_track_block_already_in_index() {
         config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
     );
 
     let genesis = block_status_provider_mock.genesis_header();
