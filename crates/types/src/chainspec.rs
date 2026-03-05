@@ -24,6 +24,7 @@ hardfork!(
     IrysHardfork {
         Frontier,
         NextNameTBD,
+        Sprite,
         Aurora
     }
 );
@@ -47,6 +48,14 @@ impl IrysChainHardforks {
         if let Some(ref fork) = config.next_name_tbd {
             forks.push((
                 IrysHardfork::NextNameTBD,
+                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
+            ));
+        }
+
+        // Conditionally add Sprite hardfork if configured
+        if let Some(ref fork) = config.sprite {
+            forks.push((
+                IrysHardfork::Sprite,
                 ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
             ));
         }
@@ -117,6 +126,9 @@ impl IrysHardfork {
                 (EthereumHardfork::Prague, ForkCondition::ZERO_TIMESTAMP),
             ],
             Self::NextNameTBD => &[],
+            // Sprite doesn't add any new Ethereum hardforks (PD is Irys-specific)
+            Self::Sprite => &[],
+            // Aurora doesn't add any new Ethereum hardforks
             Self::Aurora => &[],
         }
     }

@@ -46,6 +46,9 @@ reth-payload-builder-primitives.workspace = true
 reth-ethereum-payload-builder.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
+reth-revm.workspace = true
+reth-consensus-common.workspace = true
+reth-errors.workspace = true
 
 
 tokio.workspace = true
@@ -54,24 +57,29 @@ serde.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
+parking_lot = "0.12"
 thiserror.workspace = true
 either = "1.15"
 sha2.workspace = true
 alloy-rlp.workspace = true
 
 [dev-dependencies]
+irys-types = { workspace = true, features = ["test-utils"] }
 reth-e2e-test-utils = { workspace = true }
 serde_json.workspace = true
 alloy-rpc-types-engine.workspace = true
 test-log.workspace = true
 rstest.workspace = true
+proptest = "1.6"
 futures.workspace = true
 alloy-signer-local.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
+rand09 = { package = "rand", version = "0.9" }
 
 [features]
-test-utils = ["reth-e2e-test-utils"]
+test-utils = ["reth-e2e-test-utils", "irys-types/test-utils"]
 
 [lints]
 workspace = true

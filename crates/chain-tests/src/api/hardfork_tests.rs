@@ -100,6 +100,7 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
     config.consensus.get_mut().hardforks = IrysHardforkConfig {
         frontier: default_test_frontier(),
         next_name_tbd: None,
+        sprite: None,
         aurora,
         borealis: None,
     };
@@ -535,6 +536,7 @@ mod epoch_block_filtering {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora,
             borealis: None,
         };
@@ -636,6 +638,7 @@ mod epoch_block_filtering {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -709,6 +712,7 @@ mod borealis_hardfork {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora,
             borealis,
         };
@@ -793,6 +797,7 @@ mod borealis_hardfork {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(0),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -915,6 +920,7 @@ mod peer_sync_recovery {
             frontier: default_test_frontier(),
             aurora: None, // Disabled initially
             next_name_tbd: None,
+            sprite: None,
             borealis: None,
         };
 

@@ -73,6 +73,12 @@ pub enum TransactionPacket {
     PermFeeRefund(BalanceIncrement),
     /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
     UnstakeRefund(BalanceIncrement),
+    /// Set the PD base fee per chunk in EVM state (protocol metadata update).
+    PdBaseFeeUpdate(PdBaseFeeUpdate),
+    /// Update the IRYS/USD price in EVM state for minimum cost validation.
+    IrysUsdPriceUpdate(IrysUsdPriceUpdate),
+    /// Deposit funds into the protocol treasury.
+    TreasuryDeposit(TreasuryDeposit),
     /// Update reward address at inclusion: fee-only via priority fee. No amount in packet; log-only.
     UpdateRewardAddress(UpdateRewardAddressDebit),
 }
@@ -143,6 +149,9 @@ impl TransactionPacket {
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
+            Self::PdBaseFeeUpdate(_) => None, // Protocol-level update, no fee payer
+            Self::IrysUsdPriceUpdate(_) => None, // Protocol-level update, no fee payer
+            Self::TreasuryDeposit(_) => None, // Protocol-level update, no fee payer
             Self::UpdateRewardAddress(dec) => Some(dec.target),
         }
     }
@@ -175,6 +184,12 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD"));
     pub static PERM_FEE_REFUND: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+    pub static PD_BASE_FEE_UPDATE: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_PD_BASE_FEE_UPDATE"));
+    pub static IRYS_USD_PRICE_UPDATE: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_IRYS_USD_PRICE_UPDATE"));
+    pub static TREASURY_DEPOSIT: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_TREASURY_DEPOSIT"));
     pub static UPDATE_REWARD_ADDRESS: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_UPDATE_REWARD_ADDRESS"));
 }
@@ -249,6 +264,9 @@ impl TransactionPacket {
             Self::TermFeeReward(_) => *TERM_FEE_REWARD,
             Self::IngressProofReward(_) => *INGRESS_PROOF_REWARD,
             Self::PermFeeRefund(_) => *PERM_FEE_REFUND,
+            Self::PdBaseFeeUpdate(_) => *PD_BASE_FEE_UPDATE,
+            Self::IrysUsdPriceUpdate(_) => *IRYS_USD_PRICE_UPDATE,
+            Self::TreasuryDeposit(_) => *TREASURY_DEPOSIT,
             Self::UpdateRewardAddress(_) => *UPDATE_REWARD_ADDRESS,
         }
     }
@@ -266,7 +284,10 @@ pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
 pub const UNSTAKE_DEBIT_ID: u8 = 0x0B;
-pub const UPDATE_REWARD_ADDRESS_ID: u8 = 0x0C;
+pub const PD_BASE_FEE_UPDATE_ID: u8 = 0x0C;
+pub const IRYS_USD_PRICE_UPDATE_ID: u8 = 0x0D;
+pub const TREASURY_DEPOSIT_ID: u8 = 0x0E;
+pub const UPDATE_REWARD_ADDRESS_ID: u8 = 0x0F;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -358,6 +379,18 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[UNPLEDGE_REFUND_ID])?;
                 inner.serialize(writer)
             }
+            Self::PdBaseFeeUpdate(inner) => {
+                writer.write_all(&[PD_BASE_FEE_UPDATE_ID])?;
+                inner.serialize(writer)
+            }
+            Self::IrysUsdPriceUpdate(inner) => {
+                writer.write_all(&[IRYS_USD_PRICE_UPDATE_ID])?;
+                inner.serialize(writer)
+            }
+            Self::TreasuryDeposit(inner) => {
+                writer.write_all(&[TREASURY_DEPOSIT_ID])?;
+                inner.serialize(writer)
+            }
             Self::UpdateRewardAddress(inner) => {
                 writer.write_all(&[UPDATE_REWARD_ADDRESS_ID])?;
                 inner.serialize(writer)
@@ -389,6 +422,15 @@ impl BorshDeserialize for TransactionPacket {
             }
             UNPLEDGE_REFUND_ID => {
                 Self::UnpledgeRefund(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            PD_BASE_FEE_UPDATE_ID => {
+                Self::PdBaseFeeUpdate(PdBaseFeeUpdate::deserialize_reader(reader)?)
+            }
+            IRYS_USD_PRICE_UPDATE_ID => {
+                Self::IrysUsdPriceUpdate(IrysUsdPriceUpdate::deserialize_reader(reader)?)
+            }
+            TREASURY_DEPOSIT_ID => {
+                Self::TreasuryDeposit(TreasuryDeposit::deserialize_reader(reader)?)
             }
             UPDATE_REWARD_ADDRESS_ID => {
                 Self::UpdateRewardAddress(UpdateRewardAddressDebit::deserialize_reader(reader)?)
@@ -685,6 +727,115 @@ impl BorshDeserialize for BlockRewardIncrement {
         let mut amount_buf = [0_u8; 32];
         reader.read_exact(&mut amount_buf)?;
         let amount = U256::from_be_bytes(amount_buf);
+        Ok(Self { amount })
+    }
+}
+
+/// PD base fee update: sets the protocol-wide PD base fee per chunk.
+/// This is a metadata-only shadow tx that updates EVM state without transferring value.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct PdBaseFeeUpdate {
+    /// Base fee per PD chunk (tokens, 1e18 scale)
+    pub per_chunk: U256,
+}
+
+impl BorshSerialize for PdBaseFeeUpdate {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.per_chunk.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for PdBaseFeeUpdate {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0_u8; 32];
+        reader.read_exact(&mut buf)?;
+        let per_chunk = U256::from_be_bytes(buf);
+        Ok(Self { per_chunk })
+    }
+}
+
+/// IRYS/USD price update: sets the protocol-wide IRYS token price in USD.
+/// Used for converting USD-denominated minimum fees to IRYS amounts.
+/// This is a metadata-only shadow tx that updates EVM state without transferring value.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct IrysUsdPriceUpdate {
+    /// Price of 1 IRYS token in USD (1e18 scale, e.g., 1e18 = $1.00)
+    pub price: U256,
+}
+
+impl BorshSerialize for IrysUsdPriceUpdate {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.price.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for IrysUsdPriceUpdate {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0_u8; 32];
+        reader.read_exact(&mut buf)?;
+        let price = U256::from_be_bytes(buf);
+        Ok(Self { price })
+    }
+}
+
+/// Treasury deposit: adds funds to the protocol treasury.
+/// This is a protocol-level operation to seed or top-up the treasury.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct TreasuryDeposit {
+    /// Amount to deposit into treasury (tokens, 1e18 scale)
+    pub amount: U256,
+}
+
+impl BorshSerialize for TreasuryDeposit {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for TreasuryDeposit {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0_u8; 32];
+        reader.read_exact(&mut buf)?;
+        let amount = U256::from_be_bytes(buf);
         Ok(Self { amount })
     }
 }

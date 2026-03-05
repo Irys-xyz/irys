@@ -10,6 +10,7 @@ pub mod index;
 pub mod ledger;
 pub mod mempool;
 pub mod mining;
+pub mod pd_pricing;
 pub mod peer_list;
 pub mod post_chunk;
 pub mod price;

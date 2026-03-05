@@ -5,6 +5,7 @@ pub(crate) mod block_production;
 mod block_rebuilding;
 pub(crate) mod block_validation;
 mod difficulty_adjustment;
+mod pd_base_fee_adjustment;
 mod reset_seed;
 pub(crate) mod test_double_spend;
 pub(crate) mod testing_primitives;
