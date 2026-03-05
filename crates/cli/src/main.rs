@@ -34,6 +34,20 @@ pub enum Commands {
         #[command(subcommand)]
         mode: RollbackMode,
     },
+    #[command(
+        name = "build-genesis",
+        about = "Build a signed genesis block with multi-miner commitments and write to disk"
+    )]
+    BuildGenesis {
+        /// Path to genesis_miners.toml containing miner keys and pledge counts
+        #[arg(long)]
+        miners: PathBuf,
+
+        /// Output directory for genesis block and commitments JSON files.
+        /// Defaults to current directory.
+        #[arg(long, default_value = ".")]
+        output: PathBuf,
+    },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
         /// Node URLs to connect to
@@ -216,6 +230,48 @@ async fn main() -> eyre::Result<()> {
             rw_tx.commit()?;
 
             info!("Rollback complete. New tip is at height {}", target_height);
+            Ok(())
+        }
+        Commands::BuildGenesis { miners, output } => {
+            use irys_chain::genesis_builder::{GenesisMinerManifest, build_signed_genesis_block};
+            use irys_chain::genesis_utilities::{
+                save_genesis_block_to_disk, save_genesis_commitments_to_disk,
+            };
+
+            let node_config: NodeConfig = load_config()?;
+            let config = Config::new_with_random_peer_id(node_config);
+
+            let manifest = GenesisMinerManifest::load(&miners)?;
+            let miner_entries = manifest.into_entries()?;
+
+            info!(
+                "Building genesis block with {} miner(s), {} total pledges",
+                miner_entries.len(),
+                miner_entries.iter().map(|m| m.pledge_count).sum::<u64>()
+            );
+
+            let genesis_output = build_signed_genesis_block(&config, &miner_entries).await?;
+
+            save_genesis_block_to_disk(
+                Arc::new(genesis_output.block.clone()),
+                &output,
+            )
+            .map_err(|e| eyre::eyre!("Failed to write genesis block: {}", e))?;
+
+            save_genesis_commitments_to_disk(
+                &genesis_output.commitments,
+                &output,
+            )
+            .map_err(|e| eyre::eyre!("Failed to write genesis commitments: {}", e))?;
+
+            info!("Genesis block written to {:?}", &output);
+            info!("  Block hash: {}", genesis_output.block.block_hash);
+            info!("  Commitments: {} total", genesis_output.commitments.len());
+            info!(
+                "  Add to peer configs: consensus.expected_genesis_hash = \"{}\"",
+                genesis_output.block.block_hash
+            );
+
             Ok(())
         }
         Commands::Tui {
