@@ -2126,13 +2126,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
-        // Derive the timestamp from the parent block rather than wall-clock time
-        // to avoid test/production divergence.
-        let parent_timestamp = {
+        // Simulate production's current_timestamp() which returns max(now, parent + 1s).
+        // Use parent_timestamp + 1s for determinism, matching production semantics.
+        let new_block_timestamp = {
             let tree = self.node_ctx.block_tree_guard.read();
-            tree.get_block(&parent_block_hash)
+            let parent_secs = tree
+                .get_block(&parent_block_hash)
                 .expect("parent block should exist in block tree")
-                .timestamp_secs()
+                .timestamp_secs();
+            irys_types::UnixTimestamp::from_secs(parent_secs.as_secs() + 1)
         };
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &self.node_ctx.block_tree_guard,
@@ -2144,7 +2146,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         irys_actors::tx_selector::select_best_txs(
             parent_block_hash,
-            parent_timestamp,
+            new_block_timestamp,
             &ctx,
         )
         .await

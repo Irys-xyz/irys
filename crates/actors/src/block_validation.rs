@@ -2982,7 +2982,15 @@ fn get_ledger_range(
             None => return Ok(None),
         };
         let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
-        if block_total_chunks == 0 || block_total_chunks <= prev_total_chunks {
+        if block_total_chunks < prev_total_chunks {
+            return Err(eyre::eyre!(
+                "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
+                hash,
+                block_total_chunks,
+                prev_total_chunks
+            ));
+        }
+        if block_total_chunks == 0 || block_total_chunks == prev_total_chunks {
             return Ok(None);
         }
         Ok(Some(LedgerChunkRange(ii(

@@ -30,7 +30,7 @@ use reth_db::Database as _;
 use reth_db::cursor::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Borrowed dependencies for transaction selection.
 pub struct TxSelectionContext<'a> {
@@ -721,7 +721,11 @@ async fn get_publish_txs_and_proofs(
             },
             ctx.db,
         )
-        .await?;
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to fetch publish tx headers: {}", e);
+            vec![]
+        });
 
         // Sort the resulting publish_txs & proofs
         tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
