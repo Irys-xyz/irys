@@ -252,17 +252,11 @@ async fn main() -> eyre::Result<()> {
 
             let genesis_output = build_signed_genesis_block(&config, &miner_entries).await?;
 
-            save_genesis_block_to_disk(
-                Arc::new(genesis_output.block.clone()),
-                &output,
-            )
-            .map_err(|e| eyre::eyre!("Failed to write genesis block: {}", e))?;
+            save_genesis_block_to_disk(Arc::new(genesis_output.block.clone()), &output)
+                .map_err(|e| eyre::eyre!("Failed to write genesis block: {}", e))?;
 
-            save_genesis_commitments_to_disk(
-                &genesis_output.commitments,
-                &output,
-            )
-            .map_err(|e| eyre::eyre!("Failed to write genesis commitments: {}", e))?;
+            save_genesis_commitments_to_disk(&genesis_output.commitments, &output)
+                .map_err(|e| eyre::eyre!("Failed to write genesis commitments: {}", e))?;
 
             info!("Genesis block written to {:?}", &output);
             info!("  Block hash: {}", genesis_output.block.block_hash);
