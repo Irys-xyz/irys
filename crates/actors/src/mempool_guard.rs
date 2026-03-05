@@ -124,9 +124,7 @@ pub async fn get_data_txs_best_effort(
         .zip(mempool_results)
         .map(|(tx_id, mempool_result)| {
             mempool_result.or_else(|| {
-                match db.view_eyre(|read_tx| {
-                    tx_header_by_txid(read_tx, tx_id).map_err(|e| eyre::eyre!("{:?}", e))
-                }) {
+                match db.view_eyre(|read_tx| tx_header_by_txid(read_tx, tx_id)) {
                     Ok(result) => result,
                     Err(e) => {
                         tracing::warn!(tx.id = %tx_id, error = %e, "DB fallback failed in get_data_txs_best_effort");
