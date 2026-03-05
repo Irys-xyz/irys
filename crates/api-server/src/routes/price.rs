@@ -226,8 +226,7 @@ pub async fn get_price(
                 ema.ema_for_public_pricing()
             };
 
-            // OneYear/ThirtyDay have no ingress proofs — replica count is 1.
-            let replica_count = 1;
+            let replica_count = state.config.consensus.num_partitions_per_term_ledger_slot;
 
             let term_fee = calculate_term_fee(
                 bytes_to_store,

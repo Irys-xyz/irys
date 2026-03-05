@@ -93,8 +93,12 @@ pub struct ConsensusConfig {
     /// Number of chunks that can be recalled in each partition by a mining step
     pub num_chunks_in_recall_range: u64,
 
-    /// Number of replica partitions in each storage slot
+    /// Number of replica partitions in each storage slot (Publish/Submit ledgers)
     pub num_partitions_per_slot: u64,
+
+    /// Number of replica partitions in each term ledger slot (OneYear/ThirtyDay).
+    /// Independently configurable from `num_partitions_per_slot`.
+    pub num_partitions_per_term_ledger_slot: u64,
 
     /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
@@ -646,6 +650,7 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: 400,
             // Number of replica partitions in each storage slot
             num_partitions_per_slot: 10,
+            num_partitions_per_term_ledger_slot: 10,
             // Number of iterations for Matrix (entropy) packing algorithm
             entropy_packing_iterations: 1_000_000,
             // Toggles full ingress proof validation on or off
@@ -712,6 +717,7 @@ impl ConsensusConfig {
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             num_partitions_per_slot: 1,
+            num_partitions_per_term_ledger_slot: 1,
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -832,6 +838,7 @@ impl ConsensusConfig {
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
             num_partitions_per_slot: 10,
+            num_partitions_per_term_ledger_slot: 10,
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,

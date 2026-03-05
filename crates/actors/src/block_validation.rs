@@ -2186,7 +2186,7 @@ fn validate_term_only_price(
         epochs_for_storage,
         block_ema,
         config,
-        1, // no ingress proofs for term-only ledgers
+        config.consensus.num_partitions_per_term_ledger_slot,
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
