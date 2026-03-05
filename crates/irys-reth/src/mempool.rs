@@ -225,55 +225,56 @@ where
 
         // Reject PD transactions before Sprite hardfork is active
         if !self.is_sprite_active()
-            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
+            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input)
+        {
+            tracing::trace!(
+                sender = ?tx.sender(),
+                tx_hash = ?tx.hash(),
+                "PD transaction rejected: Sprite hardfork not active"
+            );
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::TxTypeNotSupported,
+                ),
+            ));
+        }
+
+        // Validate minimum PD transaction cost when Sprite is active
+        if self.is_sprite_active()
+            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input)
+        {
+            // Count PD chunks from access list
+            let chunks = tx
+                .access_list()
+                .map(sum_pd_chunks_in_access_list)
+                .unwrap_or(0);
+
+            // Calculate total fees in IRYS tokens:
+            // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
+            let total_per_chunk = pd_header
+                .max_base_fee_per_chunk
+                .saturating_add(pd_header.max_priority_fee_per_chunk);
+            let total_fees = total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
+
+            // Basic sanity check: PD transactions must have non-zero fees.
+            // The full min_pd_transaction_cost validation (USD→IRYS conversion)
+            // happens at EVM execution time.
+            if total_fees.is_zero() {
                 tracing::trace!(
                     sender = ?tx.sender(),
                     tx_hash = ?tx.hash(),
-                    "PD transaction rejected: Sprite hardfork not active"
+                    chunks = chunks,
+                    "PD transaction rejected: zero total fees"
                 );
                 return Err(TransactionValidationOutcome::Invalid(
                     tx,
                     reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                        InvalidTransactionError::TxTypeNotSupported,
+                        InvalidTransactionError::FeeCapTooLow,
                     ),
                 ));
             }
-
-        // Validate minimum PD transaction cost when Sprite is active
-        if self.is_sprite_active()
-            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input) {
-                // Count PD chunks from access list
-                let chunks = tx
-                    .access_list()
-                    .map(sum_pd_chunks_in_access_list)
-                    .unwrap_or(0);
-
-                // Calculate total fees in IRYS tokens:
-                // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
-                let total_per_chunk = pd_header
-                    .max_base_fee_per_chunk
-                    .saturating_add(pd_header.max_priority_fee_per_chunk);
-                let total_fees =
-                    total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
-
-                // Basic sanity check: PD transactions must have non-zero fees.
-                // The full min_pd_transaction_cost validation (USD→IRYS conversion)
-                // happens at EVM execution time.
-                if total_fees.is_zero() {
-                    tracing::trace!(
-                        sender = ?tx.sender(),
-                        tx_hash = ?tx.hash(),
-                        chunks = chunks,
-                        "PD transaction rejected: zero total fees"
-                    );
-                    return Err(TransactionValidationOutcome::Invalid(
-                        tx,
-                        reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                            InvalidTransactionError::FeeCapTooLow,
-                        ),
-                    ));
-                }
-            }
+        }
 
         // once we support blobs, we can start accepting eip4844 txs
         if tx.is_eip4844() {

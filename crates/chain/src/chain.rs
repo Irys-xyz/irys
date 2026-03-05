@@ -1138,23 +1138,27 @@ impl IrysNode {
         // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
         let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
         let exec = reth_runtime.clone();
-        let (node_handle, reth_node) =
-            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height, Arc::new(mock_provider))
-                .in_current_span()
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(
-                        "Failed to start reth node at block height {}: {:?}",
-                        latest_block_height, e
-
-                    );
-                    return ShutdownReason::FatalError(format!(
-                        "start_reth_node failed at block height {latest_block_height}: {e}"
-                    ));
-                }
-            };
+        let (node_handle, reth_node) = match start_reth_node(
+            exec,
+            reth_chainspec,
+            config.clone(),
+            latest_block_height,
+            Arc::new(mock_provider),
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(
+                    "Failed to start reth node at block height {}: {:?}",
+                    latest_block_height, e
+                );
+                return ShutdownReason::FatalError(format!(
+                    "start_reth_node failed at block height {latest_block_height}: {e}"
+                ));
+            }
+        };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
@@ -1186,7 +1190,6 @@ impl IrysNode {
         // (The gossip server is spawned separately via spawn_p2p_server_watcher_task.)
         let api_server_handle = actix_server.handle();
         let mut actix_task = runtime_handle.spawn(actix_server);
-
 
         // Send IrysNodeCtx back to start()
         let early_shutdown = match irys_node_ctx_tx.send(irys_node_ctx) {
@@ -1315,7 +1318,6 @@ impl IrysNode {
             Ok(Err(_)) => error!("VDF thread likely panicked (completion channel dropped)"),
             Err(_) => error!("VDF thread did not finish within {VDF_THREAD_TIMEOUT:?}"),
         }
-
 
         // Graceful shutdown of actor services
         info!(shutdown.phase = "service_set", "Lifecycle shutdown phase");

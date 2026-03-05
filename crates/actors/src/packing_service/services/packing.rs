@@ -243,10 +243,10 @@ impl InternalPackingService {
                         short_writes_before_sync,
                     )
                     .await
-                {
-                    sync_with_warning(&storage_module, "remote packing completion");
-                    continue;
-                }
+            {
+                sync_with_warning(&storage_module, "remote packing completion");
+                continue;
+            }
 
             // Fall back to local packing strategy
             if let Err(e) = self
