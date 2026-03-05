@@ -10,7 +10,7 @@ use irys_types::{Config, IrysAddress, IrysTransactionCommon, U256, UnixTimestamp
 use reth::rpc::types::BlockId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Calculate the expected protocol fee for permanent storage
 /// This includes base network fee + ingress proof rewards
@@ -96,12 +96,26 @@ pub(crate) fn check_funding<T: IrysTransactionCommon>(
     // get balance state for the block we're building off of
     let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
 
-    let has_funds = balance >= current_spent + fee;
+    let total_required = match current_spent.checked_add(fee) {
+        Some(total) => total,
+        None => {
+            warn!(
+                tx.signer = ?signer,
+                tx.fee = ?fee,
+                cumulative_spent = ?current_spent,
+                "Cumulative fee overflow for signer — skipping transaction"
+            );
+            unfunded_address.insert(signer);
+            return false;
+        }
+    };
+
+    let has_funds = balance >= total_required;
 
     // Track fees for this address regardless of whether this specific transaction is included
     fees_spent_per_address
         .entry(signer)
-        .and_modify(|val| *val += fee)
+        .and_modify(|val| *val = val.checked_add(fee).unwrap_or(U256::MAX))
         .or_insert(fee);
 
     // If transaction cannot be funded, mark the entire address as unfunded
