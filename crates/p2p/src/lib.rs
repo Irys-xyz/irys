@@ -4,6 +4,8 @@ mod cache;
 mod chain_sync;
 mod gossip_client;
 mod gossip_data_handler;
+#[cfg(test)]
+mod gossip_fixture_tests;
 mod gossip_service;
 mod metrics;
 mod peer_network_service;
