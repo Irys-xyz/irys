@@ -520,13 +520,11 @@ pub async fn select_best_txs(
                 }
             }
             irys_types::DataLedger::Submit => {
-                // todo: add to list of invalid txs because we don't support Submit txs
                 debug!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
-                    "Not promoting data tx - Submit ledger not eligible for promotion"
+                    "Processing Submit ledger tx for single-block promotion"
                 );
-                continue;
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 warn!(
@@ -718,12 +716,18 @@ async fn get_publish_txs_and_proofs(
         // Note: get_data_tx_in_parallel_inner() read from both the mempool and
         //       db as publishing can happen to a tx that is no longer in the mempool
         // TODO: improve this
+        let publish_txids_for_lookup = publish_txids.clone();
         let mut tx_headers = get_data_tx_in_parallel_inner(
             publish_txids,
-            |_tx_ids| {
-                {
-                    let txs = txs.clone(); // whyyyy
-                    async move { Ok(txs) }
+            |tx_ids| {
+                let txs = txs.clone();
+                let all_ids = publish_txids_for_lookup.clone();
+                async move {
+                    let lookup: HashMap<_, _> = all_ids.into_iter().zip(txs.into_iter()).collect();
+                    Ok(tx_ids
+                        .into_iter()
+                        .map(|id| lookup.get(&id).cloned().flatten())
+                        .collect())
                 }
                 .boxed()
             },
