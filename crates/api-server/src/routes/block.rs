@@ -83,7 +83,7 @@ fn get_block_by_hash(
     let irys_header =
         block_tree_service::get_block_header(&state.block_tree, &state.db, block_hash, with_poa)
             .map_err(|e| {
-                tracing::error!("Error looking up block header: {}", e);
+                tracing::error!("Error looking up block header for {block_hash}: {e}");
                 ApiError::Internal {
                     err: "DB error".to_string(),
                 }
