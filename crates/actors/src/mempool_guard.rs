@@ -151,8 +151,6 @@ pub async fn get_data_txs_best_effort(
     mempool_results
         .into_iter()
         .enumerate()
-        .map(|(i, mempool_result)| {
-            mempool_result.or_else(|| db_lookup.get(&tx_ids[i]).cloned())
-        })
+        .map(|(i, mempool_result)| mempool_result.or_else(|| db_lookup.get(&tx_ids[i]).cloned()))
         .collect()
 }

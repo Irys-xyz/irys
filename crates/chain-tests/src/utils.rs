@@ -2268,9 +2268,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
             Ok(None) => {
                 // Fall back to mempool metadata
-                if let Some(meta) =
-                    self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await
-                {
+                if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
                     return Ok(meta.promoted_height().is_some());
                 }
                 Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))

@@ -12,6 +12,7 @@ use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
+    tx_header_by_txid_canonical,
 };
 use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -379,8 +380,7 @@ pub async fn select_best_txs(
     }
 
     // Prepare data transactions for inclusion after commitments
-    let mut submit_ledger_txs =
-        get_pending_submit_ledger_txs(parent_block_hash, ctx).await?;
+    let mut submit_ledger_txs = get_pending_submit_ledger_txs(parent_block_hash, ctx).await?;
     let total_data_available = submit_ledger_txs.len();
 
     // Sort data transactions by fee (highest first) to maximize revenue
@@ -771,10 +771,12 @@ async fn get_publish_txs_and_proofs(
             if !submit_txs_from_canonical.contains(&tx_header.id) {
                 // check for single-block promotion
                 if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
-                    // check database
+                    // check database — constrained to canonical chain at or before parent
                     if ctx
                         .db
-                        .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
+                        .view_eyre(|tx| {
+                            tx_header_by_txid_canonical(tx, &tx_header.id, current_height)
+                        })?
                         .is_none()
                     {
                         // no previous inclusion
@@ -1007,15 +1009,9 @@ async fn get_pending_submit_ledger_txs(
     // This ensures we only consider history up to the parent when building
     // on a non-tip parent, avoiding inclusion of post-parent transactions.
     let block_hash = parent_block_hash;
-    let parent_entry = crate::block_tree_service::get_block_header(
-        ctx.block_tree,
-        ctx.db,
-        block_hash,
-        false,
-    )?
-    .ok_or_else(|| {
-        eyre::eyre!("No block header found for parent hash {}", block_hash)
-    })?;
+    let parent_entry =
+        crate::block_tree_service::get_block_header(ctx.block_tree, ctx.db, block_hash, false)?
+            .ok_or_else(|| eyre::eyre!("No block header found for parent hash {}", block_hash))?;
     let block_height = parent_entry.height;
 
     let mut block = parent_entry;

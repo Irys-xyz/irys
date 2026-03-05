@@ -172,6 +172,59 @@ pub fn tx_header_by_txid<T: DbTx>(
     }
 }
 
+/// Gets a [`DataTransactionHeader`] by its [`IrysTransactionId`], but only if it was
+/// included (Submit ledger) on the canonical chain at or before `max_height`.
+///
+/// This prevents accepting tx headers that were persisted from orphaned forks or
+/// that were included in blocks beyond a given parent height.
+///
+/// Checks:
+/// 1. The tx header exists in `IrysDataTxHeaders`
+/// 2. Its `included_height` metadata is set and ≤ `max_height`
+/// 3. The block at `included_height` in `MigratedBlockHashes` is canonical
+///
+/// Returns `Ok(None)` if any check fails.
+pub fn tx_header_by_txid_canonical<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<DataTransactionHeader>> {
+    let Some(header) = tx_header_by_txid(tx, txid)? else {
+        return Ok(None);
+    };
+
+    // The tx must have an included_height (set during block migration)
+    let Some(included_height) = header.metadata().included_height else {
+        debug!(tx.id = %txid, "DB fallback: tx has no included_height metadata, rejecting");
+        return Ok(None);
+    };
+
+    // The inclusion must be at or before the parent's height
+    if included_height > max_height {
+        debug!(
+            tx.id = %txid,
+            tx.included_height = included_height,
+            max_height,
+            "DB fallback: tx included_height exceeds parent height, rejecting"
+        );
+        return Ok(None);
+    }
+
+    // Verify the height has been migrated (canonical chain reached this height)
+    // If MigratedBlockHashes has an entry, that height is on the canonical chain
+    let canonical_hash = tx.get::<MigratedBlockHashes>(included_height)?;
+    if canonical_hash.is_none() {
+        debug!(
+            tx.id = %txid,
+            tx.included_height = included_height,
+            "DB fallback: height not yet migrated, cannot verify canonicality, rejecting"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(header))
+}
+
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
 pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
@@ -774,7 +827,10 @@ mod tests {
         insert_commitment_tx, tables::IrysTables,
     };
 
-    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
+    use super::{
+        insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid,
+        tx_header_by_txid_canonical,
+    };
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
@@ -840,5 +896,109 @@ mod tests {
         block_header.poa.chunk = None;
         assert_eq!(result2, block_header);
         Ok(())
+    }
+
+    mod tx_header_by_txid_canonical_tests {
+        use crate::{
+            db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
+            tables::IrysTables, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
+        };
+        use irys_types::{DataTransactionHeader, H256};
+        use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
+        use tempfile::tempdir;
+
+        use super::open_or_create_db;
+
+        fn make_tx_header(tx_id: H256) -> DataTransactionHeader {
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: irys_types::DataTransactionHeaderV1 {
+                    id: tx_id,
+                    ..Default::default()
+                },
+                metadata: Default::default(),
+            })
+        }
+
+        /// Tx included at height 5 on canonical chain, queried with max_height=10 → found
+        #[test]
+        fn returns_header_when_included_on_canonical_chain_within_height() {
+            let path = tempdir().unwrap();
+            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let block_hash_at_5 = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, 5)?;
+                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let result = db
+                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
+                .unwrap();
+            assert!(
+                result.is_some(),
+                "tx on canonical chain within height should be found"
+            );
+        }
+
+        /// Tx included at height 5, but queried with max_height=3 → rejected (too new for parent)
+        #[test]
+        fn rejects_header_when_included_height_exceeds_max() {
+            let path = tempdir().unwrap();
+            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let block_hash_at_5 = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, 5)?;
+                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let result = db
+                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 3))
+                .unwrap();
+            assert!(
+                result.is_none(),
+                "tx included at height 5 should be rejected when max_height is 3"
+            );
+        }
+
+        /// Tx included at height 5, no MigratedBlockHashes entry → rejected
+        #[test]
+        fn rejects_header_at_unmigrated_height() {
+            let path = tempdir().unwrap();
+            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, 5)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let result = db
+                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
+                .unwrap();
+            assert!(result.is_none(), "tx at unmigrated height should be rejected");
+        }
     }
 }

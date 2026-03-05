@@ -8,7 +8,7 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -2174,8 +2174,11 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // check the db - if we can fetch it, we have a previous inclusion
-                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                        // check the db — constrained to canonical chain at or before the parent
+                        let parent_height = block.height.saturating_sub(1);
+                        if let Ok(Some(_header)) =
+                            tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height)
+                        {
                             warn!(
                                 "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
                                 &_header, &tx.id, &tx
