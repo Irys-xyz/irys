@@ -453,12 +453,13 @@ async fn heavy_mempool_persistence_test() -> eyre::Result<()> {
     let restarted_node = genesis_node.stop().await.start().await;
 
     // confirm the mempool data tx have appeared back in the mempool after a restart
-    let data_tx_from_mempool = irys_actors::mempool_guard::get_data_txs_best_effort(
-        &restarted_node.node_ctx.mempool_guard,
-        &[storage_tx.header.id],
-        &restarted_node.node_ctx.db,
-    )
-    .await;
+    // Use mempool-only lookup (no DB fallback) to verify the tx was actually restored to mempool state
+    let data_tx_from_mempool = restarted_node
+        .node_ctx
+        .mempool_guard
+        .atomic_state()
+        .batch_valid_submit_ledger_tx_cloned(&[storage_tx.header.id])
+        .await;
     assert!(data_tx_from_mempool
         .first()
         .expect("expected a data tx")
@@ -1176,12 +1177,13 @@ async fn heavy4_mempool_publish_fork_recovery_test(
     );
 
     let a_blk1_tx1_mempool = {
-        let results = irys_actors::mempool_guard::get_data_txs_best_effort(
-            &a_node.node_ctx.mempool_guard,
-            &[a_blk1_tx1.header.id],
-            &a_node.node_ctx.db,
-        )
-        .await;
+        // Use mempool-only lookup (no DB fallback) to verify the tx was orphaned back into mempool state
+        let results = a_node
+            .node_ctx
+            .mempool_guard
+            .atomic_state()
+            .batch_valid_submit_ledger_tx_cloned(&[a_blk1_tx1.header.id])
+            .await;
         results.into_iter().next().unwrap().unwrap()
     };
 
