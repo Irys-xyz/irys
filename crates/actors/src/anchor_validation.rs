@@ -109,7 +109,6 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
     })? {
         Some(height) => height,
         None => {
-            // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
             return Ok(false);
         }
     };
