@@ -1,11 +1,14 @@
 use crate::{ApiClient, IrysApiClient, Method};
 use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
-use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
+use irys_api_server::routes::{
+    anchor::AnchorResponse, commitment_state::CommitmentStateResponse, price::PriceInfo,
+    tx::PromotionStatus,
+};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
-    Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset,
-    UnpackedChunk, H256,
+    Base64, BlockHash, ChunkFormat, ConsensusConfig, DataLedger, DataRoot,
+    DataTransaction, IrysAddress, TxChunkOffset, UnpackedChunk, H256,
 };
 use std::{
     net::SocketAddr,
@@ -13,6 +16,9 @@ use std::{
 };
 use tokio::time::sleep;
 use tracing::debug;
+
+pub use irys_api_server::routes::commitment_state;
+pub use irys_api_server::routes::ledger::EpochInfoResponse;
 
 /// Trait defining the interface for the extended API client
 #[async_trait::async_trait]
@@ -55,6 +61,16 @@ pub trait ApiClientExt: ApiClient {
     ) -> eyre::Result<ChunkFormat>;
 
     async fn get_anchor(&self, peer: SocketAddr) -> eyre::Result<BlockHash>;
+
+    async fn get_commitment_state(
+        &self,
+        peer: SocketAddr,
+        address: IrysAddress,
+    ) -> eyre::Result<CommitmentStateResponse>;
+
+    async fn get_current_epoch(&self, peer: SocketAddr) -> eyre::Result<EpochInfoResponse>;
+
+    async fn get_network_config(&self, peer: SocketAddr) -> eyre::Result<ConsensusConfig>;
 }
 
 #[async_trait::async_trait]
@@ -179,4 +195,32 @@ impl ApiClientExt for IrysApiClient {
             .ok_or_eyre("Unable to fetch anchor")?
             .block_hash)
     }
+
+    async fn get_commitment_state(
+        &self,
+        peer: SocketAddr,
+        address: IrysAddress,
+    ) -> eyre::Result<CommitmentStateResponse> {
+        self.make_request::<CommitmentStateResponse, _>(
+            peer,
+            Method::GET,
+            &format!("/commitment-state/{:?}", address),
+            None::<&()>,
+        )
+        .await?
+        .ok_or_eyre("Unable to fetch commitment state")
+    }
+
+    async fn get_current_epoch(&self, peer: SocketAddr) -> eyre::Result<EpochInfoResponse> {
+        self.make_request::<EpochInfoResponse, _>(peer, Method::GET, "/epoch/current", None::<&()>)
+            .await?
+            .ok_or_eyre("Unable to fetch current epoch")
+    }
+
+    async fn get_network_config(&self, peer: SocketAddr) -> eyre::Result<ConsensusConfig> {
+        self.make_request::<ConsensusConfig, _>(peer, Method::GET, "/network/config", None::<&()>)
+            .await?
+            .ok_or_eyre("Unable to fetch network config")
+    }
+
 }

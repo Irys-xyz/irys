@@ -252,11 +252,11 @@ pub async fn get_all_assignments(
 #[serde(rename_all = "camelCase")]
 pub struct EpochInfoResponse {
     #[serde(with = "string_u64")]
-    current_epoch: u64,
+    pub current_epoch: u64,
     #[serde(with = "string_u64")]
-    epoch_block_height: u64,
-    total_active_partitions: usize,
-    unassigned_partitions: usize,
+    pub epoch_block_height: u64,
+    pub total_active_partitions: usize,
+    pub unassigned_partitions: usize,
 }
 
 pub async fn get_current_epoch(

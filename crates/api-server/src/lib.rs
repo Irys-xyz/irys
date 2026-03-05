@@ -20,8 +20,8 @@ use irys_domain::{
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress, Traced};
 use routes::{
-    balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
-    mining, peer_list, post_chunk, price, proxy::proxy, storage, tx,
+    balance, block, block_index, block_tree, commitment, commitment_state, config, get_chunk,
+    index, ledger, mempool, mining, peer_list, post_chunk, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -89,6 +89,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/commitment-tx",
             web::post().to(commitment::post_commitment_tx),
+        )
+        .route(
+            "/commitment-state/{address}",
+            web::get().to(commitment_state::get_commitment_state),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(

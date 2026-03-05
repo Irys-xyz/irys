@@ -4,6 +4,7 @@ pub mod block;
 pub mod block_index;
 pub mod block_tree;
 pub mod commitment;
+pub mod commitment_state;
 pub mod config;
 pub mod get_chunk;
 pub mod index;
