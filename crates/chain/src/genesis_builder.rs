@@ -7,9 +7,12 @@
 //! commitments globally to produce unique transaction IDs.
 
 use std::{
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use serde::{Deserialize, Serialize};
 
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
@@ -35,6 +38,62 @@ pub struct GenesisMinerEntry {
     pub signing_key: SigningKey,
     /// How many pledge (storage partition) commitments this miner contributes.
     pub pledge_count: u64,
+}
+
+/// Configuration file format for genesis miners (`genesis_miners.toml`).
+///
+/// Example:
+/// ```toml
+/// [[miners]]
+/// mining_key = "f57554aff54acd4cfaa084f45a7062d5869c8dbb789f7d6a883fade660960303"
+/// pledge_count = 5
+///
+/// [[miners]]
+/// mining_key = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+/// pledge_count = 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisMinerManifest {
+    pub miners: Vec<GenesisMinerManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisMinerManifestEntry {
+    pub mining_key: String,
+    pub pledge_count: u64,
+}
+
+impl GenesisMinerManifest {
+    /// Load from a TOML file path.
+    pub fn load(path: &Path) -> eyre::Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| eyre::eyre!("Failed to read genesis miners file {:?}: {}", path, e))?;
+        let manifest: Self = toml::from_str(&contents)
+            .map_err(|e| eyre::eyre!("Failed to parse genesis miners file {:?}: {}", path, e))?;
+        eyre::ensure!(
+            !manifest.miners.is_empty(),
+            "genesis_miners.toml must contain at least one [[miners]] entry"
+        );
+        Ok(manifest)
+    }
+
+    /// Convert parsed entries into [`GenesisMinerEntry`] values.
+    pub fn into_entries(self) -> eyre::Result<Vec<GenesisMinerEntry>> {
+        self.miners
+            .into_iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let key_bytes = hex::decode(entry.mining_key.trim_start_matches("0x"))
+                    .map_err(|e| eyre::eyre!("Invalid hex for miner[{}] mining_key: {}", i, e))?;
+                let signing_key = SigningKey::from_slice(&key_bytes)
+                    .map_err(|e| eyre::eyre!("Invalid signing key for miner[{}]: {}", i, e))?;
+                Ok(GenesisMinerEntry {
+                    signing_key,
+                    pledge_count: entry.pledge_count,
+                })
+            })
+            .collect()
+    }
 }
 
 /// The fully-assembled output of [`build_signed_genesis_block`].
