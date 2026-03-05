@@ -97,6 +97,10 @@ pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
     pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    /// PD handle for unified chunk management.
+    /// - PD transactions in the payload builder will be skipped if their chunks are not ready
+    /// - The mempool will monitor for PD transactions and provision/release chunks
+    pub pd_handle: irys_types::pd_handle::PdHandle,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
@@ -104,6 +108,7 @@ impl std::fmt::Debug for IrysEthereumNode {
         f.debug_struct("IrysEthereumNode")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
+            .field("pd_handle", &self.pd_handle)
             .finish()
     }
 }
@@ -136,16 +141,22 @@ impl IrysEthereumNode {
                 PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
             >,
     {
+        // Create pool builder with PD handle
+        let pool_builder =
+            IrysPoolBuilder::new(self.hardfork_config.clone(), self.pd_handle.clone());
+
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(IrysPoolBuilder::new(self.hardfork_config.clone()))
+            .pool(pool_builder)
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
+                pd_handle: self.pd_handle.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
+                pd_handle: self.pd_handle.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -222,6 +233,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    pd_handle: irys_types::pd_handle::PdHandle,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
@@ -229,6 +241,7 @@ impl std::fmt::Debug for IrysExecutorBuilder {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
+            .field("pd_handle", &self.pd_handle)
             .finish()
     }
 }
@@ -244,7 +257,7 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider.config(), self.hardfork_config);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -253,7 +266,9 @@ where
                 spec,
                 evm_factory,
             ),
-        };
+            pd_handle: None,
+        }
+        .with_pd_handle(self.pd_handle);
         Ok(evm_config)
     }
 }
@@ -2509,6 +2524,52 @@ pub mod test_utils {
     use reth_payload_primitives::PayloadBuilderAttributes as _;
     use reth_transaction_pool::EthPooledTransaction;
 
+    /// Create a mock PdHandle backed by the given chunk provider.
+    /// Useful for tests that need an IrysEthereumNode without a full PD subsystem.
+    pub fn mock_pd_handle(
+        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    ) -> irys_types::pd_handle::PdHandle {
+        /// Thin PdStoreApi impl that delegates to a RethChunkProvider.
+        #[derive(Debug)]
+        struct TestPdStore(Arc<dyn irys_types::chunk_provider::RethChunkProvider>);
+
+        impl irys_types::pd_handle::PdStoreApi for TestPdStore {
+            fn is_ready(&self, _tx_hash: &alloy_primitives::B256) -> bool {
+                true
+            }
+            fn provision_chunks(
+                &self,
+                _tx_hash: alloy_primitives::B256,
+                _specs: Vec<irys_types::range_specifier::ChunkRangeSpecifier>,
+            ) {
+            }
+            fn release_chunks(&self, _tx_hash: &alloy_primitives::B256) {}
+            fn expire_at_height(&self, _height: u64) {}
+            fn get_chunks_batch(
+                &self,
+                keys: &[(u32, u64)],
+            ) -> irys_types::chunk_provider::ChunkTable {
+                let mut table = irys_types::chunk_provider::ChunkTable::new();
+                for &(ledger, offset) in keys {
+                    if let Ok(Some(bytes)) =
+                        self.0.get_unpacked_chunk_by_ledger_offset(ledger, offset)
+                    {
+                        table.insert((ledger, offset), Arc::new(bytes));
+                    }
+                }
+                table
+            }
+            fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
+                self.0.config()
+            }
+        }
+
+        irys_types::pd_handle::PdHandle::new(
+            irys_types::chunk_provider::ChunkTableStore::new(),
+            Arc::new(TestPdStore(chunk_provider)),
+        )
+    }
+
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
     use alloy_primitives::aliases::U200;
@@ -3332,16 +3393,21 @@ pub mod test_utils {
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(tasks.clone())
-                .node(IrysEthereumNode {
-                    // Use default value for tests
-                    max_pd_chunks_per_block: 7_500,
-                    chunk_provider: chunk_provider.clone(),
-                    // Use testing hardfork config with Sprite enabled from genesis
-                    hardfork_config: std::sync::Arc::new(
-                        irys_types::config::ConsensusConfig::testing()
-                            .hardforks
-                            .clone(),
-                    ),
+                .node({
+                    // Create a mock PdHandle for testing
+                    let pd_handle = crate::test_utils::mock_pd_handle(chunk_provider.clone());
+                    IrysEthereumNode {
+                        // Use default value for tests
+                        max_pd_chunks_per_block: 7_500,
+                        chunk_provider: chunk_provider.clone(),
+                        // Use testing hardfork config with Sprite enabled from genesis
+                        hardfork_config: std::sync::Arc::new(
+                            irys_types::config::ConsensusConfig::testing()
+                                .hardforks
+                                .clone(),
+                        ),
+                        pd_handle,
+                    }
                 })
                 .launch()
                 .await?;

@@ -358,6 +358,7 @@ async fn start_reth_node(
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pd_handle: irys_types::pd_handle::PdHandle,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -367,6 +368,7 @@ async fn start_reth_node(
         latest_block,
         random_ports,
         chunk_provider,
+        pd_handle,
     )
     .in_current_span()
     .await?;
@@ -859,10 +861,14 @@ impl IrysNode {
         let irys_provider = reth_provider::create_provider();
         let shutdown_token = CancellationToken::new();
 
+        // PdHandle oneshot: init_services creates the PdHandle (with real ChunkProvider)
+        // and sends it to the reth thread which needs it for IrysEthereumNode construction.
+        let (pd_handle_tx, pd_handle_rx) = oneshot::channel::<irys_types::pd_handle::PdHandle>();
+
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = reth_runtime.clone();
-        // vdf gets started here...
+
         // init the services
         let actor_done_rx = Self::init_services_thread(
             self.config.clone(),
@@ -881,6 +887,7 @@ impl IrysNode {
             self.gossip_listener,
             tokio_runtime.handle().clone(),
             shutdown_token.clone(),
+            pd_handle_tx,
         )?;
 
         let handle = tokio_runtime.handle().clone();
@@ -897,6 +904,7 @@ impl IrysNode {
             reth_runtime,
             tokio_runtime,
             service_set_rx,
+            pd_handle_rx,
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
@@ -1088,6 +1096,7 @@ impl IrysNode {
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
+        pd_handle_tx: oneshot::Sender<irys_types::pd_handle::PdHandle>,
     ) -> Result<oneshot::Receiver<()>, eyre::Error> {
         let span = tracing::Span::current();
         let (actor_done_tx, actor_done_rx) = oneshot::channel::<()>();
@@ -1121,6 +1130,7 @@ impl IrysNode {
                                 gossip_listener,
                                 runtime_handle,
                                 shutdown_token.clone(),
+                                pd_handle_tx,
                             )
                             .instrument(tracing::Span::current())
                             .await
@@ -1192,6 +1202,7 @@ impl IrysNode {
         reth_runtime: reth::tasks::Runtime,
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
+        pd_handle_rx: oneshot::Receiver<irys_types::pd_handle::PdHandle>,
     ) -> eyre::Result<oneshot::Receiver<ShutdownReason>> {
         let span = tracing::Span::current();
         let span2 = span.clone();
@@ -1204,7 +1215,13 @@ impl IrysNode {
                 let exec = reth_runtime.clone();
                 let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async move {
-                    // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
+                    // Wait for the PdHandle from init_services (it needs the real ChunkProvider).
+                    let pd_handle = pd_handle_rx
+                        .await
+                        .expect("PdHandle sender must not be dropped");
+
+                    // The PdHandle provides chunk data; pass a MockChunkProvider to reth's
+                    // executor builder as a placeholder (all real fetching goes through PdHandle).
                     let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
 
                     let node_handle = start_reth_node(
@@ -1214,6 +1231,7 @@ impl IrysNode {
                         reth_handle_sender,
                         latest_block_height,
                         Arc::new(mock_provider),
+                        pd_handle,
                     )
                     .in_current_span()
                     .await
@@ -1327,6 +1345,7 @@ impl IrysNode {
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
+        pd_handle_tx: oneshot::Sender<irys_types::pd_handle::PdHandle>,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -1367,7 +1386,7 @@ impl IrysNode {
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
-        // start reth service
+        // start reth service with external provisioner
         let reth_service_task = init_reth_service(
             &irys_db,
             reth_node_adapter.clone(),
@@ -1626,6 +1645,50 @@ impl IrysNode {
         )));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
+        // Create PdHandle early so it's available for both the validation service and reth.
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+        let chunk_table_store = irys_types::chunk_provider::ChunkTableStore::new();
+        let pd_chunk_store = irys_actors::pd_service::store::PdChunkStoreHandle::new(
+            irys_actors::pd_service::store::PdChunkStore::new(chunk_provider.clone()),
+        );
+        let pd_handle =
+            irys_types::pd_handle::PdHandle::new(chunk_table_store, Arc::new(pd_chunk_store));
+
+        // Send PdHandle to the reth thread (it's awaiting this before starting the node).
+        pd_handle_tx
+            .send(pd_handle.clone())
+            .expect("PdHandle receiver must not be dropped");
+        debug!("PD handle initialized and sent to reth thread");
+
+        // Spawn a lightweight block-height expiration task (replaces old PdService).
+        {
+            let pd_handle_for_expiry = pd_handle.clone();
+            let mut block_state_rx = service_senders.subscribe_block_state_updates();
+            runtime_handle.spawn(async move {
+                loop {
+                    match block_state_rx.recv().await {
+                        Ok(event) if !event.discarded => {
+                            pd_handle_for_expiry.store().expire_at_height(event.height);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // Spawn periodic ChunkTableStore TTL cleanup (evicts stale entries every 60s).
+        {
+            let cts = pd_handle.chunk_table_store().clone();
+            runtime_handle.spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    cts.evict_stale(std::time::Duration::from_secs(120));
+                }
+            });
+        }
+
         // Spawn the validation service
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
@@ -1638,6 +1701,7 @@ impl IrysNode {
             irys_db.clone(),
             execution_payload_cache.clone(),
             receivers.validation_service,
+            Some(pd_handle.clone()),
             runtime_handle.clone(),
             sync_state.clone(),
         );
@@ -1719,6 +1783,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             block_index,
+            Some(pd_handle.clone()),
             runtime_handle.clone(),
         );
 
@@ -1762,9 +1827,6 @@ impl IrysNode {
             sync_state.clone(),
             shutdown_token.clone(),
         );
-
-        // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
 
         // set up sync service
         let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
@@ -2134,6 +2196,7 @@ impl IrysNode {
         block_producer_rx: UnboundedReceiver<Traced<BlockProducerCommand>>,
         reth_provider: NodeProvider,
         block_index: BlockIndex,
+        pd_handle: Option<irys_types::pd_handle::PdHandle>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -2151,6 +2214,7 @@ impl IrysNode {
             reth_provider,
             consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
+            pd_handle,
         });
 
         // Spawn the service and get the handle

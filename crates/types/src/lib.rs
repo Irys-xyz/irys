@@ -46,6 +46,7 @@ pub mod traced;
 
 pub mod block_provider;
 pub mod h256;
+pub mod pd_handle;
 pub mod remote_packing;
 pub mod rlp;
 

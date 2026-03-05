@@ -101,6 +101,7 @@ pub async fn run_node(
     latest_block: u64,
     random_ports: bool,
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pd_handle: irys_types::pd_handle::PdHandle,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -216,6 +217,7 @@ pub async fn run_node(
             max_pd_chunks_per_block,
             chunk_provider,
             hardfork_config: std::sync::Arc::new(hardfork_config.clone()),
+            pd_handle,
         })
         .launch_with_debug_capabilities()
         .into_future()

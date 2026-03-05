@@ -1429,6 +1429,9 @@ pub async fn shadow_transactions_are_valid(
     }
 
     // 2.5. Validate PD chunk budget (only if Sprite hardfork is active)
+    // Note: chunk provisioning is handled on-demand by the PD service during EVM execution.
+    // The PD precompile requests chunks via GetChunk, and the PD service loads from storage
+    // on cache miss. No pre-provisioning is needed here.
     let block_timestamp = irys_types::UnixTimestamp::from_secs(block_timestamp_sec as u64);
     if let Some(max_pd_chunks) = config
         .consensus
@@ -1438,14 +1441,12 @@ pub async fn shadow_transactions_are_valid(
         let mut total_pd_chunks: u64 = 0;
 
         for tx in evm_block.body.transactions.iter() {
-            // Try to detect PD header in transaction input
             let input = tx.input();
-            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-                // This is a PD transaction, sum chunks from access list if present
-                if let Some(access_list) = tx.access_list() {
-                    let chunks = sum_pd_chunks_in_access_list(access_list);
-                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-                }
+            if let Ok(Some(_header)) = detect_and_decode_pd_header(input)
+                && let Some(access_list) = tx.access_list()
+            {
+                let chunks = sum_pd_chunks_in_access_list(access_list);
+                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
             }
         }
 

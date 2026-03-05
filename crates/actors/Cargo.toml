@@ -35,6 +35,7 @@ itertools.workspace = true
 lru.workspace = true
 nodit.workspace = true
 openssl.workspace = true
+parking_lot = "0.12"
 opentelemetry.workspace = true
 priority-queue.workspace = true
 rayon.workspace = true

@@ -591,6 +591,19 @@ impl BlockValidationTask {
             ) => {
                 tracing::debug!("All consensus validations successful, submitting to reth");
 
+                // Pre-build the chunk table so the EVM finds it in the side-channel
+                // (no extra I/O on the Reth side).
+                if let Some(pd_handle) = &self.service_inner.pd_handle {
+                    let block_hash = execution_data.payload.block_hash();
+                    let chunk_config = pd_handle.store().config();
+                    irys_reth::pd_tx::prebuild_chunk_table(
+                        pd_handle,
+                        block_hash,
+                        execution_data.payload.transactions(),
+                        &chunk_config,
+                    );
+                }
+
                 // All consensus layer validations passed, now submit to execution layer
                 let reth_result = submit_payload_to_reth(
                     self.sealed_block.header(),
@@ -619,6 +632,7 @@ impl BlockValidationTask {
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
+
                 // At least one validation failed, return the first Invalid result
                 let first_invalid = [
                     &recall_result,

@@ -100,6 +100,7 @@ async fn evm_block_hash_from_block_hash(
 }
 
 impl RethService {
+    /// Spawn the Reth service.
     pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,

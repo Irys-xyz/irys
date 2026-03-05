@@ -3,8 +3,11 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{B256, Bytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
+use irys_types::chunk_provider::ChunkConfig;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{PdAccessListArg, PdAccessListArgSerde as _};
+use irys_types::range_specifier::{
+    ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _,
+};
 use std::io::{Read, Write};
 
 /// Create a PD access list for a list of ChunkRangeSpecifiers, under the PD precompile address.
@@ -154,6 +157,109 @@ pub fn detect_and_decode_pd_header(
     let header = PdHeaderV1::deserialize_reader(&mut rdr)?;
     let consumed = input.len() - rdr.len();
     Ok(Some((header, consumed)))
+}
+
+/// Extracts PD chunk range specifiers from a transaction's access list.
+///
+/// Returns all `ChunkRangeSpecifier` entries found under the PD precompile address.
+/// Invalid encodings are logged as warnings and skipped.
+pub fn extract_pd_chunk_specs(
+    access_list: &alloy_eips::eip2930::AccessList,
+) -> Vec<ChunkRangeSpecifier> {
+    access_list
+        .0
+        .iter()
+        .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
+        .flat_map(|item| item.storage_keys.iter())
+        .filter_map(|key| match PdAccessListArg::decode(&key.0) {
+            Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec),
+            Ok(PdAccessListArg::ByteRead(_)) => None,
+            Err(e) => {
+                tracing::warn!("Invalid PD access list key encoding, skipping: {}", e);
+                None
+            }
+        })
+        .collect()
+}
+
+/// Convert a [`ChunkRangeSpecifier`] into a list of `(ledger, ledger_offset)` keys
+/// using the same checked-arithmetic logic as `PdChunkStore::specs_to_keys`.
+///
+/// The ledger value is currently hardcoded to `0`.
+pub fn specs_to_ledger_offsets(
+    spec: &ChunkRangeSpecifier,
+    config: &ChunkConfig,
+) -> Vec<(u32, u64)> {
+    let partition_index: u64 = spec.partition_index.try_into().unwrap_or(u64::MAX);
+    let base = config.num_chunks_in_partition.checked_mul(partition_index);
+    (0..spec.chunk_count)
+        .filter_map(|i| {
+            base.and_then(|b| b.checked_add(spec.offset as u64))
+                .and_then(|b| b.checked_add(i as u64))
+                .map(|offset| (0_u32, offset))
+        })
+        .collect()
+}
+
+/// Build a [`ChunkTable`] from raw EVM-encoded payload transactions and insert it
+/// into the [`ChunkTableStore`] keyed by `block_hash`.
+///
+/// This is the canonical pre-build path used by CL (block validation & production)
+/// so that the EVM side finds the table in the side-channel without any I/O.
+///
+/// Returns the built table (also inserted into the store).
+pub fn prebuild_chunk_table(
+    pd_handle: &irys_types::pd_handle::PdHandle,
+    block_hash: alloy_primitives::B256,
+    raw_transactions: &[impl AsRef<[u8]>],
+    chunk_config: &ChunkConfig,
+) -> std::sync::Arc<irys_types::chunk_provider::ChunkTable> {
+    use alloy_consensus::Transaction as _;
+    use alloy_eips::eip2718::Decodable2718 as _;
+    use reth::primitives::TransactionSigned;
+    use std::collections::HashSet;
+
+    let mut keys = HashSet::new();
+    for raw_tx in raw_transactions {
+        let Ok(tx) = TransactionSigned::decode_2718(&mut raw_tx.as_ref()) else {
+            continue;
+        };
+        let Some(access_list) = tx.access_list() else {
+            continue;
+        };
+        if detect_and_decode_pd_header(tx.input())
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            continue;
+        }
+        for spec in extract_pd_chunk_specs(access_list) {
+            for key in specs_to_ledger_offsets(&spec, chunk_config) {
+                keys.insert(key);
+            }
+        }
+    }
+
+    if keys.is_empty() {
+        let table = std::sync::Arc::new(irys_types::chunk_provider::ChunkTable::new());
+        pd_handle
+            .chunk_table_store()
+            .insert(block_hash, table.clone());
+        return table;
+    }
+
+    let keys_vec: Vec<(u32, u64)> = keys.into_iter().collect();
+    let table = std::sync::Arc::new(pd_handle.store().get_chunks_batch(&keys_vec));
+    tracing::debug!(
+        table_size = table.len(),
+        %block_hash,
+        "prebuild_chunk_table: built and inserted into ChunkTableStore"
+    );
+    pd_handle
+        .chunk_table_store()
+        .insert(block_hash, table.clone());
+    table
 }
 
 #[cfg(test)]
