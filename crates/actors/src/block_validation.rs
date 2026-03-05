@@ -2356,8 +2356,14 @@ pub async fn data_txs_are_valid(
             })?;
 
             // Validate assigned ingress proofs and get counts
-            let (assigned_proofs, assigned_miners) =
-                get_assigned_ingress_proofs(&tx_proofs, tx_header, block_tree_guard, db, config, &parent_epoch_snapshot)?;
+            let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
+                &tx_proofs,
+                tx_header,
+                block_tree_guard,
+                db,
+                config,
+                &parent_epoch_snapshot,
+            )?;
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
@@ -3024,7 +3030,6 @@ fn get_submit_ledger_slot_addresses(
     slot_indexes: &Vec<usize>,
     epoch_snapshot: &EpochSnapshot,
 ) -> HashMap<usize, usize> {
-
     let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
 
     for slot_index in slot_indexes {

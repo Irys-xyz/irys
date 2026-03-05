@@ -29,7 +29,9 @@ impl BlockTreeReadGuard {
     pub fn latest_block_height(&self) -> Option<u64> {
         let tree = self.read();
         let (canonical, _) = tree.get_canonical_chain();
-        canonical.last().map(|entry| entry.height())
+        canonical
+            .last()
+            .map(super::super::models::block_tree::BlockTreeEntry::height)
     }
 
     /// Gets the total number of chunks in a ledger at a given block height
