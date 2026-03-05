@@ -4,6 +4,7 @@
 )]
 use crate::metrics::record_gossip_outbound_error;
 use crate::types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
+use crate::wire_types;
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
@@ -337,11 +338,12 @@ impl GossipClient {
                     ));
                 }
                 if let Some(req_v1) = requested_data.to_v1() {
+                    let wire_req: wire_types::GossipDataRequestV1 = (&req_v1).into();
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
                         self.send_data_internal(
                             &peer.1.address.gossip,
                             GossipRoutes::PullData,
-                            &req_v1,
+                            &wire_req,
                             ProtocolVersion::V1,
                         )
                         .await;
@@ -358,10 +360,11 @@ impl GossipClient {
                     ))
                 }
             } else {
+                let wire_req: wire_types::GossipDataRequestV2 = (&requested_data).into();
                 self.send_data_internal(
                     &peer.1.address.gossip,
                     GossipRoutes::PullData,
-                    &requested_data,
+                    &wire_req,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -499,12 +502,13 @@ impl GossipClient {
             GossipRoutes::Version
         );
         debug!("Posting V1 handshake to {}: {:?}", url, version);
+        let wire_req: wire_types::HandshakeRequestV1 = (&version).into();
         let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
             .headers(headers)
-            .json(&version)
+            .json(&wire_req)
             .send()
             .await
             .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
@@ -569,12 +573,13 @@ impl GossipClient {
             GossipRoutes::Handshake
         );
         debug!("Posting V2 handshake to {}: {:?}", url, version);
+        let wire_req: wire_types::HandshakeRequestV2 = (&version).into();
         let headers = traced_headers();
         let response = self
             .internal_client()
             .post(&url)
             .headers(headers)
-            .json(&version)
+            .json(&wire_req)
             .send()
             .await
             .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
@@ -827,18 +832,27 @@ impl GossipClient {
         data: &GossipDataV2,
     ) -> Option<(GossipRoutes, bytes::Bytes)> {
         let (route, json_result) = match data {
-            GossipDataV2::Chunk(chunk) => (
-                GossipRoutes::Chunk,
-                serde_json::to_vec(&self.create_request_v2(chunk.clone())),
-            ),
-            GossipDataV2::Transaction(header) => (
-                GossipRoutes::Transaction,
-                serde_json::to_vec(&self.create_request_v2(header.clone())),
-            ),
-            GossipDataV2::CommitmentTransaction(tx) => (
-                GossipRoutes::CommitmentTx,
-                serde_json::to_vec(&self.create_request_v2(tx.clone())),
-            ),
+            GossipDataV2::Chunk(chunk) => {
+                let wire: wire_types::UnpackedChunk = chunk.as_ref().into();
+                (
+                    GossipRoutes::Chunk,
+                    serde_json::to_vec(&self.create_request_v2(wire)),
+                )
+            }
+            GossipDataV2::Transaction(header) => {
+                let wire: wire_types::DataTransactionHeader = header.into();
+                (
+                    GossipRoutes::Transaction,
+                    serde_json::to_vec(&self.create_request_v2(wire)),
+                )
+            }
+            GossipDataV2::CommitmentTransaction(tx) => {
+                let wire: wire_types::CommitmentTransaction = tx.into();
+                (
+                    GossipRoutes::CommitmentTx,
+                    serde_json::to_vec(&self.create_request_v2(wire)),
+                )
+            }
             GossipDataV2::BlockHeader(header) => {
                 if header.poa.chunk.is_none() {
                     error!(
@@ -847,23 +861,30 @@ impl GossipClient {
                         "Pre-serializing a block header without the POA chunk"
                     );
                 }
+                let wire: wire_types::IrysBlockHeader = header.as_ref().into();
                 (
                     GossipRoutes::Block,
-                    serde_json::to_vec(&self.create_request_v2(header.clone())),
+                    serde_json::to_vec(&self.create_request_v2(wire)),
                 )
             }
-            GossipDataV2::BlockBody(body) => (
-                GossipRoutes::BlockBody,
-                serde_json::to_vec(&self.create_request_v2(body.clone())),
-            ),
+            GossipDataV2::BlockBody(body) => {
+                let wire: wire_types::BlockBody = body.as_ref().into();
+                (
+                    GossipRoutes::BlockBody,
+                    serde_json::to_vec(&self.create_request_v2(wire)),
+                )
+            }
             GossipDataV2::ExecutionPayload(payload) => (
                 GossipRoutes::ExecutionPayload,
                 serde_json::to_vec(&self.create_request_v2(payload.clone())),
             ),
-            GossipDataV2::IngressProof(proof) => (
-                GossipRoutes::IngressProof,
-                serde_json::to_vec(&self.create_request_v2(proof.clone())),
-            ),
+            GossipDataV2::IngressProof(proof) => {
+                let wire: wire_types::IngressProof = proof.into();
+                (
+                    GossipRoutes::IngressProof,
+                    serde_json::to_vec(&self.create_request_v2(wire)),
+                )
+            }
         };
         match json_result {
             Ok(b) => Some((route, bytes::Bytes::from(b))),
@@ -1009,28 +1030,31 @@ impl GossipClient {
 
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
+                let wire: wire_types::UnpackedChunk = unpacked_chunk.as_ref().into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Chunk,
-                    unpacked_chunk,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::Transaction(irys_transaction_header) => {
+                let wire: wire_types::DataTransactionHeader = irys_transaction_header.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Transaction,
-                    irys_transaction_header,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::CommitmentTransaction(commitment_tx) => {
+                let wire: wire_types::CommitmentTransaction = commitment_tx.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::CommitmentTx,
-                    commitment_tx,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1043,19 +1067,21 @@ impl GossipClient {
                         "Sending a block header without the POA chunk"
                     );
                 }
+                let wire: wire_types::IrysBlockHeader = irys_block_header.as_ref().into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Block,
-                    &irys_block_header,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::BlockBody(block_body) => {
+                let wire: wire_types::BlockBody = block_body.as_ref().into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::BlockBody,
-                    &block_body,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1070,10 +1096,11 @@ impl GossipClient {
                 .await
             }
             GossipDataV2::IngressProof(ingress_proof) => {
+                let wire: wire_types::IngressProof = ingress_proof.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::IngressProof,
-                    ingress_proof,
+                    &wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1089,28 +1116,31 @@ impl GossipClient {
         use irys_types::v1::GossipDataV1;
         match data {
             GossipDataV1::Chunk(unpacked_chunk) => {
+                let wire: wire_types::UnpackedChunk = unpacked_chunk.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Chunk,
-                    unpacked_chunk,
+                    &wire,
                     ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::Transaction(irys_transaction_header) => {
+                let wire: wire_types::DataTransactionHeader = irys_transaction_header.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Transaction,
-                    irys_transaction_header,
+                    &wire,
                     ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::CommitmentTransaction(commitment_tx) => {
+                let wire: wire_types::CommitmentTransaction = commitment_tx.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::CommitmentTx,
-                    commitment_tx,
+                    &wire,
                     ProtocolVersion::V1,
                 )
                 .await
@@ -1123,10 +1153,11 @@ impl GossipClient {
                         "Sending a block header without the POA chunk"
                     );
                 }
+                let wire: wire_types::IrysBlockHeader = irys_block_header.as_ref().into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Block,
-                    irys_block_header,
+                    &wire,
                     ProtocolVersion::V1,
                 )
                 .await
@@ -1141,10 +1172,11 @@ impl GossipClient {
                 .await
             }
             GossipDataV1::IngressProof(ingress_proof) => {
+                let wire: wire_types::IngressProof = ingress_proof.into();
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::IngressProof,
-                    ingress_proof,
+                    &wire,
                     ProtocolVersion::V1,
                 )
                 .await
@@ -1375,15 +1407,15 @@ impl GossipClient {
         });
     }
 
-    fn create_request_v1<T>(&self, data: T) -> irys_types::GossipRequestV1<T> {
-        irys_types::GossipRequestV1 {
+    fn create_request_v1<T>(&self, data: T) -> wire_types::GossipRequestV1<T> {
+        wire_types::GossipRequestV1 {
             miner_address: self.mining_address,
             data,
         }
     }
 
-    fn create_request_v2<T>(&self, data: T) -> irys_types::GossipRequestV2<T> {
-        irys_types::GossipRequestV2 {
+    fn create_request_v2<T>(&self, data: T) -> wire_types::GossipRequestV2<T> {
+        wire_types::GossipRequestV2 {
             peer_id: self.peer_id,
             miner_address: self.mining_address,
             data,

@@ -8,13 +8,13 @@ mod gossip_data_handler;
 mod gossip_fixture_tests;
 mod gossip_service;
 mod metrics;
-pub(crate) mod wire_types;
 mod peer_network_service;
 mod rate_limiting;
 mod server;
 #[cfg(test)]
 mod tests;
 mod types;
+pub(crate) mod wire_types;
 
 pub use block_pool::{BlockPool, BlockPoolError};
 pub use block_status_provider::{BlockStatus, BlockStatusProvider};

@@ -62,7 +62,7 @@ impl From<crate::types::RejectionReason> for RejectionReason {
     fn from(r: crate::types::RejectionReason) -> Self {
         match r {
             crate::types::RejectionReason::HandshakeRequired(reason) => {
-                Self::HandshakeRequired(reason.map(|r| r.into()))
+                Self::HandshakeRequired(reason.map(Into::into))
             }
             crate::types::RejectionReason::GossipDisabled => Self::GossipDisabled,
             crate::types::RejectionReason::InvalidData => Self::InvalidData,
@@ -82,7 +82,7 @@ impl From<RejectionReason> for crate::types::RejectionReason {
     fn from(r: RejectionReason) -> Self {
         match r {
             RejectionReason::HandshakeRequired(reason) => {
-                Self::HandshakeRequired(reason.map(|r| r.into()))
+                Self::HandshakeRequired(reason.map(Into::into))
             }
             RejectionReason::GossipDisabled => Self::GossipDisabled,
             RejectionReason::InvalidData => Self::InvalidData,

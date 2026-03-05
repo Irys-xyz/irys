@@ -7,17 +7,11 @@ use serde::{Deserialize, Serialize};
 pub enum CommitmentTypeV1 {
     Stake,
     Pledge {
-        #[serde(
-            rename = "pledgeCountBeforeExecuting",
-            with = "irys_types::string_u64"
-        )]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "irys_types::string_u64")]
         pledge_count_before_executing: u64,
     },
     Unpledge {
-        #[serde(
-            rename = "pledgeCountBeforeExecuting",
-            with = "irys_types::string_u64"
-        )]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "irys_types::string_u64")]
         pledge_count_before_executing: u64,
         #[serde(rename = "partitionHash")]
         partition_hash: H256,
@@ -31,17 +25,11 @@ pub enum CommitmentTypeV1 {
 pub enum CommitmentTypeV2 {
     Stake,
     Pledge {
-        #[serde(
-            rename = "pledgeCountBeforeExecuting",
-            with = "irys_types::string_u64"
-        )]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "irys_types::string_u64")]
         pledge_count_before_executing: u64,
     },
     Unpledge {
-        #[serde(
-            rename = "pledgeCountBeforeExecuting",
-            with = "irys_types::string_u64"
-        )]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "irys_types::string_u64")]
         pledge_count_before_executing: u64,
         #[serde(rename = "partitionHash")]
         partition_hash: H256,
@@ -95,15 +83,15 @@ pub enum CommitmentTransaction {
 
 impl Serialize for CommitmentTransaction {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
+        use serde::ser::SerializeMap as _;
 
         let (version, inner_value) = match self {
             Self::V1(inner) => (
-                1u8,
+                1_u8,
                 serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
             ),
             Self::V2(inner) => (
-                2u8,
+                2_u8,
                 serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
             ),
         };
@@ -130,8 +118,7 @@ impl<'de> Deserialize<'de> for CommitmentTransaction {
             let mut fields = serde_json::Map::new();
             for (key, val) in obj {
                 if key == "version" {
-                    version =
-                        Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
+                    version = Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
                 } else {
                     fields.insert(key, val);
                 }
@@ -148,10 +135,7 @@ impl<'de> Deserialize<'de> for CommitmentTransaction {
                         serde_json::from_value(inner_value).map_err(serde::de::Error::custom)?;
                     Ok(Self::V2(inner))
                 }
-                Some(v) => Err(serde::de::Error::custom(format!(
-                    "unknown version: {}",
-                    v
-                ))),
+                Some(v) => Err(serde::de::Error::custom(format!("unknown version: {}", v))),
                 None => Err(serde::de::Error::missing_field("version")),
             }
         } else {
@@ -257,30 +241,26 @@ impl From<CommitmentTypeV2> for irys_types::CommitmentTypeV2 {
 impl From<&irys_types::CommitmentTransaction> for CommitmentTransaction {
     fn from(ct: &irys_types::CommitmentTransaction) -> Self {
         match ct {
-            irys_types::CommitmentTransaction::V1(wm) => {
-                Self::V1(CommitmentTransactionV1Inner {
-                    id: wm.tx.id,
-                    anchor: wm.tx.anchor,
-                    signer: wm.tx.signer,
-                    commitment_type: (&wm.tx.commitment_type).into(),
-                    chain_id: wm.tx.chain_id,
-                    fee: wm.tx.fee,
-                    value: wm.tx.value,
-                    signature: wm.tx.signature,
-                })
-            }
-            irys_types::CommitmentTransaction::V2(wm) => {
-                Self::V2(CommitmentTransactionV2Inner {
-                    id: wm.tx.id,
-                    anchor: wm.tx.anchor,
-                    signer: wm.tx.signer,
-                    commitment_type: (&wm.tx.commitment_type).into(),
-                    chain_id: wm.tx.chain_id,
-                    fee: wm.tx.fee,
-                    value: wm.tx.value,
-                    signature: wm.tx.signature,
-                })
-            }
+            irys_types::CommitmentTransaction::V1(wm) => Self::V1(CommitmentTransactionV1Inner {
+                id: wm.tx.id,
+                anchor: wm.tx.anchor,
+                signer: wm.tx.signer,
+                commitment_type: (&wm.tx.commitment_type).into(),
+                chain_id: wm.tx.chain_id,
+                fee: wm.tx.fee,
+                value: wm.tx.value,
+                signature: wm.tx.signature,
+            }),
+            irys_types::CommitmentTransaction::V2(wm) => Self::V2(CommitmentTransactionV2Inner {
+                id: wm.tx.id,
+                anchor: wm.tx.anchor,
+                signer: wm.tx.signer,
+                commitment_type: (&wm.tx.commitment_type).into(),
+                chain_id: wm.tx.chain_id,
+                fee: wm.tx.fee,
+                value: wm.tx.value,
+                signature: wm.tx.signature,
+            }),
         }
     }
 }
@@ -290,38 +270,34 @@ impl TryFrom<CommitmentTransaction> for irys_types::CommitmentTransaction {
     fn try_from(ct: CommitmentTransaction) -> eyre::Result<Self> {
         match ct {
             CommitmentTransaction::V1(inner) => {
-                Ok(irys_types::CommitmentTransaction::V1(
-                    irys_types::CommitmentV1WithMetadata {
-                        tx: irys_types::CommitmentTransactionV1 {
-                            id: inner.id,
-                            anchor: inner.anchor,
-                            signer: inner.signer,
-                            commitment_type: inner.commitment_type.into(),
-                            chain_id: inner.chain_id,
-                            fee: inner.fee,
-                            value: inner.value,
-                            signature: inner.signature,
-                        },
-                        metadata: Default::default(),
+                Ok(Self::V1(irys_types::CommitmentV1WithMetadata {
+                    tx: irys_types::CommitmentTransactionV1 {
+                        id: inner.id,
+                        anchor: inner.anchor,
+                        signer: inner.signer,
+                        commitment_type: inner.commitment_type.into(),
+                        chain_id: inner.chain_id,
+                        fee: inner.fee,
+                        value: inner.value,
+                        signature: inner.signature,
                     },
-                ))
+                    metadata: Default::default(),
+                }))
             }
             CommitmentTransaction::V2(inner) => {
-                Ok(irys_types::CommitmentTransaction::V2(
-                    irys_types::CommitmentV2WithMetadata {
-                        tx: irys_types::CommitmentTransactionV2 {
-                            id: inner.id,
-                            anchor: inner.anchor,
-                            signer: inner.signer,
-                            commitment_type: inner.commitment_type.into(),
-                            chain_id: inner.chain_id,
-                            fee: inner.fee,
-                            value: inner.value,
-                            signature: inner.signature,
-                        },
-                        metadata: Default::default(),
+                Ok(Self::V2(irys_types::CommitmentV2WithMetadata {
+                    tx: irys_types::CommitmentTransactionV2 {
+                        id: inner.id,
+                        anchor: inner.anchor,
+                        signer: inner.signer,
+                        commitment_type: inner.commitment_type.into(),
+                        chain_id: inner.chain_id,
+                        fee: inner.fee,
+                        value: inner.value,
+                        signature: inner.signature,
                     },
-                ))
+                    metadata: Default::default(),
+                }))
             }
         }
     }

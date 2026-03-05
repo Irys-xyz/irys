@@ -1,7 +1,8 @@
 use irys_types::{
     block::IrysTokenPrice,
+    partition::PartitionHash,
     serialization::{Base64, H256List, IngressProofsList},
-    partition::PartitionHash, BlockHash, IrysAddress, IrysSignature, UnixTimestampMs, H256, U256,
+    BlockHash, IrysAddress, IrysSignature, UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
@@ -104,10 +105,10 @@ pub enum IrysBlockHeader {
 
 impl Serialize for IrysBlockHeader {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
+        use serde::ser::SerializeMap as _;
         let (version, inner_value) = match self {
             Self::V1(inner) => (
-                1u8,
+                1_u8,
                 serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
             ),
         };
@@ -132,8 +133,7 @@ impl<'de> Deserialize<'de> for IrysBlockHeader {
             let mut fields = serde_json::Map::new();
             for (key, val) in obj {
                 if key == "version" {
-                    version =
-                        Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
+                    version = Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
                 } else {
                     fields.insert(key, val);
                 }
@@ -145,10 +145,7 @@ impl<'de> Deserialize<'de> for IrysBlockHeader {
                             .map_err(serde::de::Error::custom)?;
                     Ok(Self::V1(inner))
                 }
-                Some(v) => Err(serde::de::Error::custom(format!(
-                    "unknown version: {}",
-                    v
-                ))),
+                Some(v) => Err(serde::de::Error::custom(format!("unknown version: {}", v))),
                 None => Err(serde::de::Error::missing_field("version")),
             }
         } else {
@@ -292,8 +289,8 @@ impl From<&irys_types::IrysBlockHeader> for IrysBlockHeader {
                 reward_amount: inner.reward_amount,
                 miner_address: inner.miner_address,
                 timestamp: inner.timestamp,
-                system_ledgers: inner.system_ledgers.iter().map(|l| l.into()).collect(),
-                data_ledgers: inner.data_ledgers.iter().map(|l| l.into()).collect(),
+                system_ledgers: inner.system_ledgers.iter().map(Into::into).collect(),
+                data_ledgers: inner.data_ledgers.iter().map(Into::into).collect(),
                 evm_block_hash: inner.evm_block_hash,
                 vdf_limiter_info: (&inner.vdf_limiter_info).into(),
                 oracle_irys_price: inner.oracle_irys_price,
@@ -308,42 +305,32 @@ impl TryFrom<IrysBlockHeader> for irys_types::IrysBlockHeader {
     type Error = eyre::Report;
     fn try_from(h: IrysBlockHeader) -> eyre::Result<Self> {
         match h {
-            IrysBlockHeader::V1(inner) => Ok(irys_types::IrysBlockHeader::V1(
-                irys_types::IrysBlockHeaderV1 {
-                    block_hash: inner.block_hash,
-                    signature: inner.signature,
-                    height: inner.height,
-                    diff: inner.diff,
-                    cumulative_diff: inner.cumulative_diff,
-                    solution_hash: inner.solution_hash,
-                    last_diff_timestamp: inner.last_diff_timestamp,
-                    previous_solution_hash: inner.previous_solution_hash,
-                    last_epoch_hash: inner.last_epoch_hash,
-                    chunk_hash: inner.chunk_hash,
-                    previous_block_hash: inner.previous_block_hash,
-                    previous_cumulative_diff: inner.previous_cumulative_diff,
-                    poa: inner.poa.into(),
-                    reward_address: inner.reward_address,
-                    reward_amount: inner.reward_amount,
-                    miner_address: inner.miner_address,
-                    timestamp: inner.timestamp,
-                    system_ledgers: inner
-                        .system_ledgers
-                        .into_iter()
-                        .map(|l| l.into())
-                        .collect(),
-                    data_ledgers: inner
-                        .data_ledgers
-                        .into_iter()
-                        .map(|l| l.into())
-                        .collect(),
-                    evm_block_hash: inner.evm_block_hash,
-                    vdf_limiter_info: inner.vdf_limiter_info.into(),
-                    oracle_irys_price: inner.oracle_irys_price,
-                    ema_irys_price: inner.ema_irys_price,
-                    treasury: inner.treasury,
-                },
-            )),
+            IrysBlockHeader::V1(inner) => Ok(Self::V1(irys_types::IrysBlockHeaderV1 {
+                block_hash: inner.block_hash,
+                signature: inner.signature,
+                height: inner.height,
+                diff: inner.diff,
+                cumulative_diff: inner.cumulative_diff,
+                solution_hash: inner.solution_hash,
+                last_diff_timestamp: inner.last_diff_timestamp,
+                previous_solution_hash: inner.previous_solution_hash,
+                last_epoch_hash: inner.last_epoch_hash,
+                chunk_hash: inner.chunk_hash,
+                previous_block_hash: inner.previous_block_hash,
+                previous_cumulative_diff: inner.previous_cumulative_diff,
+                poa: inner.poa.into(),
+                reward_address: inner.reward_address,
+                reward_amount: inner.reward_amount,
+                miner_address: inner.miner_address,
+                timestamp: inner.timestamp,
+                system_ledgers: inner.system_ledgers.into_iter().map(Into::into).collect(),
+                data_ledgers: inner.data_ledgers.into_iter().map(Into::into).collect(),
+                evm_block_hash: inner.evm_block_hash,
+                vdf_limiter_info: inner.vdf_limiter_info.into(),
+                oracle_irys_price: inner.oracle_irys_price,
+                ema_irys_price: inner.ema_irys_price,
+                treasury: inner.treasury,
+            })),
         }
     }
 }
@@ -352,12 +339,8 @@ impl From<&irys_types::BlockBody> for BlockBody {
     fn from(b: &irys_types::BlockBody) -> Self {
         Self {
             block_hash: b.block_hash,
-            data_transactions: b.data_transactions.iter().map(|t| t.into()).collect(),
-            commitment_transactions: b
-                .commitment_transactions
-                .iter()
-                .map(|c| c.into())
-                .collect(),
+            data_transactions: b.data_transactions.iter().map(Into::into).collect(),
+            commitment_transactions: b.commitment_transactions.iter().map(Into::into).collect(),
         }
     }
 }
