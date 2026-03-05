@@ -299,6 +299,53 @@ impl PdChunkStore {
     }
 }
 
+use irys_types::pd_handle::PdStoreApi;
+
+/// Thread-safe wrapper implementing `PdStoreApi` for cross-crate use.
+pub struct PdChunkStoreHandle {
+    inner: parking_lot::Mutex<PdChunkStore>,
+}
+
+impl std::fmt::Debug for PdChunkStoreHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdChunkStoreHandle").finish_non_exhaustive()
+    }
+}
+
+impl PdChunkStoreHandle {
+    pub fn new(store: PdChunkStore) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(store),
+        }
+    }
+}
+
+impl PdStoreApi for PdChunkStoreHandle {
+    fn is_ready(&self, tx_hash: &B256) -> bool {
+        self.inner.lock().is_ready(tx_hash)
+    }
+
+    fn provision_chunks(&self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
+        self.inner.lock().provision_chunks(tx_hash, chunk_specs);
+    }
+
+    fn release_chunks(&self, tx_hash: &B256) {
+        self.inner.lock().release_chunks(tx_hash);
+    }
+
+    fn expire_at_height(&self, height: u64) {
+        self.inner.lock().expire_at_height(height);
+    }
+
+    fn get_chunks_batch(&self, keys: &[(u32, u64)]) -> ChunkTable {
+        self.inner.lock().get_chunks_batch(keys)
+    }
+
+    fn config(&self) -> ChunkConfig {
+        self.inner.lock().config()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
