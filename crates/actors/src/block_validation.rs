@@ -2896,6 +2896,15 @@ pub fn get_assigned_ingress_proofs(
         })?
         .block_set;
 
+    if block_hashes.is_empty() {
+        return Err(PreValidationError::DatabaseError {
+            error: format!(
+                "block_set is empty for data_root {} (tx_id {}), cannot determine assigned miners",
+                tx_header.data_root, tx_header.id
+            ),
+        });
+    }
+
     //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
     let mut block_ranges = Vec::new();
     for block_hash in block_hashes.iter() {

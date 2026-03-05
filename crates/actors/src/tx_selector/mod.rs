@@ -930,26 +930,25 @@ async fn get_publish_txs_and_proofs(
             // Build the final proof list
             let mut final_proofs = Vec::new();
 
-            // First, add assigned proofs up to the total network limit
-            // Use all available assigned proofs, but don't exceed the network total
-            let total_network_limit = number_of_ingress_proofs_total as usize;
-            let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
+            // First, add assigned proofs up to the clamped total limit
+            // Use all available assigned proofs, but don't exceed the clamped network total
+            let assigned_to_use = std::cmp::min(assigned_proofs.len(), proofs_per_tx);
             final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
 
             // Then fill remaining slots with unassigned proofs if needed
-            let remaining_slots = total_network_limit - final_proofs.len();
+            let remaining_slots = proofs_per_tx - final_proofs.len();
             if remaining_slots > 0 {
                 let unassigned_to_use = std::cmp::min(unassigned_proofs.len(), remaining_slots);
                 final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
             }
 
-            // Final check - do we have enough total proofs?
-            if final_proofs.len() < number_of_ingress_proofs_total as usize {
+            // Final check - do we have enough total proofs (using clamped limit)?
+            if final_proofs.len() < proofs_per_tx {
                 info!(
                     "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                     &tx_header.id,
                     final_proofs.len(),
-                    number_of_ingress_proofs_total
+                    proofs_per_tx
                 );
                 continue;
             }
@@ -1077,36 +1076,50 @@ async fn get_data_txs(
         .batch_valid_submit_ledger_tx_cloned(&txids)
         .await;
 
-    let mut found_txs = Vec::with_capacity(txids.len());
+    let mut found_txs: Vec<Option<DataTransactionHeader>> = Vec::with_capacity(txids.len());
 
-    for (tx_id, mempool_result) in txids.iter().zip(mempool_results) {
+    // Collect indices and tx_ids for mempool misses that need DB fallback
+    let mut db_miss_indices = Vec::new();
+    for (i, (tx_id, mempool_result)) in txids.iter().zip(mempool_results).enumerate() {
         if let Some(tx_header) = mempool_result {
             trace!("Got tx {} from mempool", tx_id);
             found_txs.push(Some(tx_header));
-            continue;
+        } else {
+            db_miss_indices.push(i);
+            found_txs.push(None); // placeholder, filled below
         }
+    }
 
-        // Fall back to DB for txs not in mempool
-        let inner_result = ctx
+    // Batch DB fallback: single read transaction for all misses
+    if !db_miss_indices.is_empty() {
+        let miss_ids: Vec<H256> = db_miss_indices.iter().map(|&i| txids[i]).collect();
+        let db_results: Vec<Result<Option<DataTransactionHeader>, _>> = ctx
             .db
-            .view(|read_tx| tx_header_by_txid(read_tx, tx_id))
+            .view(|read_tx| {
+                miss_ids
+                    .iter()
+                    .map(|tx_id| tx_header_by_txid(read_tx, tx_id))
+                    .collect::<Vec<_>>()
+            })
             .map_err(|e| {
                 warn!("Failed to open DB read transaction: {}", e);
                 eyre::eyre!("Failed to open DB read transaction: {}", e)
             })?;
 
-        match inner_result {
-            Ok(Some(tx_header)) => {
-                trace!("Got tx {} from DB", tx_id);
-                found_txs.push(Some(tx_header));
-            }
-            Ok(None) => {
-                debug!("Tx {} not found in DB", tx_id);
-                found_txs.push(None);
-            }
-            Err(e) => {
-                warn!("DB error reading tx {}: {}", tx_id, e);
-                return Err(eyre::eyre!("DB error reading tx {}: {}", tx_id, e));
+        for (&idx, result) in db_miss_indices.iter().zip(db_results) {
+            let tx_id = &txids[idx];
+            match result {
+                Ok(Some(tx_header)) => {
+                    trace!("Got tx {} from DB", tx_id);
+                    found_txs[idx] = Some(tx_header);
+                }
+                Ok(None) => {
+                    debug!("Tx {} not found in DB", tx_id);
+                }
+                Err(e) => {
+                    warn!("DB error reading tx {}: {}", tx_id, e);
+                    return Err(eyre::eyre!("DB error reading tx {}: {}", tx_id, e));
+                }
             }
         }
     }
