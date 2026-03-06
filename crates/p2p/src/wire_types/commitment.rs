@@ -81,6 +81,8 @@ pub enum CommitmentTransaction {
     V2(CommitmentTransactionV2Inner),
 }
 
+/// NOTE: This Serialize impl uses serde_json internally and is designed specifically
+/// for JSON wire format. It may not work correctly with other serialization formats.
 impl Serialize for CommitmentTransaction {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap as _;
