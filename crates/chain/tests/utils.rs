@@ -52,7 +52,9 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::{
+    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArgSerde as _,
+};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -2455,7 +2457,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         nonce: u64,
         offset_base: u32,
     ) -> eyre::Result<FixedBytes<32>> {
-        const LARGE_MAX_BASE_FEE: u64 = 100_000_000_000_u64;
+        const LARGE_MAX_BASE_FEE: u64 = 1_000_000_000_000_000_u64;
 
         self.create_and_inject_pd_transaction_with_custom_fees(
             signer,
@@ -2496,9 +2498,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build storage keys for the specified number of chunks
+        // Build storage keys for the specified number of chunks.
+        // Use U200::MAX as a sentinel partition_index: it overflows u64 in specs_to_keys(),
+        // producing an empty chunk key set. This means PdService marks the tx as Ready
+        // (0 required chunks) without needing real data uploaded. Tests that need real
+        // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
         let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
-            partition_index: alloy_primitives::aliases::U200::from_le_bytes([0xff; 25]),
+            partition_index: alloy_primitives::aliases::U200::MAX,
             offset: offset_base + i as u32,
             chunk_count: 1,
         });
@@ -2593,6 +2599,74 @@ impl IrysNodeTest<IrysNodeCtx> {
             offset_base,
         )
         .await
+    }
+
+    /// Build and inject a tx that calls a contract function with PD chunk access.
+    /// Prepends a PD header to the ABI calldata so the EVM strips it before execution,
+    /// while the preloading gate detects the PD header and preloads chunks.
+    pub async fn inject_pd_contract_call(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        contract_address: Address,
+        abi_calldata: alloy_primitives::Bytes,
+        chunk_specs: Vec<ChunkRangeSpecifier>,
+        byte_specs: Vec<ByteRangeSpecifier>,
+        priority_fee_per_chunk: u64,
+        nonce: u64,
+    ) -> eyre::Result<FixedBytes<32>> {
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let chain_id = self.node_ctx.config.consensus.chain_id;
+
+        // Build PD header
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: alloy_primitives::U256::from(priority_fee_per_chunk),
+            max_base_fee_per_chunk: alloy_primitives::U256::from(1_000_000_000_000_000_u64),
+        };
+        let calldata = prepend_pd_header_v1_to_calldata(&header, &abi_calldata);
+
+        // Build access list with chunk and byte range specifiers
+        let mut storage_keys: Vec<alloy_primitives::B256> = chunk_specs
+            .into_iter()
+            .map(|spec| alloy_primitives::B256::from(spec.encode()))
+            .collect();
+        storage_keys.extend(
+            byte_specs
+                .into_iter()
+                .map(|spec| alloy_primitives::B256::from(spec.encode())),
+        );
+        let access_list =
+            alloy_eips::eip2930::AccessList::from(vec![alloy_eips::eip2930::AccessListItem {
+                address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+                storage_keys,
+            }]);
+
+        // Create and sign EIP-1559 transaction targeting the contract
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: calldata,
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(contract_address),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
     }
 
     #[diag_slow(state = "stop".to_string())]
