@@ -1223,6 +1223,7 @@ impl AtomicMempoolState {
             for txs in state.valid_commitment_tx.values_mut() {
                 if let Some(tx) = txs.iter_mut().find(|t| t.id() == *tx_id) {
                     tx.metadata_mut().included_height = Some(height);
+                    state.recent_valid_tx.put(*tx_id, ());
                     continue 'next_commitment;
                 }
             }
@@ -1231,6 +1232,7 @@ impl AtomicMempoolState {
             for (_, pledges_cache) in state.pending_pledges.iter_mut() {
                 if let Some(tx) = pledges_cache.get_mut(tx_id) {
                     tx.metadata_mut().included_height = Some(height);
+                    state.recent_valid_tx.put(*tx_id, ());
                     continue 'next_commitment;
                 }
             }
