@@ -581,7 +581,7 @@ pub(crate) fn validate_tx_signature<
             target = "invalid_tx_header_json",
             "Invalid tx: {:#}",
             &serde_json::to_string(&tx)
-                .unwrap_or_else(|e| format!("error serializing block header: {}\n{:?}", &e, &tx))
+                .unwrap_or_else(|e| format!("error serializing invalid tx: {}\n{:?}", &e, &tx))
         );
         Err(TxIngressError::InvalidSignature(tx.signer()))
     }
