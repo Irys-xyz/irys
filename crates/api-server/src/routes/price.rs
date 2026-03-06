@@ -125,7 +125,11 @@ pub async fn get_price(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
                 bytes_to_store,
                 term_fee,
-                state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
+                state
+                    .config
+                    .consensus
+                    .immediate_tx_inclusion_reward_percent
+                    .amount,
                 number_of_ingress_proofs_total
             );
 

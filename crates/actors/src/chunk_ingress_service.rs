@@ -188,6 +188,7 @@ impl ChunkIngressService {
                 let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                     irys_db.clone(),
                     chunk_writer_buffer_size,
+                    &handle_for_inner,
                 );
 
                 let service = Self {
