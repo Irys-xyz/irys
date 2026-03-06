@@ -182,7 +182,7 @@ impl LedgerCore for PermanentLedger {
             .enumerate()
             .filter_map(|(idx, slot)| {
                 let needed = self.num_partitions_per_slot as usize - slot.partitions.len();
-                if needed > 0 {
+                if needed > 0 && !slot.is_expired {
                     Some((idx, needed))
                 } else {
                     None
@@ -590,6 +590,24 @@ mod tests {
         assert_eq!(perm_expiring.len(), 1);
         // Verify NOT marked as expired (read-only)
         assert!(!ledgers.perm.slots[0].is_expired);
+    }
+
+    #[test]
+    fn test_perm_get_slot_needs_filters_expired() {
+        let config = ConsensusConfig::testing();
+        let mut perm = PermanentLedger::new(&config);
+
+        // Add two slots (both empty, so both need partitions)
+        perm.allocate_slots(2, 1);
+
+        // Mark slot 0 as expired
+        perm.slots[0].is_expired = true;
+
+        let needs = perm.get_slot_needs();
+        // Slot 0 is expired — should not appear in needs
+        // Slot 1 needs partitions — should appear
+        assert_eq!(needs.len(), 1);
+        assert_eq!(needs[0].0, 1); // slot index 1
     }
 
     #[test]
