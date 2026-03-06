@@ -338,15 +338,42 @@ impl Ledgers {
         expired_partitions
     }
 
-    pub fn get_expiring_term_partitions(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
+    /// Get all partition hashes that would expire at this epoch height (read-only).
+    /// Unlike `expire_partitions`, this does NOT mark slots as expired.
+    pub fn get_expiring_partitions(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
         let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
-        // Collect expired partition hashes from term ledgers
+        // Check perm ledger slots if configured
+        if let Some(epoch_length) = self.publish_ledger_epoch_length {
+            let min_blocks = epoch_length * self.num_blocks_in_epoch;
+            if epoch_height >= min_blocks {
+                let expiry_height = epoch_height - min_blocks;
+                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id).unwrap();
+                let num_slots = self.perm.slots.len();
+                let last_slot_index = num_slots.saturating_sub(1);
+
+                for (slot_index, slot) in self.perm.slots.iter().enumerate() {
+                    if num_slots > 0 && slot_index == last_slot_index {
+                        continue;
+                    }
+                    if slot.last_height <= expiry_height && !slot.is_expired {
+                        for partition_hash in slot.partitions.iter() {
+                            expired_partitions.push(ExpiringPartitionInfo {
+                                partition_hash: *partition_hash,
+                                ledger_id: perm_ledger_id,
+                                slot_index,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect from term ledgers (existing logic)
         for term_ledger in &self.term {
             let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
             for expiring_slot_index in term_ledger.get_expired_slot_indexes(epoch_height) {
                 for partition_hash in term_ledger.slots[expiring_slot_index].partitions.iter() {
-                    // Add ExpiringPartitionInfo for each expired partition_hash
                     expired_partitions.push(ExpiringPartitionInfo {
                         partition_hash: *partition_hash,
                         ledger_id,
@@ -544,5 +571,35 @@ mod tests {
             .filter(|e| e.ledger_id == DataLedger::Publish)
             .collect();
         assert_eq!(perm_expired.len(), 0);
+    }
+
+    #[test]
+    fn test_get_expiring_partitions_includes_perm() {
+        let config = make_test_config(Some(2));
+        let mut ledgers = Ledgers::new(&config);
+        ledgers.perm.allocate_slots(2, 1);
+        ledgers.perm.slots[0].partitions.push(H256::random());
+        ledgers.perm.slots[1].partitions.push(H256::random());
+
+        // Read-only: should report slot 0 as expiring without marking it
+        let expiring = ledgers.get_expiring_partitions(30);
+        let perm_expiring: Vec<_> = expiring
+            .iter()
+            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .collect();
+        assert_eq!(perm_expiring.len(), 1);
+        // Verify NOT marked as expired (read-only)
+        assert!(!ledgers.perm.slots[0].is_expired);
+    }
+
+    #[test]
+    fn test_get_expiring_partitions_disabled_perm() {
+        let config = make_test_config(None);
+        let mut ledgers = Ledgers::new(&config);
+        ledgers.perm.allocate_slots(1, 1);
+        ledgers.perm.slots[0].partitions.push(H256::random());
+
+        let expiring = ledgers.get_expiring_partitions(1000);
+        assert!(expiring.iter().all(|e| e.ledger_id != DataLedger::Publish));
     }
 }
