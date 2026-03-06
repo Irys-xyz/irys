@@ -146,6 +146,15 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
+        // publish_ledger_epoch_length must be > 0 if set
+        if let Some(n) = self.consensus.epoch.publish_ledger_epoch_length {
+            ensure!(
+                n > 0,
+                "publish_ledger_epoch_length must be > 0 when set (got {})",
+                n
+            );
+        }
+
         Ok(())
     }
 }
@@ -828,6 +837,27 @@ mod tests {
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
+    }
+
+    #[test]
+    fn test_publish_ledger_epoch_length_validation() {
+        // Some(0) should fail
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = Some(0);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
+
+        // Some(1) should pass
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = Some(1);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // None should pass
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
