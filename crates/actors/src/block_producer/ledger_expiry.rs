@@ -297,9 +297,12 @@ fn collect_expired_partitions(
 
         // Only process partitions for the target ledger type
         if ledger_id == target_ledger_type {
-            // Verify this ledger type can expire
+            // Safety: Publish ledger expiry has no fee distribution — expired
+            // Publish partitions are simply reset. This bail prevents accidental
+            // fee calculation for Publish, which has no treasury to distribute.
+            // It is unreachable as long as callers pass DataLedger::Submit.
             if ledger_id == DataLedger::Publish {
-                eyre::bail!("publish ledger cannot expire");
+                eyre::bail!("publish ledger cannot expire — fee distribution not supported for Publish");
             }
 
             tracing::info!(
