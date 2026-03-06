@@ -1727,8 +1727,9 @@ impl MempoolState {
         Ok(())
     }
 
-    /// Adds a tx ID to the recent invalid set.
+    /// Adds a tx ID to the recent invalid set, removing it from recent valid if present.
     pub fn put_recent_invalid(&mut self, tx_id: H256) {
+        self.recent_valid_tx.pop(&tx_id);
         self.recent_invalid_tx.put(tx_id, ());
     }
 
