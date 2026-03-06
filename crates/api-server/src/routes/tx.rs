@@ -293,35 +293,15 @@ pub async fn get_tx_promotion_status(
     let promotion_height = if let Some(metadata) = db_metadata {
         // DB metadata exists - use it unconditionally
         metadata.promoted_height
+    } else if let Some(mempool_meta) = state.mempool_guard.get_tx_metadata(&tx_id).await {
+        // Mempool metadata exists - use its promoted_height
+        mempool_meta.promoted_height()
     } else {
-        // No DB metadata - fall back to mempool header
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        if let Err(err) = state
-            .mempool_service
-            .send_traced(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
-        {
-            tracing::error!(
-                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {}",
-                err
-            );
-            return Err(ApiError::Internal {
-                err: format!("Failed to query mempool for transaction: {}", err),
-            });
-        }
-
-        let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
-            err: "Unable to read result from oneshot".to_owned(),
-        })?;
-
-        let tx_header = oneshot_res
-            .first()
-            .and_then(|opt| opt.as_ref())
-            .ok_or_else(|| ApiError::ErrNoId {
-                id: tx_id.to_string(),
-                err: "Unable to find tx".to_owned(),
-            })?;
-
-        tx_header.promoted_height()
+        // Transaction not found in either DB or mempool
+        return Err(ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: String::from("Unable to find tx"),
+        });
     };
 
     Ok(web::Json(PromotionStatus { promotion_height }))

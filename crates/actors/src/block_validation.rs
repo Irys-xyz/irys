@@ -2,15 +2,13 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
-    mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -47,7 +45,6 @@ use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
-use std::future::Future;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -205,6 +202,8 @@ pub enum PreValidationError {
     PublishTxProofLengthMismatch,
     #[error("Block EMA snapshot not found for block {block_hash}")]
     BlockEmaSnapshotNotFound { block_hash: BlockHash },
+    #[error("Parent epoch snapshot not found for block {block_hash}")]
+    ParentEpochSnapshotNotFound { block_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
     #[error("Failed to fetch transactions: {0}")]
@@ -1334,7 +1333,6 @@ pub fn poa_is_valid(
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
@@ -1460,7 +1458,6 @@ pub async fn shadow_transactions_are_valid(
     // 3. Generate expected shadow transactions
     let expected_txs = generate_expected_shadow_transactions(
         config,
-        service_senders,
         block_tree_guard,
         mempool_guard,
         block,
@@ -1585,7 +1582,6 @@ pub async fn submit_payload_to_reth(
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions(
     config: &Config,
-    service_senders: &ServiceSenders,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
@@ -1596,22 +1592,13 @@ async fn generate_expected_shadow_transactions(
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = {
-        let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
-        service_senders
-            .mempool
-            .send_traced(MempoolServiceMessage::GetBlockHeader(
-                block.previous_block_hash,
-                false,
-                tx_prev,
-            ))?;
-        match rx_prev.await? {
-            Some(h) => h,
-            None => db
-                .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
-                .ok_or_eyre("Previous block not found")?,
-        }
-    };
+    let prev_block = crate::block_tree_service::get_block_header(
+        block_tree_guard,
+        db,
+        block.previous_block_hash,
+        false,
+    )?
+    .ok_or_eyre("Previous block not found")?;
 
     // Calculate is_epoch_block early since it's needed for multiple checks
     let is_epoch_block = block
@@ -2337,6 +2324,15 @@ pub async fn data_txs_are_valid(
             block_hash: block.previous_block_hash,
         })?;
 
+    // Get the parent block's epoch snapshot for ingress proof validation
+    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation)
+    let parent_epoch_snapshot = block_tree_guard
+        .read()
+        .get_epoch_snapshot(&block.previous_block_hash)
+        .ok_or(PreValidationError::ParentEpochSnapshotNotFound {
+            block_hash: block.previous_block_hash,
+        })?;
+
     // Extract publish ledger for ingress proofs validation
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
@@ -2427,8 +2423,11 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // check the db - if we can fetch it, we have a previous inclusion
-                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                        // check the db — constrained to canonical chain at or before the parent
+                        let parent_height = block.height.saturating_sub(1);
+                        if let Ok(Some(_header)) =
+                            tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height)
+                        {
                             warn!(
                                 "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
                                 &_header, &tx.id, &tx
@@ -2553,21 +2552,10 @@ pub async fn data_txs_are_valid(
         // Compute the expected total number of proofs based on the number of
         // publish_tx and the number of proofs_per_tx
         let expected_proof_count = {
-            let total_miners = block_tree_guard
-                .read()
-                .canonical_epoch_snapshot()
-                .commitment_state
-                .stake_commitments
-                .len();
-
-            // Take the smallest value, the configured proof count or the number
-            // of staked miners that can produce a valid proof.
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            let proofs_per_tx =
-                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
-            publish_txs.len() * proofs_per_tx
+            publish_txs.len() * number_of_ingress_proofs_total as usize
         };
 
         if proofs_list.len() != expected_proof_count {
@@ -2590,12 +2578,11 @@ pub async fn data_txs_are_valid(
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
                 tx_header,
-                |hash| mempool_block_retriever(hash, service_senders),
                 block_tree_guard,
                 db,
                 config,
-            )
-            .await?;
+                &parent_epoch_snapshot,
+            )?;
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
@@ -3144,33 +3131,69 @@ fn process_block_ledgers_with_states(
     Ok(())
 }
 
-async fn mempool_block_retriever(
-    hash: H256,
-    service_senders: &ServiceSenders,
-) -> Option<IrysBlockHeader> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    service_senders
-        .mempool
-        .send_traced(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
-        .expect("MempoolServiceMessage should be delivered");
-    rx.await.expect("mempool service message should succeed")
-}
-
-pub async fn get_assigned_ingress_proofs<F, Fut>(
+pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
-    mempool_block_retriever: F,
-    block_tree_guard: &BlockTreeReadGuard,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
-) -> Result<(Vec<IngressProof>, usize), PreValidationError>
-where
-    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
+    epoch_snapshot: &EpochSnapshot,
+) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
+
+    //  a) Get the block hashes from the cached data_root (invariant across all proofs)
+    let block_hashes = db
+        .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+        .map_err(|e| PreValidationError::DatabaseError {
+            error: format!(
+                "Failed to open DB read tx for data_root {} (tx_id {}): {}",
+                tx_header.data_root, tx_header.id, e
+            ),
+        })?
+        .map_err(|e| PreValidationError::DatabaseError {
+            error: format!(
+                "DB query failed for data_root {} (tx_id {}): {}",
+                tx_header.data_root, tx_header.id, e
+            ),
+        })?
+        .ok_or_else(|| PreValidationError::DatabaseError {
+            error: format!(
+                "CachedDataRoot not found for data_root {} (tx_id {})",
+                tx_header.data_root, tx_header.id
+            ),
+        })?
+        .block_set;
+
+    // Empty block_set is valid for single-block promotion: the data_root hasn't
+    // been included in any confirmed block yet.  With no block_ranges, no proofs
+    // will be classified as "assigned" and assigned_miners stays 0.  The caller
+    // clamps expected_assigned_proofs to 0, so all proofs count as unassigned and
+    // only the total-proof-count gate applies.
+    if block_hashes.is_empty() {
+        return Ok((vec![], 0));
+    }
+
+    //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
+    let mut block_ranges = Vec::new();
+    for block_hash in block_hashes.iter() {
+        match get_ledger_range(block_hash, block_tree, db) {
+            Ok(Some(block_range)) => block_ranges.push(block_range),
+            Ok(None) => {
+                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                    "get_ledger_range returned None for block {}, assigned_miners would remain unset (tx_id {})",
+                    block_hash, tx_header.id
+                )));
+            }
+            Err(e) => {
+                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                    "Failed to get ledger range for block {}: {}",
+                    block_hash, e
+                )));
+            }
+        }
+    }
 
     // Loop through all the ingress proofs for the published transaction and pre-validate them
     for ingress_proof in tx_proofs.iter() {
@@ -3184,31 +3207,8 @@ where
 
         // 1.) is the proof from a miner assigned to store the data in the submit ledger?
 
-        //  a) Get the block hashes from the cached data_root
-        let block_hashes = db
-            .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
-            .expect("creating a read tx should succeed")
-            .expect("db query should succeed")
-            .unwrap_or_else(|| {
-                panic!(
-                    "CachedDataRoot should be found for data_root {} (tx_id {})",
-                    tx_header.data_root, tx_header.id
-                )
-            })
-            .block_set;
-
-        //  b) Get the submit ledger offset intervals for each of the blocks
-        let mut block_ranges = Vec::new();
-        for block_hash in block_hashes.iter() {
-            if let Some(block_range) =
-                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await
-            {
-                block_ranges.push(block_range);
-            }
-        }
-
         //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree_guard);
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
 
         // d) Get the ledger ranges of the slot indexes
         let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
@@ -3226,7 +3226,7 @@ where
             .collect();
 
         // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree_guard);
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
 
         //  f) are there any intersections of block and slot ranges?
         let mut is_intersected = false;
@@ -3248,58 +3248,63 @@ where
     Ok((assigned_proofs, assigned_miners))
 }
 
-async fn get_ledger_range<F, Fut>(
+fn get_ledger_range(
     hash: &H256,
-    mempool_block_retriever: F,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-) -> Option<LedgerChunkRange>
-where
-    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
-    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await?;
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    let block = match get_block_by_hash(hash, block_tree, db)? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
     let prev_block_hash = block.previous_block_hash;
 
+    let block_total_chunks = block.data_ledgers[DataLedger::Submit].total_chunks;
+
     if block.height == 0 {
-        Some(LedgerChunkRange(ii(
+        if block_total_chunks == 0 {
+            return Ok(None);
+        }
+        Ok(Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(0),
-            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        )))
+            LedgerChunkOffset::from(block_total_chunks - 1),
+        ))))
     } else {
-        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await?;
-        Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
-            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        )))
+        let prev_block = match get_block_by_hash(&prev_block_hash, block_tree, db)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
+        if block_total_chunks < prev_total_chunks {
+            return Err(eyre::eyre!(
+                "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
+                hash,
+                block_total_chunks,
+                prev_total_chunks
+            ));
+        }
+        if block_total_chunks == 0 || block_total_chunks == prev_total_chunks {
+            return Ok(None);
+        }
+        Ok(Some(LedgerChunkRange(ii(
+            LedgerChunkOffset::from(prev_total_chunks),
+            LedgerChunkOffset::from(block_total_chunks - 1),
+        ))))
     }
 }
 
-async fn get_block_by_hash<F, Fut>(
+fn get_block_by_hash(
     hash: &H256,
-    mempool_block_retriever: F,
+    block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-) -> Option<IrysBlockHeader>
-where
-    F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
-    Fut: Future<Output = Option<IrysBlockHeader>>,
-{
-    let block = mempool_block_retriever(*hash).await;
-
-    // Return the block if we found it in the mempool, otherwise get it from the db
-    if let Some(block) = block {
-        Some(block)
-    } else {
-        db.view(|tx| block_header_by_hash(tx, hash, false))
-            .expect("creating a read tx should succeed")
-            .expect("creating a read tx should succeed")
-    }
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    crate::block_tree_service::get_block_header(block_tree, db, *hash, false)
 }
 
 fn get_submit_ledger_slot_assignments(
     address: &IrysAddress,
-    block_tree_guard: &BlockTreeReadGuard,
+    epoch_snapshot: &EpochSnapshot,
 ) -> Vec<usize> {
-    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
     partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
     partition_assignments
@@ -3310,10 +3315,8 @@ fn get_submit_ledger_slot_assignments(
 
 fn get_submit_ledger_slot_addresses(
     slot_indexes: &Vec<usize>,
-    block_tree_guard: &BlockTreeReadGuard,
+    epoch_snapshot: &EpochSnapshot,
 ) -> HashMap<usize, usize> {
-    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-
     let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
 
     for slot_index in slot_indexes {
@@ -3339,6 +3342,7 @@ mod tests {
 
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
+    use irys_database::db::IrysDatabaseExt as _;
     use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{

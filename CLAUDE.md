@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Think from the perspective of a blockchain L1 protocol developer. Security guarantees, correctness, and deterministic output are the core principles.
+
 ## Build & Development Commands
 
 ```sh

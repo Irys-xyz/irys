@@ -1,3 +1,4 @@
+mod anchor_canonical_reorg;
 mod blobs_rejected;
 mod cascade_block_rejection;
 mod cascade_ledger_shape;
@@ -1192,6 +1193,125 @@ async fn heavy3_block_validation_discards_a_block_if_its_too_old() -> eyre::Resu
     );
     genesis_node.stop().await;
     peer_node.stop().await;
+
+    Ok(())
+}
+
+/// A publish tx in a block must have a prior Submit ledger inclusion.
+/// The DB fallback (`tx_header_by_txid_canonical`) constrains results to the canonical chain
+/// at or below the parent height. This test plants a tx header in the DB at a height far beyond
+/// the parent, then builds a block containing that tx in the Publish ledger.
+/// The validator must reject it with `PublishTxMissingPriorSubmit`.
+#[test_log::test(tokio::test)]
+async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() -> eyre::Result<()> {
+    use irys_database::{
+        db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
+        tables::MigratedBlockHashes,
+    };
+    use reth_db::transaction::DbTxMut as _;
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub publish_tx: DataTransactionHeader,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![self.publish_tx.clone()],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    reward_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
+            })
+        }
+    }
+
+    // 1. Start a single-node test network
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", 20)
+        .await;
+    // Mine one block so the chain is at height 1 (parent_height for next block = 1)
+    genesis_node.mine_block().await?;
+
+    // 2. Create a properly-signed data transaction header for the Publish ledger
+    let consensus = &genesis_node.node_ctx.config.consensus;
+    let signer = genesis_config.signer();
+    let mut fake_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1::new(consensus),
+        metadata: Default::default(),
+    });
+    fake_tx.data_size = 32;
+    fake_tx.data_root = H256::random();
+    fake_tx.anchor = genesis_node.get_anchor().await?;
+    let fake_tx = fake_tx.sign(&signer)?;
+    let fake_tx_id = fake_tx.id();
+
+    // 3. Plant the tx in the validator's DB with included_height = 100 and a
+    //    MigratedBlockHashes entry at height 100 — so it passes the "is migrated" check
+    //    but fails the "included_height <= parent_height" check (parent is at height 1).
+    let fake_block_hash = H256::random();
+    genesis_node.node_ctx.db.update_eyre(|tx| {
+        insert_tx_header(tx, &fake_tx)?;
+        set_data_tx_included_height(tx, &fake_tx_id, 100)?;
+        tx.put::<MigratedBlockHashes>(100, fake_block_hash)?;
+        Ok(())
+    })?;
+
+    // 4. Build a block using the evil strategy that puts the tx in the Publish ledger
+    let block_prod_strategy = EvilBlockProdStrategy {
+        publish_tx: fake_tx,
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // 5. Send block for validation (skip VDF since we crafted the solution)
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), true).await?;
+
+    // 6. Assert the block is rejected because the DB fallback rejects the tx
+    //    (included_height 100 > parent_height 1)
+    assert_validation_error(
+        outcome,
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(
+                    PreValidationError::PublishTxMissingPriorSubmit { .. }
+                )
+            )
+        },
+        "publish tx with DB submit inclusion beyond parent height should be rejected",
+    );
+
+    genesis_node.stop().await;
 
     Ok(())
 }
