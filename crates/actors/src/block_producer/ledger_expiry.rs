@@ -302,7 +302,9 @@ fn collect_expired_partitions(
             // fee calculation for Publish, which has no treasury to distribute.
             // It is unreachable as long as callers pass DataLedger::Submit.
             if ledger_id == DataLedger::Publish {
-                eyre::bail!("publish ledger cannot expire — fee distribution not supported for Publish");
+                eyre::bail!(
+                    "publish ledger cannot expire — fee distribution not supported for Publish"
+                );
             }
 
             tracing::info!(
