@@ -324,49 +324,17 @@ pub async fn select_best_txs(
 
     // Log commitment selection summary
     if !commitment_tx.is_empty() {
-        let (stakes, pledges, unpledges, unstakes, update_reward_addresses) =
-            commitment_tx.iter().fold(
-                (0_usize, 0_usize, 0_usize, 0_usize, 0_usize),
-                |(stakes, pledges, unpledges, unstakes, update_reward_addresses), tx| match tx
-                    .commitment_type()
-                {
-                    CommitmentTypeV2::Stake => (
-                        stakes + 1,
-                        pledges,
-                        unpledges,
-                        unstakes,
-                        update_reward_addresses,
-                    ),
-                    CommitmentTypeV2::Pledge { .. } => (
-                        stakes,
-                        pledges + 1,
-                        unpledges,
-                        unstakes,
-                        update_reward_addresses,
-                    ),
-                    CommitmentTypeV2::Unpledge { .. } => (
-                        stakes,
-                        pledges,
-                        unpledges + 1,
-                        unstakes,
-                        update_reward_addresses,
-                    ),
-                    CommitmentTypeV2::Unstake => (
-                        stakes,
-                        pledges,
-                        unpledges,
-                        unstakes + 1,
-                        update_reward_addresses,
-                    ),
-                    CommitmentTypeV2::UpdateRewardAddress { .. } => (
-                        stakes,
-                        pledges,
-                        unpledges,
-                        unstakes,
-                        update_reward_addresses + 1,
-                    ),
-                },
-            );
+        let (mut stakes, mut pledges, mut unpledges, mut unstakes, mut update_reward_addresses) =
+            (0_usize, 0, 0, 0, 0);
+        for tx in &commitment_tx {
+            match tx.commitment_type() {
+                CommitmentTypeV2::Stake => stakes += 1,
+                CommitmentTypeV2::Pledge { .. } => pledges += 1,
+                CommitmentTypeV2::Unpledge { .. } => unpledges += 1,
+                CommitmentTypeV2::Unstake => unstakes += 1,
+                CommitmentTypeV2::UpdateRewardAddress { .. } => update_reward_addresses += 1,
+            }
+        }
         info!(
             commitment_selection.selected_commitments = commitment_tx.len(),
             commitment_selection.stake_txs = stakes,
