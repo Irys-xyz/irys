@@ -182,6 +182,7 @@ async fn add_slots_test() {
             num_blocks_in_epoch: 100,
             num_capacity_partitions: Some(123),
             submit_ledger_epoch_length: 5,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -275,6 +276,7 @@ async fn unique_addresses_per_slot_test() {
             num_blocks_in_epoch: 100,
             num_capacity_partitions: Some(123),
             submit_ledger_epoch_length: 5,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -421,6 +423,7 @@ async fn partition_expiration_and_repacking_test() {
             submit_ledger_epoch_length: 2,
             num_blocks_in_epoch: 5,
             num_capacity_partitions: Some(123),
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -947,6 +950,7 @@ async fn partitions_assignment_determinism_test() {
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 2,
             num_capacity_partitions: None,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
