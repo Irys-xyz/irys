@@ -76,19 +76,18 @@ pub async fn select_best_txs(
         // blocks beyond the parent when building on a non-tip parent.
         let (full_canonical, _) = tree.get_canonical_chain();
 
-        let parent_pos = full_canonical
+        let Some(parent_pos) = full_canonical
             .iter()
-            .position(|entry| entry.block_hash() == parent_block_hash);
-
-        eyre::ensure!(
-            parent_pos.is_some(),
-            "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
-            parent_block_hash,
-            full_canonical.last().map(BlockTreeEntry::block_hash)
-        );
+            .position(|entry| entry.block_hash() == parent_block_hash)
+        else {
+            eyre::bail!(
+                "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
+                parent_block_hash,
+                full_canonical.last().map(BlockTreeEntry::block_hash)
+            );
+        };
 
         // Truncate to only include entries up to and including the parent block
-        let parent_pos = parent_pos.unwrap();
         if parent_pos != full_canonical.len() - 1 {
             warn!(
                 block.parent_block_hash = ?parent_block_hash,
