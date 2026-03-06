@@ -108,8 +108,8 @@ impl TryFrom<DataTransactionHeader> for irys_types::DataTransactionHeader {
     type Error = eyre::Report;
     fn try_from(h: DataTransactionHeader) -> eyre::Result<Self> {
         match h {
-            DataTransactionHeader::V1(inner) => Ok(Self::V1(
-                irys_types::DataTransactionHeaderV1WithMetadata {
+            DataTransactionHeader::V1(inner) => {
+                Ok(Self::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                     tx: irys_types::DataTransactionHeaderV1 {
                         id: inner.id,
                         anchor: inner.anchor,
@@ -125,8 +125,8 @@ impl TryFrom<DataTransactionHeader> for irys_types::DataTransactionHeader {
                         perm_fee: inner.perm_fee,
                     },
                     metadata: Default::default(),
-                },
-            )),
+                }))
+            }
         }
     }
 }

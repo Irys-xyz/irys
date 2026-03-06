@@ -3,11 +3,13 @@
 //! These tests verify that the JSON serialization format of all gossip protocol
 //! messages remains stable across code changes. Each test constructs a message
 //! with deterministic values, serializes it to JSON, and asserts the output
-//! matches a hardcoded fixture string.
+//! matches the expected fixture from `gossip_fixtures.json`.
 //!
 //! If any test fails, it means a gossip protocol message format has changed,
 //! which could break network compatibility between nodes running different
 //! versions.
+//!
+//! To regenerate fixtures: `cargo test -p irys-p2p generate_fixture_json -- --ignored`
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -359,27 +361,55 @@ fn fixture_block_body() -> wire::BlockBody {
 }
 
 // =============================================================================
+// Fixture file helpers
+// =============================================================================
+
+fn fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/gossip_fixtures.json")
+}
+
+fn load_fixtures() -> serde_json::Map<String, serde_json::Value> {
+    let path = fixture_path();
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
+    match value {
+        serde_json::Value::Object(map) => map,
+        _ => panic!("{} must be a JSON object", path.display()),
+    }
+}
+
+// =============================================================================
 // Fixture assertion helper
 // =============================================================================
 
 /// Asserts that the JSON serialization of a value matches the expected fixture
-/// string exactly, and that the value can be deserialized back from the fixture.
+/// from gossip_fixtures.json, and that the value can be deserialized back.
 fn assert_json_fixture<T: Serialize + DeserializeOwned + std::fmt::Debug>(
     value: &T,
-    expected_json: &str,
     fixture_name: &str,
 ) {
-    let serialized = serde_json::to_string_pretty(value).unwrap();
+    let fixtures = load_fixtures();
+    let expected_value = fixtures
+        .get(fixture_name)
+        .unwrap_or_else(|| panic!("Fixture '{fixture_name}' not found in gossip_fixtures.json"));
+
+    let actual_value = serde_json::to_value(value).unwrap();
     assert_eq!(
-        serialized, expected_json,
+        actual_value,
+        *expected_value,
         "\n\nFixture mismatch for '{fixture_name}'!\n\
          The JSON serialization format has changed.\n\
          This may break gossip protocol compatibility.\n\n\
-         === ACTUAL ===\n{serialized}\n\n\
-         === EXPECTED ===\n{expected_json}\n"
+         === ACTUAL ===\n{}\n\n\
+         === EXPECTED ===\n{}\n",
+        serde_json::to_string_pretty(&actual_value).unwrap(),
+        serde_json::to_string_pretty(expected_value).unwrap(),
     );
 
     // Verify roundtrip deserialization produces identical JSON
+    let serialized = serde_json::to_string_pretty(value).unwrap();
     let deserialized: T = serde_json::from_str(&serialized).unwrap();
     let re_serialized = serde_json::to_string_pretty(&deserialized).unwrap();
     assert_eq!(
@@ -393,93 +423,83 @@ fn assert_json_fixture<T: Serialize + DeserializeOwned + std::fmt::Debug>(
 // Test: Generate fixtures (run with --nocapture to see JSON output)
 // =============================================================================
 
-/// Helper test to generate/regenerate fixture JSON strings.
-/// Run with: `cargo test -p irys-p2p generate_fixture_json -- --nocapture`
-///
-/// Copy the output into the corresponding test constants below.
+/// Helper test to generate/regenerate the gossip_fixtures.json file.
+/// Run with: `cargo test -p irys-p2p generate_fixture_json -- --ignored`
 #[test]
+#[ignore = "writes fixtures/gossip_fixtures.json — run explicitly to regenerate"]
 fn generate_fixture_json() {
-    let fixtures: Vec<(&str, String)> = vec![
+    let fixtures: Vec<(&str, serde_json::Value)> = vec![
         // V1 Gossip Data variants
         (
             "v1_gossip_data_chunk",
-            serde_json::to_string_pretty(&wire::GossipDataV1::Chunk(fixture_unpacked_chunk()))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataV1::Chunk(fixture_unpacked_chunk())).unwrap(),
         ),
         (
             "v1_gossip_data_transaction",
-            serde_json::to_string_pretty(
-                &wire::GossipDataV1::Transaction(fixture_data_tx_header()),
-            )
-            .unwrap(),
+            serde_json::to_value(wire::GossipDataV1::Transaction(fixture_data_tx_header()))
+                .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_stake",
-            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_stake(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_pledge",
-            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_pledge(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_unpledge",
-            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_unpledge(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_commitment_unstake",
-            serde_json::to_string_pretty(&wire::GossipDataV1::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV1::CommitmentTransaction(
                 fixture_commitment_v1_unstake(),
             ))
             .unwrap(),
         ),
         (
             "v1_gossip_data_block",
-            serde_json::to_string_pretty(&wire::GossipDataV1::Block(fixture_block_header()))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataV1::Block(fixture_block_header())).unwrap(),
         ),
         (
             "v1_gossip_data_ingress_proof",
-            serde_json::to_string_pretty(
-                &wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
-            )
-            .unwrap(),
+            serde_json::to_value(wire::GossipDataV1::IngressProof(fixture_ingress_proof()))
+                .unwrap(),
         ),
         // V1 Data Requests
         (
             "v1_data_request_execution_payload",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV1::ExecutionPayload(B256::from(
+            serde_json::to_value(wire::GossipDataRequestV1::ExecutionPayload(B256::from(
                 [0xEE; 32],
             )))
             .unwrap(),
         ),
         (
             "v1_data_request_block",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Block(test_h256(0xBB)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV1::Block(test_h256(0xBB))).unwrap(),
         ),
         (
             "v1_data_request_chunk",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Chunk(test_h256(0xCC)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV1::Chunk(test_h256(0xCC))).unwrap(),
         ),
         (
             "v1_data_request_transaction",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV1::Transaction(test_h256(0xDD)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV1::Transaction(test_h256(0xDD))).unwrap(),
         ),
         // V1 Request Wrapper
         (
             "v1_gossip_request",
-            serde_json::to_string_pretty(&wire::GossipRequestV1 {
+            serde_json::to_value(wire::GossipRequestV1 {
                 miner_address: test_address(0xAA),
                 data: wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
             })
@@ -488,100 +508,89 @@ fn generate_fixture_json() {
         // V2 Gossip Data variants
         (
             "v2_gossip_data_chunk",
-            serde_json::to_string_pretty(&wire::GossipDataV2::Chunk(fixture_unpacked_chunk()))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataV2::Chunk(fixture_unpacked_chunk())).unwrap(),
         ),
         (
             "v2_gossip_data_transaction",
-            serde_json::to_string_pretty(
-                &wire::GossipDataV2::Transaction(fixture_data_tx_header()),
-            )
-            .unwrap(),
+            serde_json::to_value(wire::GossipDataV2::Transaction(fixture_data_tx_header()))
+                .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_stake",
-            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_stake(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_pledge",
-            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_pledge(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_unpledge",
-            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_unpledge(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_unstake",
-            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_unstake(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_commitment_v2_update_reward_address",
-            serde_json::to_string_pretty(&wire::GossipDataV2::CommitmentTransaction(
+            serde_json::to_value(wire::GossipDataV2::CommitmentTransaction(
                 fixture_commitment_v2_update_reward_address(),
             ))
             .unwrap(),
         ),
         (
             "v2_gossip_data_block_header",
-            serde_json::to_string_pretty(&wire::GossipDataV2::BlockHeader(fixture_block_header()))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataV2::BlockHeader(fixture_block_header())).unwrap(),
         ),
         (
             "v2_gossip_data_block_body",
-            serde_json::to_string_pretty(&wire::GossipDataV2::BlockBody(fixture_block_body()))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataV2::BlockBody(fixture_block_body())).unwrap(),
         ),
         (
             "v2_gossip_data_ingress_proof",
-            serde_json::to_string_pretty(
-                &wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
-            )
-            .unwrap(),
+            serde_json::to_value(wire::GossipDataV2::IngressProof(fixture_ingress_proof()))
+                .unwrap(),
         ),
         // V2 Data Requests
         (
             "v2_data_request_execution_payload",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV2::ExecutionPayload(B256::from(
+            serde_json::to_value(wire::GossipDataRequestV2::ExecutionPayload(B256::from(
                 [0xEE; 32],
             )))
             .unwrap(),
         ),
         (
             "v2_data_request_block_header",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV2::BlockHeader(test_h256(0xBB)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV2::BlockHeader(test_h256(0xBB))).unwrap(),
         ),
         (
             "v2_data_request_block_body",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV2::BlockBody(test_h256(0xBB)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV2::BlockBody(test_h256(0xBB))).unwrap(),
         ),
         (
             "v2_data_request_chunk",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV2::Chunk(test_h256(0xCC)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV2::Chunk(test_h256(0xCC))).unwrap(),
         ),
         (
             "v2_data_request_transaction",
-            serde_json::to_string_pretty(&wire::GossipDataRequestV2::Transaction(test_h256(0xDD)))
-                .unwrap(),
+            serde_json::to_value(wire::GossipDataRequestV2::Transaction(test_h256(0xDD))).unwrap(),
         ),
         // V2 Request Wrapper
         (
             "v2_gossip_request",
-            serde_json::to_string_pretty(&wire::GossipRequestV2 {
+            serde_json::to_value(wire::GossipRequestV2 {
                 peer_id: test_peer_id(0xBB),
                 miner_address: test_address(0xAA),
                 data: wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
@@ -591,7 +600,7 @@ fn generate_fixture_json() {
         // Handshake V1
         (
             "handshake_request_v1",
-            serde_json::to_string_pretty(&wire::HandshakeRequestV1 {
+            serde_json::to_value(wire::HandshakeRequestV1 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V1,
                 mining_address: test_address(0xAA),
@@ -605,7 +614,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_request_v2",
-            serde_json::to_string_pretty(&wire::HandshakeRequestV2 {
+            serde_json::to_value(wire::HandshakeRequestV2 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V2,
                 mining_address: test_address(0xAA),
@@ -621,7 +630,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_response_v1",
-            serde_json::to_string_pretty(&wire::HandshakeResponseV1 {
+            serde_json::to_value(wire::HandshakeResponseV1 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V1,
                 peers: vec![test_peer_address()],
@@ -632,7 +641,7 @@ fn generate_fixture_json() {
         ),
         (
             "handshake_response_v2",
-            serde_json::to_string_pretty(&wire::HandshakeResponseV2 {
+            serde_json::to_value(wire::HandshakeResponseV2 {
                 version: Version::new(1, 2, 3),
                 protocol_version: ProtocolVersion::V2,
                 peers: vec![test_peer_address()],
@@ -645,18 +654,18 @@ fn generate_fixture_json() {
         // GossipResponse variants
         (
             "gossip_response_accepted",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Accepted(())).unwrap(),
+            serde_json::to_value(wire::GossipResponse::<()>::Accepted(())).unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_none",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::HandshakeRequired(None),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_handshake_required_not_in_peer_list",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::HandshakeRequired(Some(
                     wire::HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
                 )),
@@ -665,7 +674,7 @@ fn generate_fixture_json() {
         ),
         (
             "gossip_response_rejected_handshake_required_origin_mismatch",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::HandshakeRequired(Some(
                     wire::HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
                 )),
@@ -674,7 +683,7 @@ fn generate_fixture_json() {
         ),
         (
             "gossip_response_rejected_handshake_required_unknown_miner",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::HandshakeRequired(Some(
                     wire::HandshakeRequirementReason::MinerAddressIsUnknown,
                 )),
@@ -683,56 +692,56 @@ fn generate_fixture_json() {
         ),
         (
             "gossip_response_rejected_gossip_disabled",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::GossipDisabled,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_invalid_data",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::InvalidData,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_rate_limited",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::RateLimited,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unable_to_verify_origin",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::UnableToVerifyOrigin,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_invalid_credentials",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::InvalidCredentials,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_protocol_mismatch",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::ProtocolMismatch,
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unsupported_protocol_version",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::UnsupportedProtocolVersion(99),
             ))
             .unwrap(),
         ),
         (
             "gossip_response_rejected_unsupported_feature",
-            serde_json::to_string_pretty(&wire::GossipResponse::<()>::Rejected(
+            serde_json::to_value(wire::GossipResponse::<()>::Rejected(
                 wire::RejectionReason::UnsupportedFeature,
             ))
             .unwrap(),
@@ -740,7 +749,7 @@ fn generate_fixture_json() {
         // NodeInfo
         (
             "node_info",
-            serde_json::to_string_pretty(&NodeInfo {
+            serde_json::to_value(NodeInfo {
                 version: "1.2.3".to_string(),
                 peer_count: 5,
                 chain_id: 1270,
@@ -759,11 +768,15 @@ fn generate_fixture_json() {
         ),
     ];
 
-    for (name, json) in &fixtures {
-        println!("=== {name} ===");
-        println!("{json}");
-        println!();
-    }
+    let map: serde_json::Map<String, serde_json::Value> = fixtures
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap();
+    let path = fixture_path();
+    std::fs::write(&path, format!("{json}\n")).unwrap();
+    println!("Wrote fixtures to {}", path.display());
 }
 
 // =============================================================================
@@ -774,7 +787,6 @@ fn generate_fixture_json() {
 fn fixture_v1_gossip_data_chunk() {
     assert_json_fixture(
         &wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
-        FIXTURE_V1_GOSSIP_DATA_CHUNK,
         "v1_gossip_data_chunk",
     );
 }
@@ -783,7 +795,6 @@ fn fixture_v1_gossip_data_chunk() {
 fn fixture_v1_gossip_data_transaction() {
     assert_json_fixture(
         &wire::GossipDataV1::Transaction(fixture_data_tx_header()),
-        FIXTURE_V1_GOSSIP_DATA_TRANSACTION,
         "v1_gossip_data_transaction",
     );
 }
@@ -792,7 +803,6 @@ fn fixture_v1_gossip_data_transaction() {
 fn fixture_v1_gossip_data_commitment_stake() {
     assert_json_fixture(
         &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_stake()),
-        FIXTURE_V1_GOSSIP_DATA_COMMITMENT_STAKE,
         "v1_gossip_data_commitment_stake",
     );
 }
@@ -801,7 +811,6 @@ fn fixture_v1_gossip_data_commitment_stake() {
 fn fixture_v1_gossip_data_commitment_pledge() {
     assert_json_fixture(
         &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_pledge()),
-        FIXTURE_V1_GOSSIP_DATA_COMMITMENT_PLEDGE,
         "v1_gossip_data_commitment_pledge",
     );
 }
@@ -810,7 +819,6 @@ fn fixture_v1_gossip_data_commitment_pledge() {
 fn fixture_v1_gossip_data_commitment_unpledge() {
     assert_json_fixture(
         &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unpledge()),
-        FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNPLEDGE,
         "v1_gossip_data_commitment_unpledge",
     );
 }
@@ -819,7 +827,6 @@ fn fixture_v1_gossip_data_commitment_unpledge() {
 fn fixture_v1_gossip_data_commitment_unstake() {
     assert_json_fixture(
         &wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unstake()),
-        FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNSTAKE,
         "v1_gossip_data_commitment_unstake",
     );
 }
@@ -828,7 +835,6 @@ fn fixture_v1_gossip_data_commitment_unstake() {
 fn fixture_v1_gossip_data_block() {
     assert_json_fixture(
         &wire::GossipDataV1::Block(fixture_block_header()),
-        FIXTURE_V1_GOSSIP_DATA_BLOCK,
         "v1_gossip_data_block",
     );
 }
@@ -837,7 +843,6 @@ fn fixture_v1_gossip_data_block() {
 fn fixture_v1_gossip_data_ingress_proof() {
     assert_json_fixture(
         &wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
-        FIXTURE_V1_GOSSIP_DATA_INGRESS_PROOF,
         "v1_gossip_data_ingress_proof",
     );
 }
@@ -850,7 +855,6 @@ fn fixture_v1_gossip_data_ingress_proof() {
 fn fixture_v1_data_request_execution_payload() {
     assert_json_fixture(
         &wire::GossipDataRequestV1::ExecutionPayload(B256::from([0xEE; 32])),
-        FIXTURE_V1_DATA_REQUEST_EXECUTION_PAYLOAD,
         "v1_data_request_execution_payload",
     );
 }
@@ -859,7 +863,6 @@ fn fixture_v1_data_request_execution_payload() {
 fn fixture_v1_data_request_block() {
     assert_json_fixture(
         &wire::GossipDataRequestV1::Block(test_h256(0xBB)),
-        FIXTURE_V1_DATA_REQUEST_BLOCK,
         "v1_data_request_block",
     );
 }
@@ -868,7 +871,6 @@ fn fixture_v1_data_request_block() {
 fn fixture_v1_data_request_chunk() {
     assert_json_fixture(
         &wire::GossipDataRequestV1::Chunk(test_h256(0xCC)),
-        FIXTURE_V1_DATA_REQUEST_CHUNK,
         "v1_data_request_chunk",
     );
 }
@@ -877,7 +879,6 @@ fn fixture_v1_data_request_chunk() {
 fn fixture_v1_data_request_transaction() {
     assert_json_fixture(
         &wire::GossipDataRequestV1::Transaction(test_h256(0xDD)),
-        FIXTURE_V1_DATA_REQUEST_TRANSACTION,
         "v1_data_request_transaction",
     );
 }
@@ -893,7 +894,6 @@ fn fixture_v1_gossip_request() {
             miner_address: test_address(0xAA),
             data: wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
         },
-        FIXTURE_V1_GOSSIP_REQUEST,
         "v1_gossip_request",
     );
 }
@@ -906,7 +906,6 @@ fn fixture_v1_gossip_request() {
 fn fixture_v2_gossip_data_chunk() {
     assert_json_fixture(
         &wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
-        FIXTURE_V2_GOSSIP_DATA_CHUNK,
         "v2_gossip_data_chunk",
     );
 }
@@ -915,7 +914,6 @@ fn fixture_v2_gossip_data_chunk() {
 fn fixture_v2_gossip_data_transaction() {
     assert_json_fixture(
         &wire::GossipDataV2::Transaction(fixture_data_tx_header()),
-        FIXTURE_V2_GOSSIP_DATA_TRANSACTION,
         "v2_gossip_data_transaction",
     );
 }
@@ -924,7 +922,6 @@ fn fixture_v2_gossip_data_transaction() {
 fn fixture_v2_gossip_data_commitment_v2_stake() {
     assert_json_fixture(
         &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_stake()),
-        FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_STAKE,
         "v2_gossip_data_commitment_v2_stake",
     );
 }
@@ -933,7 +930,6 @@ fn fixture_v2_gossip_data_commitment_v2_stake() {
 fn fixture_v2_gossip_data_commitment_v2_pledge() {
     assert_json_fixture(
         &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_pledge()),
-        FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_PLEDGE,
         "v2_gossip_data_commitment_v2_pledge",
     );
 }
@@ -942,7 +938,6 @@ fn fixture_v2_gossip_data_commitment_v2_pledge() {
 fn fixture_v2_gossip_data_commitment_v2_unpledge() {
     assert_json_fixture(
         &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unpledge()),
-        FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNPLEDGE,
         "v2_gossip_data_commitment_v2_unpledge",
     );
 }
@@ -951,7 +946,6 @@ fn fixture_v2_gossip_data_commitment_v2_unpledge() {
 fn fixture_v2_gossip_data_commitment_v2_unstake() {
     assert_json_fixture(
         &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_unstake()),
-        FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNSTAKE,
         "v2_gossip_data_commitment_v2_unstake",
     );
 }
@@ -960,7 +954,6 @@ fn fixture_v2_gossip_data_commitment_v2_unstake() {
 fn fixture_v2_gossip_data_commitment_v2_update_reward_address() {
     assert_json_fixture(
         &wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_update_reward_address()),
-        FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UPDATE_REWARD_ADDRESS,
         "v2_gossip_data_commitment_v2_update_reward_address",
     );
 }
@@ -969,7 +962,6 @@ fn fixture_v2_gossip_data_commitment_v2_update_reward_address() {
 fn fixture_v2_gossip_data_block_header() {
     assert_json_fixture(
         &wire::GossipDataV2::BlockHeader(fixture_block_header()),
-        FIXTURE_V2_GOSSIP_DATA_BLOCK_HEADER,
         "v2_gossip_data_block_header",
     );
 }
@@ -978,7 +970,6 @@ fn fixture_v2_gossip_data_block_header() {
 fn fixture_v2_gossip_data_block_body() {
     assert_json_fixture(
         &wire::GossipDataV2::BlockBody(fixture_block_body()),
-        FIXTURE_V2_GOSSIP_DATA_BLOCK_BODY,
         "v2_gossip_data_block_body",
     );
 }
@@ -987,7 +978,6 @@ fn fixture_v2_gossip_data_block_body() {
 fn fixture_v2_gossip_data_ingress_proof() {
     assert_json_fixture(
         &wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
-        FIXTURE_V2_GOSSIP_DATA_INGRESS_PROOF,
         "v2_gossip_data_ingress_proof",
     );
 }
@@ -1000,7 +990,6 @@ fn fixture_v2_gossip_data_ingress_proof() {
 fn fixture_v2_data_request_execution_payload() {
     assert_json_fixture(
         &wire::GossipDataRequestV2::ExecutionPayload(B256::from([0xEE; 32])),
-        FIXTURE_V2_DATA_REQUEST_EXECUTION_PAYLOAD,
         "v2_data_request_execution_payload",
     );
 }
@@ -1009,7 +998,6 @@ fn fixture_v2_data_request_execution_payload() {
 fn fixture_v2_data_request_block_header() {
     assert_json_fixture(
         &wire::GossipDataRequestV2::BlockHeader(test_h256(0xBB)),
-        FIXTURE_V2_DATA_REQUEST_BLOCK_HEADER,
         "v2_data_request_block_header",
     );
 }
@@ -1018,7 +1006,6 @@ fn fixture_v2_data_request_block_header() {
 fn fixture_v2_data_request_block_body() {
     assert_json_fixture(
         &wire::GossipDataRequestV2::BlockBody(test_h256(0xBB)),
-        FIXTURE_V2_DATA_REQUEST_BLOCK_BODY,
         "v2_data_request_block_body",
     );
 }
@@ -1027,7 +1014,6 @@ fn fixture_v2_data_request_block_body() {
 fn fixture_v2_data_request_chunk() {
     assert_json_fixture(
         &wire::GossipDataRequestV2::Chunk(test_h256(0xCC)),
-        FIXTURE_V2_DATA_REQUEST_CHUNK,
         "v2_data_request_chunk",
     );
 }
@@ -1036,7 +1022,6 @@ fn fixture_v2_data_request_chunk() {
 fn fixture_v2_data_request_transaction() {
     assert_json_fixture(
         &wire::GossipDataRequestV2::Transaction(test_h256(0xDD)),
-        FIXTURE_V2_DATA_REQUEST_TRANSACTION,
         "v2_data_request_transaction",
     );
 }
@@ -1053,7 +1038,6 @@ fn fixture_v2_gossip_request() {
             miner_address: test_address(0xAA),
             data: wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
         },
-        FIXTURE_V2_GOSSIP_REQUEST,
         "v2_gossip_request",
     );
 }
@@ -1075,7 +1059,6 @@ fn fixture_handshake_request_v1() {
             user_agent: Some("irys-node/1.2.3".to_string()),
             signature: test_signature(),
         },
-        FIXTURE_HANDSHAKE_REQUEST_V1,
         "handshake_request_v1",
     );
 }
@@ -1095,7 +1078,6 @@ fn fixture_handshake_request_v2() {
             consensus_config_hash: test_h256(0xFF),
             signature: test_signature(),
         },
-        FIXTURE_HANDSHAKE_REQUEST_V2,
         "handshake_request_v2",
     );
 }
@@ -1110,7 +1092,6 @@ fn fixture_handshake_response_v1() {
             timestamp: 1700000000000,
             message: Some("Welcome".to_string()),
         },
-        FIXTURE_HANDSHAKE_RESPONSE_V1,
         "handshake_response_v1",
     );
 }
@@ -1126,7 +1107,6 @@ fn fixture_handshake_response_v2() {
             message: Some("Welcome".to_string()),
             consensus_config_hash: test_h256(0xFF),
         },
-        FIXTURE_HANDSHAKE_RESPONSE_V2,
         "handshake_response_v2",
     );
 }
@@ -1139,7 +1119,6 @@ fn fixture_handshake_response_v2() {
 fn fixture_gossip_response_accepted() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Accepted(()),
-        FIXTURE_GOSSIP_RESPONSE_ACCEPTED,
         "gossip_response_accepted",
     );
 }
@@ -1148,7 +1127,6 @@ fn fixture_gossip_response_accepted() {
 fn fixture_gossip_response_rejected_handshake_required_none() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(None)),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NONE,
         "gossip_response_rejected_handshake_required_none",
     );
 }
@@ -1159,7 +1137,6 @@ fn fixture_gossip_response_rejected_handshake_required_not_in_peer_list() {
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
             wire::HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
         ))),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NOT_IN_PEER_LIST,
         "gossip_response_rejected_handshake_required_not_in_peer_list",
     );
 }
@@ -1170,7 +1147,6 @@ fn fixture_gossip_response_rejected_handshake_required_origin_mismatch() {
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
             wire::HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
         ))),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_ORIGIN_MISMATCH,
         "gossip_response_rejected_handshake_required_origin_mismatch",
     );
 }
@@ -1181,7 +1157,6 @@ fn fixture_gossip_response_rejected_handshake_required_unknown_miner() {
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
             wire::HandshakeRequirementReason::MinerAddressIsUnknown,
         ))),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_UNKNOWN_MINER,
         "gossip_response_rejected_handshake_required_unknown_miner",
     );
 }
@@ -1190,7 +1165,6 @@ fn fixture_gossip_response_rejected_handshake_required_unknown_miner() {
 fn fixture_gossip_response_rejected_gossip_disabled() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::GossipDisabled),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_GOSSIP_DISABLED,
         "gossip_response_rejected_gossip_disabled",
     );
 }
@@ -1199,7 +1173,6 @@ fn fixture_gossip_response_rejected_gossip_disabled() {
 fn fixture_gossip_response_rejected_invalid_data() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidData),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_DATA,
         "gossip_response_rejected_invalid_data",
     );
 }
@@ -1208,7 +1181,6 @@ fn fixture_gossip_response_rejected_invalid_data() {
 fn fixture_gossip_response_rejected_rate_limited() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::RateLimited),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_RATE_LIMITED,
         "gossip_response_rejected_rate_limited",
     );
 }
@@ -1217,7 +1189,6 @@ fn fixture_gossip_response_rejected_rate_limited() {
 fn fixture_gossip_response_rejected_unable_to_verify_origin() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnableToVerifyOrigin),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_UNABLE_TO_VERIFY_ORIGIN,
         "gossip_response_rejected_unable_to_verify_origin",
     );
 }
@@ -1226,7 +1197,6 @@ fn fixture_gossip_response_rejected_unable_to_verify_origin() {
 fn fixture_gossip_response_rejected_invalid_credentials() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidCredentials),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_CREDENTIALS,
         "gossip_response_rejected_invalid_credentials",
     );
 }
@@ -1235,7 +1205,6 @@ fn fixture_gossip_response_rejected_invalid_credentials() {
 fn fixture_gossip_response_rejected_protocol_mismatch() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::ProtocolMismatch),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_PROTOCOL_MISMATCH,
         "gossip_response_rejected_protocol_mismatch",
     );
 }
@@ -1246,7 +1215,6 @@ fn fixture_gossip_response_rejected_unsupported_protocol_version() {
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedProtocolVersion(
             99,
         )),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_PROTOCOL_VERSION,
         "gossip_response_rejected_unsupported_protocol_version",
     );
 }
@@ -1255,7 +1223,6 @@ fn fixture_gossip_response_rejected_unsupported_protocol_version() {
 fn fixture_gossip_response_rejected_unsupported_feature() {
     assert_json_fixture(
         &wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedFeature),
-        FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_FEATURE,
         "gossip_response_rejected_unsupported_feature",
     );
 }
@@ -1282,641 +1249,6 @@ fn fixture_node_info() {
             mining_address: test_address(0xAA),
             cumulative_difficulty: U256::from(50_000_u64),
         },
-        FIXTURE_NODE_INFO,
         "node_info",
     );
 }
-
-// =============================================================================
-// Hardcoded JSON fixture constants
-// =============================================================================
-// These constants are the canonical JSON serialization for each gossip protocol
-// message. If any of these need to be updated, it means the wire format has
-// changed and protocol compatibility must be reviewed.
-//
-// To regenerate: `cargo test -p irys-p2p generate_fixture_json -- --nocapture`
-
-const FIXTURE_V1_GOSSIP_DATA_CHUNK: &str = r#"{
-  "Chunk": {
-    "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
-    "dataSize": "262144",
-    "dataPath": "3q2-7w",
-    "bytes": "yv66vg",
-    "txOffset": 0
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_TRANSACTION: &str = r#"{
-  "Transaction": {
-    "version": 1,
-    "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
-    "bundleFormat": "1",
-    "chainId": "1270",
-    "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
-    "dataSize": "1048576",
-    "headerSize": "256",
-    "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-    "ledgerId": 1,
-    "permFee": "500000",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
-    "termFee": "1000000"
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_COMMITMENT_STAKE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 1,
-    "anchor": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
-    "chainId": "1270",
-    "commitmentType": {
-      "type": "stake"
-    },
-    "fee": "5000",
-    "id": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "FbuAN3XZn2Kmrbihy2YggRvfNos",
-    "value": "1000000"
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_COMMITMENT_PLEDGE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 1,
-    "anchor": "3EKkiwNLWqoUbzFkPrmKbtUB4EweE6f4STzevYUmezeL",
-    "chainId": "1270",
-    "commitmentType": {
-      "pledgeCountBeforeExecuting": "5",
-      "type": "pledge"
-    },
-    "fee": "3000",
-    "id": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "UahXaJfQF9wo4Tv13ib54bC93XX",
-    "value": "500000"
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNPLEDGE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 1,
-    "anchor": "4K2V1kpVycZ6qSFsNdz2FtpNxnJs17eBNzf9rdCMcKoe",
-    "chainId": "1270",
-    "commitmentType": {
-      "partitionHash": "4Ss5JMkXAD9Z7cktFEdrqeMuT6jGMF1pVozTyPHZ6zT4",
-      "pledgeCountBeforeExecuting": "3",
-      "type": "unpledge"
-    },
-    "fee": "2000",
-    "id": "4F7BsTMVPKFshM1MwLf6y23cid6fL3xMpazVoF9krzUw",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "hZVtnZoEiHZpGL7J8QdTSkTciFB",
-    "value": "250000"
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_COMMITMENT_UNSTAKE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 1,
-    "anchor": "5PjDJaGfSPJj4tFzMRCiuuAasKg5n8dJKXKenhuwZexx",
-    "chainId": "1270",
-    "commitmentType": {
-      "type": "unstake"
-    },
-    "fee": "1000",
-    "id": "5KovAGoer61Vvo1Uv7sod2PpdATt74wUm7ezjKsLpKeF",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "vYJFzpw5BRBqUCJbD6fqpuj6Nxq",
-    "value": "100000"
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_BLOCK: &str = r#"{
-  "Block": {
-    "version": 1,
-    "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-    "chunkHash": "EzDBdLQ7QjUtsjn4HqXCECkuXsYfRA7jfTxq4gH1exmL",
-    "cumulativeDiff": "50000",
-    "dataLedgers": [
-      {
-        "expires": "100",
-        "ledgerId": 1,
-        "totalChunks": "256",
-        "txIds": [
-          "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
-        ],
-        "txRoot": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
-      }
-    ],
-    "diff": "1000",
-    "emaIrysPrice": {
-      "amount": "95"
-    },
-    "evmBlockHash": "0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
-    "height": "42",
-    "lastDiffTimestamp": "1700000000000",
-    "lastEpochHash": "EvHtV2w6pSBfjeXYrYCGwKz9HiLTk6Rv74JB1JEQudSd",
-    "minerAddress": "49XF233b4hnYfgyzL5LL3zsZmhbn",
-    "oracleIrysPrice": {
-      "amount": "100"
-    },
-    "poa": {
-      "chunk": "AQID",
-      "dataPath": "Bgc",
-      "ledgerId": 1,
-      "partitionChunkOffset": 100,
-      "partitionHash": "F83muwL8bL5M9vH5ASB2oxJS2By4mHVNnHJ9BSND9dQk",
-      "txPath": "BAU"
-    },
-    "previousBlockHash": "F48Umds812n81q2Zj8r7X5Xfn2ks6DoZDsdV84KcQJ63",
-    "previousCumulativeDiff": "49000",
-    "previousSolutionHash": "ErNbLjU6E8tSbZH3REsMeTDP3Z8G52k6YedWwvBpAJ7v",
-    "rewardAddress": "48iC7xethYqhHs7j88faQMEjgM4B",
-    "rewardAmount": "100",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "solutionHash": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
-    "systemLedgers": [
-      {
-        "ledgerId": 0,
-        "txIds": [
-          "HDXwMGmSvaHNUj2oghHWq6E5b7VJeFmo6vxUzDknJxQf"
-        ]
-      }
-    ],
-    "timestamp": "1700000000000",
-    "treasury": "999999",
-    "vdfLimiterInfo": {
-      "globalStepNumber": "1000",
-      "lastStepCheckpoints": [
-        "C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"
-      ],
-      "nextSeed": "BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX",
-      "nextVdfDifficulty": "55000",
-      "output": "Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7",
-      "prevOutput": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
-      "seed": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
-      "steps": [
-        "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
-      ],
-      "vdfDifficulty": "50000"
-    }
-  }
-}"#;
-
-const FIXTURE_V1_GOSSIP_DATA_INGRESS_PROOF: &str = r#"{
-  "IngressProof": {
-    "version": 1,
-    "anchor": "G4uuv9rGsWEX7BnBGcjttD77SQutCB6rbzdKzkzbcHve",
-    "chain_id": 1270,
-    "data_root": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE",
-    "proof": "FzzcmrPGHCwHy6XfqKQybLLMCFhgX7R33axfwNwzrxbw",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv"
-  }
-}"#;
-
-const FIXTURE_V1_DATA_REQUEST_EXECUTION_PAYLOAD: &str = r#"{
-  "ExecutionPayload": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-}"#;
-
-const FIXTURE_V1_DATA_REQUEST_BLOCK: &str = r#"{
-  "Block": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC"
-}"#;
-
-const FIXTURE_V1_DATA_REQUEST_CHUNK: &str = r#"{
-  "Chunk": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD"
-}"#;
-
-const FIXTURE_V1_DATA_REQUEST_TRANSACTION: &str = r#"{
-  "Transaction": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE"
-}"#;
-
-const FIXTURE_V1_GOSSIP_REQUEST: &str = r#"{
-  "miner_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-  "data": {
-    "Chunk": {
-      "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
-      "dataSize": "262144",
-      "dataPath": "3q2-7w",
-      "bytes": "yv66vg",
-      "txOffset": 0
-    }
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_CHUNK: &str = r#"{
-  "Chunk": {
-    "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
-    "dataSize": "262144",
-    "dataPath": "3q2-7w",
-    "bytes": "yv66vg",
-    "txOffset": 0
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_TRANSACTION: &str = r#"{
-  "Transaction": {
-    "version": 1,
-    "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
-    "bundleFormat": "1",
-    "chainId": "1270",
-    "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
-    "dataSize": "1048576",
-    "headerSize": "256",
-    "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-    "ledgerId": 1,
-    "permFee": "500000",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
-    "termFee": "1000000"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_STAKE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 2,
-    "anchor": "6URwbPipuA4MJLG7LCRRZuWnms3JZ9cRG3z9indXWz8G",
-    "chainId": "1270",
-    "commitmentType": {
-      "type": "stake"
-    },
-    "fee": "5000",
-    "id": "6QWeT6FpJrm8AF1btu6WH2k2Xhq6t5vbheKVfQavmeoZ",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "29X6dD64ueYorg4VtHniED4za3gV",
-    "value": "2000000"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_PLEDGE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 2,
-    "anchor": "7Z8ftDAzMvoyXnGEJye8DurzgQQXLAbYCaeeesM7UKHa",
-    "chainId": "1270",
-    "commitmentType": {
-      "pledgeCountBeforeExecuting": "7",
-      "type": "pledge"
-    },
-    "fee": "4000",
-    "id": "7VDNjuhymdWkPh1isgKCw36ESFCKf6uieAyzbVJWiyxs",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "2NVtzRMCk7gRssvhBNUkcbEG3iQ9",
-    "value": "800000"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNPLEDGE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 2,
-    "anchor": "8dqQB2d9phZbmEGMHkrpsvDCawmk7Baf97K9ax4hReSt",
-    "chainId": "1270",
-    "commitmentType": {
-      "partitionHash": "8mfzTdZB1JA43QmNAMWfTfkj5GC9TJxJFveThi9tvK6J",
-      "pledgeCountBeforeExecuting": "2",
-      "type": "unpledge"
-    },
-    "fee": "3000",
-    "id": "8Zv72jA9EQGNd91qrTXub3SSLnZYS7tqaheVXa26gK8B",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "2bUhMdcLaap3u5ntUTAnzyPXXP7o",
-    "value": "400000"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UNSTAKE: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 2,
-    "anchor": "9iY8Tr5KHUKDzgGUGY5XXvZQVV8xtCZn5dyeX2nHNycC",
-    "chainId": "1270",
-    "commitmentType": {
-      "type": "unstake"
-    },
-    "fee": "2000",
-    "id": "9ecqKYcJhB1zrb1xqEkcF3neFKvmD8sxXEJzTejgdeHV",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "2pTViqsUR3wfvHf5mXrqPMYo13qT",
-    "value": "300000"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_COMMITMENT_V2_UPDATE_REWARD_ADDRESS: &str = r#"{
-  "CommitmentTransaction": {
-    "version": 2,
-    "anchor": "AoErkfXUkF4rE8GbFKJEBvucQ2WBfDYu2Ae9T7VsLJmW",
-    "chainId": "1270",
-    "commitmentType": {
-      "newRewardAddress": "34FLz8XJcg29KKPYGZDdRPLta56i",
-      "type": "updateRewardAddress"
-    },
-    "fee": "1500",
-    "id": "AjKZcN4U9wmd6325p1yJu48r9sHyz9s5TkyVPjTGaySo",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "signer": "33SJ648cFX5HwVXH4cYsmji4UiZ7",
-    "value": "0"
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_BLOCK_HEADER: &str = r#"{
-  "BlockHeader": {
-    "version": 1,
-    "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-    "chunkHash": "EzDBdLQ7QjUtsjn4HqXCECkuXsYfRA7jfTxq4gH1exmL",
-    "cumulativeDiff": "50000",
-    "dataLedgers": [
-      {
-        "expires": "100",
-        "ledgerId": 1,
-        "totalChunks": "256",
-        "txIds": [
-          "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
-        ],
-        "txRoot": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
-      }
-    ],
-    "diff": "1000",
-    "emaIrysPrice": {
-      "amount": "95"
-    },
-    "evmBlockHash": "0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
-    "height": "42",
-    "lastDiffTimestamp": "1700000000000",
-    "lastEpochHash": "EvHtV2w6pSBfjeXYrYCGwKz9HiLTk6Rv74JB1JEQudSd",
-    "minerAddress": "49XF233b4hnYfgyzL5LL3zsZmhbn",
-    "oracleIrysPrice": {
-      "amount": "100"
-    },
-    "poa": {
-      "chunk": "AQID",
-      "dataPath": "Bgc",
-      "ledgerId": 1,
-      "partitionChunkOffset": 100,
-      "partitionHash": "F83muwL8bL5M9vH5ASB2oxJS2By4mHVNnHJ9BSND9dQk",
-      "txPath": "BAU"
-    },
-    "previousBlockHash": "F48Umds812n81q2Zj8r7X5Xfn2ks6DoZDsdV84KcQJ63",
-    "previousCumulativeDiff": "49000",
-    "previousSolutionHash": "ErNbLjU6E8tSbZH3REsMeTDP3Z8G52k6YedWwvBpAJ7v",
-    "rewardAddress": "48iC7xethYqhHs7j88faQMEjgM4B",
-    "rewardAmount": "100",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-    "solutionHash": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
-    "systemLedgers": [
-      {
-        "ledgerId": 0,
-        "txIds": [
-          "HDXwMGmSvaHNUj2oghHWq6E5b7VJeFmo6vxUzDknJxQf"
-        ]
-      }
-    ],
-    "timestamp": "1700000000000",
-    "treasury": "999999",
-    "vdfLimiterInfo": {
-      "globalStepNumber": "1000",
-      "lastStepCheckpoints": [
-        "C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"
-      ],
-      "nextSeed": "BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX",
-      "nextVdfDifficulty": "55000",
-      "output": "Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7",
-      "prevOutput": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
-      "seed": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
-      "steps": [
-        "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
-      ],
-      "vdfDifficulty": "50000"
-    }
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_BLOCK_BODY: &str = r#"{
-  "BlockBody": {
-    "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-    "data_transactions": [
-      {
-        "version": 1,
-        "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
-        "bundleFormat": "1",
-        "chainId": "1270",
-        "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
-        "dataSize": "1048576",
-        "headerSize": "256",
-        "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-        "ledgerId": 1,
-        "permFee": "500000",
-        "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-        "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
-        "termFee": "1000000"
-      }
-    ],
-    "commitment_transactions": [
-      {
-        "version": 2,
-        "anchor": "6URwbPipuA4MJLG7LCRRZuWnms3JZ9cRG3z9indXWz8G",
-        "chainId": "1270",
-        "commitmentType": {
-          "type": "stake"
-        },
-        "fee": "5000",
-        "id": "6QWeT6FpJrm8AF1btu6WH2k2Xhq6t5vbheKVfQavmeoZ",
-        "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
-        "signer": "29X6dD64ueYorg4VtHniED4za3gV",
-        "value": "2000000"
-      }
-    ]
-  }
-}"#;
-
-const FIXTURE_V2_GOSSIP_DATA_INGRESS_PROOF: &str = r#"{
-  "IngressProof": {
-    "version": 1,
-    "anchor": "G4uuv9rGsWEX7BnBGcjttD77SQutCB6rbzdKzkzbcHve",
-    "chain_id": 1270,
-    "data_root": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE",
-    "proof": "FzzcmrPGHCwHy6XfqKQybLLMCFhgX7R33axfwNwzrxbw",
-    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv"
-  }
-}"#;
-
-const FIXTURE_V2_DATA_REQUEST_EXECUTION_PAYLOAD: &str = r#"{
-  "ExecutionPayload": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-}"#;
-
-const FIXTURE_V2_DATA_REQUEST_BLOCK_HEADER: &str = r#"{
-  "BlockHeader": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC"
-}"#;
-
-const FIXTURE_V2_DATA_REQUEST_BLOCK_BODY: &str = r#"{
-  "BlockBody": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC"
-}"#;
-
-const FIXTURE_V2_DATA_REQUEST_CHUNK: &str = r#"{
-  "Chunk": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD"
-}"#;
-
-const FIXTURE_V2_DATA_REQUEST_TRANSACTION: &str = r#"{
-  "Transaction": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE"
-}"#;
-
-const FIXTURE_V2_GOSSIP_REQUEST: &str = r#"{
-  "peer_id": "3chLuAB9CqrCNL42WFwjPLk4GEtr",
-  "miner_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-  "data": {
-    "Chunk": {
-      "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
-      "dataSize": "262144",
-      "dataPath": "3q2-7w",
-      "bytes": "yv66vg",
-      "txOffset": 0
-    }
-  }
-}"#;
-
-const FIXTURE_HANDSHAKE_REQUEST_V1: &str = r#"{
-  "version": "1.2.3",
-  "protocol_version": "V1",
-  "mining_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-  "chain_id": 1270,
-  "address": {
-    "gossip": "192.168.1.1:4200",
-    "api": "192.168.1.1:4201",
-    "execution": {
-      "peering_tcp_addr": "192.168.1.1:30303",
-      "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    }
-  },
-  "timestamp": 1700000000000,
-  "user_agent": "irys-node/1.2.3",
-  "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv"
-}"#;
-
-const FIXTURE_HANDSHAKE_REQUEST_V2: &str = r#"{
-  "version": "1.2.3",
-  "protocol_version": "V2",
-  "mining_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-  "peer_id": "3chLuAB9CqrCNL42WFwjPLk4GEtr",
-  "chain_id": 1270,
-  "address": {
-    "gossip": "192.168.1.1:4200",
-    "api": "192.168.1.1:4201",
-    "execution": {
-      "peering_tcp_addr": "192.168.1.1:30303",
-      "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    }
-  },
-  "timestamp": 1700000000000,
-  "user_agent": "irys-node/1.2.3",
-  "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
-  "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv"
-}"#;
-
-const FIXTURE_HANDSHAKE_RESPONSE_V1: &str = r#"{
-  "version": "1.2.3",
-  "protocol_version": "V1",
-  "peers": [
-    {
-      "gossip": "192.168.1.1:4200",
-      "api": "192.168.1.1:4201",
-      "execution": {
-        "peering_tcp_addr": "192.168.1.1:30303",
-        "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-      }
-    }
-  ],
-  "timestamp": 1700000000000,
-  "message": "Welcome"
-}"#;
-
-const FIXTURE_HANDSHAKE_RESPONSE_V2: &str = r#"{
-  "version": "1.2.3",
-  "protocol_version": "V2",
-  "peers": [
-    {
-      "gossip": "192.168.1.1:4200",
-      "api": "192.168.1.1:4201",
-      "execution": {
-        "peering_tcp_addr": "192.168.1.1:30303",
-        "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-      }
-    }
-  ],
-  "timestamp": 1700000000000,
-  "message": "Welcome",
-  "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_ACCEPTED: &str = r#"{
-  "Accepted": null
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NONE: &str = r#"{
-  "Rejected": {
-    "HandshakeRequired": null
-  }
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_NOT_IN_PEER_LIST: &str = r#"{
-  "Rejected": {
-    "HandshakeRequired": "RequestOriginIsNotInThePeerList"
-  }
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_ORIGIN_MISMATCH: &str = r#"{
-  "Rejected": {
-    "HandshakeRequired": "RequestOriginDoesNotMatchExpected"
-  }
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_HANDSHAKE_REQUIRED_UNKNOWN_MINER: &str = r#"{
-  "Rejected": {
-    "HandshakeRequired": "MinerAddressIsUnknown"
-  }
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_GOSSIP_DISABLED: &str = r#"{
-  "Rejected": "GossipDisabled"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_DATA: &str = r#"{
-  "Rejected": "InvalidData"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_RATE_LIMITED: &str = r#"{
-  "Rejected": "RateLimited"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_UNABLE_TO_VERIFY_ORIGIN: &str = r#"{
-  "Rejected": "UnableToVerifyOrigin"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_INVALID_CREDENTIALS: &str = r#"{
-  "Rejected": "InvalidCredentials"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_PROTOCOL_MISMATCH: &str = r#"{
-  "Rejected": "ProtocolMismatch"
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_PROTOCOL_VERSION: &str = r#"{
-  "Rejected": {
-    "UnsupportedProtocolVersion": 99
-  }
-}"#;
-
-const FIXTURE_GOSSIP_RESPONSE_REJECTED_UNSUPPORTED_FEATURE: &str = r#"{
-  "Rejected": "UnsupportedFeature"
-}"#;
-
-const FIXTURE_NODE_INFO: &str = r#"{
-  "version": "1.2.3",
-  "peerCount": 5,
-  "chainId": "1270",
-  "height": "42",
-  "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-  "blockIndexHeight": "40",
-  "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
-  "pendingBlocks": "2",
-  "isSyncing": false,
-  "currentSyncHeight": "42",
-  "uptimeSecs": "3600",
-  "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-  "cumulativeDifficulty": "50000"
-}"#;
