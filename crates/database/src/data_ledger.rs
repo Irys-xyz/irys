@@ -262,6 +262,10 @@ impl LedgerCore for TermLedger {
 pub struct Ledgers {
     perm: PermanentLedger,
     term: Vec<TermLedger>,
+    /// When Some(n), publish ledger slots expire after n epochs
+    publish_ledger_epoch_length: Option<u64>,
+    /// Blocks per epoch (needed for expiry height calculation)
+    num_blocks_in_epoch: u64,
 }
 
 impl Ledgers {
@@ -270,6 +274,8 @@ impl Ledgers {
         Self {
             perm: PermanentLedger::new(config),
             term: vec![TermLedger::new(DataLedger::Submit, config)],
+            publish_ledger_epoch_length: config.epoch.publish_ledger_epoch_length,
+            num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
         }
     }
 
