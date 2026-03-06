@@ -212,7 +212,13 @@ pub async fn select_best_txs(
         )
         .await
         {
-            tracing::warn!(tx.error = ?error, "rejecting commitment tx");
+            tracing::warn!(
+                tx.error = ?error,
+                tx.id = ?tx.id(),
+                tx.commitment_type = ?tx.commitment_type(),
+                tx.signer = ?tx.signer(),
+                "rejecting commitment tx"
+            );
             continue;
         }
 
