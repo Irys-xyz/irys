@@ -556,6 +556,7 @@ mod tests {
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
+        num_partitions_per_term_ledger_slot = 1
         entropy_packing_iterations = 1000
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
