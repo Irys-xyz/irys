@@ -843,19 +843,31 @@ mod tests {
     fn test_publish_ledger_epoch_length_validation() {
         // Some(0) should fail
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = Some(0);
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(0);
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_err());
 
         // Some(1) should pass
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = Some(1);
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(1);
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_ok());
 
         // None should pass
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = None;
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_ok());
     }
