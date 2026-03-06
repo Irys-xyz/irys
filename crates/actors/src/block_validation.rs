@@ -74,6 +74,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+    #[error("Rejected ingress proof version: {0}")]
+    IngressProofVersionRejected(String),
     #[error(
         "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
     )]
@@ -713,6 +715,13 @@ pub async fn prevalidate_block(
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.iter() {
             proof
+                .check_version_accepted(
+                    config.consensus.accept_kzg_ingress_proofs,
+                    config.consensus.require_kzg_ingress_proofs,
+                )
+                .map_err(|msg| PreValidationError::IngressProofVersionRejected(msg.into()))?;
+
+            proof
                 .pre_validate(&tx_header.data_root)
                 .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
         }
@@ -1342,38 +1351,36 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
-    // Reject any blob gas usage in the payload
-    if payload_v3.blob_gas_used != 0 {
-        tracing::debug!(
-            block.hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            payload.blob_gas_used = payload_v3.blob_gas_used,
-            "Rejecting block: blob_gas_used must be zero",
-        );
-        eyre::bail!("block has non-zero blob_gas_used which is disabled");
-    }
-    if payload_v3.excess_blob_gas != 0 {
-        tracing::debug!(
-            block.block_hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            payload.excess_blob_gas = payload_v3.excess_blob_gas,
-            "Rejecting block: excess_blob_gas must be zero",
-        );
-        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
-    }
-
-    // Reject any block that carries blob sidecars (EIP-4844).
-    // We keep Cancun active but disable blobs/sidecars entirely.
-    if let Some(versioned_hashes) = sidecar.versioned_hashes()
-        && !versioned_hashes.is_empty()
-    {
-        tracing::debug!(
-            block.block_hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            block.versioned_hashes_len = versioned_hashes.len(),
-            "Rejecting block: EIP-4844 blobs/sidecars are not supported",
-        );
-        eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+    if !config.consensus.enable_blobs {
+        if payload_v3.blob_gas_used != 0 {
+            tracing::debug!(
+                block.hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                payload.blob_gas_used = payload_v3.blob_gas_used,
+                "Rejecting block: blob_gas_used must be zero",
+            );
+            eyre::bail!("block has non-zero blob_gas_used which is disabled");
+        }
+        if payload_v3.excess_blob_gas != 0 {
+            tracing::debug!(
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                payload.excess_blob_gas = payload_v3.excess_blob_gas,
+                "Rejecting block: excess_blob_gas must be zero",
+            );
+            eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+        }
+        if let Some(versioned_hashes) = sidecar.versioned_hashes()
+            && !versioned_hashes.is_empty()
+        {
+            tracing::debug!(
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                block.versioned_hashes_len = versioned_hashes.len(),
+                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+            );
+            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+        }
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
     if let Some(requests) = sidecar.requests()
@@ -1411,15 +1418,16 @@ pub async fn shadow_transactions_are_valid(
         eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
     }
 
-    // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
-    for tx in evm_block.body.transactions.iter() {
-        if tx.is_eip4844() {
-            tracing::debug!(
-                block.block_hash = %block.block_hash,
-                block.evm_block_hash = %block.evm_block_hash,
-                "Rejecting block: contains EIP-4844 transaction which is disabled",
-            );
-            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+    if !config.consensus.enable_blobs {
+        for tx in evm_block.body.transactions.iter() {
+            if tx.is_eip4844() {
+                tracing::debug!(
+                    block.block_hash = %block.block_hash,
+                    block.evm_block_hash = %block.evm_block_hash,
+                    "Rejecting block: contains EIP-4844 transaction which is disabled",
+                );
+                eyre::bail!("block contains EIP-4844 transaction which is disabled");
+            }
         }
     }
 
@@ -3052,6 +3060,120 @@ fn get_submit_ledger_slot_addresses(
     }
 
     num_addresses_per_slot
+}
+
+/// Verify custody proofs included in a block.
+///
+/// Returns `Ok(())` if all proofs are valid or custody proofs are disabled.
+pub fn validate_custody_proofs(
+    custody_proofs: &[irys_types::custody::CustodyProof],
+    consensus_config: &ConsensusConfig,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    if !consensus_config.enable_custody_proofs {
+        return Ok(());
+    }
+
+    let kzg_settings = irys_types::kzg::default_kzg_settings();
+    let tx = db.tx()?;
+    for proof in custody_proofs {
+        let result = irys_types::custody::verify_custody_proof(
+            proof,
+            |data_root, chunk_index| {
+                irys_database::get_per_chunk_kzg_commitment(&tx, data_root, chunk_index)
+            },
+            kzg_settings,
+            consensus_config.custody_challenge_count,
+            consensus_config.num_chunks_in_partition,
+        )?;
+
+        match result {
+            irys_types::custody::CustodyVerificationResult::Valid => {}
+            irys_types::custody::CustodyVerificationResult::InvalidOpeningCount {
+                expected,
+                got,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?} partition {:?}: expected {expected} openings, got {got}",
+                    proof.challenged_miner,
+                    proof.partition_hash,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::InvalidOffset {
+                chunk_offset,
+                expected,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: offset mismatch at chunk_offset={chunk_offset}, expected={expected}",
+                    proof.challenged_miner,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::MissingCommitment {
+                data_root,
+                chunk_index,
+            } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: missing commitment for data_root={data_root:?} chunk_index={chunk_index}",
+                    proof.challenged_miner,
+                );
+            }
+            irys_types::custody::CustodyVerificationResult::InvalidProof { chunk_offset } => {
+                eyre::bail!(
+                    "custody proof for miner {:?}: invalid KZG opening at chunk_offset={chunk_offset}",
+                    proof.challenged_miner,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Store per-chunk KZG commitments extracted from V2 EvmBlob ingress proofs.
+///
+/// For blob-derived data (single chunk), the per-chunk commitment at index 0
+/// equals the blob's KZG commitment from the ingress proof. This ensures
+/// custody proof verification can find the commitment for peer-received blocks.
+pub fn store_blob_ingress_commitments(
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    use irys_types::ingress::DataSourceType;
+    use irys_types::kzg::KzgCommitmentBytes;
+
+    let mut to_store: Vec<(H256, KzgCommitmentBytes)> = Vec::new();
+
+    for ledger in &block.data_ledgers {
+        let proofs = match &ledger.proofs {
+            Some(p) => &p.0,
+            None => continue,
+        };
+        for proof in proofs {
+            if let IngressProof::V2(v2) = proof {
+                if v2.source_type == DataSourceType::EvmBlob {
+                    to_store.push((v2.data_root, v2.kzg_commitment));
+                }
+            }
+        }
+    }
+
+    if to_store.is_empty() {
+        return Ok(());
+    }
+
+    db.update(|rw_tx| {
+        for (data_root, commitment) in &to_store {
+            irys_database::store_per_chunk_kzg_commitments(rw_tx, *data_root, &[(0, *commitment)])?;
+        }
+        Ok::<(), eyre::Report>(())
+    })??;
+
+    tracing::debug!(
+        count = to_store.len(),
+        "Stored per-chunk KZG commitments from blob ingress proofs",
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

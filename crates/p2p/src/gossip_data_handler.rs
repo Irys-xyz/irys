@@ -84,6 +84,8 @@ where
     /// Precomputed hash of the consensus config to avoid recomputing on every handshake
     pub consensus_config_hash: H256,
     pub runtime_handle: tokio::runtime::Handle,
+    pub custody_proof_sender:
+        tokio::sync::mpsc::UnboundedSender<irys_actors::custody_proof_service::CustodyProofMessage>,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -108,6 +110,7 @@ where
             started_at: self.started_at,
             consensus_config_hash: self.consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            custody_proof_sender: self.custody_proof_sender.clone(),
         }
     }
 }
@@ -250,11 +253,13 @@ where
         let source_miner_address = proof_request.miner_address;
         debug!(
             "Node {}: Gossip ingress_proof received from peer {}: {:?}",
-            self.gossip_client.mining_address, source_miner_address, proof_request.data.proof
+            self.gossip_client.mining_address,
+            source_miner_address,
+            proof_request.data.proof_id()
         );
 
         let proof = proof_request.data;
-        let proof_hash = proof.proof;
+        let proof_hash = proof.proof_id();
 
         let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof_hash)?;
 

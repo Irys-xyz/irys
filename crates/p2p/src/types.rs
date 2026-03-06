@@ -58,6 +58,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::InvalidAnchor(anchor) => {
                 Self::InvalidData(InvalidDataError::IngressProofAnchor(anchor))
             }
+            IngressProofError::RejectedVersion(reason) => {
+                Self::InvalidData(InvalidDataError::IngressProofVersionRejected(reason))
+            }
         }
     }
 }
@@ -182,6 +185,8 @@ pub enum InvalidDataError {
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]
     IngressProofAnchor(irys_types::BlockHash),
+    #[error("Rejected ingress proof version: {0}")]
+    IngressProofVersionRejected(String),
     #[error("Block body transactions do not match the header")]
     BlockBodyTransactionsMismatch,
     #[error("Invalid transaction version {version}, minimum required is {minimum}")]
@@ -266,6 +271,7 @@ pub enum GossipRoutes {
     Block,
     BlockBody,
     IngressProof,
+    CustodyProof,
     ExecutionPayload,
     GetData,
     PullData,
@@ -288,6 +294,7 @@ impl GossipRoutes {
             Self::Block => "/block",
             Self::BlockBody => "/block_body",
             Self::IngressProof => "/ingress_proof",
+            Self::CustodyProof => "/custody_proof",
             Self::ExecutionPayload => "/execution_payload",
             Self::GetData => "/get_data",
             Self::PullData => "/pull_data",

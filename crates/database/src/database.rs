@@ -6,14 +6,16 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
-    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
-    IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
+    CompactLedgerIndexItem, CompactPerChunkCommitment, IngressProofs, IrysBlockHeaders,
+    IrysBlockIndexItems, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata,
+    MigratedBlockHashes, PeerListItems, PerChunkKzgCommitments,
 };
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
+use irys_types::kzg::{KzgCommitmentBytes, PerChunkCommitment};
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
     DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
@@ -482,12 +484,12 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
@@ -502,7 +504,7 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -517,12 +519,12 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     address: IrysAddress,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_root())?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_root()
         ));
     }
 
@@ -535,7 +537,7 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_root(),
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -731,6 +733,52 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     } else {
         Ok(None)
     }
+}
+
+pub fn get_peer_id<T: DbTx>(tx: &T) -> Result<Option<IrysPeerId>, DatabaseError> {
+    if let Some(bytes) = tx.get::<Metadata>(MetadataKey::PeerId)? {
+        let arr: [u8; 20] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other("PeerId metadata does not have exactly 20 bytes".to_string())
+        })?;
+
+        Ok(Some(IrysPeerId::from(arr)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_peer_id<T: DbTxMut>(tx: &T, peer_id: IrysPeerId) -> Result<(), DatabaseError> {
+    let bytes: [u8; 20] = peer_id.into();
+    tx.put::<Metadata>(MetadataKey::PeerId, bytes.to_vec())
+}
+
+pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    commitments: &[(u32, KzgCommitmentBytes)],
+) -> eyre::Result<()> {
+    for &(chunk_index, commitment) in commitments {
+        tx.put::<PerChunkKzgCommitments>(
+            data_root,
+            CompactPerChunkCommitment(PerChunkCommitment {
+                chunk_index,
+                commitment,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn get_per_chunk_kzg_commitment<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    chunk_index: u32,
+) -> eyre::Result<Option<KzgCommitmentBytes>> {
+    let mut cursor = tx.cursor_dup_read::<PerChunkKzgCommitments>()?;
+    Ok(cursor
+        .seek_by_key_subkey(data_root, chunk_index)?
+        .filter(|e| e.chunk_index == chunk_index)
+        .map(|e| e.commitment))
 }
 
 #[cfg(test)]

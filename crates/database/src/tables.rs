@@ -6,6 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
+use irys_types::kzg::PerChunkCommitment;
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
 };
@@ -87,6 +88,7 @@ add_wrapper_struct!((LedgerIndexItem, CompactLedgerIndexItem));
 add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata));
 add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
+add_wrapper_struct!((PerChunkCommitment, CompactPerChunkCommitment));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
@@ -103,6 +105,7 @@ impl_compression_for_compact!(
     CompactBase64,
     CompactCachedIngressProof,
     CompactLedgerIndexItem,
+    CompactPerChunkCommitment,
     CompactCommitmentTxMetadata,
     CompactDataTxMetadata
 );
@@ -209,6 +212,12 @@ table CachedChunksIndex {
 table CachedChunks {
     type Key = ChunkPathHash;
     type Value = CachedChunk;
+}
+
+table PerChunkKzgCommitments {
+    type Key = DataRoot;
+    type Value = CompactPerChunkCommitment;
+    type SubKey = u32;
 }
 
 /// Indexes ingress proofs by DataRoot and Address

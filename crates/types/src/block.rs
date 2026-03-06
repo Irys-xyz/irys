@@ -1098,6 +1098,9 @@ pub struct BlockTransactions {
     pub system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>>,
     /// Data transactions organized by ledger type
     pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
+    /// Custody proofs included in this block
+    #[serde(default)]
+    pub custody_proofs: Vec<crate::custody::CustodyProof>,
 }
 
 impl BlockTransactions {
@@ -1133,6 +1136,8 @@ pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+    #[serde(default)]
+    pub custody_proofs: Vec<crate::custody::CustodyProof>,
 }
 
 impl BlockBody {

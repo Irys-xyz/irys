@@ -6,6 +6,7 @@ use base58::ToBase58 as _;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
+    blob_extraction_service::BlobExtractionService,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -16,6 +17,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
+    custody_proof_service::CustodyProofService,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
@@ -1596,6 +1598,28 @@ impl IrysNode {
             chunk_ingress_state.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
+
+        if config.consensus.enable_blobs {
+            let blob_store = reth_node_adapter.inner.pool.blob_store().clone();
+            BlobExtractionService::spawn_service(
+                blob_store,
+                service_senders.mempool.clone(), // clone: UnboundedSender is cheaply cloneable
+                config.clone(),                  // clone: Config is Arc-wrapped internally
+                receivers.blob_extraction,
+                runtime_handle.clone(),
+            );
+        }
+
+        if config.consensus.enable_custody_proofs {
+            CustodyProofService::spawn_service(
+                config.clone(),                           // clone: Config is Arc-wrapped internally
+                storage_modules_guard.clone(),            // clone: Arc-based read guard
+                service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
+                irys_db.clone(),                          // clone: DatabaseProvider is Arc-wrapped
+                receivers.custody_proof,
+                runtime_handle.clone(),
+            );
+        }
 
         // Get the mempool state to create the pledge provider
         let (tx, rx) = oneshot::channel();

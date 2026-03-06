@@ -20,10 +20,10 @@ use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
-    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem,
-    PeerScore, ProtocolVersion, UnpackedChunk,
+    custody::CustodyProof, parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction,
+    DataTransactionHeader, GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2,
+    HandshakeResponseV1, HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysPeerId, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -519,7 +519,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = proof_json.0.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -880,7 +880,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = proof_json.0.data.data_root;
+            let data_root = proof_json.0.data.data_root();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
@@ -913,6 +913,81 @@ where
         }
 
         debug!("Gossip data handled");
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_custody_proof_v2(
+        server: Data<Self>,
+        proof_json: web::Json<GossipRequestV2<CustodyProof>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.config.consensus.enable_custody_proofs {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+
+        let v2_request = proof_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
+
+        match Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            source_peer_id,
+            source_miner_address,
+        ) {
+            Ok(_) => {}
+            Err(error_response) => return error_response,
+        };
+        server.peer_list.set_is_online(&source_miner_address, true);
+
+        let cache_key = irys_types::GossipCacheKey::CustodyProof(v2_request.data.partition_hash);
+        let already_seen = server
+            .data_handler
+            .cache
+            .seen_custody_proof_from_any_peer(&v2_request.data.partition_hash);
+
+        if matches!(already_seen, Ok(true)) {
+            debug!(
+                partition.hash = %v2_request.data.partition_hash,
+                "Custody proof already seen, skipping",
+            );
+            return HttpResponse::Ok().json(GossipResponse::Accepted(()));
+        }
+
+        if let Err(e) = server
+            .data_handler
+            .cache
+            .record_seen(source_peer_id, cache_key)
+        {
+            warn!(error = ?e, "Failed to record custody proof in gossip cache");
+        }
+
+        debug!(
+            partition.hash = %v2_request.data.partition_hash,
+            "Received custody proof via gossip, forwarding to custody service",
+        );
+
+        use irys_actors::custody_proof_service::CustodyProofMessage;
+        if let Err(e) = server
+            .data_handler
+            .custody_proof_sender
+            .send(CustodyProofMessage::ReceivedProof(v2_request.data))
+        {
+            warn!(error = %e, "Failed to forward custody proof to service");
+        }
+
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
@@ -1476,6 +1551,10 @@ where
                     .route(
                         GossipRoutes::IngressProof.as_str(),
                         web::post().to(Self::handle_ingress_proof_v2),
+                    )
+                    .route(
+                        GossipRoutes::CustodyProof.as_str(),
+                        web::post().to(Self::handle_custody_proof_v2),
                     )
                     .route(
                         GossipRoutes::ExecutionPayload.as_str(),

@@ -310,6 +310,7 @@ impl GossipClient {
             block_hash: header.block_hash,
             data_transactions,
             commitment_transactions,
+            custody_proofs: Vec::new(),
         };
 
         Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockBody(
@@ -1074,6 +1075,15 @@ impl GossipClient {
                     &peer.address.gossip,
                     GossipRoutes::IngressProof,
                     ingress_proof,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::CustodyProof(custody_proof) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::CustodyProof,
+                    custody_proof,
                     ProtocolVersion::V2,
                 )
                 .await

@@ -1234,6 +1234,148 @@ where
     }
 }
 
+/// Order pre-fetched transactions into BlockTransactions structure.
+///
+/// Caller is responsible for providing ALL required transactions.
+/// This function only handles ordering them correctly per ledger.
+/// Transactions are returned in the exact order specified in the block header,
+/// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+pub(crate) fn order_transactions_for_block(
+    block_header: &IrysBlockHeader,
+    data_txs: Vec<irys_types::DataTransactionHeader>,
+    commitment_txs: Vec<irys_types::CommitmentTransaction>,
+) -> Result<BlockTransactions, BlockPoolError> {
+    use std::collections::HashMap;
+
+    // Extract required IDs from block header (preserving order)
+    // Use ledger_id-based lookup to avoid relying on vector ordering
+    let submit_ids: Vec<H256> = block_header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    let publish_ids: Vec<H256> = block_header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    let commitment_ids: Vec<H256> = block_header
+        .system_ledgers
+        .iter()
+        .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    // Create sets for quick lookup
+    let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+    let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+
+    // Collect transactions into maps by ID
+    let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+
+    for data_tx in data_txs {
+        // Note: A tx can be in both submit and publish ledgers (published after submission)
+        // so we check both independently and clone if needed for both
+        let in_submit = submit_ids_set.contains(&data_tx.id);
+        let in_publish = publish_ids_set.contains(&data_tx.id);
+
+        if in_submit && in_publish {
+            submit_txs_map.insert(data_tx.id, data_tx.clone());
+            publish_txs_map.insert(data_tx.id, data_tx);
+        } else if in_submit {
+            submit_txs_map.insert(data_tx.id, data_tx);
+        } else if in_publish {
+            publish_txs_map.insert(data_tx.id, data_tx);
+        }
+    }
+
+    for commitment_tx in commitment_txs {
+        commitment_txs_map.insert(commitment_tx.id(), commitment_tx);
+    }
+
+    // Build final vectors in the exact order specified by block header
+    let submit_txs: Vec<_> = submit_ids
+        .iter()
+        .filter_map(|id| submit_txs_map.remove(id))
+        .collect();
+
+    let publish_txs: Vec<_> = publish_ids
+        .iter()
+        .filter_map(|id| publish_txs_map.remove(id))
+        .collect();
+
+    let commitment_txs: Vec<_> = commitment_ids
+        .iter()
+        .filter_map(|id| commitment_txs_map.remove(id))
+        .collect();
+
+    // Validate header/body consistency: check that resolved counts match expected counts
+    if submit_txs.len() != submit_ids.len() {
+        let missing_ids: Vec<H256> = submit_ids
+            .iter()
+            .filter(|id| !submit_txs.iter().any(|tx| &tx.id == *id))
+            .copied()
+            .collect();
+        return Err(BlockPoolError::Critical(
+            CriticalBlockPoolError::HeaderBodyMismatch {
+                block_hash: block_header.block_hash,
+                ledger: "submit".to_string(),
+                expected: submit_ids.len(),
+                found: submit_txs.len(),
+                missing_ids,
+            },
+        ));
+    }
+
+    if publish_txs.len() != publish_ids.len() {
+        let missing_ids: Vec<H256> = publish_ids
+            .iter()
+            .filter(|id| !publish_txs.iter().any(|tx| &tx.id == *id))
+            .copied()
+            .collect();
+        return Err(BlockPoolError::Critical(
+            CriticalBlockPoolError::HeaderBodyMismatch {
+                block_hash: block_header.block_hash,
+                ledger: "publish".to_string(),
+                expected: publish_ids.len(),
+                found: publish_txs.len(),
+                missing_ids,
+            },
+        ));
+    }
+
+    if commitment_txs.len() != commitment_ids.len() {
+        let missing_ids: Vec<H256> = commitment_ids
+            .iter()
+            .filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id))
+            .copied()
+            .collect();
+        return Err(BlockPoolError::Critical(
+            CriticalBlockPoolError::HeaderBodyMismatch {
+                block_hash: block_header.block_hash,
+                ledger: "commitment".to_string(),
+                expected: commitment_ids.len(),
+                found: commitment_txs.len(),
+                missing_ids,
+            },
+        ));
+    }
+
+    Ok(BlockTransactions {
+        commitment_txs,
+        data_txs: HashMap::from([
+            (DataLedger::Submit, submit_txs),
+            (DataLedger::Publish, publish_txs),
+        ]),
+        custody_proofs: Vec::new(),
+    })
+}
 fn check_block_status(
     block_status_provider: &BlockStatusProvider,
     block_hash: BlockHash,

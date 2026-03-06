@@ -151,6 +151,8 @@ chrono = { version = "0.4", features = ["serde"] }
 revm = { version = "34.0.0", default-features = false }
 revm-primitives = "22"
 
+blst = "0.3.16"
+c-kzg = { version = "2.1.5", features = ["ethereum_kzg_settings"] }
 alloy-dyn-abi = "1.5.6"
 alloy-evm = { version = "0.27.2", default-features = false }
 alloy-primitives = { version = "1.5.6", default-features = false, features = [
@@ -167,7 +169,7 @@ alloy-sol-types = { version = "1.5.6", default-features = false }
 alloy-consensus = { version = "1.7.3", default-features = false }
 alloy-contract = { version = "1.7.3", default-features = false }
 alloy-core = { version = "1.5.6", default-features = false }
-alloy-eips = { version = "1.7.3", default-features = false }
+alloy-eips = { version = "1.7.3", default-features = false, features = ["kzg"] }
 alloy-genesis = { version = "1.7.3", default-features = false }
 alloy-network = { version = "1.7.3", default-features = false }
 alloy-provider = { version = "1.7.3", default-features = false }

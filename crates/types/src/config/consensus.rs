@@ -115,6 +115,37 @@ pub struct ConsensusConfig {
     #[serde(default = "default_disable_full_ingress_proof_validation")]
     pub enable_full_ingress_proof_validation: bool,
 
+    /// Enable shadow KZG commitment computation during ingress proof generation.
+    /// When enabled, KZG commitments are computed alongside V1 proofs and logged
+    /// for comparison, but do not affect consensus.
+    #[serde(default)]
+    pub enable_shadow_kzg_logging: bool,
+
+    /// Use V2 proofs for new transactions.
+    #[serde(default)]
+    pub use_kzg_ingress_proofs: bool,
+
+    /// Accept V2 proofs from peers.
+    #[serde(default)]
+    pub accept_kzg_ingress_proofs: bool,
+
+    /// Reject V1 proofs. Implies `accept_kzg_ingress_proofs`.
+    #[serde(default)]
+    pub require_kzg_ingress_proofs: bool,
+
+    #[serde(default)]
+    pub enable_blobs: bool,
+
+    /// Requires `accept_kzg_ingress_proofs`.
+    #[serde(default)]
+    pub enable_custody_proofs: bool,
+
+    #[serde(default = "default_custody_challenge_count")]
+    pub custody_challenge_count: u32,
+
+    #[serde(default = "default_custody_response_window")]
+    pub custody_response_window: u64,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -182,6 +213,14 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
 /// present in the provided TOML. This preserves current behavior.
 fn default_disable_full_ingress_proof_validation() -> bool {
     false
+}
+
+fn default_custody_challenge_count() -> u32 {
+    20
+}
+
+fn default_custody_response_window() -> u64 {
+    10
 }
 
 /// # Consensus Configuration Source
@@ -453,6 +492,28 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
+    /// Enforce logical implications between KZG/blob config flags.
+    /// Call before wrapping in `Arc` to fix contradictions early.
+    pub fn normalize(&mut self) {
+        let dependents: &[(&str, bool)] = &[
+            ("enable_blobs", self.enable_blobs),
+            (
+                "require_kzg_ingress_proofs",
+                self.require_kzg_ingress_proofs,
+            ),
+            ("use_kzg_ingress_proofs", self.use_kzg_ingress_proofs),
+            ("enable_custody_proofs", self.enable_custody_proofs),
+        ];
+        for &(flag_name, flag_set) in dependents {
+            if flag_set && !self.accept_kzg_ingress_proofs {
+                tracing::warn!(
+                    "{flag_name}=true requires accept_kzg_ingress_proofs=true, auto-enabling"
+                );
+                self.accept_kzg_ingress_proofs = true;
+            }
+        }
+    }
+
     // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
     pub const CHUNKS_PER_PARTITION_20TB: u64 = 75_534_400;
 
@@ -615,6 +676,14 @@ impl ConsensusConfig {
             entropy_packing_iterations: 1_000_000,
             // Toggles full ingress proof validation on or off
             enable_full_ingress_proof_validation: false,
+            enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
+            enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             // Fee required to stake a mining address in Irys tokens
             stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
             // Base fee required for pledging a partition in Irys tokens
@@ -753,6 +822,14 @@ impl ConsensusConfig {
                 .expect("valid percentage"),
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             enable_full_ingress_proof_validation: false,
+            enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
+            enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             max_future_timestamp_drift_millis: 15_000,
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
@@ -803,6 +880,14 @@ impl ConsensusConfig {
                 .expect("valid percentage"),
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             enable_full_ingress_proof_validation: false,
+            enable_shadow_kzg_logging: false,
+            use_kzg_ingress_proofs: false,
+            accept_kzg_ingress_proofs: false,
+            require_kzg_ingress_proofs: false,
+            enable_blobs: false,
+            enable_custody_proofs: false,
+            custody_challenge_count: 20,
+            custody_response_window: 10,
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {
@@ -925,7 +1010,6 @@ mod tests {
         let mut peer_config = ConsensusConfig::testing();
         peer_config.expected_genesis_hash = Some(fake_hash);
 
-        // Simulate what Genesis node does at runtime
         genesis_config.expected_genesis_hash = Some(fake_hash);
 
         assert_eq!(
@@ -937,11 +1021,6 @@ mod tests {
 
     #[test]
     fn test_consensus_hash_regression() {
-        // This test verifies that the hash of the testing config remains stable.
-        // If this test fails, it indicates a breaking change in either:
-        // - The ConsensusConfig structure or field order
-        // - The canonical JSON serialization implementation
-        // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
         let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
         assert_eq!(
@@ -949,5 +1028,41 @@ mod tests {
             expected_hash,
             "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
         );
+    }
+
+    #[test]
+    fn normalize_enable_blobs_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.enable_blobs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_require_kzg_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.require_kzg_ingress_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_use_kzg_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.use_kzg_ingress_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
+    }
+
+    #[test]
+    fn normalize_custody_proofs_forces_accept_kzg() {
+        let mut config = ConsensusConfig::testing();
+        config.enable_custody_proofs = true;
+        config.accept_kzg_ingress_proofs = false;
+        config.normalize();
+        assert!(config.accept_kzg_ingress_proofs);
     }
 }

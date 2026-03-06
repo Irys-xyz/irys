@@ -47,6 +47,7 @@ use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatu
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
+use reth_db::Database as _;
 use reth_db::cursor::*;
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -251,6 +252,14 @@ pub enum MempoolServiceMessage {
     /// `GetDataTxs`) when possible, and avoid holding the guard across long‑running
     /// operations to prevent reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
+    /// Ingest a blob-derived data transaction with its pre-computed ingress proof
+    /// and zero-padded chunk data. Created by the blob extraction service.
+    IngestBlobDerivedTx {
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
+    },
 }
 
 impl MempoolServiceMessage {
@@ -274,6 +283,7 @@ impl MempoolServiceMessage {
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetMempoolStatus(_) => "GetMempoolStatus",
             Self::GetReadGuard(_) => "GetReadGuard",
+            Self::IngestBlobDerivedTx { .. } => "IngestBlobDerivedTx",
         }
     }
 }
@@ -426,8 +436,95 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
+            MempoolServiceMessage::IngestBlobDerivedTx {
+                tx_header,
+                ingress_proof,
+                chunk_data,
+                per_chunk_commitments,
+            } => {
+                self.handle_ingest_blob_derived_tx(
+                    tx_header,
+                    ingress_proof,
+                    chunk_data,
+                    per_chunk_commitments,
+                )
+                .await;
+            }
         }
         Ok(())
+    }
+
+    async fn handle_ingest_blob_derived_tx(
+        &self,
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
+    ) {
+        if let Err(reason) = ingress_proof.check_version_accepted(
+            self.config.consensus.accept_kzg_ingress_proofs,
+            self.config.consensus.require_kzg_ingress_proofs,
+        ) {
+            warn!(
+                data_root = %tx_header.data_root,
+                reason,
+                "Dropping blob-derived tx: proof version rejected by config"
+            );
+            return;
+        }
+
+        let data_root = tx_header.data_root;
+        let chunk_len = match u64::try_from(chunk_data.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                warn!(data_root = %data_root, "Chunk data length overflows u64");
+                return;
+            }
+        };
+        debug!(
+            data_root = %data_root,
+            data_size = tx_header.data_size,
+            chunk_data_len = chunk_len,
+            "Ingesting blob-derived data transaction",
+        );
+
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: chunk_len,
+            data_path: Default::default(),
+            bytes: chunk_data.into(),
+            tx_offset: TxChunkOffset(0),
+        };
+        if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to cache blob chunk data");
+            return;
+        }
+
+        if let Err(e) = self.handle_data_tx_ingress_message_gossip(tx_header).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
+            return;
+        }
+
+        if let Err(e) = self.handle_ingest_ingress_proof(ingress_proof) {
+            warn!(data_root = %data_root, error = ?e, "Failed to store blob ingress proof");
+        }
+
+        if !per_chunk_commitments.is_empty() {
+            if let Err(e) = self.irys_db.update(|rw_tx| {
+                irys_database::store_per_chunk_kzg_commitments(
+                    rw_tx,
+                    data_root,
+                    &per_chunk_commitments,
+                )
+                .map_err(|e| reth_db::DatabaseError::Other(e.to_string()))
+            }) {
+                warn!(
+                    data_root = %data_root,
+                    error = %e,
+                    "Failed to store per-chunk KZG commitments for blob"
+                );
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -493,7 +590,7 @@ impl Inner {
         min_anchor_height: u64,
         ingress_proof: &IngressProof,
     ) -> eyre::Result<bool> {
-        let anchor = ingress_proof.anchor;
+        let anchor = ingress_proof.anchor();
         let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
             TxIngressError::DatabaseError(format!(
                 "Error getting anchor height for {}: {}",
@@ -522,7 +619,8 @@ impl Inner {
             // TODO: recover the signer's address here? (or compute an ID)
             warn!(
                 "ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
-                &ingress_proof.data_root, &ingress_proof.signature
+                ingress_proof.data_root(),
+                ingress_proof.signature()
             );
             Ok(false)
         }
@@ -1376,17 +1474,13 @@ impl Inner {
                 // Separate assigned and unassigned proofs
                 let assigned_proof_set: HashSet<_> = assigned_proofs
                     .iter()
-                    .map(|p| &p.proof.0) // Use signature as unique identifier
+                    .map(|p| p.proof_id().0) // Use proof ID as unique identifier
                     .collect();
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
-                    .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
-                    .filter(|c| {
-                        // Filter out proofs from unstaked signers
-                        epoch_snapshot.is_staked(c.address)
-                    })
-                    .map(|c| c.proof.clone())
+                    .filter(|p| !assigned_proof_set.contains(&p.proof_id().0))
+                    .cloned()
                     .collect();
 
                 // Build the final proof list
