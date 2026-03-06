@@ -67,8 +67,8 @@ pub async fn select_best_txs(
         parent_block_height,
         parent_evm_block_id,
         commitment_snapshot,
-        epoch_snapshot,
-        ema_snapshot,
+        parent_epoch_snapshot,
+        parent_ema_snapshot,
     ) = {
         let tree = ctx.block_tree.read();
 
@@ -243,7 +243,7 @@ pub async fn select_best_txs(
 
         // signer stake status check
         if matches!(tx.commitment_type(), CommitmentTypeV2::Stake) {
-            let is_staked = epoch_snapshot.is_staked(tx.signer());
+            let is_staked = parent_epoch_snapshot.is_staked(tx.signer());
             debug!(
                 tx.id = ?tx.id(),
                 tx.signer = ?tx.signer(),
@@ -263,7 +263,8 @@ pub async fn select_best_txs(
         }
         // simulation check
         {
-            let simulation = simulation_commitment_snapshot.add_commitment(tx, &epoch_snapshot);
+            let simulation =
+                simulation_commitment_snapshot.add_commitment(tx, &parent_epoch_snapshot);
 
             // skip commitments that would not be accepted
             if simulation != CommitmentSnapshotStatus::Accepted {
@@ -401,7 +402,7 @@ pub async fn select_best_txs(
                 let Ok(expected_term_fee) = helpers::calculate_term_storage_fee(
                     ctx.config,
                     tx.data_size,
-                    &ema_snapshot,
+                    &parent_ema_snapshot,
                     next_block_height,
                     current_timestamp,
                 ) else {
@@ -417,7 +418,7 @@ pub async fn select_best_txs(
                     ctx.config,
                     tx.data_size,
                     expected_term_fee,
-                    &ema_snapshot,
+                    &parent_ema_snapshot,
                     current_timestamp,
                 ) else {
                     debug!(
@@ -569,7 +570,7 @@ pub async fn select_best_txs(
         &submit_tx,
         current_height,
         current_timestamp,
-        &epoch_snapshot,
+        &parent_epoch_snapshot,
     )
     .await?;
 
