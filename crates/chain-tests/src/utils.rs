@@ -2101,6 +2101,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 commitment_tx,
                 submit_tx,
                 publish_tx,
+                ..
             } = txs.clone();
             prev = (submit_tx.len(), publish_tx.txs.len(), commitment_tx.len());
 

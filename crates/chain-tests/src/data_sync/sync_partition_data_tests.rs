@@ -40,6 +40,7 @@ async fn slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
             consensus.block_migration_depth = 1;
             consensus.epoch.submit_ledger_epoch_length = 1000;
+            consensus.hardforks.cascade = None;
         })
         .with_genesis_peer_discovery_timeout(1000);
 

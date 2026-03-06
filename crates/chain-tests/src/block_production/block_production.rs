@@ -1226,6 +1226,8 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,

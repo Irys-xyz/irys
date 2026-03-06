@@ -49,7 +49,7 @@ impl Default for EpochSnapshot {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         Self {
-            ledgers: Ledgers::new(&config.consensus),
+            ledgers: Ledgers::new(&config.consensus, false),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
@@ -118,8 +118,14 @@ impl EpochSnapshot {
         commitments: Vec<CommitmentTransaction>,
         config: &Config,
     ) -> Self {
+        let cascade_active = config
+            .consensus
+            .hardforks
+            .cascade
+            .as_ref()
+            .is_some_and(|f| genesis_block.timestamp_secs() >= f.activation_timestamp);
         let mut new_self = Self {
-            ledgers: Ledgers::new(&config.consensus),
+            ledgers: Ledgers::new(&config.consensus, cascade_active),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
@@ -301,6 +307,18 @@ impl EpochSnapshot {
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
+        // Activate Cascade hardfork ledgers at the activation epoch boundary
+        if self
+            .config
+            .consensus
+            .hardforks
+            .cascade
+            .as_ref()
+            .is_some_and(|f| new_epoch_block.timestamp_secs() >= f.activation_timestamp)
+        {
+            self.ledgers.activate_cascade(&self.config.consensus);
+        }
+
         self.compute_commitment_state(&new_epoch_commitments);
 
         self.try_genesis_init(new_epoch_block);
@@ -423,20 +441,24 @@ impl EpochSnapshot {
     fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
         if self.all_active_partitions.is_empty() && new_epoch_block.is_genesis() {
             debug!("Performing genesis init");
-            // Allocate 1 slot to each ledger and calculate the number of partitions
+            // Allocate 1 slot to each active ledger and calculate the number of partitions
             let mut num_data_partitions = 0;
+            let active_ledgers = self.ledgers.active_ledgers();
             {
                 // Create a scope for the write lock to expire with
-                for ledger in DataLedger::iter() {
-                    debug!("Allocating 1 slot for {:?}", &ledger);
+                for ledger in &active_ledgers {
+                    debug!("Allocating 1 slot for {:?}", ledger);
                     num_data_partitions +=
-                        self.ledgers[ledger].allocate_slots(1, new_epoch_block.height);
+                        self.ledgers[*ledger].allocate_slots(1, new_epoch_block.height);
                 }
             }
 
             // Calculate the total number of capacity partitions
-            let projected_capacity_parts =
-                Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
+            let projected_capacity_parts = Self::get_num_capacity_partitions(
+                num_data_partitions,
+                &self.config.consensus,
+                active_ledgers.len() as u64,
+            );
 
             // Determine the number of capacity partitions to create
             // We take the greater of:
@@ -501,7 +523,15 @@ impl EpochSnapshot {
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
     ) {
-        for ledger in DataLedger::iter() {
+        for ledger in self.ledgers.active_ledgers() {
+            // Skip ledgers not present in the block (e.g. pre-hardfork blocks)
+            if !new_epoch_block
+                .data_ledgers
+                .iter()
+                .any(|l| l.ledger_id == ledger as u32)
+            {
+                continue;
+            }
             let part_slots =
                 self.calculate_additional_slots(previous_epoch_block, new_epoch_block, ledger);
             debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
@@ -517,8 +547,11 @@ impl EpochSnapshot {
         // Calculate total number of active partitions based on the amount of data stored
         let pa = &self.partition_assignments;
         let num_data_partitions = pa.data_partitions.len() as u64;
-        let num_capacity_partitions =
-            Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
+        let num_capacity_partitions = Self::get_num_capacity_partitions(
+            num_data_partitions,
+            &self.config.consensus,
+            self.ledgers.active_ledgers().len() as u64,
+        );
         let total_parts = num_capacity_partitions + num_data_partitions;
 
         // Add additional capacity partitions as needed
@@ -551,8 +584,8 @@ impl EpochSnapshot {
         debug!("RNG seed: {}", self.epoch_block.last_epoch_hash);
         let mut rng = SimpleRNG::new(seed);
 
-        // Loop though all of the ledgers processing their slot needs
-        for ledger in DataLedger::iter() {
+        // Loop though all of the active ledgers processing their slot needs
+        for ledger in self.ledgers.active_ledgers() {
             self.process_slot_needs(ledger, &mut capacity_partitions, &mut rng);
         }
     }
@@ -636,11 +669,15 @@ impl EpochSnapshot {
 
     /// Computes active capacity partitions available for pledges based on
     /// data partitions and scaling factor
-    pub fn get_num_capacity_partitions(num_data_partitions: u64, config: &ConsensusConfig) -> u64 {
+    pub fn get_num_capacity_partitions(
+        num_data_partitions: u64,
+        config: &ConsensusConfig,
+        num_active_ledgers: u64,
+    ) -> u64 {
         use num_bigfloat::BigFloat;
 
-        // Every ledger needs at least one slot filled with data partitions
-        let min_count = DataLedger::ALL.len() as u64 * config.num_partitions_per_slot;
+        // Every active ledger needs at least one slot filled with data partitions
+        let min_count = num_active_ledgers * config.num_partitions_per_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
 
         // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
@@ -768,7 +805,13 @@ impl EpochSnapshot {
         // there are 2 or 10 partition replicas of each slot across the network.
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
 
-        let ledger_size = new_epoch_block.data_ledgers[ledger].total_chunks;
+        // Safe lookup: the ledger may not exist in the block header (e.g. pre-Cascade blocks)
+        let ledger_size = new_epoch_block
+            .data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == ledger as u32)
+            .map(|dl| dl.total_chunks)
+            .unwrap_or(0);
 
         // STRATEGY 1: Threshold-based capacity expansion
         // Add slots when utilization reaches within half partition of max capacity
@@ -783,11 +826,15 @@ impl EpochSnapshot {
         // STRATEGY 2: Growth-based capacity expansion
         // Add slots proportional to data ingress rate from previous epoch
         if new_epoch_block.height >= self.config.consensus.epoch.num_blocks_in_epoch {
-            let previous_ledger_size = previous_epoch_block
-                .as_ref()
-                .map_or(0, |prev| prev.data_ledgers[ledger].total_chunks);
+            let previous_ledger_size = previous_epoch_block.as_ref().map_or(0, |prev| {
+                prev.data_ledgers
+                    .iter()
+                    .find(|dl| dl.ledger_id == ledger as u32)
+                    .map(|dl| dl.total_chunks)
+                    .unwrap_or(0)
+            });
 
-            let data_added = ledger_size - previous_ledger_size;
+            let data_added = ledger_size.saturating_sub(previous_ledger_size);
 
             // If data added exceeds a full partition, scale capacity proportionally
             if data_added > num_chunks_in_partition {
@@ -1386,7 +1433,7 @@ mod tests {
         });
         let config = Config::new_with_random_peer_id(node_config);
         let mut snapshot = EpochSnapshot {
-            ledgers: Ledgers::new(&config.consensus),
+            ledgers: Ledgers::new(&config.consensus, false),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),

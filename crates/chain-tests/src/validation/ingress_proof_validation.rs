@@ -43,6 +43,8 @@ async fn heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Resu
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(self.evil_proofs.clone()),
