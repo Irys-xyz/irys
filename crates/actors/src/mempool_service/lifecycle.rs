@@ -105,7 +105,7 @@ impl Inner {
     pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
         let current_height = self
             .block_tree_read_guard
-            .latest_block_height()
+            .latest_canonical_block_height()
             .ok_or_else(|| {
                 TxIngressError::Other("empty canonical chain in block tree".to_owned())
             })?;
@@ -199,7 +199,7 @@ impl Inner {
     /// 3. Single write lock: batch-remove all expired txs
     #[instrument(skip_all)]
     pub async fn prune_pending_txs(&self) {
-        let current_height = match self.block_tree_read_guard.latest_block_height() {
+        let current_height = match self.block_tree_read_guard.latest_canonical_block_height() {
             Some(height) => height,
             None => {
                 error!("Empty canonical chain in block tree during anchor expiry pruning");

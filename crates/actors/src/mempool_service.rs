@@ -366,7 +366,7 @@ impl Inner {
 
         let latest_height = self
             .block_tree_read_guard
-            .latest_block_height()
+            .latest_canonical_block_height()
             .ok_or_else(|| {
                 TxIngressError::Other("empty canonical chain in block tree".to_owned())
             })?;

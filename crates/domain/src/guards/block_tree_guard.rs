@@ -26,7 +26,7 @@ impl BlockTreeReadGuard {
     }
 
     /// Returns the height of the latest block on the canonical chain.
-    pub fn latest_block_height(&self) -> Option<u64> {
+    pub fn latest_canonical_block_height(&self) -> Option<u64> {
         let tree = self.read();
         let (canonical, _) = tree.get_canonical_chain();
         canonical
