@@ -158,7 +158,9 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         anchor,
     )?;
 
-    // Store both data txs and all proofs in the DB
+    // Store both data txs and all proofs in the DB.
+    // We also set included_height metadata so the tx selector's canonical DB
+    // fallback (`tx_header_by_txid_canonical`) can find them as prior submit inclusions.
     genesis_node.node_ctx.db.update(|tx| {
         use irys_database::tables::{
             CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
@@ -168,6 +170,7 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         // Insert data_root_1 proofs directly to bypass store_external_ingress_proof_checked dedup
         tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
         irys_database::cache_data_root(tx, &data_tx_1, None)?;
+        irys_database::db_index::set_data_tx_included_height(tx, &data_tx_1.id, 0)?;
         for (proof, address) in [
             (&proof_1a1, signer_a.address()),
             (&proof_1a2, signer_a.address()),
@@ -190,6 +193,7 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
         tx.put::<IrysDataTxHeaders>(data_tx_2.id, CompactTxHeader(data_tx_2.clone()))?;
         irys_database::cache_data_root(tx, &data_tx_2, None)?;
+        irys_database::db_index::set_data_tx_included_height(tx, &data_tx_2.id, 0)?;
         for (proof, address) in [
             (&proof_2a, signer_a.address()),
             (&proof_2b, signer_b.address()),

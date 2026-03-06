@@ -1,14 +1,15 @@
-use crate::mempool_service::{Inner, TxIngressError, TxReadError, validate_commitment_transaction};
+use crate::mempool_service::{
+    Inner, TxIngressError, TxReadError, validate_commitment_transaction, validate_tx_signature,
+};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
     CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, H256, IrysAddress,
-    IrysTransactionCommon as _, IrysTransactionId, SendTraced as _, TxKnownStatus, UnixTimestamp,
+    IrysTransactionCommon as _, SendTraced as _, TxKnownStatus, UnixTimestamp,
     VersionDiscriminant as _,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
-use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
 impl Inner {
@@ -34,7 +35,10 @@ impl Inner {
             }
         }
         // Validate tx signature first to prevent ID poisoning
-        if let Err(e) = self.validate_signature(commitment_tx).await {
+        if let Err(e) = validate_tx_signature(commitment_tx) {
+            self.mempool_state
+                .mark_fingerprint_as_invalid(commitment_tx.fingerprint())
+                .await;
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
                 &commitment_tx,
@@ -334,10 +338,17 @@ impl Inner {
 
     /// Broadcasts the commitment transaction over gossip.
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
-        self.service_senders
+        if let Err(error) = self
+            .service_senders
             .gossip_broadcast
             .send_traced(GossipBroadcastMessageV2::from(tx.clone()))
-            .expect("Failed to send gossip data");
+        {
+            tracing::error!(
+                "Failed to send gossip data for commitment tx {}: {:?}",
+                tx.id(),
+                error
+            );
+        }
     }
 
     // checks recent_valid_tx, recent_invalid_tx, valid_commitment_tx, pending_pledges, and the database
@@ -361,34 +372,6 @@ impl Inner {
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),
         }
-    }
-
-    /// read specified commitment txs from mempool
-    #[instrument(level = "trace", skip_all, name = "get_commitment_tx", fields(tx.count = commitment_tx_ids.len()))]
-    pub async fn handle_get_commitment_tx_message(
-        &self,
-        commitment_tx_ids: Vec<H256>,
-    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
-        let all_commitment_transactions = self.mempool_state.all_commitment_transactions().await;
-
-        debug!(
-            "handle_get_commitment_transactions_message: {:?}",
-            all_commitment_transactions
-                .iter()
-                .map(|x| x.0)
-                .collect::<Vec<_>>()
-        );
-
-        // Attempt to locate and retain only the requested tx_ids
-        let mut filtered_map = HashMap::with_capacity(commitment_tx_ids.len());
-        for txid in commitment_tx_ids {
-            if let Some(tx) = all_commitment_transactions.get(&txid) {
-                filtered_map.insert(txid, tx.clone());
-            }
-        }
-
-        // Return only the transactions matching the requested IDs
-        filtered_map
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id()))]

@@ -1,7 +1,8 @@
 use crate::mempool_service::AtomicMempoolState;
+use irys_database::{db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
-    DataTransactionMetadata, IrysTransactionId,
+    DataTransactionMetadata, IrysTransactionId, app_state::DatabaseProvider,
 };
 use std::collections::HashMap;
 
@@ -63,6 +64,13 @@ impl MempoolReadGuard {
         self.mempool_state.get_data_txs(data_tx_ids).await
     }
 
+    /// Returns a reference to the underlying `AtomicMempoolState`.
+    /// This is primarily used by the block producer to construct a `TxSelectionContext`
+    /// for direct tx selection without going through the mempool message queue.
+    pub fn atomic_state(&self) -> &AtomicMempoolState {
+        &self.mempool_state
+    }
+
     /// Check if a transaction ID is in the recent valid transactions cache.
     pub async fn is_recent_valid_tx(&self, tx_id: &IrysTransactionId) -> bool {
         self.mempool_state.is_recent_valid_tx(tx_id).await
@@ -96,4 +104,53 @@ impl TxMetadata {
             Self::Data(m) => m.promoted_height,
         }
     }
+}
+
+/// Best-effort fetch: mempool first, DB fallback for missing txs.
+/// Preserves the semantics of the old `GetDataTxs` message handler.
+/// Kept as a free function to avoid mixing DB concerns into `MempoolReadGuard`.
+pub async fn get_data_txs_best_effort(
+    guard: &MempoolReadGuard,
+    tx_ids: &[IrysTransactionId],
+    db: &DatabaseProvider,
+) -> Vec<Option<DataTransactionHeader>> {
+    let mempool_results = guard
+        .atomic_state()
+        .batch_valid_submit_ledger_tx_cloned(tx_ids)
+        .await;
+
+    // Collect tx_ids that were not found in the mempool so we can fetch them
+    // in a single DB read transaction instead of one per miss.
+    let missing_ids: Vec<(usize, &IrysTransactionId)> = mempool_results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.is_none())
+        .map(|(i, _)| (i, &tx_ids[i]))
+        .collect();
+
+    let db_lookup: HashMap<IrysTransactionId, DataTransactionHeader> = if missing_ids.is_empty() {
+        HashMap::new()
+    } else {
+        match db.view_eyre(|read_tx| {
+            let mut map = HashMap::with_capacity(missing_ids.len());
+            for &(_, tx_id) in &missing_ids {
+                if let Some(header) = tx_header_by_txid(read_tx, tx_id)? {
+                    map.insert(*tx_id, header);
+                }
+            }
+            Ok(map)
+        }) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(error = %e, "DB fallback failed in get_data_txs_best_effort");
+                HashMap::new()
+            }
+        }
+    };
+
+    mempool_results
+        .into_iter()
+        .enumerate()
+        .map(|(i, mempool_result)| mempool_result.or_else(|| db_lookup.get(&tx_ids[i]).cloned()))
+        .collect()
 }
