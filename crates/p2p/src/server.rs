@@ -3,8 +3,9 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::block_pool::CriticalBlockPoolError;
-use crate::types::{GossipResponse, GossipRoutes, HandshakeRequirementReason, RejectionReason};
+use crate::types::GossipRoutes;
 use crate::wire_types;
+use crate::wire_types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -22,9 +23,8 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, HandshakeResponseV1, HandshakeResponseV2, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem, PeerScore, ProtocolVersion,
-    UnpackedChunk,
+    GossipRequest, GossipRequestV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
+    PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -102,7 +102,11 @@ where
         <C as TryFrom<W>>::Error: std::fmt::Display,
     {
         let data = wire_req.data.try_into().map_err(|e| {
-            error!("Failed to convert wire type to canonical: {}", e);
+            error!(
+                "Failed to convert wire type to canonical {}: {}",
+                std::any::type_name::<C>(),
+                e
+            );
             HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
         })?;
         Ok(GossipRequestV2 {
@@ -121,7 +125,11 @@ where
         <C as TryFrom<W>>::Error: std::fmt::Display,
     {
         let data = wire_req.data.try_into().map_err(|e| {
-            error!("Failed to convert wire type to canonical: {}", e);
+            error!(
+                "Failed to convert wire type to canonical {}: {}",
+                std::any::type_name::<C>(),
+                e
+            );
             HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
         })?;
         Ok(GossipRequest {
@@ -1055,7 +1063,9 @@ where
                     HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
                 } else {
                     debug!("Rejecting health check from peer {peer_addr:?}: gossip is disabled");
-                    HttpResponse::Ok().json(GossipResponse::rejected_gossip_disabled())
+                    HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                        RejectionReason::GossipDisabled,
+                    ))
                 }
             }
             None => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
@@ -1121,37 +1131,47 @@ where
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         };
 
         let wire_req = body.into_inner();
         let version_request: irys_types::HandshakeRequestV1 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
-                RejectionReason::UnsupportedProtocolVersion(
-                    version_request.protocol_version as u32,
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
+                    RejectionReason::UnsupportedProtocolVersion(
+                        version_request.protocol_version as u32,
+                    ),
                 ),
-            ));
+            );
         }
 
         if !version_request.verify_signature() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV1>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         }
 
         let mut peers = server.peer_list.all_known_peers();
@@ -1199,7 +1219,7 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = HandshakeResponseV1 {
+        let response = wire_types::HandshakeResponseV1 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
             peers,
@@ -1226,31 +1246,39 @@ where
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         };
 
         let wire_req = body.into_inner();
         let version_request: irys_types::HandshakeRequestV2 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
-                RejectionReason::UnsupportedProtocolVersion(
-                    version_request.protocol_version as u32,
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
+                    RejectionReason::UnsupportedProtocolVersion(
+                        version_request.protocol_version as u32,
+                    ),
                 ),
-            ));
+            );
         }
 
         if !version_request.verify_signature() {
@@ -1258,9 +1286,11 @@ where
                 "V2 Handshake signature verification failed for mining_address: {}, peer_id: {}",
                 version_request.mining_address, version_request.peer_id
             );
-            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponseV2>::Rejected(
-                RejectionReason::InvalidCredentials,
-            ));
+            return HttpResponse::Ok().json(
+                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
+                    RejectionReason::InvalidCredentials,
+                ),
+            );
         }
         debug!(
             "V2 Handshake signature verified for mining_address: {}",
@@ -1327,7 +1357,7 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = HandshakeResponseV2 {
+        let response = wire_types::HandshakeResponseV2 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
             peers,
@@ -1488,6 +1518,8 @@ where
         }
     }
 
+    /// Handles V2 data requests. Uses the V1 request wrapper (no peer_id) for
+    /// backward compatibility — data requests don't require peer identification.
     #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,

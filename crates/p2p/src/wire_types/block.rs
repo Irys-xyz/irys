@@ -7,7 +7,7 @@ use irys_types::{
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 
-use super::{CommitmentTransaction, DataTransactionHeader};
+use super::{impl_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
 
 // PoaData — plain struct, no versioning
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -103,56 +103,7 @@ pub enum IrysBlockHeader {
     V1(IrysBlockHeaderV1Inner),
 }
 
-impl Serialize for IrysBlockHeader {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap as _;
-        let (version, inner_value) = match self {
-            Self::V1(inner) => (
-                1_u8,
-                serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-            ),
-        };
-        if let serde_json::Value::Object(inner_map) = inner_value {
-            let mut map = serializer.serialize_map(Some(inner_map.len() + 1))?;
-            map.serialize_entry("version", &version)?;
-            for (key, value) in inner_map {
-                map.serialize_entry(&key, &value)?;
-            }
-            map.end()
-        } else {
-            Err(serde::ser::Error::custom("inner value must be a struct"))
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for IrysBlockHeader {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let serde_json::Value::Object(obj) = value {
-            let mut version: Option<u8> = None;
-            let mut fields = serde_json::Map::new();
-            for (key, val) in obj {
-                if key == "version" {
-                    version = Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
-                } else {
-                    fields.insert(key, val);
-                }
-            }
-            match version {
-                Some(1) => {
-                    let inner: IrysBlockHeaderV1Inner =
-                        serde_json::from_value(serde_json::Value::Object(fields))
-                            .map_err(serde::de::Error::custom)?;
-                    Ok(Self::V1(inner))
-                }
-                Some(v) => Err(serde::de::Error::custom(format!("unknown version: {}", v))),
-                None => Err(serde::de::Error::missing_field("version")),
-            }
-        } else {
-            Err(serde::de::Error::custom("expected object"))
-        }
-    }
-}
+impl_version_tagged_serde!(IrysBlockHeader { 1 => V1(IrysBlockHeaderV1Inner) });
 
 /// Sovereign wire type for BlockBody.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

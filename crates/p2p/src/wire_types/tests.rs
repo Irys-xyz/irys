@@ -13,46 +13,19 @@ use irys_types::{
     commitment_v1::{CommitmentTransactionV1, CommitmentTypeV1},
     commitment_v2::{CommitmentTransactionV2, CommitmentTypeV2},
     ingress::{IngressProof, IngressProofV1},
-    serialization::{Base64, H256List},
+    serialization::H256List,
     storage_pricing::Amount,
     transaction::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
-    CommitmentTransactionMetadata, DataTransactionLedger, IrysAddress, IrysSignature, Signature,
-    SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
+    CommitmentTransactionMetadata, DataTransactionLedger, SystemTransactionLedger, TxChunkOffset,
+    U256,
 };
 use reth::revm::primitives::B256;
 
+use super::test_helpers::*;
 use crate::wire_types as wire;
-
-// =============================================================================
-// Deterministic test value constructors (same as gossip_fixture_tests.rs)
-// =============================================================================
-
-fn test_h256(byte: u8) -> H256 {
-    H256::from([byte; 32])
-}
-
-fn test_address(byte: u8) -> IrysAddress {
-    IrysAddress::from_slice(&[byte; 20])
-}
-
-fn test_signature() -> IrysSignature {
-    IrysSignature::new(Signature::new(
-        reth::revm::primitives::U256::from(1_u64),
-        reth::revm::primitives::U256::from(2_u64),
-        false,
-    ))
-}
-
-fn test_base64(bytes: &[u8]) -> Base64 {
-    Base64(bytes.to_vec())
-}
-
-fn test_unix_timestamp() -> UnixTimestampMs {
-    UnixTimestampMs::from(1_700_000_000_000_u128)
-}
 
 // =============================================================================
 // Helper: assert canonical type and wire type produce identical JSON

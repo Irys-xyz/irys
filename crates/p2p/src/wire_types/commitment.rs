@@ -1,6 +1,8 @@
 use irys_types::{IrysAddress, IrysSignature, H256, U256};
 use serde::{Deserialize, Serialize};
 
+use super::impl_version_tagged_serde;
+
 // -- CommitmentTypeV1 --
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
@@ -81,70 +83,10 @@ pub enum CommitmentTransaction {
     V2(CommitmentTransactionV2Inner),
 }
 
-/// NOTE: This Serialize impl uses serde_json internally and is designed specifically
-/// for JSON wire format. It may not work correctly with other serialization formats.
-impl Serialize for CommitmentTransaction {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap as _;
-
-        let (version, inner_value) = match self {
-            Self::V1(inner) => (
-                1_u8,
-                serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-            ),
-            Self::V2(inner) => (
-                2_u8,
-                serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-            ),
-        };
-
-        if let serde_json::Value::Object(inner_map) = inner_value {
-            let mut map = serializer.serialize_map(Some(inner_map.len() + 1))?;
-            map.serialize_entry("version", &version)?;
-            for (key, value) in inner_map {
-                map.serialize_entry(&key, &value)?;
-            }
-            map.end()
-        } else {
-            Err(serde::ser::Error::custom("inner value must be a struct"))
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for CommitmentTransaction {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-
-        if let serde_json::Value::Object(obj) = value {
-            let mut version: Option<u8> = None;
-            let mut fields = serde_json::Map::new();
-            for (key, val) in obj {
-                if key == "version" {
-                    version = Some(serde_json::from_value(val).map_err(serde::de::Error::custom)?);
-                } else {
-                    fields.insert(key, val);
-                }
-            }
-            let inner_value = serde_json::Value::Object(fields);
-            match version {
-                Some(1) => {
-                    let inner: CommitmentTransactionV1Inner =
-                        serde_json::from_value(inner_value).map_err(serde::de::Error::custom)?;
-                    Ok(Self::V1(inner))
-                }
-                Some(2) => {
-                    let inner: CommitmentTransactionV2Inner =
-                        serde_json::from_value(inner_value).map_err(serde::de::Error::custom)?;
-                    Ok(Self::V2(inner))
-                }
-                Some(v) => Err(serde::de::Error::custom(format!("unknown version: {}", v))),
-                None => Err(serde::de::Error::missing_field("version")),
-            }
-        } else {
-            Err(serde::de::Error::custom("expected object"))
-        }
-    }
-}
+impl_version_tagged_serde!(CommitmentTransaction {
+    1 => V1(CommitmentTransactionV1Inner),
+    2 => V2(CommitmentTransactionV2Inner),
+});
 
 // -- Conversions --
 
