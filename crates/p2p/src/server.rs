@@ -1342,10 +1342,12 @@ where
                             "Data handler returned an unexpected data for request {:?}: {:?}",
                             request_for_logging, data_v2
                         );
-                        HttpResponse::Ok().json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>))
+                        HttpResponse::Ok()
+                            .json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>))
                     }
                 },
-                None => HttpResponse::Ok().json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>)),
+                None => HttpResponse::Ok()
+                    .json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>)),
             },
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
@@ -1363,8 +1365,7 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> =
-            data_request.0.into();
+        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> = data_request.0.into();
         Self::handle_data_request_inner(server, v1_request, req).await
     }
 
@@ -1435,8 +1436,7 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> =
-            data_request.0.into();
+        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> = data_request.0.into();
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
