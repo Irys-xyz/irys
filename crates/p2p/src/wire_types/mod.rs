@@ -1,3 +1,25 @@
+//! Sovereign wire types for the gossip protocol.
+//!
+//! These types decouple the gossip protocol's JSON serialization format from the
+//! canonical `irys_types` structs. By owning their own `#[serde]` attributes
+//! ("sovereign" — they control their serialization independently), wire types
+//! prevent accidental wire-format breakage when internal types are refactored.
+//!
+//! **Serialization flow:** canonical type → wire type → JSON (outbound).
+//! **Deserialization flow:** JSON → wire type → canonical type (inbound).
+//!
+//! **Parity invariant:** Wire types MUST produce JSON output identical to their
+//! canonical `irys_types` counterparts. The server serializes using wire types,
+//! but some client deserialization paths still use canonical types directly. If
+//! parity drifts, deserialization will fail at runtime. The parity tests in
+//! `tests.rs` and fixture tests in `gossip_fixture_tests.rs` enforce this.
+//!
+//! **Adding a new wire type:**
+//! 1. Create a struct with matching serde attributes in the appropriate file.
+//! 2. Add `From` impls in both directions (canonical ↔ wire).
+//! 3. Add a parity test in `tests.rs`.
+//! 4. Add a fixture test in `gossip_fixture_tests.rs`.
+
 mod block;
 mod chunk;
 mod commitment;
