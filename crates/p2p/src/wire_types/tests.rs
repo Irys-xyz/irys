@@ -5,8 +5,13 @@
 //! from the canonical format, these tests catch it.
 
 use irys_types::{
-    commitment_common::CommitmentTransaction, ingress::IngressProof,
-    transaction::DataTransactionHeader,
+    commitment_common::CommitmentTransaction,
+    ingress::IngressProof,
+    serialization::H256List,
+    transaction::{
+        DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+        DataTransactionMetadata,
+    },
 };
 
 use super::test_helpers::*;
@@ -72,11 +77,15 @@ fn test_commitment_v1_stake_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    // Compare fields since metadata is skipped in serde
+    // Compare fields since metadata is skipped in serde.
+    // Note: chain_id has no getter on CommitmentTransaction; covered by assert_json_parity above.
     assert_eq!(canonical.id(), roundtrip.id());
     assert_eq!(canonical.signer(), roundtrip.signer());
     assert_eq!(canonical.fee(), roundtrip.fee());
     assert_eq!(canonical.value(), roundtrip.value());
+    assert_eq!(canonical.anchor(), roundtrip.anchor());
+    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+    assert_eq!(canonical.signature(), roundtrip.signature());
 }
 
 #[test]
@@ -121,7 +130,17 @@ fn test_data_transaction_header_parity() {
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: DataTransactionHeader = deserialized.into();
     assert_eq!(canonical.id, roundtrip.id);
+    assert_eq!(canonical.anchor, roundtrip.anchor);
+    assert_eq!(canonical.signer, roundtrip.signer);
+    assert_eq!(canonical.data_root, roundtrip.data_root);
     assert_eq!(canonical.data_size, roundtrip.data_size);
+    assert_eq!(canonical.header_size, roundtrip.header_size);
+    assert_eq!(canonical.term_fee, roundtrip.term_fee);
+    assert_eq!(canonical.perm_fee, roundtrip.perm_fee);
+    assert_eq!(canonical.ledger_id, roundtrip.ledger_id);
+    assert_eq!(canonical.bundle_format, roundtrip.bundle_format);
+    assert_eq!(canonical.chain_id, roundtrip.chain_id);
+    assert_eq!(canonical.signature, roundtrip.signature);
 }
 
 // =============================================================================
@@ -138,6 +157,237 @@ fn test_block_header_parity() {
     let deserialized: wire::IrysBlockHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::IrysBlockHeader = deserialized.into();
     assert_eq!(canonical.block_hash, roundtrip.block_hash);
+    assert_eq!(canonical.signature, roundtrip.signature);
     assert_eq!(canonical.height, roundtrip.height);
     assert_eq!(canonical.diff, roundtrip.diff);
+    assert_eq!(canonical.cumulative_diff, roundtrip.cumulative_diff);
+    assert_eq!(canonical.solution_hash, roundtrip.solution_hash);
+    assert_eq!(canonical.last_diff_timestamp, roundtrip.last_diff_timestamp);
+    assert_eq!(
+        canonical.previous_solution_hash,
+        roundtrip.previous_solution_hash
+    );
+    assert_eq!(canonical.last_epoch_hash, roundtrip.last_epoch_hash);
+    assert_eq!(canonical.chunk_hash, roundtrip.chunk_hash);
+    assert_eq!(canonical.previous_block_hash, roundtrip.previous_block_hash);
+    assert_eq!(
+        canonical.previous_cumulative_diff,
+        roundtrip.previous_cumulative_diff
+    );
+    assert_eq!(canonical.poa, roundtrip.poa);
+    assert_eq!(canonical.reward_address, roundtrip.reward_address);
+    assert_eq!(canonical.reward_amount, roundtrip.reward_amount);
+    assert_eq!(canonical.miner_address, roundtrip.miner_address);
+    assert_eq!(canonical.timestamp, roundtrip.timestamp);
+    assert_eq!(canonical.system_ledgers, roundtrip.system_ledgers);
+    assert_eq!(canonical.data_ledgers, roundtrip.data_ledgers);
+    assert_eq!(canonical.evm_block_hash, roundtrip.evm_block_hash);
+    assert_eq!(canonical.vdf_limiter_info, roundtrip.vdf_limiter_info);
+    assert_eq!(canonical.oracle_irys_price, roundtrip.oracle_irys_price);
+    assert_eq!(canonical.ema_irys_price, roundtrip.ema_irys_price);
+    assert_eq!(canonical.treasury, roundtrip.treasury);
+}
+
+// =============================================================================
+// Error-path tests for version-tagged serde
+// =============================================================================
+
+#[test]
+fn test_version_tagged_unknown_version() {
+    let mut obj = serde_json::to_value(canonical_block_header()).unwrap();
+    obj.as_object_mut()
+        .unwrap()
+        .insert("version".to_string(), serde_json::json!(255));
+    let result = serde_json::from_value::<wire::IrysBlockHeader>(obj);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown"),
+        "Error should mention unknown version: {err}"
+    );
+}
+
+#[test]
+fn test_version_tagged_missing_version() {
+    let wire_type: wire::IrysBlockHeader = (&canonical_block_header()).into();
+    let mut obj = serde_json::to_value(&wire_type).unwrap();
+    obj.as_object_mut().unwrap().remove("version");
+    let result = serde_json::from_value::<wire::IrysBlockHeader>(obj);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("version"),
+        "Error should mention missing version field: {err}"
+    );
+}
+
+#[test]
+fn test_version_tagged_non_object_input() {
+    let json_array = serde_json::json!([1, 2, 3]);
+    let result = serde_json::from_value::<wire::IrysBlockHeader>(json_array);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("expected object"),
+        "Error should mention expected object: {err}"
+    );
+}
+
+// =============================================================================
+// BlockBody parity
+// =============================================================================
+
+#[test]
+fn test_block_body_parity() {
+    let canonical = canonical_block_body();
+    let wire_type: wire::BlockBody = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::BlockBody = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::BlockBody = deserialized.into();
+    assert_eq!(canonical.block_hash, roundtrip.block_hash);
+    assert_eq!(
+        canonical.data_transactions.len(),
+        roundtrip.data_transactions.len()
+    );
+    assert_eq!(
+        canonical.commitment_transactions.len(),
+        roundtrip.commitment_transactions.len()
+    );
+    // Verify individual transaction fields survived the round-trip
+    assert_eq!(
+        canonical.data_transactions[0].id,
+        roundtrip.data_transactions[0].id
+    );
+    assert_eq!(
+        canonical.commitment_transactions[0].id(),
+        roundtrip.commitment_transactions[0].id()
+    );
+}
+
+// =============================================================================
+// None/empty edge case tests
+// =============================================================================
+
+#[test]
+fn test_data_tx_header_with_none_optional_fields() {
+    // DataTransactionHeader with perm_fee: None and bundle_format: None
+    let canonical = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1 {
+            perm_fee: None,
+            bundle_format: None,
+            ..canonical_data_tx_header_v1_inner()
+        },
+        metadata: DataTransactionMetadata::new(),
+    });
+    let wire_type: wire::DataTransactionHeader = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: DataTransactionHeader = deserialized.into();
+    assert_eq!(roundtrip.perm_fee, None);
+    assert_eq!(roundtrip.bundle_format, None);
+}
+
+#[test]
+fn test_poa_data_all_none_fields() {
+    use irys_types::block::PoaData;
+    let poa = PoaData {
+        partition_chunk_offset: 0,
+        partition_hash: test_h256(0x00),
+        chunk: None,
+        ledger_id: None,
+        tx_path: None,
+        data_path: None,
+    };
+    let wire_poa: wire::PoaData = (&poa).into();
+    assert_json_parity(&poa, &wire_poa);
+
+    let wire_json = serde_json::to_string(&wire_poa).unwrap();
+    let deserialized: wire::PoaData = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: PoaData = deserialized.into();
+    assert_eq!(poa, roundtrip);
+}
+
+#[test]
+fn test_block_header_empty_ledgers() {
+    let irys_types::IrysBlockHeader::V1(mut header) = canonical_block_header();
+    header.system_ledgers = vec![];
+    header.data_ledgers = vec![];
+    header.vdf_limiter_info.last_step_checkpoints = H256List(vec![]);
+    header.vdf_limiter_info.steps = H256List(vec![]);
+    let canonical = irys_types::IrysBlockHeader::V1(header);
+
+    let wire_type: wire::IrysBlockHeader = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::IrysBlockHeader = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::IrysBlockHeader = deserialized.into();
+    assert!(roundtrip.system_ledgers.is_empty());
+    assert!(roundtrip.data_ledgers.is_empty());
+    assert!(roundtrip
+        .vdf_limiter_info
+        .last_step_checkpoints
+        .0
+        .is_empty());
+    assert!(roundtrip.vdf_limiter_info.steps.0.is_empty());
+}
+
+// =============================================================================
+// Missing commitment variant parity tests
+// =============================================================================
+
+#[test]
+fn test_commitment_v1_unstake_parity() {
+    let canonical = canonical_commitment_v1_unstake();
+    let wire_type: wire::CommitmentTransaction = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: CommitmentTransaction = deserialized.into();
+    assert_eq!(canonical.id(), roundtrip.id());
+    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+}
+
+#[test]
+fn test_commitment_v2_pledge_parity() {
+    let canonical = canonical_commitment_v2_pledge();
+    let wire_type: wire::CommitmentTransaction = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: CommitmentTransaction = deserialized.into();
+    assert_eq!(canonical.id(), roundtrip.id());
+    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+}
+
+#[test]
+fn test_commitment_v2_unpledge_parity() {
+    let canonical = canonical_commitment_v2_unpledge();
+    let wire_type: wire::CommitmentTransaction = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: CommitmentTransaction = deserialized.into();
+    assert_eq!(canonical.id(), roundtrip.id());
+    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+}
+
+#[test]
+fn test_commitment_v2_unstake_parity() {
+    let canonical = canonical_commitment_v2_unstake();
+    let wire_type: wire::CommitmentTransaction = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: CommitmentTransaction = deserialized.into();
+    assert_eq!(canonical.id(), roundtrip.id());
+    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
 }
