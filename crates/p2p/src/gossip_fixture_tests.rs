@@ -23,49 +23,28 @@ use irys_types::{
     commitment_v1::{CommitmentTransactionV1, CommitmentTypeV1},
     commitment_v2::{CommitmentTransactionV2, CommitmentTypeV2},
     ingress::{IngressProof, IngressProofV1},
-    serialization::{Base64, H256List},
+    serialization::H256List,
     storage_pricing::Amount,
     transaction::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
     version::{NodeInfo, PeerAddress, ProtocolVersion},
-    CommitmentTransactionMetadata, DataTransactionLedger, IrysAddress, IrysPeerId, IrysSignature,
-    RethPeerInfo, Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
+    CommitmentTransactionMetadata, DataTransactionLedger, IrysPeerId, RethPeerInfo,
+    SystemTransactionLedger, TxChunkOffset, U256,
 };
 use reth::revm::primitives::B256;
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::wire_types as wire;
+use crate::wire_types::{self as wire, test_helpers::*};
 
 // =============================================================================
-// Deterministic test value constructors
+// Additional test value constructors (not shared — specific to fixture tests)
 // =============================================================================
-
-fn test_h256(byte: u8) -> H256 {
-    H256::from([byte; 32])
-}
-
-fn test_address(byte: u8) -> IrysAddress {
-    IrysAddress::from_slice(&[byte; 20])
-}
 
 fn test_peer_id(byte: u8) -> IrysPeerId {
     IrysPeerId::from(test_address(byte))
-}
-
-fn test_signature() -> IrysSignature {
-    // Use a deterministic signature with known r, s, v values
-    IrysSignature::new(Signature::new(
-        reth::revm::primitives::U256::from(1_u64),
-        reth::revm::primitives::U256::from(2_u64),
-        false,
-    ))
-}
-
-fn test_base64(bytes: &[u8]) -> Base64 {
-    Base64(bytes.to_vec())
 }
 
 fn test_peer_address() -> PeerAddress {
@@ -77,10 +56,6 @@ fn test_peer_address() -> PeerAddress {
             peer_id: Default::default(),
         },
     }
-}
-
-fn test_unix_timestamp() -> UnixTimestampMs {
-    UnixTimestampMs::from(1_700_000_000_000_u128)
 }
 
 fn fixture_unpacked_chunk() -> wire::UnpackedChunk {
