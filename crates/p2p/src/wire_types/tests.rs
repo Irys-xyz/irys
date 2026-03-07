@@ -4,8 +4,11 @@
 //! to the corresponding canonical irys_types type. If a wire type drifts
 //! from the canonical format, these tests catch it.
 
+use std::sync::Arc;
+
 use irys_types::{
     commitment_common::CommitmentTransaction,
+    gossip,
     ingress::IngressProof,
     serialization::H256List,
     transaction::{
@@ -390,4 +393,196 @@ fn test_commitment_v2_unstake_parity() {
     let roundtrip: CommitmentTransaction = deserialized.into();
     assert_eq!(canonical.id(), roundtrip.id());
     assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+}
+
+// =============================================================================
+// HandshakeRequest/Response parity
+// =============================================================================
+
+#[test]
+fn test_handshake_request_v1_parity() {
+    let canonical = canonical_handshake_request_v1();
+    let wire: wire::HandshakeRequestV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    let wire_json = serde_json::to_string(&wire).unwrap();
+    let deserialized: wire::HandshakeRequestV1 = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::HandshakeRequestV1 = deserialized.into();
+    assert_eq!(canonical.mining_address, roundtrip.mining_address);
+    assert_eq!(canonical.chain_id, roundtrip.chain_id);
+    assert_eq!(canonical.timestamp, roundtrip.timestamp);
+    assert_eq!(canonical.user_agent, roundtrip.user_agent);
+}
+
+#[test]
+fn test_handshake_request_v2_parity() {
+    let canonical = canonical_handshake_request_v2();
+    let wire: wire::HandshakeRequestV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    let wire_json = serde_json::to_string(&wire).unwrap();
+    let deserialized: wire::HandshakeRequestV2 = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::HandshakeRequestV2 = deserialized.into();
+    assert_eq!(canonical.mining_address, roundtrip.mining_address);
+    assert_eq!(canonical.peer_id, roundtrip.peer_id);
+    assert_eq!(canonical.chain_id, roundtrip.chain_id);
+    assert_eq!(canonical.consensus_config_hash, roundtrip.consensus_config_hash);
+}
+
+#[test]
+fn test_handshake_response_v1_parity() {
+    let canonical = canonical_handshake_response_v1();
+    let wire: wire::HandshakeResponseV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    let wire_json = serde_json::to_string(&wire).unwrap();
+    let deserialized: wire::HandshakeResponseV1 = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::HandshakeResponseV1 = deserialized.into();
+    assert_eq!(canonical.peers.len(), roundtrip.peers.len());
+    assert_eq!(canonical.timestamp, roundtrip.timestamp);
+    assert_eq!(canonical.message, roundtrip.message);
+}
+
+#[test]
+fn test_handshake_response_v2_parity() {
+    let canonical = canonical_handshake_response_v2();
+    let wire: wire::HandshakeResponseV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    let wire_json = serde_json::to_string(&wire).unwrap();
+    let deserialized: wire::HandshakeResponseV2 = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::HandshakeResponseV2 = deserialized.into();
+    assert_eq!(canonical.peers.len(), roundtrip.peers.len());
+    assert_eq!(canonical.timestamp, roundtrip.timestamp);
+    assert_eq!(canonical.consensus_config_hash, roundtrip.consensus_config_hash);
+}
+
+// =============================================================================
+// GossipDataV1 parity
+// =============================================================================
+
+#[test]
+fn test_gossip_data_v1_parity() {
+    // Chunk variant
+    let canonical = gossip::v1::GossipDataV1::Chunk(canonical_unpacked_chunk());
+    let wire: wire::GossipDataV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // Transaction variant
+    let canonical = gossip::v1::GossipDataV1::Transaction(canonical_data_tx_header());
+    let wire: wire::GossipDataV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // CommitmentTransaction variant
+    let canonical = gossip::v1::GossipDataV1::CommitmentTransaction(canonical_commitment_v2_stake());
+    let wire: wire::GossipDataV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // Block variant (canonical wraps in Arc)
+    let canonical = gossip::v1::GossipDataV1::Block(Arc::new(canonical_block_header()));
+    let wire: wire::GossipDataV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // IngressProof variant
+    let canonical = gossip::v1::GossipDataV1::IngressProof(canonical_ingress_proof());
+    let wire: wire::GossipDataV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+}
+
+// =============================================================================
+// GossipDataV2 parity
+// =============================================================================
+
+#[test]
+fn test_gossip_data_v2_parity() {
+    // Chunk variant (canonical wraps in Arc)
+    let canonical = gossip::v2::GossipDataV2::Chunk(Arc::new(canonical_unpacked_chunk()));
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // Transaction variant
+    let canonical = gossip::v2::GossipDataV2::Transaction(canonical_data_tx_header());
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // CommitmentTransaction variant
+    let canonical =
+        gossip::v2::GossipDataV2::CommitmentTransaction(canonical_commitment_v2_stake());
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // BlockHeader variant (canonical wraps in Arc)
+    let canonical = gossip::v2::GossipDataV2::BlockHeader(Arc::new(canonical_block_header()));
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // BlockBody variant (canonical wraps in Arc)
+    let canonical = gossip::v2::GossipDataV2::BlockBody(Arc::new(canonical_block_body()));
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+
+    // IngressProof variant
+    let canonical = gossip::v2::GossipDataV2::IngressProof(canonical_ingress_proof());
+    let wire: wire::GossipDataV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
+}
+
+// =============================================================================
+// GossipDataRequest parity
+// =============================================================================
+
+#[test]
+fn test_gossip_data_request_v1_parity() {
+    use reth::revm::primitives::B256;
+    let variants = [
+        gossip::v1::GossipDataRequestV1::ExecutionPayload(B256::from([0xAA; 32])),
+        gossip::v1::GossipDataRequestV1::Block(test_h256(0xBB)),
+        gossip::v1::GossipDataRequestV1::Chunk(test_h256(0xCC)),
+        gossip::v1::GossipDataRequestV1::Transaction(test_h256(0xDD)),
+    ];
+    for canonical in &variants {
+        let wire: wire::GossipDataRequestV1 = canonical.into();
+        assert_json_parity(canonical, &wire);
+    }
+}
+
+#[test]
+fn test_gossip_data_request_v2_parity() {
+    use reth::revm::primitives::B256;
+    let variants = [
+        gossip::v2::GossipDataRequestV2::ExecutionPayload(B256::from([0xAA; 32])),
+        gossip::v2::GossipDataRequestV2::BlockHeader(test_h256(0xBB)),
+        gossip::v2::GossipDataRequestV2::BlockBody(test_h256(0xCC)),
+        gossip::v2::GossipDataRequestV2::Chunk(test_h256(0xDD)),
+        gossip::v2::GossipDataRequestV2::Transaction(test_h256(0xEE)),
+    ];
+    for canonical in &variants {
+        let wire: wire::GossipDataRequestV2 = canonical.into();
+        assert_json_parity(canonical, &wire);
+    }
+}
+
+// =============================================================================
+// GossipRequest wrapper parity
+// =============================================================================
+
+#[test]
+fn test_gossip_request_v1_parity() {
+    let canonical = canonical_gossip_request_v1();
+    let wire = wire::GossipRequestV1 {
+        miner_address: canonical.miner_address,
+        data: wire::UnpackedChunk::from(&canonical.data),
+    };
+    assert_json_parity(&canonical, &wire);
+}
+
+#[test]
+fn test_gossip_request_v2_parity() {
+    let canonical = canonical_gossip_request_v2();
+    let wire = wire::GossipRequestV2 {
+        peer_id: canonical.peer_id,
+        miner_address: canonical.miner_address,
+        data: wire::UnpackedChunk::from(&canonical.data),
+    };
+    assert_json_parity(&canonical, &wire);
 }
