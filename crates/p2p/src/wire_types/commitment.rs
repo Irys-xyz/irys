@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::impl_json_version_tagged_serde;
 
-// -- CommitmentTypeV1 --
+/// Wire type for CommitmentTypeV1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV1 {
@@ -21,7 +21,7 @@ pub enum CommitmentTypeV1 {
     Unstake,
 }
 
-// -- CommitmentTypeV2 --
+/// Wire type for CommitmentTypeV2 (adds `UpdateRewardAddress` variant).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV2 {
@@ -43,7 +43,7 @@ pub enum CommitmentTypeV2 {
     },
 }
 
-// -- CommitmentTransactionV1 fields (flattened by IntegerTagged) --
+/// Inner fields for the versioned CommitmentTransactionV1 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentTransactionV1Inner {
@@ -59,7 +59,7 @@ pub struct CommitmentTransactionV1Inner {
     pub signature: IrysSignature,
 }
 
-// -- CommitmentTransactionV2 fields (flattened by IntegerTagged) --
+/// Inner fields for the versioned CommitmentTransactionV2 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentTransactionV2Inner {
@@ -223,6 +223,7 @@ impl From<CommitmentTransaction> for irys_types::CommitmentTransaction {
                     value: inner.value,
                     signature: inner.signature,
                 },
+                // Metadata is not transmitted over the wire; initialize to default on deserialization.
                 metadata: Default::default(),
             }),
             CommitmentTransaction::V2(inner) => Self::V2(irys_types::CommitmentV2WithMetadata {
@@ -236,6 +237,7 @@ impl From<CommitmentTransaction> for irys_types::CommitmentTransaction {
                     value: inner.value,
                     signature: inner.signature,
                 },
+                // Metadata is not transmitted over the wire; initialize to default on deserialization.
                 metadata: Default::default(),
             }),
         }
