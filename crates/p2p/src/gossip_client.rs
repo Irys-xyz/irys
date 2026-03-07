@@ -225,10 +225,11 @@ impl GossipClient {
             }
 
             if let Some(req_v1) = requested_data.to_v1() {
+                let wire_req: wire_types::GossipDataRequestV1 = (&req_v1).into();
                 self.send_data_internal(
                     &peer.1.address.gossip,
                     GossipRoutes::GetData,
-                    &req_v1,
+                    &wire_req,
                     ProtocolVersion::V1,
                 )
                 .await
@@ -238,10 +239,11 @@ impl GossipClient {
                 ))
             }
         } else {
+            let wire_req: wire_types::GossipDataRequestV2 = (&requested_data).into();
             self.send_data_internal(
                 &peer.1.address.gossip,
                 GossipRoutes::GetData,
-                &requested_data,
+                &wire_req,
                 ProtocolVersion::V2,
             )
             .await

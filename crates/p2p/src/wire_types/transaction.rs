@@ -1,7 +1,7 @@
 use irys_types::{BoundedFee, IrysAddress, IrysSignature, H256};
 use serde::{Deserialize, Serialize};
 
-use super::impl_version_tagged_serde;
+use super::impl_json_version_tagged_serde;
 
 /// Sovereign wire type for the inner DataTransactionHeaderV1 fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,7 +32,7 @@ pub enum DataTransactionHeader {
     V1(DataTransactionHeaderV1Inner),
 }
 
-impl_version_tagged_serde!(DataTransactionHeader { 1 => V1(DataTransactionHeaderV1Inner) });
+impl_json_version_tagged_serde!(DataTransactionHeader { 1 => V1(DataTransactionHeaderV1Inner) });
 
 // -- Conversions --
 
@@ -57,12 +57,11 @@ impl From<&irys_types::DataTransactionHeader> for DataTransactionHeader {
     }
 }
 
-impl TryFrom<DataTransactionHeader> for irys_types::DataTransactionHeader {
-    type Error = eyre::Report;
-    fn try_from(h: DataTransactionHeader) -> eyre::Result<Self> {
+impl From<DataTransactionHeader> for irys_types::DataTransactionHeader {
+    fn from(h: DataTransactionHeader) -> Self {
         match h {
             DataTransactionHeader::V1(inner) => {
-                Ok(Self::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                Self::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                     tx: irys_types::DataTransactionHeaderV1 {
                         id: inner.id,
                         anchor: inner.anchor,
@@ -78,7 +77,7 @@ impl TryFrom<DataTransactionHeader> for irys_types::DataTransactionHeader {
                         perm_fee: inner.perm_fee,
                     },
                     metadata: Default::default(),
-                }))
+                })
             }
         }
     }

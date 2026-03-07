@@ -1,7 +1,7 @@
 use irys_types::{IrysAddress, IrysSignature, H256, U256};
 use serde::{Deserialize, Serialize};
 
-use super::impl_version_tagged_serde;
+use super::impl_json_version_tagged_serde;
 
 // -- CommitmentTypeV1 --
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub enum CommitmentTransaction {
     V2(CommitmentTransactionV2Inner),
 }
 
-impl_version_tagged_serde!(CommitmentTransaction {
+impl_json_version_tagged_serde!(CommitmentTransaction {
     1 => V1(CommitmentTransactionV1Inner),
     2 => V2(CommitmentTransactionV2Inner),
 });
@@ -209,40 +209,35 @@ impl From<&irys_types::CommitmentTransaction> for CommitmentTransaction {
     }
 }
 
-impl TryFrom<CommitmentTransaction> for irys_types::CommitmentTransaction {
-    type Error = eyre::Report;
-    fn try_from(ct: CommitmentTransaction) -> eyre::Result<Self> {
+impl From<CommitmentTransaction> for irys_types::CommitmentTransaction {
+    fn from(ct: CommitmentTransaction) -> Self {
         match ct {
-            CommitmentTransaction::V1(inner) => {
-                Ok(Self::V1(irys_types::CommitmentV1WithMetadata {
-                    tx: irys_types::CommitmentTransactionV1 {
-                        id: inner.id,
-                        anchor: inner.anchor,
-                        signer: inner.signer,
-                        commitment_type: inner.commitment_type.into(),
-                        chain_id: inner.chain_id,
-                        fee: inner.fee,
-                        value: inner.value,
-                        signature: inner.signature,
-                    },
-                    metadata: Default::default(),
-                }))
-            }
-            CommitmentTransaction::V2(inner) => {
-                Ok(Self::V2(irys_types::CommitmentV2WithMetadata {
-                    tx: irys_types::CommitmentTransactionV2 {
-                        id: inner.id,
-                        anchor: inner.anchor,
-                        signer: inner.signer,
-                        commitment_type: inner.commitment_type.into(),
-                        chain_id: inner.chain_id,
-                        fee: inner.fee,
-                        value: inner.value,
-                        signature: inner.signature,
-                    },
-                    metadata: Default::default(),
-                }))
-            }
+            CommitmentTransaction::V1(inner) => Self::V1(irys_types::CommitmentV1WithMetadata {
+                tx: irys_types::CommitmentTransactionV1 {
+                    id: inner.id,
+                    anchor: inner.anchor,
+                    signer: inner.signer,
+                    commitment_type: inner.commitment_type.into(),
+                    chain_id: inner.chain_id,
+                    fee: inner.fee,
+                    value: inner.value,
+                    signature: inner.signature,
+                },
+                metadata: Default::default(),
+            }),
+            CommitmentTransaction::V2(inner) => Self::V2(irys_types::CommitmentV2WithMetadata {
+                tx: irys_types::CommitmentTransactionV2 {
+                    id: inner.id,
+                    anchor: inner.anchor,
+                    signer: inner.signer,
+                    commitment_type: inner.commitment_type.into(),
+                    chain_id: inner.chain_id,
+                    fee: inner.fee,
+                    value: inner.value,
+                    signature: inner.signature,
+                },
+                metadata: Default::default(),
+            }),
         }
     }
 }

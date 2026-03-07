@@ -80,21 +80,18 @@ impl From<&irys_types::gossip::v1::GossipDataV1> for GossipDataV1 {
     }
 }
 
-impl TryFrom<GossipDataV1> for irys_types::gossip::v1::GossipDataV1 {
-    type Error = eyre::Report;
-    fn try_from(d: GossipDataV1) -> eyre::Result<Self> {
+impl From<GossipDataV1> for irys_types::gossip::v1::GossipDataV1 {
+    fn from(d: GossipDataV1) -> Self {
         match d {
-            GossipDataV1::Chunk(c) => Ok(Self::Chunk(c.into())),
-            GossipDataV1::Transaction(t) => Ok(Self::Transaction(t.try_into()?)),
-            GossipDataV1::CommitmentTransaction(c) => {
-                Ok(Self::CommitmentTransaction(c.try_into()?))
-            }
+            GossipDataV1::Chunk(c) => Self::Chunk(c.into()),
+            GossipDataV1::Transaction(t) => Self::Transaction(t.into()),
+            GossipDataV1::CommitmentTransaction(c) => Self::CommitmentTransaction(c.into()),
             GossipDataV1::Block(b) => {
-                let canonical: irys_types::IrysBlockHeader = b.try_into()?;
-                Ok(Self::Block(Arc::new(canonical)))
+                let canonical: irys_types::IrysBlockHeader = b.into();
+                Self::Block(Arc::new(canonical))
             }
-            GossipDataV1::ExecutionPayload(p) => Ok(Self::ExecutionPayload(p)),
-            GossipDataV1::IngressProof(p) => Ok(Self::IngressProof(p.try_into()?)),
+            GossipDataV1::ExecutionPayload(p) => Self::ExecutionPayload(p),
+            GossipDataV1::IngressProof(p) => Self::IngressProof(p.into()),
         }
     }
 }
@@ -123,28 +120,25 @@ impl From<&irys_types::gossip::v2::GossipDataV2> for GossipDataV2 {
     }
 }
 
-impl TryFrom<GossipDataV2> for irys_types::gossip::v2::GossipDataV2 {
-    type Error = eyre::Report;
-    fn try_from(d: GossipDataV2) -> eyre::Result<Self> {
+impl From<GossipDataV2> for irys_types::gossip::v2::GossipDataV2 {
+    fn from(d: GossipDataV2) -> Self {
         match d {
             GossipDataV2::Chunk(c) => {
                 let canonical: irys_types::UnpackedChunk = c.into();
-                Ok(Self::Chunk(Arc::new(canonical)))
+                Self::Chunk(Arc::new(canonical))
             }
-            GossipDataV2::Transaction(t) => Ok(Self::Transaction(t.try_into()?)),
-            GossipDataV2::CommitmentTransaction(c) => {
-                Ok(Self::CommitmentTransaction(c.try_into()?))
-            }
+            GossipDataV2::Transaction(t) => Self::Transaction(t.into()),
+            GossipDataV2::CommitmentTransaction(c) => Self::CommitmentTransaction(c.into()),
             GossipDataV2::BlockHeader(b) => {
-                let canonical: irys_types::IrysBlockHeader = b.try_into()?;
-                Ok(Self::BlockHeader(Arc::new(canonical)))
+                let canonical: irys_types::IrysBlockHeader = b.into();
+                Self::BlockHeader(Arc::new(canonical))
             }
             GossipDataV2::BlockBody(b) => {
-                let canonical: irys_types::BlockBody = b.try_into()?;
-                Ok(Self::BlockBody(Arc::new(canonical)))
+                let canonical: irys_types::BlockBody = b.into();
+                Self::BlockBody(Arc::new(canonical))
             }
-            GossipDataV2::ExecutionPayload(p) => Ok(Self::ExecutionPayload(p)),
-            GossipDataV2::IngressProof(p) => Ok(Self::IngressProof(p.try_into()?)),
+            GossipDataV2::ExecutionPayload(p) => Self::ExecutionPayload(p),
+            GossipDataV2::IngressProof(p) => Self::IngressProof(p.into()),
         }
     }
 }

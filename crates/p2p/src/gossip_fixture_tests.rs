@@ -37,6 +37,7 @@ use reth::revm::primitives::B256;
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 
+use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::wire_types::{self as wire, test_helpers::*};
 
 // =============================================================================
@@ -537,37 +538,37 @@ fixture_tests! {
 
     // GossipResponse variants
     gossip_response_accepted =>
-        wire::GossipResponse::<()>::Accepted(()),
+        GossipResponse::<()>::Accepted(()),
     gossip_response_rejected_handshake_required_none =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(None)),
+        GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(None)),
     gossip_response_rejected_handshake_required_not_in_peer_list =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
-            wire::HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+        GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
         ))),
     gossip_response_rejected_handshake_required_origin_mismatch =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
-            wire::HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+        GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
         ))),
     gossip_response_rejected_handshake_required_unknown_miner =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::HandshakeRequired(Some(
-            wire::HandshakeRequirementReason::MinerAddressIsUnknown,
+        GossipResponse::<()>::Rejected(RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::MinerAddressIsUnknown,
         ))),
     gossip_response_rejected_gossip_disabled =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::GossipDisabled),
+        GossipResponse::<()>::Rejected(RejectionReason::GossipDisabled),
     gossip_response_rejected_invalid_data =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidData),
+        GossipResponse::<()>::Rejected(RejectionReason::InvalidData),
     gossip_response_rejected_rate_limited =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::RateLimited),
+        GossipResponse::<()>::Rejected(RejectionReason::RateLimited),
     gossip_response_rejected_unable_to_verify_origin =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnableToVerifyOrigin),
+        GossipResponse::<()>::Rejected(RejectionReason::UnableToVerifyOrigin),
     gossip_response_rejected_invalid_credentials =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::InvalidCredentials),
+        GossipResponse::<()>::Rejected(RejectionReason::InvalidCredentials),
     gossip_response_rejected_protocol_mismatch =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::ProtocolMismatch),
+        GossipResponse::<()>::Rejected(RejectionReason::ProtocolMismatch),
     gossip_response_rejected_unsupported_protocol_version =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedProtocolVersion(99)),
+        GossipResponse::<()>::Rejected(RejectionReason::UnsupportedProtocolVersion(99)),
     gossip_response_rejected_unsupported_feature =>
-        wire::GossipResponse::<()>::Rejected(wire::RejectionReason::UnsupportedFeature),
+        GossipResponse::<()>::Rejected(RejectionReason::UnsupportedFeature),
 
     // NodeInfo
     node_info => NodeInfo {
