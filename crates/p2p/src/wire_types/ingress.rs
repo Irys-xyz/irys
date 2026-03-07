@@ -1,7 +1,7 @@
 use irys_types::{IrysSignature, H256};
 use serde::{Deserialize, Serialize};
 
-use super::impl_version_tagged_serde;
+use super::impl_json_version_tagged_serde;
 
 /// Inner fields for IngressProof V1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,33 +19,24 @@ pub enum IngressProof {
     V1(IngressProofV1Inner),
 }
 
-impl_version_tagged_serde!(IngressProof { 1 => V1(IngressProofV1Inner) });
+impl_json_version_tagged_serde!(IngressProof { 1 => V1(IngressProofV1Inner) });
+
+super::impl_mirror_from!(irys_types::ingress::IngressProofV1 => IngressProofV1Inner {
+    signature, data_root, proof, chain_id, anchor,
+});
 
 impl From<&irys_types::IngressProof> for IngressProof {
     fn from(p: &irys_types::IngressProof) -> Self {
         match p {
-            irys_types::IngressProof::V1(inner) => Self::V1(IngressProofV1Inner {
-                signature: inner.signature,
-                data_root: inner.data_root,
-                proof: inner.proof,
-                chain_id: inner.chain_id,
-                anchor: inner.anchor,
-            }),
+            irys_types::IngressProof::V1(inner) => Self::V1(inner.into()),
         }
     }
 }
 
-impl TryFrom<IngressProof> for irys_types::IngressProof {
-    type Error = eyre::Report;
-    fn try_from(p: IngressProof) -> eyre::Result<Self> {
+impl From<IngressProof> for irys_types::IngressProof {
+    fn from(p: IngressProof) -> Self {
         match p {
-            IngressProof::V1(inner) => Ok(Self::V1(irys_types::ingress::IngressProofV1 {
-                signature: inner.signature,
-                data_root: inner.data_root,
-                proof: inner.proof,
-                chain_id: inner.chain_id,
-                anchor: inner.anchor,
-            })),
+            IngressProof::V1(inner) => Self::V1(inner.into()),
         }
     }
 }
