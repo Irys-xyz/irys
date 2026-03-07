@@ -12,7 +12,8 @@
 //! canonical `irys_types` counterparts. The server serializes using wire types,
 //! but some client deserialization paths still use canonical types directly. If
 //! parity drifts, deserialization will fail at runtime. The parity tests in
-//! `tests.rs` and fixture tests in `gossip_fixture_tests.rs` enforce this.
+//! `wire_types/tests.rs` and fixture tests in `src/gossip_fixture_tests.rs`
+//! enforce this.
 //!
 //! **Adding a new wire type:**
 //! 1. Create a struct with matching serde attributes in the appropriate file.
