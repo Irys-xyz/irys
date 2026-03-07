@@ -13,10 +13,13 @@ use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
-    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, IrysAddress, IrysSignature,
+    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, GossipRequestV1,
+    GossipRequestV2, HandshakeRequestV1, HandshakeRequestV2, HandshakeResponseV1,
+    HandshakeResponseV2, IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVersion,
     Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
+use semver::Version;
 
 // =============================================================================
 // Primitive builders
@@ -315,5 +318,77 @@ pub(crate) fn canonical_block_body() -> BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![canonical_data_tx_header()],
         commitment_transactions: vec![canonical_commitment_v2_stake()],
+    }
+}
+
+// =============================================================================
+// Handshake builders
+// =============================================================================
+
+pub(crate) fn canonical_handshake_request_v1() -> HandshakeRequestV1 {
+    HandshakeRequestV1 {
+        version: Version::new(0, 1, 0),
+        protocol_version: ProtocolVersion::V1,
+        mining_address: test_address(0xA0),
+        chain_id: 1270,
+        address: PeerAddress::default(),
+        timestamp: 1_700_000_000_000_u64,
+        user_agent: Some("test-agent/1.0".to_string()),
+        signature: test_signature(),
+    }
+}
+
+pub(crate) fn canonical_handshake_request_v2() -> HandshakeRequestV2 {
+    HandshakeRequestV2 {
+        version: Version::new(0, 1, 0),
+        protocol_version: ProtocolVersion::V2,
+        mining_address: test_address(0xA0),
+        peer_id: IrysPeerId::from([0xBB; 20]),
+        chain_id: 1270,
+        address: PeerAddress::default(),
+        timestamp: 1_700_000_000_000_u64,
+        user_agent: Some("test-agent/2.0".to_string()),
+        consensus_config_hash: test_h256(0xCC),
+        signature: test_signature(),
+    }
+}
+
+pub(crate) fn canonical_handshake_response_v1() -> HandshakeResponseV1 {
+    HandshakeResponseV1 {
+        version: Version::new(0, 1, 0),
+        protocol_version: ProtocolVersion::V1,
+        peers: vec![PeerAddress::default()],
+        timestamp: 1_700_000_000_000_u64,
+        message: Some("welcome".to_string()),
+    }
+}
+
+pub(crate) fn canonical_handshake_response_v2() -> HandshakeResponseV2 {
+    HandshakeResponseV2 {
+        version: Version::new(0, 1, 0),
+        protocol_version: ProtocolVersion::V2,
+        peers: vec![PeerAddress::default()],
+        timestamp: 1_700_000_000_000_u64,
+        message: Some("welcome".to_string()),
+        consensus_config_hash: test_h256(0xCC),
+    }
+}
+
+// =============================================================================
+// Gossip request/data builders
+// =============================================================================
+
+pub(crate) fn canonical_gossip_request_v1() -> GossipRequestV1<irys_types::UnpackedChunk> {
+    GossipRequestV1 {
+        miner_address: test_address(0xA0),
+        data: canonical_unpacked_chunk(),
+    }
+}
+
+pub(crate) fn canonical_gossip_request_v2() -> GossipRequestV2<irys_types::UnpackedChunk> {
+    GossipRequestV2 {
+        peer_id: IrysPeerId::from([0xBB; 20]),
+        miner_address: test_address(0xA0),
+        data: canonical_unpacked_chunk(),
     }
 }
