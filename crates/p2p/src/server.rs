@@ -91,35 +91,12 @@ where
         }
     }
 
-    /// Convert a wire V2 request to a canonical V2 request.
-    fn convert_wire_v2<W, C: From<W>>(
-        wire_req: wire_types::GossipRequestV2<W>,
-    ) -> GossipRequestV2<C> {
-        GossipRequestV2 {
-            peer_id: wire_req.peer_id,
-            miner_address: wire_req.miner_address,
-            data: wire_req.data.into(),
-        }
-    }
-
-    /// Convert a wire V1 request to a canonical V1 request.
-    fn convert_wire_v1<W, C: From<W>>(
-        wire_req: wire_types::GossipRequestV1<W>,
-    ) -> GossipRequest<C> {
-        GossipRequest {
-            miner_address: wire_req.miner_address,
-            data: wire_req.data.into(),
-        }
-    }
-
     async fn handle_chunk_v1(
         server: Data<Self>,
         unpacked_chunk_json: web::Json<wire_types::GossipRequestV1<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<wire_types::UnpackedChunk, UnpackedChunk>(
-            unpacked_chunk_json.0,
-        );
+        let v1_request: GossipRequest<UnpackedChunk> = unpacked_chunk_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let chunk_hash = v1_request.data.chunk_path_hash();
@@ -278,9 +255,7 @@ where
         irys_block_header_json: web::Json<wire_types::GossipRequestV1<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<wire_types::IrysBlockHeader, IrysBlockHeader>(
-            irys_block_header_json.0,
-        );
+        let v1_request: GossipRequest<IrysBlockHeader> = irys_block_header_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v1_request.data.block_hash;
@@ -358,8 +333,7 @@ where
         block_body_request_json: web::Json<wire_types::GossipRequestV1<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request =
-            Self::convert_wire_v1::<wire_types::BlockBody, BlockBody>(block_body_request_json.0);
+        let v1_request: GossipRequest<BlockBody> = block_body_request_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v1_request.data.block_hash;
@@ -425,7 +399,7 @@ where
         irys_execution_payload_json: web::Json<wire_types::GossipRequestV1<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<Block, Block>(irys_execution_payload_json.0);
+        let v1_request: GossipRequest<Block> = irys_execution_payload_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let evm_block_hash = v1_request.data.seal_slow().hash();
@@ -469,10 +443,8 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::DataTransactionHeader,
-            DataTransactionHeader,
-        >(irys_transaction_header_json.0);
+        let v1_request: GossipRequest<DataTransactionHeader> =
+            irys_transaction_header_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v1_request.data.id;
@@ -512,10 +484,7 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::CommitmentTransaction,
-            CommitmentTransaction,
-        >(commitment_tx_json.0);
+        let v1_request: GossipRequest<CommitmentTransaction> = commitment_tx_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v1_request.data.id();
@@ -553,8 +522,7 @@ where
         proof_json: web::Json<wire_types::GossipRequestV1<wire_types::IngressProof>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request =
-            Self::convert_wire_v1::<wire_types::IngressProof, IngressProof>(proof_json.0);
+        let v1_request: GossipRequest<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let data_root = v1_request.data.data_root;
@@ -596,9 +564,7 @@ where
         unpacked_chunk_json: web::Json<wire_types::GossipRequestV2<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = Self::convert_wire_v2::<wire_types::UnpackedChunk, UnpackedChunk>(
-            unpacked_chunk_json.0,
-        );
+        let v2_request: GossipRequestV2<UnpackedChunk> = unpacked_chunk_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let chunk_hash = v2_request.data.chunk_path_hash();
@@ -655,9 +621,7 @@ where
         irys_block_header_json: web::Json<wire_types::GossipRequestV2<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = Self::convert_wire_v2::<wire_types::IrysBlockHeader, IrysBlockHeader>(
-            irys_block_header_json.0,
-        );
+        let v2_request: GossipRequestV2<IrysBlockHeader> = irys_block_header_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.block_hash;
@@ -723,8 +687,7 @@ where
         block_body_request_json: web::Json<wire_types::GossipRequestV2<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request =
-            Self::convert_wire_v2::<wire_types::BlockBody, BlockBody>(block_body_request_json.0);
+        let v2_request: GossipRequestV2<BlockBody> = block_body_request_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.block_hash;
@@ -785,7 +748,7 @@ where
         irys_execution_payload_json: web::Json<wire_types::GossipRequestV2<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = Self::convert_wire_v2::<Block, Block>(irys_execution_payload_json.0);
+        let v2_request: GossipRequestV2<Block> = irys_execution_payload_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.hash_slow();
@@ -833,10 +796,8 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = Self::convert_wire_v2::<
-            wire_types::DataTransactionHeader,
-            DataTransactionHeader,
-        >(irys_transaction_header_json.0);
+        let v2_request: GossipRequestV2<DataTransactionHeader> =
+            irys_transaction_header_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v2_request.data.id;
@@ -880,10 +841,7 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = Self::convert_wire_v2::<
-            wire_types::CommitmentTransaction,
-            CommitmentTransaction,
-        >(commitment_tx_json.0);
+        let v2_request: GossipRequestV2<CommitmentTransaction> = commitment_tx_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let commitment_tx_id = v2_request.data.id();
@@ -925,8 +883,7 @@ where
         proof_json: web::Json<wire_types::GossipRequestV2<wire_types::IngressProof>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request =
-            Self::convert_wire_v2::<wire_types::IngressProof, IngressProof>(proof_json.0);
+        let v2_request: GossipRequestV2<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let data_root = v2_request.data.data_root;
@@ -1053,49 +1010,33 @@ where
         req: actix_web::HttpRequest,
         body: web::Json<wire_types::HandshakeRequestV1>,
     ) -> HttpResponse {
+        type Resp = GossipResponse<wire_types::HandshakeResponseV1>;
+
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         };
 
         let wire_req = body.into_inner();
         let version_request: irys_types::HandshakeRequestV1 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
-                    RejectionReason::UnsupportedProtocolVersion(
-                        version_request.protocol_version as u32,
-                    ),
+            return HttpResponse::Ok().json(Resp::Rejected(
+                RejectionReason::UnsupportedProtocolVersion(
+                    version_request.protocol_version as u32,
                 ),
-            );
+            ));
         }
 
         if !version_request.verify_signature() {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV1>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
 
         let mut peers = server.peer_list.all_known_peers();
@@ -1168,41 +1109,29 @@ where
         req: actix_web::HttpRequest,
         body: web::Json<wire_types::HandshakeRequestV2>,
     ) -> HttpResponse {
+        type Resp = GossipResponse<wire_types::HandshakeResponseV2>;
+
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         };
 
         let wire_req = body.into_inner();
         let version_request: irys_types::HandshakeRequestV2 = wire_req.into();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
-                    RejectionReason::UnsupportedProtocolVersion(
-                        version_request.protocol_version as u32,
-                    ),
+            return HttpResponse::Ok().json(Resp::Rejected(
+                RejectionReason::UnsupportedProtocolVersion(
+                    version_request.protocol_version as u32,
                 ),
-            );
+            ));
         }
 
         if !version_request.verify_signature() {
@@ -1210,11 +1139,7 @@ where
                 "V2 Handshake signature verification failed for mining_address: {}, peer_id: {}",
                 version_request.mining_address, version_request.peer_id
             );
-            return HttpResponse::Ok().json(
-                GossipResponse::<wire_types::HandshakeResponseV2>::Rejected(
-                    RejectionReason::InvalidCredentials,
-                ),
-            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
         debug!(
             "V2 Handshake signature verified for mining_address: {}",
@@ -1368,10 +1293,7 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::GossipDataRequestV1,
-            GossipDataRequestV1,
-        >(data_request.0);
+        let v1_request: GossipRequest<GossipDataRequestV1> = data_request.0.into();
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
         let v2_request = GossipRequest {
             miner_address: v1_request.miner_address,
@@ -1387,10 +1309,7 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::GossipDataRequestV1,
-            GossipDataRequestV1,
-        >(data_request.0);
+        let v1_request: GossipRequest<GossipDataRequestV1> = data_request.0.into();
         let request_for_logging = v1_request.clone();
         let source_miner_address = v1_request.miner_address;
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
@@ -1423,10 +1342,10 @@ where
                             "Data handler returned an unexpected data for request {:?}: {:?}",
                             request_for_logging, data_v2
                         );
-                        HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>))
+                        HttpResponse::Ok().json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>))
                     }
                 },
-                None => HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>)),
+                None => HttpResponse::Ok().json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>)),
             },
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
@@ -1444,10 +1363,8 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::GossipDataRequestV2,
-            irys_types::v2::GossipDataRequestV2,
-        >(data_request.0);
+        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> =
+            data_request.0.into();
         Self::handle_data_request_inner(server, v1_request, req).await
     }
 
@@ -1518,10 +1435,8 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = Self::convert_wire_v1::<
-            wire_types::GossipDataRequestV2,
-            irys_types::v2::GossipDataRequestV2,
-        >(data_request.0);
+        let v1_request: GossipRequest<irys_types::v2::GossipDataRequestV2> =
+            data_request.0.into();
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
