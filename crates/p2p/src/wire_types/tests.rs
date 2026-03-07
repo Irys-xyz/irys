@@ -426,7 +426,10 @@ fn test_handshake_request_v2_parity() {
     assert_eq!(canonical.mining_address, roundtrip.mining_address);
     assert_eq!(canonical.peer_id, roundtrip.peer_id);
     assert_eq!(canonical.chain_id, roundtrip.chain_id);
-    assert_eq!(canonical.consensus_config_hash, roundtrip.consensus_config_hash);
+    assert_eq!(
+        canonical.consensus_config_hash,
+        roundtrip.consensus_config_hash
+    );
 }
 
 #[test]
@@ -454,7 +457,10 @@ fn test_handshake_response_v2_parity() {
     let roundtrip: irys_types::HandshakeResponseV2 = deserialized.into();
     assert_eq!(canonical.peers.len(), roundtrip.peers.len());
     assert_eq!(canonical.timestamp, roundtrip.timestamp);
-    assert_eq!(canonical.consensus_config_hash, roundtrip.consensus_config_hash);
+    assert_eq!(
+        canonical.consensus_config_hash,
+        roundtrip.consensus_config_hash
+    );
 }
 
 // =============================================================================
@@ -474,7 +480,8 @@ fn test_gossip_data_v1_parity() {
     assert_json_parity(&canonical, &wire);
 
     // CommitmentTransaction variant
-    let canonical = gossip::v1::GossipDataV1::CommitmentTransaction(canonical_commitment_v2_stake());
+    let canonical =
+        gossip::v1::GossipDataV1::CommitmentTransaction(canonical_commitment_v2_stake());
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
 
