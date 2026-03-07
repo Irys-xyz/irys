@@ -39,6 +39,7 @@ pub struct VDFLimiterInfo {
     pub next_vdf_difficulty: Option<u64>,
 }
 
+/// Wire type for DataTransactionLedger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DataTransactionLedger {
@@ -59,6 +60,7 @@ pub struct DataTransactionLedger {
     pub required_proof_count: Option<u8>,
 }
 
+/// Wire type for SystemTransactionLedger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemTransactionLedger {
