@@ -6,11 +6,11 @@ use super::impl_json_version_tagged_serde;
 /// Inner fields for IngressProof V1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngressProofV1Inner {
-    pub anchor: H256,
-    pub chain_id: u64,
+    pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
-    pub signature: IrysSignature,
+    pub chain_id: u64,
+    pub anchor: H256,
 }
 
 /// Sovereign wire type for IngressProof (IntegerTagged-compatible).

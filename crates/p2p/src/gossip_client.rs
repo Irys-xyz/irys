@@ -341,6 +341,9 @@ impl GossipClient {
                 }
                 if let Some(req_v1) = requested_data.to_v1() {
                     let wire_req: wire_types::GossipDataRequestV1 = (&req_v1).into();
+                    // NOTE: The server serializes this response using wire_types::GossipDataV1,
+                    // but we deserialize using the canonical type. This works because wire types
+                    // produce identical JSON (enforced by parity tests in wire_types/tests.rs).
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
                         self.send_data_internal(
                             &peer.1.address.gossip,
@@ -363,6 +366,8 @@ impl GossipClient {
                 }
             } else {
                 let wire_req: wire_types::GossipDataRequestV2 = (&requested_data).into();
+                // NOTE: Server serializes response using wire_types::GossipDataV2;
+                // we deserialize using canonical type (parity enforced by tests).
                 self.send_data_internal(
                     &peer.1.address.gossip,
                     GossipRoutes::PullData,

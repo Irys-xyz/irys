@@ -76,6 +76,7 @@ impl From<DataTransactionHeader> for irys_types::DataTransactionHeader {
                         bundle_format: inner.bundle_format,
                         perm_fee: inner.perm_fee,
                     },
+                    // Metadata is not transmitted over the wire; initialize to default on deserialization.
                     metadata: Default::default(),
                 })
             }

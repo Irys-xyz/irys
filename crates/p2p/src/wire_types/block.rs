@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
 
-// PoaData — plain struct, no versioning
+/// PoaData — plain struct, no versioning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PoaData {
@@ -21,7 +21,7 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
-// VDFLimiterInfo — plain struct
+/// VDFLimiterInfo — plain struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VDFLimiterInfo {
@@ -66,7 +66,7 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
-// IrysBlockHeaderV1 inner fields
+/// Inner fields for IrysBlockHeaderV1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeaderV1Inner {

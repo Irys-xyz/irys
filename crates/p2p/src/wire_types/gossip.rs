@@ -10,6 +10,7 @@ use super::{
     UnpackedChunk,
 };
 
+/// V1 gossip data envelope. Each variant wraps a wire type for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV1 {
     Chunk(UnpackedChunk),
@@ -20,6 +21,7 @@ pub enum GossipDataV1 {
     IngressProof(IngressProof),
 }
 
+/// V2 gossip data envelope. Splits Block into separate BlockHeader and BlockBody variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV2 {
     Chunk(UnpackedChunk),
@@ -31,6 +33,7 @@ pub enum GossipDataV2 {
     IngressProof(IngressProof),
 }
 
+/// V1 data request — identifies data to fetch by hash.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV1 {
     ExecutionPayload(B256),
@@ -39,6 +42,7 @@ pub enum GossipDataRequestV1 {
     Transaction(H256),
 }
 
+/// V2 data request — adds separate BlockHeader/BlockBody request variants.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV2 {
     ExecutionPayload(B256),
@@ -48,12 +52,14 @@ pub enum GossipDataRequestV2 {
     Transaction(H256),
 }
 
+/// V1 request wrapper — carries miner_address + payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRequestV1<T> {
     pub miner_address: IrysAddress,
     pub data: T,
 }
 
+/// V2 request wrapper — adds peer_id to the V1 wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRequestV2<T> {
     pub peer_id: IrysPeerId,
