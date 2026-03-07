@@ -7,7 +7,7 @@ use irys_types::{
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 
-use super::{impl_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
+use super::{impl_json_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
 
 // PoaData — plain struct, no versioning
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -103,7 +103,7 @@ pub enum IrysBlockHeader {
     V1(IrysBlockHeaderV1Inner),
 }
 
-impl_version_tagged_serde!(IrysBlockHeader { 1 => V1(IrysBlockHeaderV1Inner) });
+impl_json_version_tagged_serde!(IrysBlockHeader { 1 => V1(IrysBlockHeaderV1Inner) });
 
 /// Sovereign wire type for BlockBody.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -113,111 +113,24 @@ pub struct BlockBody {
     pub commitment_transactions: Vec<CommitmentTransaction>,
 }
 
-// -- Conversions --
+// -- Conversions (simple mirror structs) --
 
-impl From<&irys_types::PoaData> for PoaData {
-    fn from(p: &irys_types::PoaData) -> Self {
-        Self {
-            partition_chunk_offset: p.partition_chunk_offset,
-            partition_hash: p.partition_hash,
-            chunk: p.chunk.clone(),
-            ledger_id: p.ledger_id,
-            tx_path: p.tx_path.clone(),
-            data_path: p.data_path.clone(),
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::PoaData => PoaData {
+    partition_chunk_offset, partition_hash, chunk, ledger_id, tx_path, data_path,
+});
 
-impl From<PoaData> for irys_types::PoaData {
-    fn from(p: PoaData) -> Self {
-        Self {
-            partition_chunk_offset: p.partition_chunk_offset,
-            partition_hash: p.partition_hash,
-            chunk: p.chunk,
-            ledger_id: p.ledger_id,
-            tx_path: p.tx_path,
-            data_path: p.data_path,
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::VDFLimiterInfo => VDFLimiterInfo {
+    output, global_step_number, seed, next_seed, prev_output,
+    last_step_checkpoints, steps, vdf_difficulty, next_vdf_difficulty,
+});
 
-impl From<&irys_types::VDFLimiterInfo> for VDFLimiterInfo {
-    fn from(v: &irys_types::VDFLimiterInfo) -> Self {
-        Self {
-            output: v.output,
-            global_step_number: v.global_step_number,
-            seed: v.seed,
-            next_seed: v.next_seed,
-            prev_output: v.prev_output,
-            last_step_checkpoints: v.last_step_checkpoints.clone(),
-            steps: v.steps.clone(),
-            vdf_difficulty: v.vdf_difficulty,
-            next_vdf_difficulty: v.next_vdf_difficulty,
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::DataTransactionLedger => DataTransactionLedger {
+    ledger_id, tx_root, tx_ids, total_chunks, expires, proofs, required_proof_count,
+});
 
-impl From<VDFLimiterInfo> for irys_types::VDFLimiterInfo {
-    fn from(v: VDFLimiterInfo) -> Self {
-        Self {
-            output: v.output,
-            global_step_number: v.global_step_number,
-            seed: v.seed,
-            next_seed: v.next_seed,
-            prev_output: v.prev_output,
-            last_step_checkpoints: v.last_step_checkpoints,
-            steps: v.steps,
-            vdf_difficulty: v.vdf_difficulty,
-            next_vdf_difficulty: v.next_vdf_difficulty,
-        }
-    }
-}
-
-impl From<&irys_types::DataTransactionLedger> for DataTransactionLedger {
-    fn from(l: &irys_types::DataTransactionLedger) -> Self {
-        Self {
-            ledger_id: l.ledger_id,
-            tx_root: l.tx_root,
-            tx_ids: l.tx_ids.clone(),
-            total_chunks: l.total_chunks,
-            expires: l.expires,
-            proofs: l.proofs.clone(),
-            required_proof_count: l.required_proof_count,
-        }
-    }
-}
-
-impl From<DataTransactionLedger> for irys_types::DataTransactionLedger {
-    fn from(l: DataTransactionLedger) -> Self {
-        Self {
-            ledger_id: l.ledger_id,
-            tx_root: l.tx_root,
-            tx_ids: l.tx_ids,
-            total_chunks: l.total_chunks,
-            expires: l.expires,
-            proofs: l.proofs,
-            required_proof_count: l.required_proof_count,
-        }
-    }
-}
-
-impl From<&irys_types::SystemTransactionLedger> for SystemTransactionLedger {
-    fn from(l: &irys_types::SystemTransactionLedger) -> Self {
-        Self {
-            ledger_id: l.ledger_id,
-            tx_ids: l.tx_ids.clone(),
-        }
-    }
-}
-
-impl From<SystemTransactionLedger> for irys_types::SystemTransactionLedger {
-    fn from(l: SystemTransactionLedger) -> Self {
-        Self {
-            ledger_id: l.ledger_id,
-            tx_ids: l.tx_ids,
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::SystemTransactionLedger => SystemTransactionLedger {
+    ledger_id, tx_ids,
+});
 
 impl From<&irys_types::IrysBlockHeader> for IrysBlockHeader {
     fn from(h: &irys_types::IrysBlockHeader) -> Self {
@@ -252,11 +165,10 @@ impl From<&irys_types::IrysBlockHeader> for IrysBlockHeader {
     }
 }
 
-impl TryFrom<IrysBlockHeader> for irys_types::IrysBlockHeader {
-    type Error = eyre::Report;
-    fn try_from(h: IrysBlockHeader) -> eyre::Result<Self> {
+impl From<IrysBlockHeader> for irys_types::IrysBlockHeader {
+    fn from(h: IrysBlockHeader) -> Self {
         match h {
-            IrysBlockHeader::V1(inner) => Ok(Self::V1(irys_types::IrysBlockHeaderV1 {
+            IrysBlockHeader::V1(inner) => Self::V1(irys_types::IrysBlockHeaderV1 {
                 block_hash: inner.block_hash,
                 signature: inner.signature,
                 height: inner.height,
@@ -281,7 +193,7 @@ impl TryFrom<IrysBlockHeader> for irys_types::IrysBlockHeader {
                 oracle_irys_price: inner.oracle_irys_price,
                 ema_irys_price: inner.ema_irys_price,
                 treasury: inner.treasury,
-            })),
+            }),
         }
     }
 }
@@ -296,23 +208,16 @@ impl From<&irys_types::BlockBody> for BlockBody {
     }
 }
 
-impl TryFrom<BlockBody> for irys_types::BlockBody {
-    type Error = eyre::Report;
-    fn try_from(b: BlockBody) -> eyre::Result<Self> {
-        let data_transactions: Result<Vec<_>, _> = b
-            .data_transactions
-            .into_iter()
-            .map(irys_types::DataTransactionHeader::try_from)
-            .collect();
-        let commitment_transactions: Result<Vec<_>, _> = b
-            .commitment_transactions
-            .into_iter()
-            .map(irys_types::CommitmentTransaction::try_from)
-            .collect();
-        Ok(Self {
+impl From<BlockBody> for irys_types::BlockBody {
+    fn from(b: BlockBody) -> Self {
+        Self {
             block_hash: b.block_hash,
-            data_transactions: data_transactions?,
-            commitment_transactions: commitment_transactions?,
-        })
+            data_transactions: b.data_transactions.into_iter().map(Into::into).collect(),
+            commitment_transactions: b
+                .commitment_transactions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
     }
 }

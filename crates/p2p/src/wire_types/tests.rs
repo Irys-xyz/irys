@@ -82,7 +82,7 @@ fn test_ingress_proof_parity() {
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::IngressProof = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: IngressProof = deserialized.try_into().unwrap();
+    let roundtrip: IngressProof = deserialized.into();
     assert_eq!(canonical, roundtrip);
 }
 
@@ -110,7 +110,7 @@ fn test_commitment_v1_stake_parity() {
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: CommitmentTransaction = deserialized.try_into().unwrap();
+    let roundtrip: CommitmentTransaction = deserialized.into();
     // Compare fields since metadata is skipped in serde
     assert_eq!(canonical.id(), roundtrip.id());
     assert_eq!(canonical.signer(), roundtrip.signer());
@@ -229,7 +229,7 @@ fn test_data_transaction_header_parity() {
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: DataTransactionHeader = deserialized.try_into().unwrap();
+    let roundtrip: DataTransactionHeader = deserialized.into();
     assert_eq!(canonical.id, roundtrip.id);
     assert_eq!(canonical.data_size, roundtrip.data_size);
 }
@@ -300,7 +300,7 @@ fn test_block_header_parity() {
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::IrysBlockHeader = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: IrysBlockHeader = deserialized.try_into().unwrap();
+    let roundtrip: IrysBlockHeader = deserialized.into();
     assert_eq!(canonical.block_hash, roundtrip.block_hash);
     assert_eq!(canonical.height, roundtrip.height);
     assert_eq!(canonical.diff, roundtrip.diff);

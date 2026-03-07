@@ -1,11 +1,10 @@
-pub(crate) mod block;
-pub(crate) mod chunk;
-pub(crate) mod commitment;
-pub(crate) mod gossip;
-pub(crate) mod handshake;
-pub(crate) mod ingress;
-pub(crate) mod response;
-pub(crate) mod transaction;
+mod block;
+mod chunk;
+mod commitment;
+mod gossip;
+mod handshake;
+mod ingress;
+mod transaction;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
@@ -18,16 +17,15 @@ pub(crate) use commitment::*;
 pub(crate) use gossip::*;
 pub(crate) use handshake::*;
 pub(crate) use ingress::*;
-pub(crate) use response::*;
 pub(crate) use transaction::*;
 
-/// Implements `Serialize` and `Deserialize` for a versioned enum that flattens
-/// as `{"version": N, ...inner_fields}` (IntegerTagged-compatible JSON).
+/// Implements JSON-specific `Serialize` and `Deserialize` for a versioned enum
+/// that flattens as `{"version": N, ...inner_fields}` (IntegerTagged-compatible).
 ///
-/// NOTE: The Serialize impl uses `serde_json::to_value` internally and is
-/// designed specifically for JSON wire format. It may not work correctly with
-/// other serialization formats.
-macro_rules! impl_version_tagged_serde {
+/// **JSON-only**: The Serialize impl uses `serde_json::to_value` internally.
+/// These types must only be used with JSON serialization — other formats
+/// (bincode, msgpack, etc.) will produce incorrect output.
+macro_rules! impl_json_version_tagged_serde {
     ($enum_name:ident { $($version:literal => $variant:ident($inner:ty)),+ $(,)? }) => {
         impl serde::Serialize for $enum_name {
             fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -93,4 +91,26 @@ macro_rules! impl_version_tagged_serde {
     };
 }
 
-pub(crate) use impl_version_tagged_serde;
+pub(crate) use impl_json_version_tagged_serde;
+
+/// Generates bidirectional `From` impls between a canonical type and a mirror
+/// wire type that has the same field names.
+///
+/// - `From<&$canonical> for $wire` — clones each field (works for both Copy and Clone types)
+/// - `From<$wire> for $canonical` — moves each field
+macro_rules! impl_mirror_from {
+    ($canonical:ty => $wire:ty { $($field:ident),* $(,)? }) => {
+        impl From<&$canonical> for $wire {
+            fn from(src: &$canonical) -> Self {
+                Self { $( $field: src.$field.clone(), )* }
+            }
+        }
+        impl From<$wire> for $canonical {
+            fn from(src: $wire) -> Self {
+                Self { $( $field: src.$field, )* }
+            }
+        }
+    };
+}
+
+pub(crate) use impl_mirror_from;

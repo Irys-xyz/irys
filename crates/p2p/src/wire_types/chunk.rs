@@ -14,26 +14,6 @@ pub struct UnpackedChunk {
     pub tx_offset: TxChunkOffset,
 }
 
-impl From<&irys_types::UnpackedChunk> for UnpackedChunk {
-    fn from(c: &irys_types::UnpackedChunk) -> Self {
-        Self {
-            data_root: c.data_root,
-            data_size: c.data_size,
-            data_path: c.data_path.clone(),
-            bytes: c.bytes.clone(),
-            tx_offset: c.tx_offset,
-        }
-    }
-}
-
-impl From<UnpackedChunk> for irys_types::UnpackedChunk {
-    fn from(c: UnpackedChunk) -> Self {
-        Self {
-            data_root: c.data_root,
-            data_size: c.data_size,
-            data_path: c.data_path,
-            bytes: c.bytes,
-            tx_offset: c.tx_offset,
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::UnpackedChunk => UnpackedChunk {
+    data_root, data_size, data_path, bytes, tx_offset,
+});

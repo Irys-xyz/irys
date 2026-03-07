@@ -3,9 +3,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::block_pool::CriticalBlockPoolError;
-use crate::types::GossipRoutes;
+use crate::types::{GossipResponse, GossipRoutes, HandshakeRequirementReason, RejectionReason};
 use crate::wire_types;
-use crate::wire_types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -93,49 +92,24 @@ where
     }
 
     /// Convert a wire V2 request to a canonical V2 request.
-    /// Returns an HTTP error response if the wire data cannot be converted.
-    fn convert_wire_v2<W, C>(
+    fn convert_wire_v2<W, C: From<W>>(
         wire_req: wire_types::GossipRequestV2<W>,
-    ) -> Result<GossipRequestV2<C>, HttpResponse>
-    where
-        C: TryFrom<W>,
-        <C as TryFrom<W>>::Error: std::fmt::Display,
-    {
-        let data = wire_req.data.try_into().map_err(|e| {
-            error!(
-                "Failed to convert wire type to canonical {}: {}",
-                std::any::type_name::<C>(),
-                e
-            );
-            HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
-        })?;
-        Ok(GossipRequestV2 {
+    ) -> GossipRequestV2<C> {
+        GossipRequestV2 {
             peer_id: wire_req.peer_id,
             miner_address: wire_req.miner_address,
-            data,
-        })
+            data: wire_req.data.into(),
+        }
     }
 
     /// Convert a wire V1 request to a canonical V1 request.
-    fn convert_wire_v1<W, C>(
+    fn convert_wire_v1<W, C: From<W>>(
         wire_req: wire_types::GossipRequestV1<W>,
-    ) -> Result<GossipRequest<C>, HttpResponse>
-    where
-        C: TryFrom<W>,
-        <C as TryFrom<W>>::Error: std::fmt::Display,
-    {
-        let data = wire_req.data.try_into().map_err(|e| {
-            error!(
-                "Failed to convert wire type to canonical {}: {}",
-                std::any::type_name::<C>(),
-                e
-            );
-            HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
-        })?;
-        Ok(GossipRequest {
+    ) -> GossipRequest<C> {
+        GossipRequest {
             miner_address: wire_req.miner_address,
-            data,
-        })
+            data: wire_req.data.into(),
+        }
     }
 
     async fn handle_chunk_v1(
@@ -143,12 +117,9 @@ where
         unpacked_chunk_json: web::Json<wire_types::GossipRequestV1<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<wire_types::UnpackedChunk, UnpackedChunk>(
+        let v1_request = Self::convert_wire_v1::<wire_types::UnpackedChunk, UnpackedChunk>(
             unpacked_chunk_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        );
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let chunk_hash = v1_request.data.chunk_path_hash();
@@ -307,12 +278,9 @@ where
         irys_block_header_json: web::Json<wire_types::GossipRequestV1<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<wire_types::IrysBlockHeader, IrysBlockHeader>(
+        let v1_request = Self::convert_wire_v1::<wire_types::IrysBlockHeader, IrysBlockHeader>(
             irys_block_header_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        );
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v1_request.data.block_hash;
@@ -390,12 +358,8 @@ where
         block_body_request_json: web::Json<wire_types::GossipRequestV1<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<wire_types::BlockBody, BlockBody>(
-            block_body_request_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        let v1_request =
+            Self::convert_wire_v1::<wire_types::BlockBody, BlockBody>(block_body_request_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v1_request.data.block_hash;
@@ -461,11 +425,7 @@ where
         irys_execution_payload_json: web::Json<wire_types::GossipRequestV1<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<Block, Block>(irys_execution_payload_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        let v1_request = Self::convert_wire_v1::<Block, Block>(irys_execution_payload_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let evm_block_hash = v1_request.data.seal_slow().hash();
@@ -509,14 +469,10 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<
+        let v1_request = Self::convert_wire_v1::<
             wire_types::DataTransactionHeader,
             DataTransactionHeader,
-        >(irys_transaction_header_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(irys_transaction_header_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v1_request.data.id;
@@ -556,14 +512,10 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<
+        let v1_request = Self::convert_wire_v1::<
             wire_types::CommitmentTransaction,
             CommitmentTransaction,
-        >(commitment_tx_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(commitment_tx_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v1_request.data.id();
@@ -602,10 +554,7 @@ where
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         let v1_request =
-            match Self::convert_wire_v1::<wire_types::IngressProof, IngressProof>(proof_json.0) {
-                Ok(r) => r,
-                Err(resp) => return resp,
-            };
+            Self::convert_wire_v1::<wire_types::IngressProof, IngressProof>(proof_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let data_root = v1_request.data.data_root;
@@ -647,12 +596,9 @@ where
         unpacked_chunk_json: web::Json<wire_types::GossipRequestV2<wire_types::UnpackedChunk>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<wire_types::UnpackedChunk, UnpackedChunk>(
+        let v2_request = Self::convert_wire_v2::<wire_types::UnpackedChunk, UnpackedChunk>(
             unpacked_chunk_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        );
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let chunk_hash = v2_request.data.chunk_path_hash();
@@ -709,12 +655,9 @@ where
         irys_block_header_json: web::Json<wire_types::GossipRequestV2<wire_types::IrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<wire_types::IrysBlockHeader, IrysBlockHeader>(
+        let v2_request = Self::convert_wire_v2::<wire_types::IrysBlockHeader, IrysBlockHeader>(
             irys_block_header_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        );
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.block_hash;
@@ -780,12 +723,8 @@ where
         block_body_request_json: web::Json<wire_types::GossipRequestV2<wire_types::BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<wire_types::BlockBody, BlockBody>(
-            block_body_request_json.0,
-        ) {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        let v2_request =
+            Self::convert_wire_v2::<wire_types::BlockBody, BlockBody>(block_body_request_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.block_hash;
@@ -846,11 +785,7 @@ where
         irys_execution_payload_json: web::Json<wire_types::GossipRequestV2<Block>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<Block, Block>(irys_execution_payload_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        let v2_request = Self::convert_wire_v2::<Block, Block>(irys_execution_payload_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = v2_request.data.hash_slow();
@@ -898,14 +833,10 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<
+        let v2_request = Self::convert_wire_v2::<
             wire_types::DataTransactionHeader,
             DataTransactionHeader,
-        >(irys_transaction_header_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(irys_transaction_header_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let tx_id = v2_request.data.id;
@@ -949,14 +880,10 @@ where
         >,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v2_request = match Self::convert_wire_v2::<
+        let v2_request = Self::convert_wire_v2::<
             wire_types::CommitmentTransaction,
             CommitmentTransaction,
-        >(commitment_tx_json.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(commitment_tx_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let commitment_tx_id = v2_request.data.id();
@@ -999,10 +926,7 @@ where
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         let v2_request =
-            match Self::convert_wire_v2::<wire_types::IngressProof, IngressProof>(proof_json.0) {
-                Ok(r) => r,
-                Err(resp) => return resp,
-            };
+            Self::convert_wire_v2::<wire_types::IngressProof, IngressProof>(proof_json.0);
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let data_root = v2_request.data.data_root;
@@ -1444,13 +1368,10 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request =
-            match Self::convert_wire_v1::<wire_types::GossipDataRequestV1, GossipDataRequestV1>(
-                data_request.0,
-            ) {
-                Ok(r) => r,
-                Err(resp) => return resp,
-            };
+        let v1_request = Self::convert_wire_v1::<
+            wire_types::GossipDataRequestV1,
+            GossipDataRequestV1,
+        >(data_request.0);
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
         let v2_request = GossipRequest {
             miner_address: v1_request.miner_address,
@@ -1466,13 +1387,10 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV1>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request =
-            match Self::convert_wire_v1::<wire_types::GossipDataRequestV1, GossipDataRequestV1>(
-                data_request.0,
-            ) {
-                Ok(r) => r,
-                Err(resp) => return resp,
-            };
+        let v1_request = Self::convert_wire_v1::<
+            wire_types::GossipDataRequestV1,
+            GossipDataRequestV1,
+        >(data_request.0);
         let request_for_logging = v1_request.clone();
         let source_miner_address = v1_request.miner_address;
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
@@ -1526,14 +1444,10 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<
+        let v1_request = Self::convert_wire_v1::<
             wire_types::GossipDataRequestV2,
             irys_types::v2::GossipDataRequestV2,
-        >(data_request.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(data_request.0);
         Self::handle_data_request_inner(server, v1_request, req).await
     }
 
@@ -1604,14 +1518,10 @@ where
         data_request: web::Json<wire_types::GossipRequestV1<wire_types::GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        let v1_request = match Self::convert_wire_v1::<
+        let v1_request = Self::convert_wire_v1::<
             wire_types::GossipDataRequestV2,
             irys_types::v2::GossipDataRequestV2,
-        >(data_request.0)
-        {
-            Ok(r) => r,
-            Err(resp) => return resp,
-        };
+        >(data_request.0);
         let source_miner_address = v1_request.miner_address;
 
         let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
