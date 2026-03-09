@@ -14,9 +14,9 @@ use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
-    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, GossipRequestV1,
-    GossipRequestV2, HandshakeRequestV1, HandshakeRequestV2, HandshakeResponseV1,
-    HandshakeResponseV2, IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVersion,
+    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, HandshakeRequestV1,
+    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysPeerId,
+    IrysSignature, PeerAddress, ProtocolVersion,
     Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
@@ -397,25 +397,6 @@ pub(crate) fn canonical_handshake_response_v2() -> HandshakeResponseV2 {
         timestamp: 1_700_000_000_000_u64,
         message: Some("welcome".to_string()),
         consensus_config_hash: test_h256(0xCC),
-    }
-}
-
-// =============================================================================
-// Gossip request/data builders
-// =============================================================================
-
-pub(crate) fn canonical_gossip_request_v1() -> GossipRequestV1<irys_types::UnpackedChunk> {
-    GossipRequestV1 {
-        miner_address: test_address(0xA0),
-        data: canonical_unpacked_chunk(),
-    }
-}
-
-pub(crate) fn canonical_gossip_request_v2() -> GossipRequestV2<irys_types::UnpackedChunk> {
-    GossipRequestV2 {
-        peer_id: IrysPeerId::from([0xBB; 20]),
-        miner_address: test_address(0xA0),
-        data: canonical_unpacked_chunk(),
     }
 }
 

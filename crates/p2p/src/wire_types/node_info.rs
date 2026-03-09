@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 /// Wire type for [`irys_types::version::NodeInfo`].
 ///
 /// Mirrors the canonical type's JSON layout (`camelCase` keys, numeric
-/// fields serialized as strings) so that upstream serde-attribute changes
-/// in `irys_types` are detected by parity + fixture tests.
+/// fields serialized as strings) so that the gossip wire format is
+/// decoupled from upstream serde-attribute changes in `irys_types`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
