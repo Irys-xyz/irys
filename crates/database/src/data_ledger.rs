@@ -82,25 +82,30 @@ impl TermLedger {
     pub fn get_expired_slot_indexes(&self, epoch_height: u64) -> Vec<usize> {
         let mut expired_slot_indexes = Vec::new();
 
+        let min_blocks = self
+            .epoch_length
+            .checked_mul(self.num_blocks_in_epoch)
+            .expect("epoch_length * num_blocks_in_epoch overflows u64");
+
         tracing::debug!(
             "expire_old_slots: epoch_height={}, epoch_length={}, num_blocks_in_epoch={}, min_height_needed={}",
             epoch_height,
             self.epoch_length,
             self.num_blocks_in_epoch,
-            self.epoch_length * self.num_blocks_in_epoch
+            min_blocks
         );
 
         // Make sure enough blocks have transpired before calculating expiry height
-        if epoch_height < self.epoch_length * self.num_blocks_in_epoch {
+        if epoch_height < min_blocks {
             tracing::warn!(
                 "Not enough blocks yet: {} < {}, returning empty",
                 epoch_height,
-                self.epoch_length * self.num_blocks_in_epoch
+                min_blocks
             );
             return expired_slot_indexes;
         }
 
-        let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
+        let expiry_height = epoch_height - min_blocks;
         tracing::info!("Calculated expiry_height={}", expiry_height);
 
         // Collect indices of slots to expire
@@ -295,7 +300,9 @@ impl Ledgers {
 
         // Expire perm ledger slots if configured
         if let Some(epoch_length) = self.publish_ledger_epoch_length {
-            let min_blocks = epoch_length * self.num_blocks_in_epoch;
+            let min_blocks = epoch_length
+                .checked_mul(self.num_blocks_in_epoch)
+                .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
             if epoch_height >= min_blocks {
                 let expiry_height = epoch_height - min_blocks;
                 let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id).unwrap();
@@ -345,7 +352,9 @@ impl Ledgers {
 
         // Check perm ledger slots if configured
         if let Some(epoch_length) = self.publish_ledger_epoch_length {
-            let min_blocks = epoch_length * self.num_blocks_in_epoch;
+            let min_blocks = epoch_length
+                .checked_mul(self.num_blocks_in_epoch)
+                .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
             if epoch_height >= min_blocks {
                 let expiry_height = epoch_height - min_blocks;
                 let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id).unwrap();
