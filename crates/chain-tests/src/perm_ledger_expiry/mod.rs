@@ -392,3 +392,131 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     node.stop().await;
     Ok(())
 }
+
+/// Tests that a perm slot is NOT expired one epoch before its boundary, but IS expired
+/// at the exact boundary. Best defense against off-by-one bugs in expiry logic.
+/// Validates:
+/// - At pre_expiry_epoch: slot 0 is NOT expired
+/// - At expiry_epoch (multi-slot): slot 0 IS expired
+/// - At expiry_epoch (single-slot): slot 0 is NOT expired (last-slot protection)
+#[test_log::test(tokio::test)]
+async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
+    const CHUNK_SIZE: u64 = 32;
+    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const BLOCKS_PER_EPOCH: u64 = 3;
+    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
+    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().block_migration_depth = 1;
+    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
+    config.consensus.get_mut().num_chunks_in_partition = 4;
+    config.consensus.get_mut().num_chunks_in_recall_range = 1;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
+    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(INITIAL_BALANCE).into(),
+            ..Default::default()
+        },
+    )]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("perm_exact_boundary_test", 30)
+        .await;
+
+    let anchor = node.get_block_by_height(0).await?.block_hash;
+
+    // Post and promote a tx
+    let tx = node
+        .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx.header.id, 10).await?;
+    node.upload_chunks(&tx).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+
+    // Mine 1 block to include tx (triggers promotion to Publish)
+    node.mine_block().await?;
+
+    // Mine to first epoch boundary to trigger slot allocation (need 2+ slots)
+    let (_, epoch_height) = node.mine_until_next_epoch().await?;
+    info!("Reached first epoch boundary at height {}", epoch_height);
+
+    // Read slot state and compute exact boundaries
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    let num_slots = perm_slots.len();
+    let slot0_last_height = perm_slots[0].last_height;
+    info!(
+        "Perm slots: {}, slot0 last_height: {}",
+        num_slots, slot0_last_height
+    );
+
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let earliest_expiry = min_blocks + slot0_last_height;
+    // Round up to epoch boundary
+    let expiry_epoch =
+        ((earliest_expiry + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let pre_expiry_epoch = expiry_epoch - BLOCKS_PER_EPOCH;
+    info!(
+        "earliest_expiry={}, expiry_epoch={}, pre_expiry_epoch={}",
+        earliest_expiry, expiry_epoch, pre_expiry_epoch
+    );
+
+    // Mine to pre_expiry_epoch (may already be there if pre_expiry == current height)
+    let current_height = node.get_canonical_chain_height().await;
+    for _ in current_height..pre_expiry_epoch {
+        node.mine_block().await?;
+    }
+
+    // --- Assertion 1: At pre_expiry_epoch, slot 0 is NOT expired ---
+    let pre_snapshot = node.get_canonical_epoch_snapshot();
+    let pre_perm_slots = pre_snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        !pre_perm_slots[0].is_expired,
+        "Slot 0 should NOT be expired at pre-expiry epoch height {}",
+        pre_expiry_epoch
+    );
+    info!(
+        "Confirmed slot 0 is NOT expired at height {}",
+        node.get_canonical_chain_height().await
+    );
+
+    // Mine to expiry_epoch
+    let current_height = node.get_canonical_chain_height().await;
+    for _ in current_height..expiry_epoch {
+        node.mine_block().await?;
+    }
+
+    // --- Assertion 2/3: At expiry_epoch, check based on slot count ---
+    let post_snapshot = node.get_canonical_epoch_snapshot();
+    let post_perm_slots = post_snapshot.ledgers.get_slots(DataLedger::Publish);
+    let post_num_slots = post_perm_slots.len();
+
+    if post_num_slots > 1 {
+        // Multi-slot: slot 0 should be expired
+        assert!(
+            post_perm_slots[0].is_expired,
+            "Slot 0 should be expired at expiry epoch height {} (multi-slot, {} slots)",
+            expiry_epoch, post_num_slots
+        );
+        info!("Confirmed slot 0 IS expired at expiry epoch (multi-slot)");
+    } else {
+        // Single slot: last-slot protection prevents expiry
+        assert!(
+            !post_perm_slots[0].is_expired,
+            "Slot 0 should NOT be expired at expiry epoch height {} (last-slot protection)",
+            expiry_epoch
+        );
+        info!("Confirmed slot 0 is NOT expired at expiry epoch (last-slot protection)");
+    }
+
+    info!("Exact boundary expiry test passed!");
+    node.stop().await;
+    Ok(())
+}
