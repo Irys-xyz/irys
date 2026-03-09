@@ -656,3 +656,127 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     node.stop().await;
     Ok(())
 }
+
+/// Tests that perm slots never expire when publish_ledger_epoch_length is None (mainnet config).
+/// Uses multi-slot setup to distinguish the None config gate from last-slot protection.
+/// Verifies:
+/// - Multiple Publish slots exist (precondition — proves None is what blocks expiry, not last-slot)
+/// - Zero perm slots are expired after mining far past where expiry would trigger
+/// - All Publish partition assignments remain active (not returned to capacity pool)
+#[test_log::test(tokio::test)]
+async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
+    const CHUNK_SIZE: u64 = 32;
+    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const BLOCKS_PER_EPOCH: u64 = 3;
+    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().block_migration_depth = 1;
+    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
+    config.consensus.get_mut().num_chunks_in_partition = 4;
+    config.consensus.get_mut().num_chunks_in_recall_range = 1;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
+    // Mainnet config: perm expiry disabled
+    config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(INITIAL_BALANCE).into(),
+            ..Default::default()
+        },
+    )]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("perm_expiry_disabled_test", 30)
+        .await;
+
+    let anchor = node.get_block_by_height(0).await?.block_hash;
+
+    // Post + promote tx1 in epoch 0
+    let tx1 = node
+        .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx1.header.id, 10).await?;
+    node.upload_chunks(&tx1).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx1.header.id], 20)
+        .await?;
+
+    // Mine 1 block to include tx1
+    node.mine_block().await?;
+
+    // Mine to first epoch boundary → triggers slot allocation → 2+ Publish slots
+    let (_, epoch_height) = node.mine_until_next_epoch().await?;
+    info!("Reached first epoch boundary at height {}", epoch_height);
+
+    // Post + promote tx2 in epoch 1
+    let anchor2 = node.get_block_by_height(epoch_height).await?.block_hash;
+    let tx2 = node
+        .post_data_tx(anchor2, vec![2_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx2.header.id, 10).await?;
+    node.upload_chunks(&tx2).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
+        .await?;
+
+    // Mine 1 block to include tx2
+    node.mine_block().await?;
+
+    // Mine to 8 * BLOCKS_PER_EPOCH (far past where expiry would trigger if Some(2))
+    let target_height = 8 * BLOCKS_PER_EPOCH;
+    let current_height = node.get_canonical_chain_height().await;
+    info!(
+        "Mining from height {} to {} (far past hypothetical expiry)",
+        current_height, target_height
+    );
+    for _ in current_height..target_height {
+        node.mine_block().await?;
+    }
+
+    let final_height = node.get_canonical_chain_height().await;
+    assert!(
+        final_height >= target_height,
+        "Should have reached target height"
+    );
+
+    // --- Precondition: Multi-slot (proves None config gate, not last-slot protection) ---
+    let epoch_snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        perm_slots.len() >= 2,
+        "Expected 2+ perm slots for multi-slot verification, got {}. \
+         With a single slot, last-slot protection prevents expiry regardless of config.",
+        perm_slots.len()
+    );
+    info!("Perm slots: {} (multi-slot precondition met)", perm_slots.len());
+
+    // --- Assertion 1: Zero perm slots are expired ---
+    let expired_count = perm_slots.iter().filter(|s| s.is_expired).count();
+    assert_eq!(
+        expired_count, 0,
+        "No perm slots should expire when publish_ledger_epoch_length is None, but {} are expired",
+        expired_count
+    );
+    info!("Confirmed zero perm slots are expired at height {}", final_height);
+
+    // --- Assertion 2: All Publish partition assignments still active ---
+    let partition_assignments = &epoch_snapshot.partition_assignments;
+    for (slot_index, slot) in perm_slots.iter().enumerate() {
+        for partition_hash in &slot.partitions {
+            if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
+                assert!(
+                    assignment.ledger_id.is_some(),
+                    "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id=None",
+                    partition_hash, slot_index
+                );
+            }
+        }
+    }
+    info!("Verified all Publish partition assignments remain active");
+
+    info!("Perm expiry disabled (mainnet safety) test passed!");
+    node.stop().await;
+    Ok(())
+}
