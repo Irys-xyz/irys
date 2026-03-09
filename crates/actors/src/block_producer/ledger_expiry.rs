@@ -288,49 +288,42 @@ fn collect_expired_partitions(
     );
 
     for expired_partition in expired_partition_info {
-        let partition = partition_assignments
-            .get_assignment(expired_partition.partition_hash)
-            .ok_or_eyre("could not get expired partition")?;
-
         let ledger_id = expired_partition.ledger_id;
         let slot_index = SlotIndex::new(expired_partition.slot_index as u64);
 
-        // Only process partitions for the target ledger type
-        if ledger_id == target_ledger_type {
-            // Safety: Publish ledger expiry has no fee distribution — expired
-            // Publish partitions are simply reset. This bail prevents accidental
-            // fee calculation for Publish, which has no treasury to distribute.
-            // It is unreachable as long as callers pass DataLedger::Submit.
-            if ledger_id == DataLedger::Publish {
-                eyre::bail!(
-                    "publish ledger cannot expire — fee distribution not supported for Publish"
-                );
-            }
-
-            tracing::info!(
-                "Found expired partition for {:?} ledger at slot_index={}, miner={:?}",
-                ledger_id,
-                slot_index.0,
-                partition.miner_address
-            );
-
-            // Store miner_address (not reward_address) to preserve unique miner identities
-            // for correct fee distribution. Reward address resolution is deferred to
-            // aggregate_balance_deltas to ensure pooled miners (sharing a reward address)
-            // are counted individually for fee splitting.
-            expired_ledger_slot_indexes
-                .entry(slot_index)
-                .and_modify(|miners: &mut Vec<IrysAddress>| {
-                    miners.push(partition.miner_address);
-                })
-                .or_insert(vec![partition.miner_address]);
-        } else {
+        // Filter by ledger type FIRST — before any lookup that could fail.
+        // This prevents a Publish partition state inconsistency from blocking
+        // Submit fee distribution (or vice versa).
+        if ledger_id != target_ledger_type {
             tracing::debug!(
                 "Skipping partition with ledger_id={:?} (looking for {:?})",
                 ledger_id,
                 target_ledger_type
             );
+            continue;
         }
+
+        let partition = partition_assignments
+            .get_assignment(expired_partition.partition_hash)
+            .ok_or_eyre("could not get expired partition")?;
+
+        tracing::info!(
+            "Found expired partition for {:?} ledger at slot_index={}, miner={:?}",
+            ledger_id,
+            slot_index.0,
+            partition.miner_address
+        );
+
+        // Store miner_address (not reward_address) to preserve unique miner identities
+        // for correct fee distribution. Reward address resolution is deferred to
+        // aggregate_balance_deltas to ensure pooled miners (sharing a reward address)
+        // are counted individually for fee splitting.
+        expired_ledger_slot_indexes
+            .entry(slot_index)
+            .and_modify(|miners: &mut Vec<IrysAddress>| {
+                miners.push(partition.miner_address);
+            })
+            .or_insert(vec![partition.miner_address]);
     }
 
     Ok(expired_ledger_slot_indexes)
