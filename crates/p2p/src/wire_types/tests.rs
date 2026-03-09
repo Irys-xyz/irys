@@ -80,15 +80,7 @@ fn test_commitment_v1_stake_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    // Compare fields since metadata is skipped in serde.
-    // Note: chain_id has no getter on CommitmentTransaction; covered by assert_json_parity above.
-    assert_eq!(canonical.id(), roundtrip.id());
-    assert_eq!(canonical.signer(), roundtrip.signer());
-    assert_eq!(canonical.fee(), roundtrip.fee());
-    assert_eq!(canonical.value(), roundtrip.value());
-    assert_eq!(canonical.anchor(), roundtrip.anchor());
-    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
-    assert_eq!(canonical.signature(), roundtrip.signature());
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -159,36 +151,7 @@ fn test_block_header_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::IrysBlockHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::IrysBlockHeader = deserialized.into();
-    assert_eq!(canonical.block_hash, roundtrip.block_hash);
-    assert_eq!(canonical.signature, roundtrip.signature);
-    assert_eq!(canonical.height, roundtrip.height);
-    assert_eq!(canonical.diff, roundtrip.diff);
-    assert_eq!(canonical.cumulative_diff, roundtrip.cumulative_diff);
-    assert_eq!(canonical.solution_hash, roundtrip.solution_hash);
-    assert_eq!(canonical.last_diff_timestamp, roundtrip.last_diff_timestamp);
-    assert_eq!(
-        canonical.previous_solution_hash,
-        roundtrip.previous_solution_hash
-    );
-    assert_eq!(canonical.last_epoch_hash, roundtrip.last_epoch_hash);
-    assert_eq!(canonical.chunk_hash, roundtrip.chunk_hash);
-    assert_eq!(canonical.previous_block_hash, roundtrip.previous_block_hash);
-    assert_eq!(
-        canonical.previous_cumulative_diff,
-        roundtrip.previous_cumulative_diff
-    );
-    assert_eq!(canonical.poa, roundtrip.poa);
-    assert_eq!(canonical.reward_address, roundtrip.reward_address);
-    assert_eq!(canonical.reward_amount, roundtrip.reward_amount);
-    assert_eq!(canonical.miner_address, roundtrip.miner_address);
-    assert_eq!(canonical.timestamp, roundtrip.timestamp);
-    assert_eq!(canonical.system_ledgers, roundtrip.system_ledgers);
-    assert_eq!(canonical.data_ledgers, roundtrip.data_ledgers);
-    assert_eq!(canonical.evm_block_hash, roundtrip.evm_block_hash);
-    assert_eq!(canonical.vdf_limiter_info, roundtrip.vdf_limiter_info);
-    assert_eq!(canonical.oracle_irys_price, roundtrip.oracle_irys_price);
-    assert_eq!(canonical.ema_irys_price, roundtrip.ema_irys_price);
-    assert_eq!(canonical.treasury, roundtrip.treasury);
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
@@ -352,8 +315,7 @@ fn test_commitment_v1_unstake_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical.id(), roundtrip.id());
-    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -365,8 +327,7 @@ fn test_commitment_v2_pledge_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical.id(), roundtrip.id());
-    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -378,8 +339,7 @@ fn test_commitment_v2_unpledge_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical.id(), roundtrip.id());
-    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -391,8 +351,7 @@ fn test_commitment_v2_unstake_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical.id(), roundtrip.id());
-    assert_eq!(canonical.commitment_type(), roundtrip.commitment_type());
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
