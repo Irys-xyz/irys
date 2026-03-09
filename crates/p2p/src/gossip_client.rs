@@ -366,8 +366,8 @@ impl GossipClient {
                 }
             } else {
                 let wire_req: wire_types::GossipDataRequestV2 = (&requested_data).into();
-                let res: GossipResult<GossipResponse<Option<wire_types::GossipDataV2>>> =
-                    self.send_data_internal(
+                let res: GossipResult<GossipResponse<Option<wire_types::GossipDataV2>>> = self
+                    .send_data_internal(
                         &peer.1.address.gossip,
                         GossipRoutes::PullData,
                         &wire_req,

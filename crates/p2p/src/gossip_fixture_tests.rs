@@ -608,4 +608,3 @@ fn generate_fixture_json() {
     std::fs::write(&path, format!("{json}\n")).unwrap();
     println!("Wrote fixtures to {}", path.display());
 }
-

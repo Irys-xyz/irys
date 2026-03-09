@@ -16,8 +16,8 @@ use irys_types::{
     },
     BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, HandshakeRequestV1,
     HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysPeerId,
-    IrysSignature, PeerAddress, ProtocolVersion,
-    Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
+    IrysSignature, PeerAddress, ProtocolVersion, Signature, SystemTransactionLedger, TxChunkOffset,
+    UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
