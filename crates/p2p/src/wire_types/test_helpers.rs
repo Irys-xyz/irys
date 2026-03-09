@@ -395,6 +395,63 @@ pub(crate) fn canonical_gossip_request_v2() -> GossipRequestV2<irys_types::Unpac
 }
 
 // =============================================================================
+// NodeInfo builder
+// =============================================================================
+
+pub(crate) fn canonical_node_info() -> irys_types::version::NodeInfo {
+    irys_types::version::NodeInfo {
+        version: "1.2.3".to_string(),
+        peer_count: 5,
+        chain_id: 1270,
+        height: 42,
+        block_hash: test_h256(0xBB),
+        block_index_height: 40,
+        block_index_hash: test_h256(0xBC),
+        pending_blocks: 2,
+        is_syncing: false,
+        current_sync_height: 42,
+        uptime_secs: 3600,
+        mining_address: test_address(0xAA),
+        cumulative_difficulty: U256::from(50_000_u64),
+    }
+}
+
+// =============================================================================
+// BlockIndexItem / LedgerIndexItem builder
+// =============================================================================
+
+pub(crate) fn canonical_block_index_item() -> irys_types::block::BlockIndexItem {
+    irys_types::block::BlockIndexItem {
+        block_hash: test_h256(0xBB),
+        num_ledgers: 2,
+        ledgers: vec![
+            irys_types::block::LedgerIndexItem {
+                total_chunks: 1024,
+                tx_root: test_h256(0xF1),
+                ledger: irys_types::block::DataLedger::Publish,
+            },
+            irys_types::block::LedgerIndexItem {
+                total_chunks: 512,
+                tx_root: test_h256(0xF2),
+                ledger: irys_types::block::DataLedger::Submit,
+            },
+        ],
+    }
+}
+
+// =============================================================================
+// IrysTransactionResponse builders
+// =============================================================================
+
+pub(crate) fn canonical_irys_tx_response_storage() -> irys_types::IrysTransactionResponse {
+    irys_types::IrysTransactionResponse::Storage(canonical_data_tx_header())
+}
+
+pub(crate) fn canonical_irys_tx_response_commitment() -> irys_types::IrysTransactionResponse {
+    irys_types::IrysTransactionResponse::Commitment(canonical_commitment_v2_stake())
+}
+
+// =============================================================================
 // Execution payload (RethBlock) builder
 // =============================================================================
 

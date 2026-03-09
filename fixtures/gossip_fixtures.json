@@ -1,4 +1,24 @@
 {
+  "block_index_item": {
+    "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+    "ledgers": [
+      {
+        "ledger": "Publish",
+        "total_chunks": "1024",
+        "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
+      },
+      {
+        "ledger": "Submit",
+        "total_chunks": "512",
+        "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
+      }
+    ],
+    "num_ledgers": 2
+  },
+  "block_index_query": {
+    "height": 100,
+    "limit": 50
+  },
   "execution_payload": {
     "body": {
       "ommers": [],
@@ -25,6 +45,26 @@
   },
   "gossip_response_accepted": {
     "Accepted": null
+  },
+  "gossip_response_accepted_block_index": {
+    "Accepted": [
+      {
+        "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+        "ledgers": [
+          {
+            "ledger": "Publish",
+            "total_chunks": "1024",
+            "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
+          },
+          {
+            "ledger": "Submit",
+            "total_chunks": "512",
+            "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
+          }
+        ],
+        "num_ledgers": 2
+      }
+    ]
   },
   "gossip_response_accepted_bool": {
     "Accepted": true
@@ -93,6 +133,41 @@
       "timestamp": 1700000000000,
       "version": "1.2.3"
     }
+  },
+  "gossip_response_accepted_node_info": {
+    "Accepted": {
+      "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+      "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
+      "blockIndexHeight": "40",
+      "chainId": "1270",
+      "cumulativeDifficulty": "50000",
+      "currentSyncHeight": "42",
+      "height": "42",
+      "isSyncing": false,
+      "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+      "peerCount": 5,
+      "pendingBlocks": "2",
+      "uptimeSecs": "3600",
+      "version": "1.2.3"
+    }
+  },
+  "gossip_response_accepted_peer_list": {
+    "Accepted": [
+      {
+        "api": "192.168.1.1:4201",
+        "execution": {
+          "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "peering_tcp_addr": "192.168.1.1:30303"
+        },
+        "gossip": "192.168.1.1:4200"
+      }
+    ]
+  },
+  "gossip_response_accepted_whitelist": {
+    "Accepted": [
+      "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+      "3chLuAB9CqrCNL42WFwjPLk4GEtr"
+    ]
   },
   "gossip_response_rejected_gossip_disabled": {
     "Rejected": "GossipDisabled"
@@ -278,7 +353,39 @@
     "timestamp": 1700000000000,
     "version": "1.2.3"
   },
+  "irys_transaction_response_commitment": {
+    "anchor": "6URwbPipuA4MJLG7LCRRZuWnms3JZ9cRG3z9indXWz8G",
+    "chainId": "1270",
+    "commitmentType": {
+      "type": "stake"
+    },
+    "fee": "5000",
+    "id": "6QWeT6FpJrm8AF1btu6WH2k2Xhq6t5vbheKVfQavmeoZ",
+    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+    "signer": "29X6dD64ueYorg4VtHniED4za3gV",
+    "type": "commitment",
+    "value": "2000000",
+    "version": 2
+  },
+  "irys_transaction_response_storage": {
+    "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+    "bundleFormat": "1",
+    "chainId": "1270",
+    "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+    "dataSize": "1048576",
+    "headerSize": "256",
+    "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    "ledgerId": 1,
+    "permFee": "500000",
+    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+    "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
+    "termFee": "1000000",
+    "type": "storage",
+    "version": 1
+  },
   "leaf_b256": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "leaf_data_ledger_publish": "Publish",
+  "leaf_data_ledger_submit": "Submit",
   "leaf_h256": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
   "leaf_irys_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
   "leaf_irys_peer_id": "46H3RjUoc619APWwWJfKTQLFQHRN",
@@ -309,6 +416,10 @@
     "uptimeSecs": "3600",
     "version": "1.2.3"
   },
+  "protocol_versions": [
+    1,
+    2
+  ],
   "v1_data_request_block": {
     "Block": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC"
   },
@@ -1016,5 +1127,20 @@
     },
     "miner_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
     "peer_id": "3chLuAB9CqrCNL42WFwjPLk4GEtr"
+  },
+  "wire_node_info": {
+    "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+    "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
+    "blockIndexHeight": "40",
+    "chainId": "1270",
+    "cumulativeDifficulty": "50000",
+    "currentSyncHeight": "42",
+    "height": "42",
+    "isSyncing": false,
+    "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+    "peerCount": 5,
+    "pendingBlocks": "2",
+    "uptimeSecs": "3600",
+    "version": "1.2.3"
   }
 }

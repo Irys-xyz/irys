@@ -22,11 +22,13 @@
 //! 4. Add a fixture test in `gossip_fixture_tests.rs`.
 
 mod block;
+mod block_index;
 mod chunk;
 mod commitment;
 mod gossip;
 mod handshake;
 mod ingress;
+mod node_info;
 mod transaction;
 
 #[cfg(test)]
@@ -35,11 +37,21 @@ pub(crate) mod test_helpers;
 mod tests;
 
 pub(crate) use block::*;
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "used by tests; server adoption pending")
+)]
+pub(crate) use block_index::*;
 pub(crate) use chunk::*;
 pub(crate) use commitment::*;
 pub(crate) use gossip::*;
 pub(crate) use handshake::*;
 pub(crate) use ingress::*;
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "used by tests; server adoption pending")
+)]
+pub(crate) use node_info::*;
 pub(crate) use transaction::*;
 
 /// Implements JSON-specific `Serialize` and `Deserialize` for a versioned enum

@@ -15,8 +15,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
 
 use irys_types::{
+    block::{BlockIndexQuery, DataLedger},
     version::{NodeInfo, PeerAddress, ProtocolVersion},
-    IrysPeerId, RethPeerInfo, U256,
+    IrysAddress, IrysPeerId, RethPeerInfo, U256,
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -193,6 +194,22 @@ fn fixture_block_body_none() -> wire::BlockBody {
 
 fn fixture_execution_payload() -> RethBlock {
     canonical_execution_payload()
+}
+
+fn fixture_node_info() -> wire::NodeInfo {
+    (&canonical_node_info()).into()
+}
+
+fn fixture_block_index_item() -> wire::BlockIndexItem {
+    (&canonical_block_index_item()).into()
+}
+
+fn fixture_irys_tx_response_storage() -> wire::IrysTransactionResponse {
+    (&canonical_irys_tx_response_storage()).into()
+}
+
+fn fixture_irys_tx_response_commitment() -> wire::IrysTransactionResponse {
+    (&canonical_irys_tx_response_commitment()).into()
 }
 
 // =============================================================================
@@ -528,7 +545,7 @@ fixture_tests! {
     // Standalone ExecutionPayload (RethBlock)
     execution_payload => fixture_execution_payload(),
 
-    // NodeInfo
+    // NodeInfo (canonical — backwards compat) and wire type
     node_info => NodeInfo {
         version: "1.2.3".to_string(),
         peer_count: 5,
@@ -544,6 +561,32 @@ fixture_tests! {
         mining_address: test_address(0xAA),
         cumulative_difficulty: U256::from(50_000_u64),
     },
+    wire_node_info => fixture_node_info(),
+
+    // BlockIndexItem / LedgerIndexItem
+    block_index_item => fixture_block_index_item(),
+    block_index_query => BlockIndexQuery { height: 100, limit: 50 },
+
+    // DataLedger leaf variants
+    leaf_data_ledger_publish => DataLedger::Publish,
+    leaf_data_ledger_submit => DataLedger::Submit,
+
+    // IrysTransactionResponse variants
+    irys_transaction_response_storage => fixture_irys_tx_response_storage(),
+    irys_transaction_response_commitment => fixture_irys_tx_response_commitment(),
+
+    // GossipResponse envelope variants for GET endpoints
+    gossip_response_accepted_node_info =>
+        GossipResponse::Accepted(fixture_node_info()),
+    gossip_response_accepted_peer_list =>
+        GossipResponse::Accepted(vec![test_peer_address()]),
+    gossip_response_accepted_block_index =>
+        GossipResponse::Accepted(vec![fixture_block_index_item()]),
+    gossip_response_accepted_whitelist =>
+        GossipResponse::Accepted(vec![test_address(0xAA), test_address(0xBB)]),
+
+    // Protocol versions (returned by /protocol_version as bare Vec<u32>)
+    protocol_versions => ProtocolVersion::supported_versions_u32().to_vec(),
 }
 
 // =============================================================================
@@ -652,4 +695,46 @@ fn test_canonical_deserializes_v1_execution_payload_variant() {
 #[test]
 fn test_canonical_deserializes_v2_execution_payload_variant() {
     assert_canonical_deserializes_fixture::<wire::GossipDataV2>("v2_gossip_data_execution_payload");
+}
+
+#[test]
+fn test_canonical_deserializes_node_info() {
+    assert_canonical_deserializes_fixture::<GossipResponse<irys_types::version::NodeInfo>>(
+        "gossip_response_accepted_node_info",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_peer_list() {
+    assert_canonical_deserializes_fixture::<GossipResponse<Vec<irys_types::PeerAddress>>>(
+        "gossip_response_accepted_peer_list",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_block_index() {
+    assert_canonical_deserializes_fixture::<GossipResponse<Vec<irys_types::block::BlockIndexItem>>>(
+        "gossip_response_accepted_block_index",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_whitelist() {
+    assert_canonical_deserializes_fixture::<GossipResponse<Vec<IrysAddress>>>(
+        "gossip_response_accepted_whitelist",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_irys_transaction_response_storage() {
+    assert_canonical_deserializes_fixture::<irys_types::IrysTransactionResponse>(
+        "irys_transaction_response_storage",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_irys_transaction_response_commitment() {
+    assert_canonical_deserializes_fixture::<irys_types::IrysTransactionResponse>(
+        "irys_transaction_response_commitment",
+    );
 }

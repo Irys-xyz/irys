@@ -83,3 +83,35 @@ impl From<DataTransactionHeader> for irys_types::DataTransactionHeader {
         }
     }
 }
+
+/// Wire type for [`irys_types::IrysTransactionResponse`].
+///
+/// Mirrors the `#[serde(tag = "type", rename_all = "camelCase")]` representation
+/// so that upstream changes to the tagging or variant names are detected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(super::CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(DataTransactionHeader),
+}
+
+impl From<&irys_types::IrysTransactionResponse> for IrysTransactionResponse {
+    fn from(r: &irys_types::IrysTransactionResponse) -> Self {
+        match r {
+            irys_types::IrysTransactionResponse::Commitment(c) => Self::Commitment(c.into()),
+            irys_types::IrysTransactionResponse::Storage(s) => Self::Storage(s.into()),
+        }
+    }
+}
+
+impl From<IrysTransactionResponse> for irys_types::IrysTransactionResponse {
+    fn from(r: IrysTransactionResponse) -> Self {
+        match r {
+            IrysTransactionResponse::Commitment(c) => Self::Commitment(c.into()),
+            IrysTransactionResponse::Storage(s) => Self::Storage(s.into()),
+        }
+    }
+}
