@@ -1,9 +1,8 @@
 use irys_types::{IrysAddress, IrysSignature, H256, U256};
 use serde::{Deserialize, Serialize};
 
-use super::impl_json_version_tagged_serde;
+use super::{impl_json_version_tagged_serde, impl_mirror_enum_from, impl_versioned_tx_from};
 
-/// Wire type for CommitmentTypeV1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV1 {
@@ -21,7 +20,6 @@ pub enum CommitmentTypeV1 {
     Unstake,
 }
 
-/// Wire type for CommitmentTypeV2 (adds `UpdateRewardAddress` variant).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV2 {
@@ -43,7 +41,6 @@ pub enum CommitmentTypeV2 {
     },
 }
 
-/// Inner fields for the versioned CommitmentTransactionV1 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentTransactionV1Inner {
@@ -59,7 +56,6 @@ pub struct CommitmentTransactionV1Inner {
     pub signature: IrysSignature,
 }
 
-/// Inner fields for the versioned CommitmentTransactionV2 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentTransactionV2Inner {
@@ -88,158 +84,36 @@ impl_json_version_tagged_serde!(CommitmentTransaction {
     2 => V2(CommitmentTransactionV2Inner),
 });
 
-// -- Conversions --
+impl_mirror_enum_from!(irys_types::CommitmentTypeV1, CommitmentTypeV1 {
+    Stake,
+    Pledge { pledge_count_before_executing },
+    Unpledge { pledge_count_before_executing, partition_hash },
+    Unstake,
+});
 
-impl From<&irys_types::CommitmentTypeV1> for CommitmentTypeV1 {
-    fn from(ct: &irys_types::CommitmentTypeV1) -> Self {
-        match ct {
-            irys_types::CommitmentTypeV1::Stake => Self::Stake,
-            irys_types::CommitmentTypeV1::Pledge {
-                pledge_count_before_executing,
-            } => Self::Pledge {
-                pledge_count_before_executing: *pledge_count_before_executing,
-            },
-            irys_types::CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            } => Self::Unpledge {
-                pledge_count_before_executing: *pledge_count_before_executing,
-                partition_hash: *partition_hash,
-            },
-            irys_types::CommitmentTypeV1::Unstake => Self::Unstake,
-        }
-    }
-}
+impl_mirror_enum_from!(irys_types::CommitmentTypeV2, CommitmentTypeV2 {
+    Stake,
+    Pledge { pledge_count_before_executing },
+    Unpledge { pledge_count_before_executing, partition_hash },
+    Unstake,
+    UpdateRewardAddress { new_reward_address },
+});
 
-impl From<&irys_types::CommitmentTypeV2> for CommitmentTypeV2 {
-    fn from(ct: &irys_types::CommitmentTypeV2) -> Self {
-        match ct {
-            irys_types::CommitmentTypeV2::Stake => Self::Stake,
-            irys_types::CommitmentTypeV2::Pledge {
-                pledge_count_before_executing,
-            } => Self::Pledge {
-                pledge_count_before_executing: *pledge_count_before_executing,
-            },
-            irys_types::CommitmentTypeV2::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            } => Self::Unpledge {
-                pledge_count_before_executing: *pledge_count_before_executing,
-                partition_hash: *partition_hash,
-            },
-            irys_types::CommitmentTypeV2::Unstake => Self::Unstake,
-            irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address } => {
-                Self::UpdateRewardAddress {
-                    new_reward_address: *new_reward_address,
-                }
-            }
-        }
+impl_versioned_tx_from!(
+    irys_types::CommitmentTransaction => CommitmentTransaction {
+        V1 {
+            gossip: CommitmentTransactionV1Inner,
+            meta: irys_types::CommitmentV1WithMetadata,
+            tx: irys_types::CommitmentTransactionV1,
+            fields { id, anchor, signer, chain_id, fee, value, signature }
+            convert { commitment_type }
+        },
+        V2 {
+            gossip: CommitmentTransactionV2Inner,
+            meta: irys_types::CommitmentV2WithMetadata,
+            tx: irys_types::CommitmentTransactionV2,
+            fields { id, anchor, signer, chain_id, fee, value, signature }
+            convert { commitment_type }
+        },
     }
-}
-
-impl From<CommitmentTypeV1> for irys_types::CommitmentTypeV1 {
-    fn from(ct: CommitmentTypeV1) -> Self {
-        match ct {
-            CommitmentTypeV1::Stake => Self::Stake,
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing,
-            } => Self::Pledge {
-                pledge_count_before_executing,
-            },
-            CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            } => Self::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            },
-            CommitmentTypeV1::Unstake => Self::Unstake,
-        }
-    }
-}
-
-impl From<CommitmentTypeV2> for irys_types::CommitmentTypeV2 {
-    fn from(ct: CommitmentTypeV2) -> Self {
-        match ct {
-            CommitmentTypeV2::Stake => Self::Stake,
-            CommitmentTypeV2::Pledge {
-                pledge_count_before_executing,
-            } => Self::Pledge {
-                pledge_count_before_executing,
-            },
-            CommitmentTypeV2::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            } => Self::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            },
-            CommitmentTypeV2::Unstake => Self::Unstake,
-            CommitmentTypeV2::UpdateRewardAddress { new_reward_address } => {
-                Self::UpdateRewardAddress { new_reward_address }
-            }
-        }
-    }
-}
-
-impl From<&irys_types::CommitmentTransaction> for CommitmentTransaction {
-    fn from(ct: &irys_types::CommitmentTransaction) -> Self {
-        match ct {
-            irys_types::CommitmentTransaction::V1(wm) => Self::V1(CommitmentTransactionV1Inner {
-                id: wm.tx.id,
-                anchor: wm.tx.anchor,
-                signer: wm.tx.signer,
-                commitment_type: (&wm.tx.commitment_type).into(),
-                chain_id: wm.tx.chain_id,
-                fee: wm.tx.fee,
-                value: wm.tx.value,
-                signature: wm.tx.signature,
-            }),
-            irys_types::CommitmentTransaction::V2(wm) => Self::V2(CommitmentTransactionV2Inner {
-                id: wm.tx.id,
-                anchor: wm.tx.anchor,
-                signer: wm.tx.signer,
-                commitment_type: (&wm.tx.commitment_type).into(),
-                chain_id: wm.tx.chain_id,
-                fee: wm.tx.fee,
-                value: wm.tx.value,
-                signature: wm.tx.signature,
-            }),
-        }
-    }
-}
-
-impl From<CommitmentTransaction> for irys_types::CommitmentTransaction {
-    fn from(ct: CommitmentTransaction) -> Self {
-        match ct {
-            CommitmentTransaction::V1(inner) => Self::V1(irys_types::CommitmentV1WithMetadata {
-                tx: irys_types::CommitmentTransactionV1 {
-                    id: inner.id,
-                    anchor: inner.anchor,
-                    signer: inner.signer,
-                    commitment_type: inner.commitment_type.into(),
-                    chain_id: inner.chain_id,
-                    fee: inner.fee,
-                    value: inner.value,
-                    signature: inner.signature,
-                },
-                // Metadata is not transmitted over the wire; initialize to default on deserialization.
-                metadata: Default::default(),
-            }),
-            CommitmentTransaction::V2(inner) => Self::V2(irys_types::CommitmentV2WithMetadata {
-                tx: irys_types::CommitmentTransactionV2 {
-                    id: inner.id,
-                    anchor: inner.anchor,
-                    signer: inner.signer,
-                    commitment_type: inner.commitment_type.into(),
-                    chain_id: inner.chain_id,
-                    fee: inner.fee,
-                    value: inner.value,
-                    signature: inner.signature,
-                },
-                // Metadata is not transmitted over the wire; initialize to default on deserialization.
-                metadata: Default::default(),
-            }),
-        }
-    }
-}
+);

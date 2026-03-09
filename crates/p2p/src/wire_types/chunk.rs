@@ -1,8 +1,6 @@
 use irys_types::{serialization::Base64, DataRoot, TxChunkOffset};
 use serde::{Deserialize, Serialize};
 
-/// Sovereign wire type for UnpackedChunk.
-/// This type owns its serde configuration independently of irys_types::UnpackedChunk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UnpackedChunk {
