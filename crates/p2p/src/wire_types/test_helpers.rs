@@ -18,9 +18,11 @@ use irys_types::{
     HandshakeResponseV2, IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVersion,
     Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
+use irys_types::RethPeerInfo;
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 // =============================================================================
 // Primitive builders
@@ -40,6 +42,23 @@ pub(crate) fn test_signature() -> IrysSignature {
         reth::revm::primitives::U256::from(2_u64),
         false,
     ))
+}
+
+/// Build a deterministic, non-default [`PeerAddress`] seeded by `seed`.
+/// Each seed produces distinct IP addresses and ports so round-trip tests
+/// will fail if any address field is lost or zeroed.
+pub(crate) fn test_peer_address(seed: u8) -> PeerAddress {
+    PeerAddress {
+        gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, seed, 1)), 9000 + seed as u16),
+        api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, seed, 2)), 9100 + seed as u16),
+        execution: RethPeerInfo {
+            peering_tcp_addr: SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, seed, 3)),
+                30300 + seed as u16,
+            ),
+            peer_id: reth::transaction_pool::PeerId::from([seed; 64]),
+        },
+    }
 }
 
 pub(crate) fn test_base64(bytes: &[u8]) -> Base64 {
@@ -332,7 +351,7 @@ pub(crate) fn canonical_handshake_request_v1() -> HandshakeRequestV1 {
         protocol_version: ProtocolVersion::V1,
         mining_address: test_address(0xA0),
         chain_id: 1270,
-        address: PeerAddress::default(),
+        address: test_peer_address(0x01),
         timestamp: 1_700_000_000_000_u64,
         user_agent: Some("test-agent/1.0".to_string()),
         signature: test_signature(),
@@ -346,7 +365,7 @@ pub(crate) fn canonical_handshake_request_v2() -> HandshakeRequestV2 {
         mining_address: test_address(0xA0),
         peer_id: IrysPeerId::from([0xBB; 20]),
         chain_id: 1270,
-        address: PeerAddress::default(),
+        address: test_peer_address(0x02),
         timestamp: 1_700_000_000_000_u64,
         user_agent: Some("test-agent/2.0".to_string()),
         consensus_config_hash: test_h256(0xCC),
@@ -358,7 +377,7 @@ pub(crate) fn canonical_handshake_response_v1() -> HandshakeResponseV1 {
     HandshakeResponseV1 {
         version: Version::new(0, 1, 0),
         protocol_version: ProtocolVersion::V1,
-        peers: vec![PeerAddress::default()],
+        peers: vec![test_peer_address(0x03)],
         timestamp: 1_700_000_000_000_u64,
         message: Some("welcome".to_string()),
     }
@@ -368,7 +387,7 @@ pub(crate) fn canonical_handshake_response_v2() -> HandshakeResponseV2 {
     HandshakeResponseV2 {
         version: Version::new(0, 1, 0),
         protocol_version: ProtocolVersion::V2,
-        peers: vec![PeerAddress::default()],
+        peers: vec![test_peer_address(0x04)],
         timestamp: 1_700_000_000_000_u64,
         message: Some("welcome".to_string()),
         consensus_config_hash: test_h256(0xCC),
