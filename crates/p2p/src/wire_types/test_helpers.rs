@@ -1,3 +1,4 @@
+use irys_types::RethPeerInfo;
 use irys_types::{
     block::{IrysBlockHeader, IrysBlockHeaderV1, PoaData, VDFLimiterInfo},
     chunk::UnpackedChunk,
@@ -18,7 +19,6 @@ use irys_types::{
     HandshakeResponseV2, IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVersion,
     Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
-use irys_types::RethPeerInfo;
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
@@ -49,8 +49,14 @@ pub(crate) fn test_signature() -> IrysSignature {
 /// will fail if any address field is lost or zeroed.
 pub(crate) fn test_peer_address(seed: u8) -> PeerAddress {
     PeerAddress {
-        gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, seed, 1)), 9000 + seed as u16),
-        api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, seed, 2)), 9100 + seed as u16),
+        gossip: SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, seed, 1)),
+            9000 + seed as u16,
+        ),
+        api: SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, seed, 2)),
+            9100 + seed as u16,
+        ),
         execution: RethPeerInfo {
             peering_tcp_addr: SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(10, 0, seed, 3)),
