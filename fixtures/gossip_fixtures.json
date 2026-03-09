@@ -179,7 +179,7 @@
       "height": "42",
       "isSyncing": false,
       "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-      "peerCount": 5,
+      "peerCount": "5",
       "pendingBlocks": "2",
       "uptimeSecs": "3600",
       "version": "1.2.3"
@@ -445,7 +445,7 @@
     "height": "42",
     "isSyncing": false,
     "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-    "peerCount": 5,
+    "peerCount": "5",
     "pendingBlocks": "2",
     "uptimeSecs": "3600",
     "version": "1.2.3"
@@ -1172,7 +1172,7 @@
     "height": "42",
     "isSyncing": false,
     "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-    "peerCount": 5,
+    "peerCount": "5",
     "pendingBlocks": "2",
     "uptimeSecs": "3600",
     "version": "1.2.3"
