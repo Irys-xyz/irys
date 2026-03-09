@@ -315,27 +315,37 @@ fn test_gossip_data_v1_parity() {
     let canonical = gossip::v1::GossipDataV1::Chunk(canonical_unpacked_chunk());
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v1::GossipDataV1 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // Transaction variant
     let canonical = gossip::v1::GossipDataV1::Transaction(canonical_data_tx_header());
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v1::GossipDataV1 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // CommitmentTransaction variant
     let canonical =
         gossip::v1::GossipDataV1::CommitmentTransaction(canonical_commitment_v2_stake());
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v1::GossipDataV1 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // Block variant (canonical wraps in Arc)
     let canonical = gossip::v1::GossipDataV1::Block(Arc::new(canonical_block_header()));
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v1::GossipDataV1 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // IngressProof variant
     let canonical = gossip::v1::GossipDataV1::IngressProof(canonical_ingress_proof());
     let wire: wire::GossipDataV1 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v1::GossipDataV1 = wire.into();
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
@@ -348,32 +358,44 @@ fn test_gossip_data_v2_parity() {
     let canonical = gossip::v2::GossipDataV2::Chunk(Arc::new(canonical_unpacked_chunk()));
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // Transaction variant
     let canonical = gossip::v2::GossipDataV2::Transaction(canonical_data_tx_header());
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // CommitmentTransaction variant
     let canonical =
         gossip::v2::GossipDataV2::CommitmentTransaction(canonical_commitment_v2_stake());
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // BlockHeader variant (canonical wraps in Arc)
     let canonical = gossip::v2::GossipDataV2::BlockHeader(Arc::new(canonical_block_header()));
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // BlockBody variant (canonical wraps in Arc)
     let canonical = gossip::v2::GossipDataV2::BlockBody(Arc::new(canonical_block_body()));
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 
     // IngressProof variant
     let canonical = gossip::v2::GossipDataV2::IngressProof(canonical_ingress_proof());
     let wire: wire::GossipDataV2 = (&canonical).into();
     assert_json_parity(&canonical, &wire);
+    let roundtrip: gossip::v2::GossipDataV2 = wire.into();
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================

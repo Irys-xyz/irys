@@ -84,7 +84,7 @@ pub mod v1 {
         }
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub enum GossipDataV1 {
         Chunk(UnpackedChunk),
         Transaction(DataTransactionHeader),
@@ -240,7 +240,7 @@ pub mod v2 {
         }
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub enum GossipDataV2 {
         Chunk(Arc<UnpackedChunk>),
         Transaction(DataTransactionHeader),
