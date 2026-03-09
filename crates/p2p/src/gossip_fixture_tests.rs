@@ -11,13 +11,12 @@
 //!
 //! To regenerate fixtures: `cargo test -p irys-p2p generate_fixture_json -- --ignored`
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
 
 use irys_types::{
     block::{BlockIndexQuery, DataLedger},
     version::{NodeInfo, PeerAddress, ProtocolVersion},
-    IrysPeerId, RethPeerInfo, U256,
+    IrysPeerId, U256,
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -36,14 +35,7 @@ fn test_peer_id(byte: u8) -> IrysPeerId {
 }
 
 fn test_peer_address() -> PeerAddress {
-    PeerAddress {
-        gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 4200),
-        api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 4201),
-        execution: RethPeerInfo {
-            peering_tcp_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 30303),
-            peer_id: Default::default(),
-        },
-    }
+    crate::wire_types::test_helpers::test_peer_address(0x01)
 }
 
 fn fixture_unpacked_chunk() -> wire::UnpackedChunk {

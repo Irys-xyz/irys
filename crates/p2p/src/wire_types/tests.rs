@@ -300,6 +300,9 @@ fn test_gossip_data_v1_roundtrip() {
     assert_roundtrip(gossip::v1::GossipDataV1::Block(Arc::new(
         canonical_block_header(),
     )));
+    assert_roundtrip(gossip::v1::GossipDataV1::ExecutionPayload(
+        canonical_execution_payload(),
+    ));
     assert_roundtrip(gossip::v1::GossipDataV1::IngressProof(
         canonical_ingress_proof(),
     ));
@@ -334,6 +337,9 @@ fn test_gossip_data_v2_roundtrip() {
     assert_roundtrip(gossip::v2::GossipDataV2::BlockBody(Arc::new(
         canonical_block_body(),
     )));
+    assert_roundtrip(gossip::v2::GossipDataV2::ExecutionPayload(
+        canonical_execution_payload(),
+    ));
     assert_roundtrip(gossip::v2::GossipDataV2::IngressProof(
         canonical_ingress_proof(),
     ));

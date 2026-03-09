@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
-    pub peer_count: usize,
+    #[serde(with = "irys_types::string_u64")]
+    pub peer_count: u64,
     #[serde(with = "irys_types::string_u64")]
     pub chain_id: u64,
     #[serde(with = "irys_types::string_u64")]
@@ -22,8 +23,8 @@ pub struct NodeInfo {
     #[serde(with = "irys_types::string_u64")]
     pub pending_blocks: u64,
     pub is_syncing: bool,
-    #[serde(with = "irys_types::serialization::string_usize")]
-    pub current_sync_height: usize,
+    #[serde(with = "irys_types::string_u64")]
+    pub current_sync_height: u64,
     #[serde(with = "irys_types::string_u64")]
     pub uptime_secs: u64,
     pub mining_address: IrysAddress,
