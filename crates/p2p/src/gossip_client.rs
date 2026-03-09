@@ -341,10 +341,7 @@ impl GossipClient {
                 }
                 if let Some(req_v1) = requested_data.to_v1() {
                     let wire_req: wire_types::GossipDataRequestV1 = (&req_v1).into();
-                    // NOTE: The server serializes this response using wire_types::GossipDataV1,
-                    // but we deserialize using the canonical type. This works because wire types
-                    // produce identical JSON (enforced by parity tests in wire_types/tests.rs).
-                    let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
+                    let res_v1: GossipResult<GossipResponse<Option<wire_types::GossipDataV1>>> =
                         self.send_data_internal(
                             &peer.1.address.gossip,
                             GossipRoutes::PullData,
@@ -355,7 +352,10 @@ impl GossipClient {
 
                     res_v1.map(|response| match response {
                         GossipResponse::Accepted(maybe_data) => {
-                            GossipResponse::Accepted(maybe_data.map(GossipDataV2::from))
+                            GossipResponse::Accepted(maybe_data.map(|wire| {
+                                let canonical: irys_types::v1::GossipDataV1 = wire.into();
+                                GossipDataV2::from(canonical)
+                            }))
                         }
                         GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
                     })
@@ -366,15 +366,20 @@ impl GossipClient {
                 }
             } else {
                 let wire_req: wire_types::GossipDataRequestV2 = (&requested_data).into();
-                // NOTE: Server serializes response using wire_types::GossipDataV2;
-                // we deserialize using canonical type (parity enforced by tests).
-                self.send_data_internal(
-                    &peer.1.address.gossip,
-                    GossipRoutes::PullData,
-                    &wire_req,
-                    ProtocolVersion::V2,
-                )
-                .await
+                let res: GossipResult<GossipResponse<Option<wire_types::GossipDataV2>>> =
+                    self.send_data_internal(
+                        &peer.1.address.gossip,
+                        GossipRoutes::PullData,
+                        &wire_req,
+                        ProtocolVersion::V2,
+                    )
+                    .await;
+                res.map(|response| match response {
+                    GossipResponse::Accepted(maybe_data) => {
+                        GossipResponse::Accepted(maybe_data.map(Into::into))
+                    }
+                    GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
+                })
             };
 
         let response_time = start_time.elapsed();
@@ -527,13 +532,14 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponseV1> =
+        let response: GossipResponse<wire_types::HandshakeResponseV1> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
         match response {
-            GossipResponse::Accepted(v1_response) => {
+            GossipResponse::Accepted(v1_wire) => {
+                let v1_response: HandshakeResponseV1 = v1_wire.into();
                 // Convert V1 response to V2 format for internal compatibility
                 let v2_response = HandshakeResponseV2 {
                     version: v1_response.version,
@@ -598,13 +604,14 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponseV2> =
+        let response: GossipResponse<wire_types::HandshakeResponseV2> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
         match response {
-            GossipResponse::Accepted(version_response) => {
+            GossipResponse::Accepted(wire_response) => {
+                let version_response: HandshakeResponseV2 = wire_response.into();
                 Ok(PeerResponse::Accepted(version_response))
             }
             GossipResponse::Rejected(reason) => match reason {

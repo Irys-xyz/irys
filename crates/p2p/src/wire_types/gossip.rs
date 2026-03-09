@@ -10,7 +10,6 @@ use super::{
     UnpackedChunk,
 };
 
-/// V1 gossip data envelope. Each variant wraps a wire type for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV1 {
     Chunk(UnpackedChunk),
@@ -21,7 +20,6 @@ pub enum GossipDataV1 {
     IngressProof(IngressProof),
 }
 
-/// V2 gossip data envelope. Splits Block into separate BlockHeader and BlockBody variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV2 {
     Chunk(UnpackedChunk),
@@ -33,7 +31,6 @@ pub enum GossipDataV2 {
     IngressProof(IngressProof),
 }
 
-/// V1 data request — identifies data to fetch by hash.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV1 {
     ExecutionPayload(B256),
@@ -42,7 +39,6 @@ pub enum GossipDataRequestV1 {
     Transaction(H256),
 }
 
-/// V2 data request — adds separate BlockHeader/BlockBody request variants.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV2 {
     ExecutionPayload(B256),
@@ -52,22 +48,18 @@ pub enum GossipDataRequestV2 {
     Transaction(H256),
 }
 
-/// V1 request wrapper — carries miner_address + payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRequestV1<T> {
     pub miner_address: IrysAddress,
     pub data: T,
 }
 
-/// V2 request wrapper — adds peer_id to the V1 wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRequestV2<T> {
     pub peer_id: IrysPeerId,
     pub miner_address: IrysAddress,
     pub data: T,
 }
-
-// -- Conversions for GossipDataV1 --
 
 impl From<&irys_types::gossip::v1::GossipDataV1> for GossipDataV1 {
     fn from(d: &irys_types::gossip::v1::GossipDataV1) -> Self {
@@ -101,8 +93,6 @@ impl From<GossipDataV1> for irys_types::gossip::v1::GossipDataV1 {
         }
     }
 }
-
-// -- Conversions for GossipDataV2 --
 
 impl From<&irys_types::gossip::v2::GossipDataV2> for GossipDataV2 {
     fn from(d: &irys_types::gossip::v2::GossipDataV2) -> Self {
@@ -149,8 +139,6 @@ impl From<GossipDataV2> for irys_types::gossip::v2::GossipDataV2 {
     }
 }
 
-// -- Conversions for GossipDataRequestV1/V2 --
-
 super::impl_mirror_enum_from!(
     irys_types::gossip::v1::GossipDataRequestV1,
     GossipDataRequestV1(ExecutionPayload, Block, Chunk, Transaction,)
@@ -160,8 +148,6 @@ super::impl_mirror_enum_from!(
     irys_types::gossip::v2::GossipDataRequestV2,
     GossipDataRequestV2(ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction,)
 );
-
-// -- Conversions for GossipRequestV1/V2 --
 
 impl<T, U: From<T>> From<irys_types::GossipRequestV1<T>> for GossipRequestV1<U> {
     fn from(r: irys_types::GossipRequestV1<T>) -> Self {

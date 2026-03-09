@@ -2,7 +2,6 @@ use irys_types::{IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVe
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-/// Sovereign wire type for HandshakeRequestV1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequestV1 {
     pub version: Version,
@@ -15,7 +14,6 @@ pub struct HandshakeRequestV1 {
     pub signature: IrysSignature,
 }
 
-/// Sovereign wire type for HandshakeRequestV2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequestV2 {
     pub version: Version,
@@ -30,7 +28,6 @@ pub struct HandshakeRequestV2 {
     pub signature: IrysSignature,
 }
 
-/// Sovereign wire type for HandshakeResponseV1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeResponseV1 {
     pub version: Version,
@@ -40,7 +37,6 @@ pub struct HandshakeResponseV1 {
     pub message: Option<String>,
 }
 
-/// Sovereign wire type for HandshakeResponseV2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeResponseV2 {
     pub version: Version,
@@ -50,8 +46,6 @@ pub struct HandshakeResponseV2 {
     pub message: Option<String>,
     pub consensus_config_hash: H256,
 }
-
-// -- Conversions --
 
 super::impl_mirror_from!(irys_types::HandshakeRequestV1 => HandshakeRequestV1 {
     version, protocol_version, mining_address, chain_id, address, timestamp, user_agent, signature,

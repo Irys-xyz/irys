@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use super::impl_json_version_tagged_serde;
 
-/// Inner fields for IngressProof V1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngressProofV1Inner {
     pub signature: IrysSignature,
@@ -13,7 +12,6 @@ pub struct IngressProofV1Inner {
     pub anchor: H256,
 }
 
-/// Sovereign wire type for IngressProof (IntegerTagged-compatible).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IngressProof {
     V1(IngressProofV1Inner),
