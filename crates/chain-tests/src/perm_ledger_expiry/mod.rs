@@ -11,10 +11,11 @@ use tracing::info;
 /// - After epoch_length epochs, perm slots are marked expired
 /// - No fee distribution shadow transactions are generated for perm expiry
 /// - Expired perm partitions are returned to capacity pool
+/// - User balance is unchanged by perm expiry (no fees or refunds)
 #[test_log::test(tokio::test)]
 async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 32; // 1 chunk per tx
+    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
     const BLOCKS_PER_EPOCH: u64 = 3;
     const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
     const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
@@ -51,12 +52,46 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
 
     // Upload chunks to trigger promotion to Publish
     node.upload_chunks(&tx).await?;
-    node.wait_for_ingress_proofs(vec![tx.header.id], 20).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
 
-    // Mine through epochs until expiry
-    let target_height = (PUBLISH_LEDGER_EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH;
-    info!("Mining to height {} to trigger perm expiry", target_height);
+    // Mine 1 block to include tx (triggers promotion to Publish)
+    node.mine_block().await?;
 
+    // Capture balance before expiry mining
+    let pre_expiry_height = node.get_canonical_chain_height().await;
+    let pre_expiry_block = node.get_block_by_height(pre_expiry_height).await?;
+    let pre_expiry_balance = node
+        .get_balance(signer.address(), pre_expiry_block.evm_block_hash)
+        .await;
+    info!("User balance before expiry mining: {}", pre_expiry_balance);
+
+    // Mine to first epoch boundary to trigger additional slot allocation
+    let (_, epoch_height) = node.mine_until_next_epoch().await?;
+    info!("Reached first epoch boundary at height {}", epoch_height);
+
+    // Verify we have 2+ perm slots (last-slot protection prevents single-slot expiry)
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        perm_slots.len() >= 2,
+        "Expected 2+ perm slots after epoch boundary, got {}",
+        perm_slots.len()
+    );
+
+    // Derive expiry target from observed state
+    let slot0_last_height = perm_slots[0].last_height;
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let earliest_expiry = min_blocks + slot0_last_height;
+    // Round up to epoch boundary
+    let target_height =
+        ((earliest_expiry + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    info!(
+        "Slot 0 last_height={}, min_blocks={}, target expiry height={}",
+        slot0_last_height, min_blocks, target_height
+    );
+
+    // Mine to expiry target
     let current_height = node.get_canonical_chain_height().await;
     for _ in current_height..target_height {
         node.mine_block().await?;
@@ -92,7 +127,6 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     info!("{} of {} perm slots are expired", expired_count, num_slots);
 
     // --- Assertion 2: No TermFeeReward shadow txs for Publish expiry ---
-    // The block at the expiry boundary must exist since we asserted final_height >= target_height.
     let epoch_block = node.get_block_by_height(target_height).await?;
     let evm_block = node
         .wait_for_evm_block(epoch_block.evm_block_hash, 30)
@@ -133,6 +167,16 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
         }
     }
     info!("Verified expired perm partitions are in capacity pool");
+
+    // --- Assertion 4: User balance unchanged after perm expiry ---
+    let post_expiry_block = node.get_block_by_height(final_height).await?;
+    let post_expiry_balance = node
+        .get_balance(signer.address(), post_expiry_block.evm_block_hash)
+        .await;
+    assert_eq!(
+        pre_expiry_balance, post_expiry_balance,
+        "User balance should not change due to perm expiry (no fees or refunds)"
+    );
 
     info!("Publish ledger expiry test passed!");
     node.stop().await;

@@ -46,7 +46,7 @@ config.consensus.get_mut().epoch.publish_ledger_epoch_length = Some(PUBLISH_LEDG
 
 ---
 
-### Task 1: User Balance Unchanged After Perm Expiry
+### Task 1: User Balance Unchanged After Perm Expiry ✅ DONE
 
 **What:** Add balance assertions to the existing `heavy_perm_ledger_expiry_basic` test.
 
