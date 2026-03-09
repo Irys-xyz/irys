@@ -648,3 +648,53 @@ fn test_gossip_request_v2_parity() {
     };
     assert_json_parity(&canonical, &wire);
 }
+
+// =============================================================================
+// NodeInfo parity
+// =============================================================================
+
+#[test]
+fn test_node_info_parity() {
+    let canonical = canonical_node_info();
+    let wire_type: wire::NodeInfo = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::NodeInfo = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::version::NodeInfo = deserialized.into();
+    // NodeInfo doesn't derive PartialEq, so compare via JSON
+    assert_json_parity(&canonical, &roundtrip);
+}
+
+// =============================================================================
+// BlockIndexItem parity
+// =============================================================================
+
+#[test]
+fn test_block_index_item_parity() {
+    let canonical = canonical_block_index_item();
+    let wire_type: wire::BlockIndexItem = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::BlockIndexItem = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::block::BlockIndexItem = deserialized.into();
+    assert_eq!(canonical, roundtrip);
+}
+
+// =============================================================================
+// IrysTransactionResponse parity
+// =============================================================================
+
+#[rstest::rstest]
+#[case::storage(canonical_irys_tx_response_storage())]
+#[case::commitment(canonical_irys_tx_response_commitment())]
+fn test_irys_transaction_response_parity(#[case] canonical: IrysTransactionResponse) {
+    let wire_type: wire::IrysTransactionResponse = (&canonical).into();
+    assert_json_parity(&canonical, &wire_type);
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::IrysTransactionResponse = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: IrysTransactionResponse = deserialized.into();
+    assert_eq!(canonical, roundtrip);
+}
