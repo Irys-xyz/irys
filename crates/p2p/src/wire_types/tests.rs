@@ -603,35 +603,25 @@ fn test_gossip_data_v2_parity() {
 // GossipDataRequest parity
 // =============================================================================
 
-#[test]
-fn test_gossip_data_request_v1_parity() {
-    use reth::revm::primitives::B256;
-    let variants = [
-        gossip::v1::GossipDataRequestV1::ExecutionPayload(B256::from([0xAA; 32])),
-        gossip::v1::GossipDataRequestV1::Block(test_h256(0xBB)),
-        gossip::v1::GossipDataRequestV1::Chunk(test_h256(0xCC)),
-        gossip::v1::GossipDataRequestV1::Transaction(test_h256(0xDD)),
-    ];
-    for canonical in &variants {
-        let wire: wire::GossipDataRequestV1 = canonical.into();
-        assert_json_parity(canonical, &wire);
-    }
+#[rstest::rstest]
+#[case::execution_payload(gossip::v1::GossipDataRequestV1::ExecutionPayload(reth::revm::primitives::B256::from([0xAA; 32])))]
+#[case::block(gossip::v1::GossipDataRequestV1::Block(test_h256(0xBB)))]
+#[case::chunk(gossip::v1::GossipDataRequestV1::Chunk(test_h256(0xCC)))]
+#[case::transaction(gossip::v1::GossipDataRequestV1::Transaction(test_h256(0xDD)))]
+fn test_gossip_data_request_v1_parity(#[case] canonical: gossip::v1::GossipDataRequestV1) {
+    let wire: wire::GossipDataRequestV1 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
 }
 
-#[test]
-fn test_gossip_data_request_v2_parity() {
-    use reth::revm::primitives::B256;
-    let variants = [
-        gossip::v2::GossipDataRequestV2::ExecutionPayload(B256::from([0xAA; 32])),
-        gossip::v2::GossipDataRequestV2::BlockHeader(test_h256(0xBB)),
-        gossip::v2::GossipDataRequestV2::BlockBody(test_h256(0xCC)),
-        gossip::v2::GossipDataRequestV2::Chunk(test_h256(0xDD)),
-        gossip::v2::GossipDataRequestV2::Transaction(test_h256(0xEE)),
-    ];
-    for canonical in &variants {
-        let wire: wire::GossipDataRequestV2 = canonical.into();
-        assert_json_parity(canonical, &wire);
-    }
+#[rstest::rstest]
+#[case::execution_payload(gossip::v2::GossipDataRequestV2::ExecutionPayload(reth::revm::primitives::B256::from([0xAA; 32])))]
+#[case::block_header(gossip::v2::GossipDataRequestV2::BlockHeader(test_h256(0xBB)))]
+#[case::block_body(gossip::v2::GossipDataRequestV2::BlockBody(test_h256(0xCC)))]
+#[case::chunk(gossip::v2::GossipDataRequestV2::Chunk(test_h256(0xDD)))]
+#[case::transaction(gossip::v2::GossipDataRequestV2::Transaction(test_h256(0xEE)))]
+fn test_gossip_data_request_v2_parity(#[case] canonical: gossip::v2::GossipDataRequestV2) {
+    let wire: wire::GossipDataRequestV2 = (&canonical).into();
+    assert_json_parity(&canonical, &wire);
 }
 
 // =============================================================================
