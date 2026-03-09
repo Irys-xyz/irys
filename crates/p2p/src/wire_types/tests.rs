@@ -71,9 +71,17 @@ fn test_ingress_proof_parity() {
 // CommitmentTransaction parity
 // =============================================================================
 
-#[test]
-fn test_commitment_v1_stake_parity() {
-    let canonical = canonical_commitment_v1_stake();
+#[rstest::rstest]
+#[case::v1_stake(canonical_commitment_v1_stake())]
+#[case::v1_pledge(canonical_commitment_v1_pledge())]
+#[case::v1_unpledge(canonical_commitment_v1_unpledge())]
+#[case::v1_unstake(canonical_commitment_v1_unstake())]
+#[case::v2_stake(canonical_commitment_v2_stake())]
+#[case::v2_pledge(canonical_commitment_v2_pledge())]
+#[case::v2_unpledge(canonical_commitment_v2_unpledge())]
+#[case::v2_unstake(canonical_commitment_v2_unstake())]
+#[case::v2_update_reward_address(canonical_commitment_v2_update_reward_address())]
+fn test_commitment_parity(#[case] canonical: CommitmentTransaction) {
     let wire_type: wire::CommitmentTransaction = (&canonical).into();
     assert_json_parity(&canonical, &wire_type);
 
@@ -81,34 +89,6 @@ fn test_commitment_v1_stake_parity() {
     let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: CommitmentTransaction = deserialized.into();
     assert_eq!(canonical, roundtrip);
-}
-
-#[test]
-fn test_commitment_v1_pledge_parity() {
-    let canonical = canonical_commitment_v1_pledge();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-}
-
-#[test]
-fn test_commitment_v1_unpledge_parity() {
-    let canonical = canonical_commitment_v1_unpledge();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-}
-
-#[test]
-fn test_commitment_v2_stake_parity() {
-    let canonical = canonical_commitment_v2_stake();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-}
-
-#[test]
-fn test_commitment_v2_update_reward_address_parity() {
-    let canonical = canonical_commitment_v2_update_reward_address();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
 }
 
 // =============================================================================
@@ -300,58 +280,6 @@ fn test_block_header_empty_ledgers() {
         .0
         .is_empty());
     assert!(roundtrip.vdf_limiter_info.steps.0.is_empty());
-}
-
-// =============================================================================
-// Missing commitment variant parity tests
-// =============================================================================
-
-#[test]
-fn test_commitment_v1_unstake_parity() {
-    let canonical = canonical_commitment_v1_unstake();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-
-    let wire_json = serde_json::to_string(&wire_type).unwrap();
-    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical, roundtrip);
-}
-
-#[test]
-fn test_commitment_v2_pledge_parity() {
-    let canonical = canonical_commitment_v2_pledge();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-
-    let wire_json = serde_json::to_string(&wire_type).unwrap();
-    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical, roundtrip);
-}
-
-#[test]
-fn test_commitment_v2_unpledge_parity() {
-    let canonical = canonical_commitment_v2_unpledge();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-
-    let wire_json = serde_json::to_string(&wire_type).unwrap();
-    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical, roundtrip);
-}
-
-#[test]
-fn test_commitment_v2_unstake_parity() {
-    let canonical = canonical_commitment_v2_unstake();
-    let wire_type: wire::CommitmentTransaction = (&canonical).into();
-    assert_json_parity(&canonical, &wire_type);
-
-    let wire_json = serde_json::to_string(&wire_type).unwrap();
-    let deserialized: wire::CommitmentTransaction = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: CommitmentTransaction = deserialized.into();
-    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
