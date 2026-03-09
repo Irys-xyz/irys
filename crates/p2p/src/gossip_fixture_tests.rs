@@ -101,6 +101,96 @@ fn fixture_block_body() -> wire::BlockBody {
     (&canonical_block_body()).into()
 }
 
+// --- None-variant helpers (optional fields cleared) ---
+
+/// DataTransactionHeader with bundle_format and perm_fee set to None.
+fn fixture_data_tx_header_none() -> wire::DataTransactionHeader {
+    let mut inner = canonical_data_tx_header_v1_inner();
+    inner.bundle_format = None;
+    inner.perm_fee = None;
+    let canonical =
+        irys_types::DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: inner,
+            metadata: Default::default(),
+        });
+    (&canonical).into()
+}
+
+/// IrysBlockHeader with all nested optional fields set to None:
+/// PoaData.{chunk, ledger_id, tx_path, data_path},
+/// VDFLimiterInfo.{vdf_difficulty, next_vdf_difficulty},
+/// DataTransactionLedger.expires.
+fn fixture_block_header_none() -> wire::IrysBlockHeader {
+    use irys_types::block::{IrysBlockHeaderV1, PoaData, VDFLimiterInfo};
+    use irys_types::serialization::H256List;
+    use irys_types::{DataTransactionLedger, SystemTransactionLedger};
+
+    let header = irys_types::IrysBlockHeader::V1(IrysBlockHeaderV1 {
+        block_hash: test_h256(0xBB),
+        signature: test_signature(),
+        height: 42,
+        diff: U256::from(1000_u64),
+        cumulative_diff: U256::from(50_000_u64),
+        solution_hash: test_h256(0xCC),
+        last_diff_timestamp: irys_types::UnixTimestampMs::from(1_700_000_000_000_u128),
+        previous_solution_hash: test_h256(0xCD),
+        last_epoch_hash: test_h256(0xCE),
+        chunk_hash: test_h256(0xCF),
+        previous_block_hash: test_h256(0xD0),
+        previous_cumulative_diff: U256::from(49_000_u64),
+        poa: PoaData {
+            partition_chunk_offset: 100,
+            partition_hash: test_h256(0xD1),
+            chunk: None,
+            ledger_id: None,
+            tx_path: None,
+            data_path: None,
+        },
+        reward_address: test_address(0xE0),
+        reward_amount: U256::from(100_u64),
+        miner_address: test_address(0xE1),
+        timestamp: irys_types::UnixTimestampMs::from(1_700_000_000_000_u128),
+        system_ledgers: vec![SystemTransactionLedger {
+            ledger_id: 0,
+            tx_ids: H256List(vec![test_h256(0xF0)]),
+        }],
+        data_ledgers: vec![DataTransactionLedger {
+            ledger_id: 1,
+            tx_root: test_h256(0xF1),
+            tx_ids: H256List(vec![test_h256(0xF2)]),
+            total_chunks: 256,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }],
+        evm_block_hash: reth::revm::primitives::B256::from([0xF3; 32]),
+        vdf_limiter_info: VDFLimiterInfo {
+            output: test_h256(0xA0),
+            global_step_number: 1000,
+            seed: test_h256(0xA1),
+            next_seed: test_h256(0xA2),
+            prev_output: test_h256(0xA3),
+            last_step_checkpoints: H256List(vec![test_h256(0xA4)]),
+            steps: H256List(vec![test_h256(0xA5)]),
+            vdf_difficulty: None,
+            next_vdf_difficulty: None,
+        },
+        oracle_irys_price: irys_types::storage_pricing::Amount::new(U256::from(100_u64)),
+        ema_irys_price: irys_types::storage_pricing::Amount::new(U256::from(95_u64)),
+        treasury: U256::from(999_999_u64),
+    });
+    (&header).into()
+}
+
+/// BlockBody with data transactions that have optional fields set to None.
+fn fixture_block_body_none() -> wire::BlockBody {
+    wire::BlockBody {
+        block_hash: test_h256(0xBB),
+        data_transactions: vec![fixture_data_tx_header_none()],
+        commitment_transactions: vec![fixture_commitment_v2_stake()],
+    }
+}
+
 fn fixture_execution_payload() -> RethBlock {
     canonical_execution_payload()
 }
@@ -195,6 +285,8 @@ fixture_tests! {
         wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
     v1_gossip_data_transaction =>
         wire::GossipDataV1::Transaction(fixture_data_tx_header()),
+    v1_gossip_data_transaction_none =>
+        wire::GossipDataV1::Transaction(fixture_data_tx_header_none()),
     v1_gossip_data_commitment_stake =>
         wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_stake()),
     v1_gossip_data_commitment_pledge =>
@@ -205,6 +297,8 @@ fixture_tests! {
         wire::GossipDataV1::CommitmentTransaction(fixture_commitment_v1_unstake()),
     v1_gossip_data_block =>
         wire::GossipDataV1::Block(fixture_block_header()),
+    v1_gossip_data_block_none =>
+        wire::GossipDataV1::Block(fixture_block_header_none()),
     v1_gossip_data_ingress_proof =>
         wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
     v1_gossip_data_execution_payload =>
@@ -231,6 +325,8 @@ fixture_tests! {
         wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
     v2_gossip_data_transaction =>
         wire::GossipDataV2::Transaction(fixture_data_tx_header()),
+    v2_gossip_data_transaction_none =>
+        wire::GossipDataV2::Transaction(fixture_data_tx_header_none()),
     v2_gossip_data_commitment_v2_stake =>
         wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_stake()),
     v2_gossip_data_commitment_v2_pledge =>
@@ -243,8 +339,12 @@ fixture_tests! {
         wire::GossipDataV2::CommitmentTransaction(fixture_commitment_v2_update_reward_address()),
     v2_gossip_data_block_header =>
         wire::GossipDataV2::BlockHeader(fixture_block_header()),
+    v2_gossip_data_block_header_none =>
+        wire::GossipDataV2::BlockHeader(fixture_block_header_none()),
     v2_gossip_data_block_body =>
         wire::GossipDataV2::BlockBody(fixture_block_body()),
+    v2_gossip_data_block_body_none =>
+        wire::GossipDataV2::BlockBody(fixture_block_body_none()),
     v2_gossip_data_ingress_proof =>
         wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
     v2_gossip_data_execution_payload =>
@@ -305,6 +405,45 @@ fixture_tests! {
         peers: vec![test_peer_address()],
         timestamp: 1700000000000,
         message: Some("Welcome".to_string()),
+        consensus_config_hash: test_h256(0xFF),
+    },
+
+    // Handshakes with optional fields set to None
+    handshake_request_v1_none => wire::HandshakeRequestV1 {
+        version: Version::new(1, 2, 3),
+        protocol_version: ProtocolVersion::V1,
+        mining_address: test_address(0xAA),
+        chain_id: 1270,
+        address: test_peer_address(),
+        timestamp: 1700000000000,
+        user_agent: None,
+        signature: test_signature(),
+    },
+    handshake_request_v2_none => wire::HandshakeRequestV2 {
+        version: Version::new(1, 2, 3),
+        protocol_version: ProtocolVersion::V2,
+        mining_address: test_address(0xAA),
+        peer_id: test_peer_id(0xBB),
+        chain_id: 1270,
+        address: test_peer_address(),
+        timestamp: 1700000000000,
+        user_agent: None,
+        consensus_config_hash: test_h256(0xFF),
+        signature: test_signature(),
+    },
+    handshake_response_v1_none => wire::HandshakeResponseV1 {
+        version: Version::new(1, 2, 3),
+        protocol_version: ProtocolVersion::V1,
+        peers: vec![test_peer_address()],
+        timestamp: 1700000000000,
+        message: None,
+    },
+    handshake_response_v2_none => wire::HandshakeResponseV2 {
+        version: Version::new(1, 2, 3),
+        protocol_version: ProtocolVersion::V2,
+        peers: vec![test_peer_address()],
+        timestamp: 1700000000000,
+        message: None,
         consensus_config_hash: test_h256(0xFF),
     },
 

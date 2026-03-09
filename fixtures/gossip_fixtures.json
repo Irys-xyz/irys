@@ -157,6 +157,23 @@
     "user_agent": "irys-node/1.2.3",
     "version": "1.2.3"
   },
+  "handshake_request_v1_none": {
+    "address": {
+      "api": "192.168.1.1:4201",
+      "execution": {
+        "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "peering_tcp_addr": "192.168.1.1:30303"
+      },
+      "gossip": "192.168.1.1:4200"
+    },
+    "chain_id": 1270,
+    "mining_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+    "protocol_version": "V1",
+    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+    "timestamp": 1700000000000,
+    "user_agent": null,
+    "version": "1.2.3"
+  },
   "handshake_request_v2": {
     "address": {
       "api": "192.168.1.1:4201",
@@ -176,8 +193,43 @@
     "user_agent": "irys-node/1.2.3",
     "version": "1.2.3"
   },
+  "handshake_request_v2_none": {
+    "address": {
+      "api": "192.168.1.1:4201",
+      "execution": {
+        "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "peering_tcp_addr": "192.168.1.1:30303"
+      },
+      "gossip": "192.168.1.1:4200"
+    },
+    "chain_id": 1270,
+    "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+    "mining_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+    "peer_id": "3chLuAB9CqrCNL42WFwjPLk4GEtr",
+    "protocol_version": "V2",
+    "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+    "timestamp": 1700000000000,
+    "user_agent": null,
+    "version": "1.2.3"
+  },
   "handshake_response_v1": {
     "message": "Welcome",
+    "peers": [
+      {
+        "api": "192.168.1.1:4201",
+        "execution": {
+          "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "peering_tcp_addr": "192.168.1.1:30303"
+        },
+        "gossip": "192.168.1.1:4200"
+      }
+    ],
+    "protocol_version": "V1",
+    "timestamp": 1700000000000,
+    "version": "1.2.3"
+  },
+  "handshake_response_v1_none": {
+    "message": null,
     "peers": [
       {
         "api": "192.168.1.1:4201",
@@ -195,6 +247,23 @@
   "handshake_response_v2": {
     "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
     "message": "Welcome",
+    "peers": [
+      {
+        "api": "192.168.1.1:4201",
+        "execution": {
+          "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "peering_tcp_addr": "192.168.1.1:30303"
+        },
+        "gossip": "192.168.1.1:4200"
+      }
+    ],
+    "protocol_version": "V2",
+    "timestamp": 1700000000000,
+    "version": "1.2.3"
+  },
+  "handshake_response_v2_none": {
+    "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+    "message": null,
     "peers": [
       {
         "api": "192.168.1.1:4201",
@@ -319,6 +388,76 @@
           "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
         ],
         "vdfDifficulty": "50000"
+      },
+      "version": 1
+    }
+  },
+  "v1_gossip_data_block_none": {
+    "Block": {
+      "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+      "chunkHash": "EzDBdLQ7QjUtsjn4HqXCECkuXsYfRA7jfTxq4gH1exmL",
+      "cumulativeDiff": "50000",
+      "dataLedgers": [
+        {
+          "ledgerId": 1,
+          "totalChunks": "256",
+          "txIds": [
+            "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
+          ],
+          "txRoot": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
+        }
+      ],
+      "diff": "1000",
+      "emaIrysPrice": {
+        "amount": "95"
+      },
+      "evmBlockHash": "0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+      "height": "42",
+      "lastDiffTimestamp": "1700000000000",
+      "lastEpochHash": "EvHtV2w6pSBfjeXYrYCGwKz9HiLTk6Rv74JB1JEQudSd",
+      "minerAddress": "49XF233b4hnYfgyzL5LL3zsZmhbn",
+      "oracleIrysPrice": {
+        "amount": "100"
+      },
+      "poa": {
+        "chunk": null,
+        "dataPath": null,
+        "ledgerId": null,
+        "partitionChunkOffset": 100,
+        "partitionHash": "F83muwL8bL5M9vH5ASB2oxJS2By4mHVNnHJ9BSND9dQk",
+        "txPath": null
+      },
+      "previousBlockHash": "F48Umds812n81q2Zj8r7X5Xfn2ks6DoZDsdV84KcQJ63",
+      "previousCumulativeDiff": "49000",
+      "previousSolutionHash": "ErNbLjU6E8tSbZH3REsMeTDP3Z8G52k6YedWwvBpAJ7v",
+      "rewardAddress": "48iC7xethYqhHs7j88faQMEjgM4B",
+      "rewardAmount": "100",
+      "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+      "solutionHash": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
+      "systemLedgers": [
+        {
+          "ledgerId": 0,
+          "txIds": [
+            "HDXwMGmSvaHNUj2oghHWq6E5b7VJeFmo6vxUzDknJxQf"
+          ]
+        }
+      ],
+      "timestamp": "1700000000000",
+      "treasury": "999999",
+      "vdfLimiterInfo": {
+        "globalStepNumber": "1000",
+        "lastStepCheckpoints": [
+          "C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"
+        ],
+        "nextSeed": "BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX",
+        "nextVdfDifficulty": null,
+        "output": "Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7",
+        "prevOutput": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
+        "seed": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
+        "steps": [
+          "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
+        ],
+        "vdfDifficulty": null
       },
       "version": 1
     }
@@ -448,6 +587,23 @@
       "version": 1
     }
   },
+  "v1_gossip_data_transaction_none": {
+    "Transaction": {
+      "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+      "bundleFormat": null,
+      "chainId": "1270",
+      "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+      "dataSize": "1048576",
+      "headerSize": "256",
+      "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "ledgerId": 1,
+      "permFee": null,
+      "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+      "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
+      "termFee": "1000000",
+      "version": 1
+    }
+  },
   "v1_gossip_request": {
     "data": {
       "Chunk": {
@@ -504,6 +660,43 @@
           "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
           "ledgerId": 1,
           "permFee": "500000",
+          "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+          "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
+          "termFee": "1000000",
+          "version": 1
+        }
+      ]
+    }
+  },
+  "v2_gossip_data_block_body_none": {
+    "BlockBody": {
+      "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+      "commitment_transactions": [
+        {
+          "anchor": "6URwbPipuA4MJLG7LCRRZuWnms3JZ9cRG3z9indXWz8G",
+          "chainId": "1270",
+          "commitmentType": {
+            "type": "stake"
+          },
+          "fee": "5000",
+          "id": "6QWeT6FpJrm8AF1btu6WH2k2Xhq6t5vbheKVfQavmeoZ",
+          "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+          "signer": "29X6dD64ueYorg4VtHniED4za3gV",
+          "value": "2000000",
+          "version": 2
+        }
+      ],
+      "data_transactions": [
+        {
+          "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+          "bundleFormat": null,
+          "chainId": "1270",
+          "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+          "dataSize": "1048576",
+          "headerSize": "256",
+          "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "ledgerId": 1,
+          "permFee": null,
           "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
           "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
           "termFee": "1000000",
@@ -579,6 +772,76 @@
           "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
         ],
         "vdfDifficulty": "50000"
+      },
+      "version": 1
+    }
+  },
+  "v2_gossip_data_block_header_none": {
+    "BlockHeader": {
+      "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+      "chunkHash": "EzDBdLQ7QjUtsjn4HqXCECkuXsYfRA7jfTxq4gH1exmL",
+      "cumulativeDiff": "50000",
+      "dataLedgers": [
+        {
+          "ledgerId": 1,
+          "totalChunks": "256",
+          "txIds": [
+            "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
+          ],
+          "txRoot": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
+        }
+      ],
+      "diff": "1000",
+      "emaIrysPrice": {
+        "amount": "95"
+      },
+      "evmBlockHash": "0xf3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+      "height": "42",
+      "lastDiffTimestamp": "1700000000000",
+      "lastEpochHash": "EvHtV2w6pSBfjeXYrYCGwKz9HiLTk6Rv74JB1JEQudSd",
+      "minerAddress": "49XF233b4hnYfgyzL5LL3zsZmhbn",
+      "oracleIrysPrice": {
+        "amount": "100"
+      },
+      "poa": {
+        "chunk": null,
+        "dataPath": null,
+        "ledgerId": null,
+        "partitionChunkOffset": 100,
+        "partitionHash": "F83muwL8bL5M9vH5ASB2oxJS2By4mHVNnHJ9BSND9dQk",
+        "txPath": null
+      },
+      "previousBlockHash": "F48Umds812n81q2Zj8r7X5Xfn2ks6DoZDsdV84KcQJ63",
+      "previousCumulativeDiff": "49000",
+      "previousSolutionHash": "ErNbLjU6E8tSbZH3REsMeTDP3Z8G52k6YedWwvBpAJ7v",
+      "rewardAddress": "48iC7xethYqhHs7j88faQMEjgM4B",
+      "rewardAmount": "100",
+      "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+      "solutionHash": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
+      "systemLedgers": [
+        {
+          "ledgerId": 0,
+          "txIds": [
+            "HDXwMGmSvaHNUj2oghHWq6E5b7VJeFmo6vxUzDknJxQf"
+          ]
+        }
+      ],
+      "timestamp": "1700000000000",
+      "treasury": "999999",
+      "vdfLimiterInfo": {
+        "globalStepNumber": "1000",
+        "lastStepCheckpoints": [
+          "C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"
+        ],
+        "nextSeed": "BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX",
+        "nextVdfDifficulty": null,
+        "output": "Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7",
+        "prevOutput": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
+        "seed": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
+        "steps": [
+          "C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"
+        ],
+        "vdfDifficulty": null
       },
       "version": 1
     }
@@ -718,6 +981,23 @@
       "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "ledgerId": 1,
       "permFee": "500000",
+      "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+      "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
+      "termFee": "1000000",
+      "version": 1
+    }
+  },
+  "v2_gossip_data_transaction_none": {
+    "Transaction": {
+      "anchor": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+      "bundleFormat": null,
+      "chainId": "1270",
+      "dataRoot": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+      "dataSize": "1048576",
+      "headerSize": "256",
+      "id": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "ledgerId": 1,
+      "permFee": null,
       "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
       "signer": "3S9hEB66TqZ8Ubncq1FwwuVH4dp",
       "termFee": "1000000",
