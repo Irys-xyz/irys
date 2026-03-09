@@ -149,59 +149,15 @@ impl From<GossipDataV2> for irys_types::gossip::v2::GossipDataV2 {
     }
 }
 
-// -- Conversions for GossipDataRequestV1 --
+// -- Conversions for GossipDataRequestV1/V2 --
 
-impl From<&irys_types::gossip::v1::GossipDataRequestV1> for GossipDataRequestV1 {
-    fn from(r: &irys_types::gossip::v1::GossipDataRequestV1) -> Self {
-        match r {
-            irys_types::gossip::v1::GossipDataRequestV1::ExecutionPayload(h) => {
-                Self::ExecutionPayload(*h)
-            }
-            irys_types::gossip::v1::GossipDataRequestV1::Block(h) => Self::Block(*h),
-            irys_types::gossip::v1::GossipDataRequestV1::Chunk(h) => Self::Chunk(*h),
-            irys_types::gossip::v1::GossipDataRequestV1::Transaction(h) => Self::Transaction(*h),
-        }
-    }
-}
+super::impl_mirror_enum_from!(irys_types::gossip::v1::GossipDataRequestV1, GossipDataRequestV1 (
+    ExecutionPayload, Block, Chunk, Transaction,
+));
 
-impl From<GossipDataRequestV1> for irys_types::gossip::v1::GossipDataRequestV1 {
-    fn from(r: GossipDataRequestV1) -> Self {
-        match r {
-            GossipDataRequestV1::ExecutionPayload(h) => Self::ExecutionPayload(h),
-            GossipDataRequestV1::Block(h) => Self::Block(h),
-            GossipDataRequestV1::Chunk(h) => Self::Chunk(h),
-            GossipDataRequestV1::Transaction(h) => Self::Transaction(h),
-        }
-    }
-}
-
-// -- Conversions for GossipDataRequestV2 --
-
-impl From<&irys_types::gossip::v2::GossipDataRequestV2> for GossipDataRequestV2 {
-    fn from(r: &irys_types::gossip::v2::GossipDataRequestV2) -> Self {
-        match r {
-            irys_types::gossip::v2::GossipDataRequestV2::ExecutionPayload(h) => {
-                Self::ExecutionPayload(*h)
-            }
-            irys_types::gossip::v2::GossipDataRequestV2::BlockHeader(h) => Self::BlockHeader(*h),
-            irys_types::gossip::v2::GossipDataRequestV2::BlockBody(h) => Self::BlockBody(*h),
-            irys_types::gossip::v2::GossipDataRequestV2::Chunk(h) => Self::Chunk(*h),
-            irys_types::gossip::v2::GossipDataRequestV2::Transaction(h) => Self::Transaction(*h),
-        }
-    }
-}
-
-impl From<GossipDataRequestV2> for irys_types::gossip::v2::GossipDataRequestV2 {
-    fn from(r: GossipDataRequestV2) -> Self {
-        match r {
-            GossipDataRequestV2::ExecutionPayload(h) => Self::ExecutionPayload(h),
-            GossipDataRequestV2::BlockHeader(h) => Self::BlockHeader(h),
-            GossipDataRequestV2::BlockBody(h) => Self::BlockBody(h),
-            GossipDataRequestV2::Chunk(h) => Self::Chunk(h),
-            GossipDataRequestV2::Transaction(h) => Self::Transaction(h),
-        }
-    }
-}
+super::impl_mirror_enum_from!(irys_types::gossip::v2::GossipDataRequestV2, GossipDataRequestV2 (
+    ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction,
+));
 
 // -- Conversions for GossipRequestV1/V2 --
 
