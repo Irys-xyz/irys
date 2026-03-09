@@ -84,8 +84,7 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
     let earliest_expiry = min_blocks + slot0_last_height;
     // Round up to epoch boundary
-    let target_height =
-        ((earliest_expiry + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let target_height = earliest_expiry.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
     info!(
         "Slot 0 last_height={}, min_blocks={}, target expiry height={}",
         slot0_last_height, min_blocks, target_height
@@ -279,7 +278,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     let submit_earliest = submit_min_blocks + submit_slot0_last_height;
     let earliest = perm_earliest.max(submit_earliest);
     // Round up to epoch boundary
-    let target_height = ((earliest + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let target_height = earliest.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
     info!(
         "Perm slot0 last_height={}, Submit slot0 last_height={}, target expiry height={}",
         perm_slot0_last_height, submit_slot0_last_height, target_height
@@ -460,8 +459,7 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
     let earliest_expiry = min_blocks + slot0_last_height;
     // Round up to epoch boundary
-    let expiry_epoch =
-        ((earliest_expiry + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let expiry_epoch = earliest_expiry.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
     let pre_expiry_epoch = expiry_epoch - BLOCKS_PER_EPOCH;
     info!(
         "earliest_expiry={}, expiry_epoch={}, pre_expiry_epoch={}",
@@ -750,7 +748,10 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
          With a single slot, last-slot protection prevents expiry regardless of config.",
         perm_slots.len()
     );
-    info!("Perm slots: {} (multi-slot precondition met)", perm_slots.len());
+    info!(
+        "Perm slots: {} (multi-slot precondition met)",
+        perm_slots.len()
+    );
 
     // --- Assertion 1: Zero perm slots are expired ---
     let expired_count = perm_slots.iter().filter(|s| s.is_expired).count();
@@ -759,7 +760,10 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
         "No perm slots should expire when publish_ledger_epoch_length is None, but {} are expired",
         expired_count
     );
-    info!("Confirmed zero perm slots are expired at height {}", final_height);
+    info!(
+        "Confirmed zero perm slots are expired at height {}",
+        final_height
+    );
 
     // --- Assertion 2: All Publish partition assignments still active ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
