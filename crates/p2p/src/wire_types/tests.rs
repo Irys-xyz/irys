@@ -104,18 +104,7 @@ fn test_data_transaction_header_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: DataTransactionHeader = deserialized.into();
-    assert_eq!(canonical.id, roundtrip.id);
-    assert_eq!(canonical.anchor, roundtrip.anchor);
-    assert_eq!(canonical.signer, roundtrip.signer);
-    assert_eq!(canonical.data_root, roundtrip.data_root);
-    assert_eq!(canonical.data_size, roundtrip.data_size);
-    assert_eq!(canonical.header_size, roundtrip.header_size);
-    assert_eq!(canonical.term_fee, roundtrip.term_fee);
-    assert_eq!(canonical.perm_fee, roundtrip.perm_fee);
-    assert_eq!(canonical.ledger_id, roundtrip.ledger_id);
-    assert_eq!(canonical.bundle_format, roundtrip.bundle_format);
-    assert_eq!(canonical.chain_id, roundtrip.chain_id);
-    assert_eq!(canonical.signature, roundtrip.signature);
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
@@ -192,24 +181,7 @@ fn test_block_body_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::BlockBody = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::BlockBody = deserialized.into();
-    assert_eq!(canonical.block_hash, roundtrip.block_hash);
-    assert_eq!(
-        canonical.data_transactions.len(),
-        roundtrip.data_transactions.len()
-    );
-    assert_eq!(
-        canonical.commitment_transactions.len(),
-        roundtrip.commitment_transactions.len()
-    );
-    // Verify individual transaction fields survived the round-trip
-    assert_eq!(
-        canonical.data_transactions[0].id,
-        roundtrip.data_transactions[0].id
-    );
-    assert_eq!(
-        canonical.commitment_transactions[0].id(),
-        roundtrip.commitment_transactions[0].id()
-    );
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================
@@ -233,8 +205,7 @@ fn test_data_tx_header_with_none_optional_fields() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: DataTransactionHeader = deserialized.into();
-    assert_eq!(roundtrip.perm_fee, None);
-    assert_eq!(roundtrip.bundle_format, None);
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -295,10 +266,7 @@ fn test_handshake_request_v1_parity() {
     let wire_json = serde_json::to_string(&wire).unwrap();
     let deserialized: wire::HandshakeRequestV1 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::HandshakeRequestV1 = deserialized.into();
-    assert_eq!(canonical.mining_address, roundtrip.mining_address);
-    assert_eq!(canonical.chain_id, roundtrip.chain_id);
-    assert_eq!(canonical.timestamp, roundtrip.timestamp);
-    assert_eq!(canonical.user_agent, roundtrip.user_agent);
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -310,13 +278,7 @@ fn test_handshake_request_v2_parity() {
     let wire_json = serde_json::to_string(&wire).unwrap();
     let deserialized: wire::HandshakeRequestV2 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::HandshakeRequestV2 = deserialized.into();
-    assert_eq!(canonical.mining_address, roundtrip.mining_address);
-    assert_eq!(canonical.peer_id, roundtrip.peer_id);
-    assert_eq!(canonical.chain_id, roundtrip.chain_id);
-    assert_eq!(
-        canonical.consensus_config_hash,
-        roundtrip.consensus_config_hash
-    );
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -328,9 +290,7 @@ fn test_handshake_response_v1_parity() {
     let wire_json = serde_json::to_string(&wire).unwrap();
     let deserialized: wire::HandshakeResponseV1 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::HandshakeResponseV1 = deserialized.into();
-    assert_eq!(canonical.peers.len(), roundtrip.peers.len());
-    assert_eq!(canonical.timestamp, roundtrip.timestamp);
-    assert_eq!(canonical.message, roundtrip.message);
+    assert_eq!(canonical, roundtrip);
 }
 
 #[test]
@@ -342,12 +302,7 @@ fn test_handshake_response_v2_parity() {
     let wire_json = serde_json::to_string(&wire).unwrap();
     let deserialized: wire::HandshakeResponseV2 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::HandshakeResponseV2 = deserialized.into();
-    assert_eq!(canonical.peers.len(), roundtrip.peers.len());
-    assert_eq!(canonical.timestamp, roundtrip.timestamp);
-    assert_eq!(
-        canonical.consensus_config_hash,
-        roundtrip.consensus_config_hash
-    );
+    assert_eq!(canonical, roundtrip);
 }
 
 // =============================================================================

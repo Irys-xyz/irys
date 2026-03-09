@@ -169,7 +169,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 ///   "user_agent": "my-node/1.2.0"   // Optional identification string
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -182,7 +182,7 @@ pub struct HandshakeRequestV1 {
 }
 
 /// V2 HandshakeRequest - includes peer_id for P2P identification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -393,7 +393,7 @@ impl Compact for PeerAddress {
 ///   "message": "Welcome to the network"  // or null if None
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -435,7 +435,7 @@ impl Default for HandshakeResponseV1 {
 ///   "consensus_config_hash": "0x..."  // Hash of consensus config
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
