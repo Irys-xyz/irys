@@ -2,7 +2,7 @@ use irys_types::{IrysAddress, IrysPeerId, IrysSignature, PeerAddress, ProtocolVe
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -14,7 +14,7 @@ pub struct HandshakeRequestV1 {
     pub signature: IrysSignature,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -28,7 +28,7 @@ pub struct HandshakeRequestV2 {
     pub signature: IrysSignature,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -37,7 +37,7 @@ pub struct HandshakeResponseV1 {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
