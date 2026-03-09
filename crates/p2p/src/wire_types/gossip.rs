@@ -151,13 +151,15 @@ impl From<GossipDataV2> for irys_types::gossip::v2::GossipDataV2 {
 
 // -- Conversions for GossipDataRequestV1/V2 --
 
-super::impl_mirror_enum_from!(irys_types::gossip::v1::GossipDataRequestV1, GossipDataRequestV1 (
-    ExecutionPayload, Block, Chunk, Transaction,
-));
+super::impl_mirror_enum_from!(
+    irys_types::gossip::v1::GossipDataRequestV1,
+    GossipDataRequestV1(ExecutionPayload, Block, Chunk, Transaction,)
+);
 
-super::impl_mirror_enum_from!(irys_types::gossip::v2::GossipDataRequestV2, GossipDataRequestV2 (
-    ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction,
-));
+super::impl_mirror_enum_from!(
+    irys_types::gossip::v2::GossipDataRequestV2,
+    GossipDataRequestV2(ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction,)
+);
 
 // -- Conversions for GossipRequestV1/V2 --
 
