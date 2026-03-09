@@ -364,16 +364,32 @@ fn test_node_info_roundtrip() {
 }
 
 // =============================================================================
-// BlockIndexItem roundtrip
+// BlockIndexItem roundtrip (V1 — with num_ledgers)
+// =============================================================================
+
+#[test]
+fn test_block_index_item_v1_roundtrip() {
+    let canonical = canonical_block_index_item();
+    let wire_type: wire::BlockIndexItemV1 = (&canonical).into();
+
+    let wire_json = serde_json::to_string(&wire_type).unwrap();
+    let deserialized: wire::BlockIndexItemV1 = serde_json::from_str(&wire_json).unwrap();
+    let roundtrip: irys_types::block::BlockIndexItem = deserialized.into();
+    assert_eq!(canonical, roundtrip);
+}
+
+// =============================================================================
+// BlockIndexItem roundtrip (V2 — without num_ledgers)
 // =============================================================================
 
 #[test]
 fn test_block_index_item_roundtrip() {
     let canonical = canonical_block_index_item();
-    let wire_type: wire::BlockIndexItem = (&canonical).into();
+    let wire_type: wire::BlockIndexItemV2 = (&canonical).into();
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
-    let deserialized: wire::BlockIndexItem = serde_json::from_str(&wire_json).unwrap();
+    assert!(!wire_json.contains("num_ledgers"), "V2 wire format must not contain num_ledgers");
+    let deserialized: wire::BlockIndexItemV2 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::block::BlockIndexItem = deserialized.into();
     assert_eq!(canonical, roundtrip);
 }

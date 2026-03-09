@@ -192,7 +192,11 @@ fn fixture_node_info() -> wire::NodeInfo {
     (&canonical_node_info()).into()
 }
 
-fn fixture_block_index_item() -> wire::BlockIndexItem {
+fn fixture_block_index_item_v1() -> wire::BlockIndexItemV1 {
+    (&canonical_block_index_item()).into()
+}
+
+fn fixture_block_index_item() -> wire::BlockIndexItemV2 {
     (&canonical_block_index_item()).into()
 }
 
@@ -556,6 +560,7 @@ fixture_tests! {
     wire_node_info => fixture_node_info(),
 
     // BlockIndexItem / LedgerIndexItem
+    block_index_item_v1 => fixture_block_index_item_v1(),
     block_index_item => fixture_block_index_item(),
     block_index_query => BlockIndexQuery { height: 100, limit: 50 },
 
@@ -572,6 +577,8 @@ fixture_tests! {
         GossipResponse::Accepted(fixture_node_info()),
     gossip_response_accepted_peer_list =>
         GossipResponse::Accepted(vec![test_peer_address()]),
+    gossip_response_accepted_block_index_v1 =>
+        GossipResponse::Accepted(vec![fixture_block_index_item_v1()]),
     gossip_response_accepted_block_index =>
         GossipResponse::Accepted(vec![fixture_block_index_item()]),
     gossip_response_accepted_whitelist =>
