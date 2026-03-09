@@ -520,3 +520,139 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     node.stop().await;
     Ok(())
 }
+
+/// Tests that the last remaining Publish slot never expires, even far past its expiry boundary.
+/// Verifies:
+/// - The last slot remains active after 5x the expiry window
+/// - All last-slot partitions keep their ledger assignment (not returned to capacity pool)
+/// - No TermFeeReward shadow txs are generated in any epoch block past min_blocks
+#[test_log::test(tokio::test)]
+async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
+    const CHUNK_SIZE: u64 = 32;
+    const DATA_SIZE: usize = 32;
+    const BLOCKS_PER_EPOCH: u64 = 3;
+    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 1; // Very short — expiry would trigger quickly
+    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().block_migration_depth = 1;
+    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
+    config.consensus.get_mut().num_chunks_in_partition = 4;
+    config.consensus.get_mut().num_chunks_in_recall_range = 1;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
+    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
+    // Set Submit epoch length very high so Submit never expires during this test
+    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 100;
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(INITIAL_BALANCE).into(),
+            ..Default::default()
+        },
+    )]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("perm_last_slot_test", 30)
+        .await;
+
+    let anchor = node.get_block_by_height(0).await?.block_hash;
+
+    // Post 1 tx and promote it (uses genesis slot)
+    let tx = node
+        .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx.header.id, 10).await?;
+    node.upload_chunks(&tx).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+
+    // Mine 1 block to include tx
+    node.mine_block().await?;
+
+    // Mine to 5x past where expiry would trigger: (EPOCH_LENGTH + 4) * BLOCKS_PER_EPOCH
+    let target_height = (PUBLISH_LEDGER_EPOCH_LENGTH + 4) * BLOCKS_PER_EPOCH;
+    let current_height = node.get_canonical_chain_height().await;
+    info!(
+        "Mining from height {} to {} (5x past expiry window)",
+        current_height, target_height
+    );
+    for _ in current_height..target_height {
+        node.mine_block().await?;
+    }
+
+    let final_height = node.get_canonical_chain_height().await;
+    assert!(
+        final_height >= target_height,
+        "Should have reached target height"
+    );
+
+    // --- Assertion 1: Last perm slot is NOT expired ---
+    let epoch_snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
+    let last_slot = perm_slots.last().unwrap();
+    assert!(
+        !last_slot.is_expired,
+        "Last perm slot should never expire (last-slot protection)"
+    );
+    info!(
+        "Perm slots: {}, last slot is_expired: {}",
+        perm_slots.len(),
+        last_slot.is_expired
+    );
+
+    // --- Assertion 2: If only 1 slot, it must not be expired ---
+    if perm_slots.len() == 1 {
+        assert!(
+            !perm_slots[0].is_expired,
+            "Single perm slot should never expire (last-slot protection)"
+        );
+        info!("Confirmed single-slot protection: slot 0 is not expired");
+    }
+
+    // --- Assertion 3: All last-slot partitions still have ledger assignment ---
+    let partition_assignments = &epoch_snapshot.partition_assignments;
+    for partition_hash in &last_slot.partitions {
+        if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
+            assert!(
+                assignment.ledger_id.is_some(),
+                "Last-slot partition {:?} should still be assigned to Publish, not capacity pool",
+                partition_hash
+            );
+        }
+    }
+    info!("Verified all last-slot partitions remain assigned to Publish");
+
+    // --- Assertion 4: No TermFeeReward shadow txs in any epoch block past min_blocks ---
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let mut epoch_height = min_blocks;
+    while epoch_height <= final_height {
+        let epoch_block = node.get_block_by_height(epoch_height).await?;
+        let evm_block = node
+            .wait_for_evm_block(epoch_block.evm_block_hash, 30)
+            .await?;
+        for tx in &evm_block.body.transactions {
+            let mut input = tx.input().as_ref();
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
+                if let Some(TransactionPacket::TermFeeReward(_)) = shadow.as_v1() {
+                    panic!(
+                        "Unexpected TermFeeReward shadow tx at epoch height {} — \
+                         last-slot protection should prevent any fee distribution",
+                        epoch_height
+                    );
+                }
+            }
+        }
+        info!(
+            "No TermFeeReward at epoch height {} (confirmed)",
+            epoch_height
+        );
+        epoch_height += BLOCKS_PER_EPOCH;
+    }
+
+    info!("Last-slot protection test passed!");
+    node.stop().await;
+    Ok(())
+}
