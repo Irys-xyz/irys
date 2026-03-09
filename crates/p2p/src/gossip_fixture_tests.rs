@@ -19,6 +19,7 @@ use irys_types::{
     IrysPeerId, RethPeerInfo, U256,
 };
 use reth::revm::primitives::B256;
+use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -98,6 +99,10 @@ fn fixture_ingress_proof() -> wire::IngressProof {
 
 fn fixture_block_body() -> wire::BlockBody {
     (&canonical_block_body()).into()
+}
+
+fn fixture_execution_payload() -> RethBlock {
+    canonical_execution_payload()
 }
 
 // =============================================================================
@@ -202,6 +207,8 @@ fixture_tests! {
         wire::GossipDataV1::Block(fixture_block_header()),
     v1_gossip_data_ingress_proof =>
         wire::GossipDataV1::IngressProof(fixture_ingress_proof()),
+    v1_gossip_data_execution_payload =>
+        wire::GossipDataV1::ExecutionPayload(fixture_execution_payload()),
 
     // V1 Data Requests
     v1_data_request_execution_payload =>
@@ -240,6 +247,8 @@ fixture_tests! {
         wire::GossipDataV2::BlockBody(fixture_block_body()),
     v2_gossip_data_ingress_proof =>
         wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
+    v2_gossip_data_execution_payload =>
+        wire::GossipDataV2::ExecutionPayload(fixture_execution_payload()),
 
     // V2 Data Requests
     v2_data_request_execution_payload =>
@@ -333,6 +342,53 @@ fixture_tests! {
     gossip_response_rejected_unsupported_feature =>
         GossipResponse::<()>::Rejected(RejectionReason::UnsupportedFeature),
 
+    // GossipResponse with typed payloads (not just unit)
+    gossip_response_accepted_handshake_v1 =>
+        GossipResponse::Accepted(wire::HandshakeResponseV1 {
+            version: Version::new(1, 2, 3),
+            protocol_version: ProtocolVersion::V1,
+            peers: vec![test_peer_address()],
+            timestamp: 1700000000000,
+            message: Some("Welcome".to_string()),
+        }),
+    gossip_response_accepted_handshake_v2 =>
+        GossipResponse::Accepted(wire::HandshakeResponseV2 {
+            version: Version::new(1, 2, 3),
+            protocol_version: ProtocolVersion::V2,
+            peers: vec![test_peer_address()],
+            timestamp: 1700000000000,
+            message: Some("Welcome".to_string()),
+            consensus_config_hash: test_h256(0xFF),
+        }),
+    gossip_response_accepted_gossip_data_v1 =>
+        GossipResponse::Accepted(Some(
+            wire::GossipDataV1::Chunk(fixture_unpacked_chunk()),
+        )),
+    gossip_response_accepted_gossip_data_v2 =>
+        GossipResponse::Accepted(Some(
+            wire::GossipDataV2::Chunk(fixture_unpacked_chunk()),
+        )),
+    gossip_response_accepted_gossip_data_v1_none =>
+        GossipResponse::Accepted(None::<wire::GossipDataV1>),
+    gossip_response_accepted_gossip_data_v2_none =>
+        GossipResponse::Accepted(None::<wire::GossipDataV2>),
+    gossip_response_accepted_bool =>
+        GossipResponse::Accepted(true),
+
+    // Leaf types — standalone fixtures to detect serde changes in shared primitives
+    leaf_irys_address => test_address(0xAA),
+    leaf_h256 => test_h256(0xBB),
+    leaf_b256 => B256::from([0xCC; 32]),
+    leaf_u256 => U256::from(123_456_789_u64),
+    leaf_irys_peer_id => test_peer_id(0xDD),
+    leaf_irys_signature => test_signature(),
+    leaf_peer_address => test_peer_address(),
+    leaf_protocol_version_v1 => ProtocolVersion::V1,
+    leaf_protocol_version_v2 => ProtocolVersion::V2,
+
+    // Standalone ExecutionPayload (RethBlock)
+    execution_payload => fixture_execution_payload(),
+
     // NodeInfo
     node_info => NodeInfo {
         version: "1.2.3".to_string(),
@@ -369,4 +425,92 @@ fn generate_fixture_json() {
     let path = fixture_path();
     std::fs::write(&path, format!("{json}\n")).unwrap();
     println!("Wrote fixtures to {}", path.display());
+}
+
+// =============================================================================
+// Canonical-type deserialization against pinned fixtures
+//
+// The client deserializes responses using canonical irys_types (not wire types).
+// These tests verify that canonical types can deserialize the fixture JSON
+// produced by wire types. If an irys_types serde change breaks this, these
+// tests catch it independently of the parity tests.
+// =============================================================================
+
+/// Asserts that the fixture JSON for `fixture_name` can be deserialized into
+/// the canonical type `T`.
+fn assert_canonical_deserializes_fixture<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    fixture_name: &str,
+) {
+    let fixtures = FIXTURES.get_or_init(load_fixtures);
+    let fixture_value = fixtures
+        .get(fixture_name)
+        .unwrap_or_else(|| panic!("Fixture '{fixture_name}' not found in gossip_fixtures.json"));
+
+    let result: Result<T, _> = serde_json::from_value(fixture_value.clone());
+    assert!(
+        result.is_ok(),
+        "Canonical type {} failed to deserialize fixture '{fixture_name}':\n  error: {}\n  \
+         fixture JSON: {}",
+        std::any::type_name::<T>(),
+        result.unwrap_err(),
+        serde_json::to_string_pretty(fixture_value).unwrap(),
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_handshake_response_v1() {
+    assert_canonical_deserializes_fixture::<GossipResponse<irys_types::HandshakeResponseV1>>(
+        "gossip_response_accepted_handshake_v1",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_handshake_response_v2() {
+    assert_canonical_deserializes_fixture::<GossipResponse<irys_types::HandshakeResponseV2>>(
+        "gossip_response_accepted_handshake_v2",
+    );
+}
+
+#[test]
+fn test_canonical_deserializes_gossip_data_v1() {
+    assert_canonical_deserializes_fixture::<
+        GossipResponse<Option<irys_types::gossip::v1::GossipDataV1>>,
+    >("gossip_response_accepted_gossip_data_v1");
+}
+
+#[test]
+fn test_canonical_deserializes_gossip_data_v2() {
+    assert_canonical_deserializes_fixture::<
+        GossipResponse<Option<irys_types::gossip::v2::GossipDataV2>>,
+    >("gossip_response_accepted_gossip_data_v2");
+}
+
+#[test]
+fn test_canonical_deserializes_gossip_data_v1_none() {
+    assert_canonical_deserializes_fixture::<
+        GossipResponse<Option<irys_types::gossip::v1::GossipDataV1>>,
+    >("gossip_response_accepted_gossip_data_v1_none");
+}
+
+#[test]
+fn test_canonical_deserializes_gossip_data_v2_none() {
+    assert_canonical_deserializes_fixture::<
+        GossipResponse<Option<irys_types::gossip::v2::GossipDataV2>>,
+    >("gossip_response_accepted_gossip_data_v2_none");
+}
+
+#[test]
+fn test_canonical_deserializes_execution_payload() {
+    // The client deserializes ExecutionPayload using RethBlock directly
+    assert_canonical_deserializes_fixture::<RethBlock>("execution_payload");
+}
+
+#[test]
+fn test_canonical_deserializes_v1_execution_payload_variant() {
+    assert_canonical_deserializes_fixture::<wire::GossipDataV1>("v1_gossip_data_execution_payload");
+}
+
+#[test]
+fn test_canonical_deserializes_v2_execution_payload_variant() {
+    assert_canonical_deserializes_fixture::<wire::GossipDataV2>("v2_gossip_data_execution_payload");
 }

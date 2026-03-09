@@ -1,6 +1,98 @@
 {
+  "execution_payload": {
+    "body": {
+      "ommers": [],
+      "transactions": [],
+      "withdrawals": null
+    },
+    "header": {
+      "difficulty": "0x0",
+      "extraData": "0x",
+      "gasLimit": "0x1c9c380",
+      "gasUsed": "0x5208",
+      "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "miner": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "nonce": "0x0000000000000000",
+      "number": "0x2a",
+      "parentHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "receiptsRoot": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+      "stateRoot": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "timestamp": "0x6553f100",
+      "transactionsRoot": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
   "gossip_response_accepted": {
     "Accepted": null
+  },
+  "gossip_response_accepted_bool": {
+    "Accepted": true
+  },
+  "gossip_response_accepted_gossip_data_v1": {
+    "Accepted": {
+      "Chunk": {
+        "bytes": "yv66vg",
+        "dataPath": "3q2-7w",
+        "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
+        "dataSize": "262144",
+        "txOffset": 0
+      }
+    }
+  },
+  "gossip_response_accepted_gossip_data_v1_none": {
+    "Accepted": null
+  },
+  "gossip_response_accepted_gossip_data_v2": {
+    "Accepted": {
+      "Chunk": {
+        "bytes": "yv66vg",
+        "dataPath": "3q2-7w",
+        "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
+        "dataSize": "262144",
+        "txOffset": 0
+      }
+    }
+  },
+  "gossip_response_accepted_gossip_data_v2_none": {
+    "Accepted": null
+  },
+  "gossip_response_accepted_handshake_v1": {
+    "Accepted": {
+      "message": "Welcome",
+      "peers": [
+        {
+          "api": "192.168.1.1:4201",
+          "execution": {
+            "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "peering_tcp_addr": "192.168.1.1:30303"
+          },
+          "gossip": "192.168.1.1:4200"
+        }
+      ],
+      "protocol_version": "V1",
+      "timestamp": 1700000000000,
+      "version": "1.2.3"
+    }
+  },
+  "gossip_response_accepted_handshake_v2": {
+    "Accepted": {
+      "consensus_config_hash": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+      "message": "Welcome",
+      "peers": [
+        {
+          "api": "192.168.1.1:4201",
+          "execution": {
+            "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "peering_tcp_addr": "192.168.1.1:30303"
+          },
+          "gossip": "192.168.1.1:4200"
+        }
+      ],
+      "protocol_version": "V2",
+      "timestamp": 1700000000000,
+      "version": "1.2.3"
+    }
   },
   "gossip_response_rejected_gossip_disabled": {
     "Rejected": "GossipDisabled"
@@ -117,6 +209,22 @@
     "timestamp": 1700000000000,
     "version": "1.2.3"
   },
+  "leaf_b256": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "leaf_h256": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+  "leaf_irys_address": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+  "leaf_irys_peer_id": "46H3RjUoc619APWwWJfKTQLFQHRN",
+  "leaf_irys_signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
+  "leaf_peer_address": {
+    "api": "192.168.1.1:4201",
+    "execution": {
+      "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "peering_tcp_addr": "192.168.1.1:30303"
+    },
+    "gossip": "192.168.1.1:4200"
+  },
+  "leaf_protocol_version_v1": "V1",
+  "leaf_protocol_version_v2": "V2",
+  "leaf_u256": "123456789",
   "node_info": {
     "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
     "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
@@ -285,6 +393,32 @@
       "signer": "vYJFzpw5BRBqUCJbD6fqpuj6Nxq",
       "value": "100000",
       "version": 1
+    }
+  },
+  "v1_gossip_data_execution_payload": {
+    "ExecutionPayload": {
+      "body": {
+        "ommers": [],
+        "transactions": [],
+        "withdrawals": null
+      },
+      "header": {
+        "difficulty": "0x0",
+        "extraData": "0x",
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x5208",
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "miner": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce": "0x0000000000000000",
+        "number": "0x2a",
+        "parentHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "receiptsRoot": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "stateRoot": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "timestamp": "0x6553f100",
+        "transactionsRoot": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
     }
   },
   "v1_gossip_data_ingress_proof": {
@@ -535,6 +669,32 @@
       "signer": "33SJ648cFX5HwVXH4cYsmji4UiZ7",
       "value": "0",
       "version": 2
+    }
+  },
+  "v2_gossip_data_execution_payload": {
+    "ExecutionPayload": {
+      "body": {
+        "ommers": [],
+        "transactions": [],
+        "withdrawals": null
+      },
+      "header": {
+        "difficulty": "0x0",
+        "extraData": "0x",
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x5208",
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "miner": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce": "0x0000000000000000",
+        "number": "0x2a",
+        "parentHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "receiptsRoot": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "stateRoot": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "timestamp": "0x6553f100",
+        "transactionsRoot": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
     }
   },
   "v2_gossip_data_ingress_proof": {

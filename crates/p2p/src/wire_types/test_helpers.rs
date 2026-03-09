@@ -19,6 +19,7 @@ use irys_types::{
     Signature, SystemTransactionLedger, TxChunkOffset, UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
+use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
 
 // =============================================================================
@@ -391,4 +392,31 @@ pub(crate) fn canonical_gossip_request_v2() -> GossipRequestV2<irys_types::Unpac
         miner_address: test_address(0xA0),
         data: canonical_unpacked_chunk(),
     }
+}
+
+// =============================================================================
+// Execution payload (RethBlock) builder
+// =============================================================================
+
+/// Returns a deterministic `RethBlock` with non-default header fields.
+///
+/// Uses a subset of header fields to create a recognizable fixture
+/// without depending on transaction types (which are complex to construct).
+pub(crate) fn canonical_execution_payload() -> RethBlock {
+    use reth::primitives::Header;
+    use reth::revm::primitives::Address;
+
+    let header = Header {
+        parent_hash: B256::from([0xAA; 32]),
+        beneficiary: Address::from([0xBB; 20]),
+        state_root: B256::from([0xCC; 32]),
+        transactions_root: B256::from([0xDD; 32]),
+        receipts_root: B256::from([0xEE; 32]),
+        number: 42,
+        gas_limit: 30_000_000,
+        gas_used: 21_000,
+        timestamp: 1_700_000_000,
+        ..Default::default()
+    };
+    RethBlock::new(header, Default::default())
 }

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
 
-/// PoaData — plain struct, no versioning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PoaData {
@@ -21,7 +20,6 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
-/// VDFLimiterInfo — plain struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VDFLimiterInfo {
@@ -39,7 +37,6 @@ pub struct VDFLimiterInfo {
     pub next_vdf_difficulty: Option<u64>,
 }
 
-/// Wire type for DataTransactionLedger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DataTransactionLedger {
@@ -68,7 +65,7 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
-/// Inner fields for IrysBlockHeaderV1.
+/// Inner fields for IrysBlockHeaderV1
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeaderV1Inner {
@@ -99,7 +96,6 @@ pub struct IrysBlockHeaderV1Inner {
     pub treasury: U256,
 }
 
-/// Sovereign wire type for IrysBlockHeader (IntegerTagged-compatible).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrysBlockHeader {
     V1(IrysBlockHeaderV1Inner),
@@ -107,7 +103,6 @@ pub enum IrysBlockHeader {
 
 impl_json_version_tagged_serde!(IrysBlockHeader { 1 => V1(IrysBlockHeaderV1Inner) });
 
-/// Sovereign wire type for BlockBody.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockBody {
     pub block_hash: BlockHash,
@@ -115,7 +110,7 @@ pub struct BlockBody {
     pub commitment_transactions: Vec<CommitmentTransaction>,
 }
 
-// -- Conversions (simple mirror structs) --
+// conversions (mirror structs)
 
 super::impl_mirror_from!(irys_types::PoaData => PoaData {
     partition_chunk_offset, partition_hash, chunk, ledger_id, tx_path, data_path,
