@@ -95,6 +95,14 @@ pub async fn calculate_expired_ledger_fees(
     db: &DatabaseProvider,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    // Fee distribution is only implemented for Submit ledger. Publish expiry
+    // simply resets partitions without fee redistribution.
+    debug_assert_ne!(
+        ledger_type,
+        DataLedger::Publish,
+        "fee distribution not supported for Publish ledger"
+    );
+
     // Step 1: Collect expired partitions
     let expired_slots =
         collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
