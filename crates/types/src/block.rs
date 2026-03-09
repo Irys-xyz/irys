@@ -1128,11 +1128,25 @@ impl BlockTransactions {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+}
+
+impl PartialEq for BlockBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_hash == other.block_hash
+            && self.commitment_transactions == other.commitment_transactions
+            && self.data_transactions.len() == other.data_transactions.len()
+            && self
+                .data_transactions
+                .iter()
+                .zip(other.data_transactions.iter())
+                // note: use eq_tx here
+                .all(|(a, b)| a.eq_tx(b))
+    }
 }
 
 impl BlockBody {

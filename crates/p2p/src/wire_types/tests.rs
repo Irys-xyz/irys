@@ -104,7 +104,7 @@ fn test_data_transaction_header_parity() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: DataTransactionHeader = deserialized.into();
-    assert_eq!(canonical, roundtrip);
+    assert!(canonical.eq_tx(&roundtrip));
 }
 
 // =============================================================================
@@ -205,7 +205,7 @@ fn test_data_tx_header_with_none_optional_fields() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::DataTransactionHeader = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: DataTransactionHeader = deserialized.into();
-    assert_eq!(canonical, roundtrip);
+    assert!(canonical.eq_tx(&roundtrip));
 }
 
 #[test]

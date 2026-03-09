@@ -84,7 +84,7 @@ pub mod v1 {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum GossipDataV1 {
         Chunk(UnpackedChunk),
         Transaction(DataTransactionHeader),
@@ -92,6 +92,29 @@ pub mod v1 {
         Block(Arc<IrysBlockHeader>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+    }
+
+    impl PartialEq for GossipDataV1 {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Chunk(a), Self::Chunk(b)) => a == b,
+                // needed due to eq_tx
+                (Self::Transaction(a), Self::Transaction(b)) => a.eq_tx(b),
+                (Self::CommitmentTransaction(a), Self::CommitmentTransaction(b)) => a == b,
+                (Self::Block(a), Self::Block(b)) => a == b,
+                (Self::ExecutionPayload(a), Self::ExecutionPayload(b)) => a == b,
+                (Self::IngressProof(a), Self::IngressProof(b)) => a == b,
+                (
+                    Self::Chunk(_)
+                    | Self::Transaction(_)
+                    | Self::CommitmentTransaction(_)
+                    | Self::Block(_)
+                    | Self::ExecutionPayload(_)
+                    | Self::IngressProof(_),
+                    _,
+                ) => false,
+            }
+        }
     }
 
     impl From<SealedBlock<Block>> for GossipDataV1 {
@@ -240,7 +263,7 @@ pub mod v2 {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum GossipDataV2 {
         Chunk(Arc<UnpackedChunk>),
         Transaction(DataTransactionHeader),
@@ -249,6 +272,31 @@ pub mod v2 {
         BlockBody(Arc<BlockBody>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+    }
+
+    impl PartialEq for GossipDataV2 {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Chunk(a), Self::Chunk(b)) => a == b,
+                // needed due to eq_tx
+                (Self::Transaction(a), Self::Transaction(b)) => a.eq_tx(b),
+                (Self::CommitmentTransaction(a), Self::CommitmentTransaction(b)) => a == b,
+                (Self::BlockHeader(a), Self::BlockHeader(b)) => a == b,
+                (Self::BlockBody(a), Self::BlockBody(b)) => a == b,
+                (Self::ExecutionPayload(a), Self::ExecutionPayload(b)) => a == b,
+                (Self::IngressProof(a), Self::IngressProof(b)) => a == b,
+                (
+                    Self::Chunk(_)
+                    | Self::Transaction(_)
+                    | Self::CommitmentTransaction(_)
+                    | Self::BlockHeader(_)
+                    | Self::BlockBody(_)
+                    | Self::ExecutionPayload(_)
+                    | Self::IngressProof(_),
+                    _,
+                ) => false,
+            }
+        }
     }
 
     impl From<SealedBlock<Block>> for GossipDataV2 {

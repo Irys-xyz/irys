@@ -65,7 +65,8 @@ pub enum CommitmentValidationError {
 
 // Wrapper struct to hold transaction + metadata
 // This is a transparent wrapper that delegates serde to the inner transaction
-#[derive(Clone, Debug, Default, PartialEq, Arbitrary, Serialize, Deserialize)]
+// DO NOT IMPLEMENT EQ OR PARTIALEQ - USE .eq_tx INSTEAD
+#[derive(Clone, Debug, Default, Arbitrary, Serialize, Deserialize)]
 pub struct DataTransactionHeaderV1WithMetadata {
     #[serde(flatten)]
     pub tx: DataTransactionHeaderV1,
@@ -73,7 +74,8 @@ pub struct DataTransactionHeaderV1WithMetadata {
     pub metadata: DataTransactionMetadata,
 }
 
-#[derive(Clone, Debug, PartialEq, IntegerTagged, Arbitrary)]
+// DO NOT IMPLEMENT EQ OR PARTIALEQ - USE .eq_tx INSTEAD
+#[derive(Clone, Debug, IntegerTagged, Arbitrary)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
 pub enum DataTransactionHeader {
