@@ -2,11 +2,29 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add comprehensive integration tests for the publish (permanent) ledger expiry feature, covering balance verification, simultaneous perm+term expiry, multi-slot scenarios, last-slot protection, and data retrieval post-expiry.
+**Goal:** Add comprehensive integration tests for the publish (permanent) ledger expiry feature, covering balance verification, simultaneous perm+term expiry, exact-boundary expiry, last-slot protection, and mainnet safety.
 
 **Architecture:** All tests live in `crates/chain-tests/src/perm_ledger_expiry/`. Each test boots a single-node `IrysNodeTest` with accelerated epochs (`BLOCKS_PER_EPOCH=3`, `PUBLISH_LEDGER_EPOCH_LENGTH=2`) and small partitions (`CHUNK_SIZE=32`, `num_chunks_in_partition=4`). Tests follow the same patterns established by the term ledger expiry tests in `crates/chain-tests/src/term_ledger_expiry/`.
 
 **Tech Stack:** Rust, `#[test_log::test(tokio::test)]`, `IrysNodeTest` harness, `eyre::Result`, shadow tx decoding via `irys_reth_node_bridge::irys_reth::shadow_tx`
+
+---
+
+## Critical Harness Notes (from Codex review)
+
+These apply to ALL tests in this plan and must be followed carefully:
+
+1. **`wait_for_ingress_proofs()` mines blocks internally** — it calls `mine_block()` once per second in its polling loop. For expiry tests that care about exact heights, use `wait_for_ingress_proofs_no_mining()` instead, then mine explicitly. Otherwise you can silently advance past epoch boundaries.
+
+2. **Slot allocation is epoch-based, not tx-based** — Slots are allocated by `allocate_additional_ledger_slots()` during epoch processing. `last_height` is set to the epoch block height when the slot is allocated, NOT when data is written to it. Genesis init allocates 1 slot per ledger at height 0.
+
+3. **Derive expected expiry from observed state** — Rather than computing `target_height = (EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH` and hoping it lines up, read the actual `slot.last_height` from the epoch snapshot and compute the exact epoch boundary where `epoch_height - min_blocks >= slot.last_height`. This prevents false passes from off-by-one errors.
+
+4. **`mine_until_next_epoch()` always advances** — At height 3 with B=3, it mines to 6, not 3. It computes `B - (height % B)` blocks to mine. Use explicit `mine_block()` loops when you need precise height control.
+
+5. **`num_capacity_partitions` controls capacity pool size, NOT partitions per slot** — To get 1 partition per slot, set `num_partitions_per_slot = 1`.
+
+6. **Signer vs miner** — Use a separate `IrysSigner::random_signer()` funded via genesis, NOT `config.signer()` or the node's reward address. Mining rewards would corrupt balance assertions.
 
 ---
 
@@ -24,11 +42,10 @@ The existing test `heavy_perm_ledger_expiry_basic` in `crates/chain-tests/src/pe
 | # | Test Case | Priority | Why |
 |---|-----------|----------|-----|
 | 1 | User balance unchanged after perm expiry | High | Proves no economic side effects |
-| 2 | Simultaneous perm + term expiry in same epoch | High | Most likely production scenario |
-| 3 | Multi-slot perm expiry across epochs | Medium | Multiple slots expire at different times |
-| 4 | Last-slot protection on live node | Medium | Unit test exists, integration does not |
-| 5 | Perm expiry disabled (`None`) does nothing | Medium | Mainnet safety regression test |
-| 6 | No `PermFeeRefund` shadow txs for promoted Publish data | Medium | Promoted data has no refund path |
+| 2 | Simultaneous perm + term expiry in same epoch | High | Most likely production scenario; proves non-interference |
+| 3 | Exact-boundary expiry (not expired → expired transition) | High | Best defense against off-by-one bugs |
+| 4 | Last-slot protection with partition + data access checks | Medium | Unit test exists but doesn't verify live-node side effects |
+| 5 | Perm expiry disabled (`None`) with multi-slot setup | Medium | Mainnet safety; multi-slot needed to rule out last-slot masking |
 
 ---
 
@@ -87,7 +104,9 @@ for tx in &evm_block.body.transactions {
 - `node.get_canonical_epoch_snapshot()` → `Arc<EpochSnapshot>` (ledger slots, partition assignments)
 - `epoch_snapshot.ledgers.get_slots(DataLedger::Publish)` → `&Vec<LedgerSlot>` (slot.is_expired, slot.partitions)
 - `epoch_snapshot.partition_assignments.get_assignment(hash)` → `Option<PartitionAssignment>` (ledger_id, miner_address)
-- `node.mine_until_next_epoch()` → `(usize, u64)` (blocks_mined, final_height)
+- `node.mine_until_next_epoch()` → `(usize, u64)` (blocks_mined, final_height) — **CAUTION: always advances at least 1 block**
+- `node.wait_for_ingress_proofs_no_mining(ids, seconds)` — polls without mining, use this for precise height control
+- `node.get_is_promoted(tx_id)` → `bool` — checks if tx has been promoted to Publish
 
 ---
 
@@ -98,21 +117,18 @@ for tx in &evm_block.body.transactions {
 
 **Context:** The existing `heavy_perm_ledger_expiry_basic` test verifies slots expire and no shadow txs are generated, but doesn't check that the user's balance is unaffected. For perm expiry, there should be zero economic effect — no fees extracted, no refunds issued. This test adds balance bookkeeping to prove it.
 
+**IMPORTANT:** The signer is already a separate random address (not the node miner), so mining rewards won't corrupt the comparison. Capture balance AFTER the tx has been included and promoted (not at genesis), so the comparison window is clean.
+
 **Step 1: Add balance assertions to `heavy_perm_ledger_expiry_basic`**
 
-Add the following after the existing signer/genesis setup (after line 38) to capture the pre-expiry balance, and after the mining loop (after line 136) to verify the post-expiry balance:
+After the tx is posted, chunks uploaded, and ingress proofs confirmed (but BEFORE the expiry mining loop), capture the user's balance. Then after expiry completes, compare:
 
 ```rust
-// After node start (after line 42), capture initial EVM state:
-let genesis_block = node.get_block_by_height(0).await?;
-
-// After posting tx and mining first block, capture the user's balance AFTER tx is included
-// (the tx costs term_fee + perm_fee, so balance = INITIAL - total_cost + any block rewards if miner == signer)
-// For simplicity, capture balance right before the expiry mining loop begins.
-
-// Insert before "Mine through epochs until expiry" comment:
-let pre_expiry_block = node.get_block_by_height(node.get_canonical_chain_height().await).await?;
-let pre_expiry_evm_block = node.wait_for_evm_block(pre_expiry_block.evm_block_hash, 30).await?;
+// Insert before "Mine through epochs until expiry" comment (before `let target_height`):
+// Capture user balance AFTER tx inclusion and promotion (but before expiry mining).
+// This gives us a clean reference point — the only debits were tx fees at inclusion time.
+let pre_expiry_height = node.get_canonical_chain_height().await;
+let pre_expiry_block = node.get_block_by_height(pre_expiry_height).await?;
 let pre_expiry_balance = U256::from_be_bytes(
     node.get_balance(signer.address(), pre_expiry_block.evm_block_hash)
         .await
@@ -120,11 +136,8 @@ let pre_expiry_balance = U256::from_be_bytes(
 );
 info!("User balance before expiry mining: {}", pre_expiry_balance);
 
-// Insert after "Verified expired perm partitions are in capacity pool" (after line 136):
+// Insert after "Verified expired perm partitions are in capacity pool" (after existing Assertion 3):
 // --- Assertion 4: User balance is unchanged by perm expiry ---
-// The user should only have paid tx costs (term_fee + perm_fee) when the tx was included.
-// Perm expiry should NOT generate any additional debits or credits for the user.
-// We check that no PermFeeRefund shadow txs exist for this user (promoted data = no refund).
 let post_expiry_block = node.get_block_by_height(final_height).await?;
 let post_expiry_balance = U256::from_be_bytes(
     node.get_balance(signer.address(), post_expiry_block.evm_block_hash)
@@ -160,7 +173,7 @@ git commit -m "test: add balance unchanged assertion to perm ledger expiry test"
 
 ---
 
-### Task 2: Simultaneous Perm + Term Expiry
+### Task 2: Simultaneous Perm + Term Expiry (Non-Interference)
 
 **Files:**
 - Modify: `crates/chain-tests/src/perm_ledger_expiry/mod.rs`
@@ -170,6 +183,12 @@ git commit -m "test: add balance unchanged assertion to perm ledger expiry test"
 - Generate NO `TermFeeReward` for Publish expiry
 - Mark both ledgers' slots as expired
 - Return both sets of partitions to capacity pool
+- Publish expiry must NOT interfere with Submit fee distribution (the bug from Finding 1)
+
+**Key design decisions (from Codex review):**
+- Use `wait_for_ingress_proofs_no_mining()` to avoid hidden height advancement
+- Explicitly assert `get_is_promoted(tx1) == false` to verify the unpromoted tx assumption
+- Both ledgers need at least 2 slots (so the genesis slot can expire while the last slot is protected). The genesis init allocates 1 slot per ledger at height 0. We need to post enough data early to trigger a second slot allocation at the first epoch boundary, so that the genesis slot becomes expirable.
 
 **Step 1: Write the test**
 
@@ -177,10 +196,11 @@ Add the following test function at the bottom of `crates/chain-tests/src/perm_le
 
 ```rust
 /// Tests that simultaneous publish and submit ledger expiry in the same epoch works correctly.
+/// This is the critical non-interference test: Publish expiry must not block Submit fee distribution.
 /// Verifies:
 /// - Both Submit and Publish slots expire at the same epoch boundary
-/// - TermFeeReward shadow txs appear ONLY for Submit expiry (not Publish)
-/// - No PermFeeRefund for promoted Publish data
+/// - TermFeeReward shadow txs appear for Submit expiry
+/// - Publish expiry does NOT generate TermFeeReward or interfere with Submit path
 /// - Both sets of expired partitions returned to capacity pool
 #[test_log::test(tokio::test)]
 async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
@@ -228,12 +248,25 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx2.header.id, 10).await?;
 
-    // Upload chunks for tx2 only to trigger promotion to Publish
+    // Upload chunks for tx2 only — use no-mining variant to preserve height control
     node.upload_chunks(&tx2).await?;
-    node.wait_for_ingress_proofs(vec![tx2.header.id], 20).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20).await?;
 
-    // Mine through epochs until both should expire
-    let target_height = (EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH;
+    // Explicitly verify tx1 is NOT promoted (no auto-promotion)
+    assert!(
+        !node.get_is_promoted(&tx1.header.id).await?,
+        "tx1 should NOT be promoted (no chunks uploaded)"
+    );
+    assert!(
+        node.get_is_promoted(&tx2.header.id).await?,
+        "tx2 should be promoted (chunks uploaded)"
+    );
+
+    // Mine block to include both txs, then mine through epochs until expiry.
+    // Genesis slot (allocated at height 0) needs: epoch_height - min_blocks >= 0
+    // min_blocks = EPOCH_LENGTH * BLOCKS_PER_EPOCH = 6
+    // So expiry triggers at epoch_height = 6 (which is the first epoch boundary >= 6)
+    let target_height = EPOCH_LENGTH * BLOCKS_PER_EPOCH;
     info!(
         "Mining to height {} to trigger simultaneous perm+term expiry",
         target_height
@@ -275,54 +308,34 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         "Expected at least one non-last Publish slot to be expired"
     );
 
-    // --- Assertion 3: TermFeeReward shadow txs exist (from Submit), not from Publish ---
-    // Scan all blocks from the epoch boundary for shadow txs
-    let epoch_height = (EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH;
+    // --- Assertion 3: TermFeeReward shadow txs exist (from Submit fee distribution) ---
+    // This is the key non-interference check: Publish expiry must not block Submit fee path.
+    let epoch_block = node.get_block_by_height(final_height).await?;
+    let evm_block = node
+        .wait_for_evm_block(epoch_block.evm_block_hash, 30)
+        .await?;
     let mut found_term_fee_reward = false;
-    let mut found_perm_fee_refund = false;
 
-    if let Ok(epoch_block) = node.get_block_by_height(epoch_height).await {
-        let evm_block = node
-            .wait_for_evm_block(epoch_block.evm_block_hash, 30)
-            .await?;
-        for tx in &evm_block.body.transactions {
-            let mut input = tx.input().as_ref();
-            if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-                if let Some(packet) = shadow.as_v1() {
-                    match packet {
-                        TransactionPacket::TermFeeReward(_) => {
-                            found_term_fee_reward = true;
-                            info!("Found TermFeeReward shadow tx (expected, from Submit expiry)");
-                        }
-                        TransactionPacket::PermFeeRefund(_) => {
-                            found_perm_fee_refund = true;
-                        }
-                        _ => {}
-                    }
+    for tx in &evm_block.body.transactions {
+        let mut input = tx.input().as_ref();
+        if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
+            if let Some(packet) = shadow.as_v1() {
+                if matches!(packet, TransactionPacket::TermFeeReward(_)) {
+                    found_term_fee_reward = true;
+                    info!("Found TermFeeReward shadow tx (expected, from Submit expiry)");
                 }
             }
         }
     }
 
-    // TermFeeReward should appear (Submit ledger expired with data)
     assert!(
         found_term_fee_reward,
-        "Expected TermFeeReward from Submit ledger expiry"
-    );
-
-    // PermFeeRefund should NOT appear for promoted tx2 (it was successfully promoted)
-    // Note: tx1 never had chunks uploaded so it could get a PermFeeRefund,
-    // but it's on Submit ledger so its perm fee refund comes through the Submit expiry path.
-    // No Publish-originated PermFeeRefund should exist.
-    info!(
-        "PermFeeRefund present: {} (tx1 unpromoted refund is expected via Submit expiry path)",
-        found_perm_fee_refund
+        "Expected TermFeeReward from Submit ledger expiry — Publish expiry may have blocked it"
     );
 
     // --- Assertion 4: Both sets of expired partitions in capacity pool ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
 
-    // Check expired Submit partitions
     for slot in submit_slots.iter().filter(|s| s.is_expired) {
         for partition_hash in &slot.partitions {
             if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
@@ -334,7 +347,6 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         }
     }
 
-    // Check expired Publish partitions
     for (i, slot) in perm_slots.iter().enumerate() {
         if i < num_perm_slots - 1 && slot.is_expired {
             for partition_hash in &slot.partitions {
@@ -366,26 +378,26 @@ Expected: PASS.
 
 ```bash
 git add crates/chain-tests/src/perm_ledger_expiry/mod.rs
-git commit -m "test: add simultaneous perm+term expiry integration test"
+git commit -m "test: add simultaneous perm+term expiry non-interference integration test"
 ```
 
 ---
 
-### Task 3: Multi-Slot Perm Expiry Across Epochs
+### Task 3: Exact-Boundary Expiry (Not Expired → Expired Transition)
 
 **Files:**
 - Modify: `crates/chain-tests/src/perm_ledger_expiry/mod.rs`
 
-**Context:** The basic test only creates one transaction (one slot). In production, multiple perm slots will fill across epochs and expire at different times. This test creates data in epoch 0 and epoch 1, then mines far enough that epoch 0's data expires but epoch 1's does not yet, then mines further until epoch 1's expires too.
+**Context (from Codex review):** The best defense against off-by-one bugs is a test that proves "not expired at the previous epoch block, expired at the exact next epoch block." Rather than using a hardcoded target height, this test reads the actual `slot.last_height` from the epoch snapshot to compute the exact epoch boundary where expiry must trigger.
 
 **Step 1: Write the test**
 
 ```rust
-/// Tests that multiple perm slots expire independently at different epoch boundaries.
-/// Slot 0 is created early (epoch 0) and should expire first.
-/// Slot 1 is created later (epoch 1) and should expire in a subsequent epoch.
+/// Tests exact-boundary expiry: perm slot is NOT expired at epoch E-1 but IS expired at epoch E.
+/// Derives the expected expiry epoch from the observed slot.last_height rather than hardcoding,
+/// preventing false passes from off-by-one errors in the expiry height calculation.
 #[test_log::test(tokio::test)]
-async fn heavy_perm_multi_slot_expiry() -> eyre::Result<()> {
+async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
     const DATA_SIZE: usize = 32;
     const BLOCKS_PER_EPOCH: u64 = 3;
@@ -400,8 +412,6 @@ async fn heavy_perm_multi_slot_expiry() -> eyre::Result<()> {
     config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
     config.consensus.get_mut().epoch.publish_ledger_epoch_length =
         Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-    // Use 1 partition per slot so each tx fills a slot
-    config.consensus.get_mut().epoch.num_capacity_partitions = Some(1);
 
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -413,94 +423,93 @@ async fn heavy_perm_multi_slot_expiry() -> eyre::Result<()> {
     )]);
 
     let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_multi_slot_test", 30)
+        .start_and_wait_for_packing("perm_exact_boundary_test", 30)
         .await;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
-    // --- Phase 1: Create data in first epoch (slot 0) ---
-    let tx1 = node
+    // Post and promote a transaction
+    let tx = node
         .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
         .await;
-    node.wait_for_mempool(tx1.header.id, 10).await?;
-    node.upload_chunks(&tx1).await?;
-    node.wait_for_ingress_proofs(vec![tx1.header.id], 20).await?;
-    info!("tx1 promoted to Publish in epoch 0");
+    node.wait_for_mempool(tx.header.id, 10).await?;
+    node.upload_chunks(&tx).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20).await?;
 
-    // Mine to next epoch boundary
-    let (_, height_after_epoch1) = node.mine_until_next_epoch().await?;
-    info!("After epoch 1 boundary, height: {}", height_after_epoch1);
+    // Mine one block to include the tx
+    node.mine_block().await?;
 
-    // --- Phase 2: Create data in second epoch (slot 1) ---
-    let anchor2 = node
-        .get_block_by_height(node.get_canonical_chain_height().await)
-        .await?
-        .block_hash;
-    let tx2 = node
-        .post_data_tx(anchor2, vec![2_u8; DATA_SIZE], &signer)
-        .await;
-    node.wait_for_mempool(tx2.header.id, 10).await?;
-    node.upload_chunks(&tx2).await?;
-    node.wait_for_ingress_proofs(vec![tx2.header.id], 20).await?;
-    info!("tx2 promoted to Publish in epoch 1");
+    // Read the genesis Publish slot's last_height from the epoch snapshot.
+    // Genesis init allocates slot 0 at height 0.
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(!perm_slots.is_empty(), "Should have at least one perm slot");
+    let slot0_last_height = perm_slots[0].last_height;
+    info!("Publish slot 0 last_height = {}", slot0_last_height);
 
-    // --- Phase 3: Mine until slot 0 should expire but slot 1 should NOT ---
-    // slot 0 data was at height ~1-3, slot 1 data was at height ~4-6
-    // With epoch_length=2, min_blocks=6. Expiry at epoch_height where
-    // epoch_height - 6 >= slot.last_height
-    // We need to mine far enough for slot 0 but not slot 1
-    let target_height_phase1 = (PUBLISH_LEDGER_EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH;
-    let current = node.get_canonical_chain_height().await;
-    for _ in current..target_height_phase1 {
-        node.mine_block().await?;
-    }
-
-    let snapshot1 = node.get_canonical_epoch_snapshot();
-    let perm_slots = snapshot1.ledgers.get_slots(DataLedger::Publish);
+    // Compute the exact epoch boundary where slot 0 should expire:
+    // min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH
+    // Slot expires when epoch_height >= min_blocks AND epoch_height - min_blocks >= slot.last_height
+    // => epoch_height >= min_blocks + slot.last_height
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let earliest_expiry_height = min_blocks + slot0_last_height;
+    // Round up to the next epoch boundary (expiry only runs on epoch blocks)
+    let expiry_epoch_height = if earliest_expiry_height % BLOCKS_PER_EPOCH == 0 {
+        earliest_expiry_height
+    } else {
+        ((earliest_expiry_height / BLOCKS_PER_EPOCH) + 1) * BLOCKS_PER_EPOCH
+    };
+    // The epoch boundary BEFORE the expiry one
+    let pre_expiry_epoch_height = expiry_epoch_height - BLOCKS_PER_EPOCH;
     info!(
-        "After phase 3: {} perm slots, expired: {:?}",
-        perm_slots.len(),
-        perm_slots.iter().map(|s| s.is_expired).collect::<Vec<_>>()
+        "Expected: NOT expired at epoch height {}, expired at epoch height {}",
+        pre_expiry_epoch_height, expiry_epoch_height
     );
 
-    // Verify slot 0 is expired (if it's not the last slot)
-    if perm_slots.len() > 1 {
-        assert!(
-            perm_slots[0].is_expired,
-            "Slot 0 (early data) should be expired by now"
-        );
-    }
-
-    // --- Phase 4: Mine further until slot 1 also expires ---
-    // Mine additional epochs
-    let target_height_phase2 = (PUBLISH_LEDGER_EPOCH_LENGTH + 2) * BLOCKS_PER_EPOCH;
+    // --- Phase 1: Mine to the epoch BEFORE expiry and verify NOT expired ---
     let current = node.get_canonical_chain_height().await;
-    for _ in current..target_height_phase2 {
-        node.mine_block().await?;
+    if pre_expiry_epoch_height > current {
+        for _ in current..pre_expiry_epoch_height {
+            node.mine_block().await?;
+        }
     }
 
-    let snapshot2 = node.get_canonical_epoch_snapshot();
-    let perm_slots2 = snapshot2.ledgers.get_slots(DataLedger::Publish);
-    let num_slots = perm_slots2.len();
-
-    // Count expired non-last slots
-    let expired_count = perm_slots2
-        .iter()
-        .enumerate()
-        .filter(|(i, s)| *i < num_slots - 1 && s.is_expired)
-        .count();
-
-    info!(
-        "After phase 4: {} non-last perm slots expired out of {}",
-        expired_count, num_slots
-    );
-
-    // Both slot 0 and slot 1 should be expired (unless one is the last slot)
-    // The last slot is protected, so at minimum all-but-last should be expired
+    let pre_snapshot = node.get_canonical_epoch_snapshot();
+    let pre_perm_slots = pre_snapshot.ledgers.get_slots(DataLedger::Publish);
     assert!(
-        expired_count >= 1,
-        "Expected multiple expired non-last perm slots"
+        !pre_perm_slots[0].is_expired,
+        "Publish slot 0 should NOT be expired at epoch height {} (one epoch before expiry)",
+        pre_expiry_epoch_height
     );
+    info!("Confirmed: slot 0 NOT expired at height {}", pre_expiry_epoch_height);
+
+    // --- Phase 2: Mine exactly to the expiry epoch boundary ---
+    let current = node.get_canonical_chain_height().await;
+    for _ in current..expiry_epoch_height {
+        node.mine_block().await?;
+    }
+
+    let post_snapshot = node.get_canonical_epoch_snapshot();
+    let post_perm_slots = post_snapshot.ledgers.get_slots(DataLedger::Publish);
+
+    // If slot 0 is the last slot, last-slot protection kicks in — that's a valid outcome.
+    // Otherwise, it MUST be expired at exactly this epoch.
+    let num_slots = post_perm_slots.len();
+    if num_slots > 1 {
+        assert!(
+            post_perm_slots[0].is_expired,
+            "Publish slot 0 should be expired at epoch height {} (expiry boundary)",
+            expiry_epoch_height
+        );
+        info!("Confirmed: slot 0 expired at exact boundary height {}", expiry_epoch_height);
+    } else {
+        // Single slot: last-slot protection should keep it alive
+        assert!(
+            !post_perm_slots[0].is_expired,
+            "Single Publish slot should be protected by last-slot rule"
+        );
+        info!("Confirmed: single slot protected by last-slot rule at height {}", expiry_epoch_height);
+    }
 
     node.stop().await;
     Ok(())
@@ -510,32 +519,38 @@ async fn heavy_perm_multi_slot_expiry() -> eyre::Result<()> {
 **Step 2: Run the test**
 
 ```bash
-cargo nextest run -p irys-chain-tests heavy_perm_multi_slot_expiry
+cargo nextest run -p irys-chain-tests heavy_perm_exact_boundary_expiry
 ```
 
-Expected: PASS. Slots expire progressively as epochs advance.
+Expected: PASS. The test derives the correct expiry boundary from observed state and verifies the transition.
 
 **Step 3: Commit**
 
 ```bash
 git add crates/chain-tests/src/perm_ledger_expiry/mod.rs
-git commit -m "test: add multi-slot perm expiry across epochs integration test"
+git commit -m "test: add exact-boundary perm expiry transition test"
 ```
 
 ---
 
-### Task 4: Last-Slot Protection on Live Node
+### Task 4: Last-Slot Protection with Live-Node Side Effects
 
 **Files:**
 - Modify: `crates/chain-tests/src/perm_ledger_expiry/mod.rs`
 
-**Context:** A unit test in `data_ledger.rs::test_perm_expiry_never_expires_last_slot` verifies the last-slot protection logic in isolation. This integration test verifies it works end-to-end on a real node: if there's only one Publish slot, it must never expire regardless of how many epochs pass.
+**Context:** A unit test in `data_ledger.rs::test_perm_expiry_never_expires_last_slot` verifies the last-slot protection logic in isolation. This integration test goes further: it verifies that on a live node with a single Publish slot, mining far past the expiry boundary:
+1. Keeps the slot NOT expired
+2. Keeps partition assignments on the Publish ledger (not reset to capacity)
+3. Generates no expiry-related shadow txs
 
 **Step 1: Write the test**
 
 ```rust
-/// Tests that the last (and only) Publish slot never expires, even after many epochs.
-/// This protects the ledger from becoming fully expired with no active slots.
+/// Tests that the last (and only) Publish slot never expires on a live node.
+/// Goes beyond the unit test by checking live-node side effects:
+/// - Partition assignment stays on Publish ledger
+/// - No expiry-related shadow transactions generated
+/// - Slot remains active even after many epochs
 #[test_log::test(tokio::test)]
 async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
@@ -568,13 +583,13 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
-    // Post exactly ONE transaction and promote it — creates one Publish slot
+    // Post exactly ONE transaction and promote it — uses the genesis slot
     let tx = node
         .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
         .await;
     node.wait_for_mempool(tx.header.id, 10).await?;
     node.upload_chunks(&tx).await?;
-    node.wait_for_ingress_proofs(vec![tx.header.id], 20).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20).await?;
 
     // Mine WAY past expiry (5x the epoch length) to stress-test last-slot protection
     let overkill_height = (PUBLISH_LEDGER_EPOCH_LENGTH + 4) * BLOCKS_PER_EPOCH;
@@ -597,7 +612,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         );
     }
 
-    // The last slot must NEVER be expired
+    // --- Assertion 1: Last slot must NOT be expired ---
     if let Some(last_slot) = perm_slots.last() {
         assert!(
             !last_slot.is_expired,
@@ -605,14 +620,51 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         );
     }
 
-    // If there's only one slot total, it should not be expired
+    // If there's only one slot total, verify it's still active
     if perm_slots.len() == 1 {
         assert!(
             !perm_slots[0].is_expired,
             "Single Publish slot must not expire (it's the last slot)"
         );
-        info!("Confirmed: single perm slot survived past expiry boundary");
     }
+
+    // --- Assertion 2: Partition assignments still on Publish ledger ---
+    let partition_assignments = &epoch_snapshot.partition_assignments;
+    let last_slot = perm_slots.last().unwrap();
+    for partition_hash in &last_slot.partitions {
+        if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
+            assert!(
+                assignment.ledger_id.is_some(),
+                "Last-slot partition {:?} should still be assigned to Publish, not capacity pool",
+                partition_hash
+            );
+        }
+    }
+    info!("Confirmed: last-slot partitions still assigned to Publish ledger");
+
+    // --- Assertion 3: No expiry-related shadow txs in any epoch block past the threshold ---
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let final_height = node.get_canonical_chain_height().await;
+    for h in (min_blocks..=final_height).step_by(BLOCKS_PER_EPOCH as usize) {
+        if let Ok(block) = node.get_block_by_height(h).await {
+            if let Ok(evm_block) = node.wait_for_evm_block(block.evm_block_hash, 10).await {
+                for evm_tx in &evm_block.body.transactions {
+                    let mut input = evm_tx.input().as_ref();
+                    if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
+                        if let Some(packet) = shadow.as_v1() {
+                            // No TermFeeReward should exist for a Publish-only node
+                            assert!(
+                                !matches!(packet, TransactionPacket::TermFeeReward(_)),
+                                "Unexpected TermFeeReward at height {} — last-slot Publish data should not trigger fees",
+                                h
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    info!("Confirmed: no expiry-related shadow txs generated");
 
     node.stop().await;
     Ok(())
@@ -631,22 +683,25 @@ Expected: PASS. The single Publish slot remains active even after 5x the configu
 
 ```bash
 git add crates/chain-tests/src/perm_ledger_expiry/mod.rs
-git commit -m "test: add last-slot protection integration test for perm expiry"
+git commit -m "test: add last-slot protection integration test with side-effect checks"
 ```
 
 ---
 
-### Task 5: Perm Expiry Disabled (Mainnet Safety)
+### Task 5: Perm Expiry Disabled (Mainnet Safety) — Multi-Slot
 
 **Files:**
 - Modify: `crates/chain-tests/src/perm_ledger_expiry/mod.rs`
 
-**Context:** On mainnet, `publish_ledger_epoch_length` is `None`. Permanent data must NEVER expire. This test boots a node with `None` config, mines many epochs, and asserts zero Publish slots are expired.
+**Context:** On mainnet, `publish_ledger_epoch_length` is `None`. Permanent data must NEVER expire. This test boots a node with `None` config, creates enough data for multiple Publish slots, mines many epochs, and asserts zero Publish slots are expired.
+
+**Key design decision (from Codex review):** A single-slot test would false-pass because last-slot protection alone prevents expiry. By forcing 2+ Publish slots, the test proves the `None` config gate is what blocks expiry, not last-slot protection.
 
 **Step 1: Write the test**
 
 ```rust
 /// Tests that Publish ledger data NEVER expires when publish_ledger_epoch_length is None.
+/// Uses multi-slot setup so last-slot protection cannot mask a broken config gate.
 /// This is the mainnet behavior — permanent data stays permanent.
 #[test_log::test(tokio::test)]
 async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
@@ -663,6 +718,8 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
     // Explicitly set to None — mainnet behavior
     config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
+    // 1 partition per slot so data fills slots faster
+    config.consensus.get_mut().num_partitions_per_slot = 1;
 
     let signer = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![(
@@ -679,36 +736,64 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
-    // Post and promote a transaction
+    // Post and promote a transaction to fill the genesis Publish slot
     let tx = node
         .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
         .await;
     node.wait_for_mempool(tx.header.id, 10).await?;
     node.upload_chunks(&tx).await?;
-    node.wait_for_ingress_proofs(vec![tx.header.id], 20).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20).await?;
 
-    // Mine many epochs — enough that expiry WOULD have triggered if enabled
-    let lots_of_blocks = 5 * BLOCKS_PER_EPOCH;
+    // Mine to first epoch boundary to trigger slot allocation (creates slot 1)
+    node.mine_block().await?; // include the tx
+    let (_, height_after_epoch) = node.mine_until_next_epoch().await?;
+    info!("After first epoch at height {}", height_after_epoch);
+
+    // Post and promote a second tx in the new epoch
+    let anchor2 = node.get_block_by_height(height_after_epoch).await?.block_hash;
+    let tx2 = node
+        .post_data_tx(anchor2, vec![2_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx2.header.id, 10).await?;
+    node.upload_chunks(&tx2).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20).await?;
+
+    // Mine many more epochs — enough that expiry WOULD have triggered if enabled
+    // With epoch_length=2 and B=3, min_blocks would be 6, so height 6+ would expire genesis slot
+    let lots_of_blocks = 8 * BLOCKS_PER_EPOCH;
     let current = node.get_canonical_chain_height().await;
     for _ in current..lots_of_blocks {
         node.mine_block().await?;
     }
 
-    // No Publish slots should be expired
+    // Verify we have multiple Publish slots
     let epoch_snapshot = node.get_canonical_epoch_snapshot();
     let perm_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
+    info!("Perm slots: {}", perm_slots.len());
+    for (i, slot) in perm_slots.iter().enumerate() {
+        info!(
+            "  Slot {}: is_expired={}, partitions={}, last_height={}",
+            i, slot.is_expired, slot.partitions.len(), slot.last_height
+        );
+    }
 
-    let expired_count = perm_slots.iter().filter(|s| s.is_expired).count();
-    assert_eq!(
-        expired_count, 0,
-        "With publish_ledger_epoch_length=None, NO perm slots should expire"
-    );
-    info!(
-        "Confirmed: {} perm slots, 0 expired (mainnet behavior correct)",
+    // We need at least 2 slots for this test to be meaningful
+    // (otherwise last-slot protection would mask the bug)
+    assert!(
+        perm_slots.len() >= 2,
+        "Need at least 2 Publish slots to distinguish None gate from last-slot protection, got {}",
         perm_slots.len()
     );
 
-    // Also verify partition is still assigned to Publish ledger
+    // No Publish slots should be expired
+    let expired_count = perm_slots.iter().filter(|s| s.is_expired).count();
+    assert_eq!(
+        expired_count, 0,
+        "With publish_ledger_epoch_length=None, NO perm slots should expire (got {} expired)",
+        expired_count
+    );
+
+    // Also verify all partitions still assigned to Publish ledger
     for slot in perm_slots {
         for partition_hash in &slot.partitions {
             if let Some(assignment) = epoch_snapshot
@@ -735,137 +820,13 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
 cargo nextest run -p irys-chain-tests heavy_perm_expiry_disabled_nothing_expires
 ```
 
-Expected: PASS. Zero Publish slots expired, all partitions still assigned.
+Expected: PASS. Zero Publish slots expired across 2+ slots, all partitions still assigned.
 
 **Step 3: Commit**
 
 ```bash
 git add crates/chain-tests/src/perm_ledger_expiry/mod.rs
-git commit -m "test: add mainnet safety test — perm expiry disabled does nothing"
-```
-
----
-
-### Task 6: No PermFeeRefund for Promoted Publish Data
-
-**Files:**
-- Modify: `crates/chain-tests/src/perm_ledger_expiry/mod.rs`
-
-**Context:** When a transaction is promoted to Publish (chunks uploaded and proven), the user should NOT receive a `PermFeeRefund` when the Publish slot expires. `PermFeeRefund` only applies to unpromoted transactions on the Submit ledger. This test explicitly verifies that no `PermFeeRefund` shadow tx is generated targeting the user who had promoted data.
-
-**Step 1: Write the test**
-
-```rust
-/// Tests that promoted Publish data does NOT generate PermFeeRefund on expiry.
-/// PermFeeRefund only applies to unpromoted Submit transactions.
-#[test_log::test(tokio::test)]
-async fn heavy_perm_no_refund_for_promoted_data() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 32;
-    const BLOCKS_PER_EPOCH: u64 = 3;
-    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
-
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    let user_address = signer.address();
-    config.consensus.extend_genesis_accounts(vec![(
-        user_address,
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
-        },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_no_refund_test", 30)
-        .await;
-
-    let anchor = node.get_block_by_height(0).await?.block_hash;
-
-    // Post and promote — this data is successfully stored in Publish
-    let tx = node
-        .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
-        .await;
-    let _perm_fee = tx.header.perm_fee;
-    node.wait_for_mempool(tx.header.id, 10).await?;
-    node.upload_chunks(&tx).await?;
-    node.wait_for_ingress_proofs(vec![tx.header.id], 20).await?;
-    info!("Transaction promoted to Publish");
-
-    // Mine to expiry
-    let target_height = (PUBLISH_LEDGER_EPOCH_LENGTH + 1) * BLOCKS_PER_EPOCH;
-    let current = node.get_canonical_chain_height().await;
-    for _ in current..target_height {
-        node.mine_block().await?;
-    }
-
-    // Scan ALL blocks from genesis to final height for PermFeeRefund shadow txs
-    let final_height = node.get_canonical_chain_height().await;
-    let mut total_perm_refunds = U256::ZERO;
-    let mut perm_refund_count = 0u32;
-
-    for h in 0..=final_height {
-        if let Ok(block) = node.get_block_by_height(h).await {
-            if let Ok(evm_block) = node.wait_for_evm_block(block.evm_block_hash, 10).await {
-                for evm_tx in &evm_block.body.transactions {
-                    let mut input = evm_tx.input().as_ref();
-                    if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-                        if let Some(TransactionPacket::PermFeeRefund(refund)) = shadow.as_v1() {
-                            perm_refund_count += 1;
-                            let amount =
-                                U256::from_le_bytes(refund.amount.to_le_bytes());
-                            total_perm_refunds = total_perm_refunds.saturating_add(amount);
-                            info!(
-                                "Found PermFeeRefund at height {}: target={:?}, amount={}",
-                                h, refund.target, amount
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // No PermFeeRefund should exist — the tx was promoted to Publish successfully
-    assert_eq!(
-        perm_refund_count, 0,
-        "Promoted Publish data should NOT generate PermFeeRefund shadow txs, found {}",
-        perm_refund_count
-    );
-    assert_eq!(
-        total_perm_refunds,
-        U256::ZERO,
-        "Total PermFeeRefund amount should be zero for promoted data"
-    );
-    info!("Confirmed: no PermFeeRefund shadow txs for promoted Publish data");
-
-    node.stop().await;
-    Ok(())
-}
-```
-
-**Step 2: Run the test**
-
-```bash
-cargo nextest run -p irys-chain-tests heavy_perm_no_refund_for_promoted_data
-```
-
-Expected: PASS. Zero `PermFeeRefund` shadow txs found across all blocks.
-
-**Step 3: Commit**
-
-```bash
-git add crates/chain-tests/src/perm_ledger_expiry/mod.rs
-git commit -m "test: verify no PermFeeRefund for promoted Publish data on expiry"
+git commit -m "test: add mainnet safety test — perm expiry disabled with multi-slot verification"
 ```
 
 ---
@@ -885,9 +846,25 @@ cargo nextest run -p irys-chain-tests heavy_perm_ledger_expiry_basic
 **Key risk:** These are `heavy_` integration tests that boot real nodes. They may take 30-60s each. If a test hangs, check:
 1. Packing service readiness (increase `start_and_wait_for_packing` timeout)
 2. Block mining stalls (check VDF, ensure `num_chunks_in_recall_range = 1`)
-3. Ingress proof timeouts (increase `wait_for_ingress_proofs` timeout)
+3. Ingress proof timeouts (increase `wait_for_ingress_proofs_no_mining` timeout)
+4. `wait_for_ingress_proofs` mining blocks — make sure you're using the `_no_mining` variant
 
 **Compilation check before running:**
 ```bash
 cargo check -p irys-chain-tests --tests
 ```
+
+---
+
+## Changes from Original Plan (Codex Review)
+
+| Original | Change | Reason |
+|----------|--------|--------|
+| Task 2: `wait_for_ingress_proofs` | → `wait_for_ingress_proofs_no_mining` | Prevents hidden height advancement past epoch boundaries |
+| Task 2: No promotion check | → Added `get_is_promoted()` assertions | Explicitly verify the test's key assumption |
+| Task 2: `target_height = (E+1)*B` | → `target_height = E*B` | Genesis slot at height 0 expires when epoch_height >= min_blocks |
+| Task 3 (multi-slot): `num_capacity_partitions = Some(1)` | → Replaced with Task 3 (exact-boundary) | Original used wrong config knob; exact-boundary test is more valuable |
+| Task 4: Only checked `is_expired` flag | → Added partition assignment + shadow tx checks | Proves live-node side effects, not just state flag |
+| Task 5: Single-slot setup | → Multi-slot with `num_partitions_per_slot = 1` | Single slot would false-pass due to last-slot protection |
+| Task 6 (PermFeeRefund scan) | → Dropped | Redundant with `term_ledger_expiry/perm_refund.rs::heavy_perm_fee_refund_for_unpromoted_tx` which already tests promoted-vs-unpromoted refunds |
+| All tasks: Hardcoded expiry heights | → Derive from observed `slot.last_height` where possible | Prevents false passes from off-by-one errors |
