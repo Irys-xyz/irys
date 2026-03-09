@@ -11,7 +11,7 @@ use irys_database::{
     db_cache::data_size_to_chunk_count,
     tables::{CachedChunks, CachedChunksIndex},
 };
-use irys_types::gossip::v2::GossipBroadcastMessageV2;
+use irys_types::gossip::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
     DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
     chunk::{UnpackedChunk, max_chunk_offset},
@@ -473,7 +473,7 @@ impl ChunkIngressServiceInner {
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
+        let gossip_broadcast_message = GossipBroadcastMessageVersionPD::from(chunk);
 
         if let Err(error) = self
             .service_senders

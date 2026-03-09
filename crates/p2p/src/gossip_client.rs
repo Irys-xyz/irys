@@ -9,6 +9,7 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
+use irys_types::version_pd::GossipDataVersionPD;
 use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
     HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
@@ -35,6 +36,7 @@ fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
     match version {
         ProtocolVersion::V1 => format!("http://{}/gossip", addr),
         ProtocolVersion::V2 => format!("http://{}/gossip/v2", addr),
+        ProtocolVersion::VersionPD => format!("http://{}/gossip/version_pd", addr),
     }
 }
 
@@ -182,7 +184,7 @@ impl GossipClient {
     async fn send_data_and_update_score_internal(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: &GossipDataV2,
+        data: &GossipDataVersionPD,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
         let peer_id = peer.0;
@@ -232,7 +234,7 @@ impl GossipClient {
                 &peer.1.address.gossip,
                 GossipRoutes::GetData,
                 &requested_data,
-                ProtocolVersion::V2,
+                peer.1.protocol_version,
             )
             .await
         };
@@ -353,7 +355,7 @@ impl GossipClient {
                     &peer.1.address.gossip,
                     GossipRoutes::PullData,
                     &requested_data,
-                    ProtocolVersion::V2,
+                    peer.1.protocol_version,
                 )
                 .await
             };
@@ -552,14 +554,14 @@ impl GossipClient {
         &self,
         peer: SocketAddr,
         version: HandshakeRequestV2,
+        protocol_version: ProtocolVersion,
     ) -> Result<PeerResponse, GossipClientError> {
-        // V2 uses /v2/handshake endpoint
         let url = format!(
             "{}{}",
-            gossip_base_url(&peer, ProtocolVersion::V2),
+            gossip_base_url(&peer, protocol_version),
             GossipRoutes::Handshake
         );
-        debug!("Posting V2 handshake to {}: {:?}", url, version);
+        debug!("Posting handshake to {}: {:?}", url, version);
         let headers = traced_headers();
         let response = self
             .internal_client()
@@ -980,95 +982,28 @@ impl GossipClient {
     async fn send_data(
         &self,
         peer: &PeerListItem,
-        data: &GossipDataV2,
+        data: &GossipDataVersionPD,
     ) -> GossipResult<GossipResponse<()>> {
-        if peer.protocol_version == irys_types::ProtocolVersion::V1 {
-            if let GossipDataV2::BlockBody(_) = data {
-                return Ok(GossipResponse::Rejected(
-                    RejectionReason::UnsupportedFeature,
-                ));
-            }
-
-            if let Some(data_v1) = data.to_v1() {
-                return self.send_data_v1(peer, &data_v1).await;
-            }
-
-            return Ok(GossipResponse::Rejected(
-                RejectionReason::UnsupportedFeature,
-            ));
-        }
-
-        match data {
-            GossipDataV2::Chunk(unpacked_chunk) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::Chunk,
-                    unpacked_chunk,
-                    ProtocolVersion::V2,
-                )
-                .await
-            }
-            GossipDataV2::Transaction(irys_transaction_header) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::Transaction,
-                    irys_transaction_header,
-                    ProtocolVersion::V2,
-                )
-                .await
-            }
-            GossipDataV2::CommitmentTransaction(commitment_tx) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::CommitmentTx,
-                    commitment_tx,
-                    ProtocolVersion::V2,
-                )
-                .await
-            }
-            GossipDataV2::BlockHeader(irys_block_header) => {
-                if irys_block_header.poa.chunk.is_none() {
-                    error!(
-                        target = "p2p::gossip_client::send_data",
-                        block.hash = ?irys_block_header.block_hash,
-                        "Sending a block header without the POA chunk"
-                    );
+        match peer.protocol_version {
+            ProtocolVersion::V1 => {
+                if let Some(data_v1) = data.to_v1() {
+                    self.send_data_v1(peer, &data_v1).await
+                } else {
+                    Ok(GossipResponse::Rejected(
+                        RejectionReason::UnsupportedFeature,
+                    ))
                 }
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::Block,
-                    &irys_block_header,
-                    ProtocolVersion::V2,
-                )
-                .await
             }
-            GossipDataV2::BlockBody(block_body) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::BlockBody,
-                    &block_body,
-                    ProtocolVersion::V2,
-                )
-                .await
+            ProtocolVersion::V2 => {
+                if let Some(data_v2) = data.to_v2() {
+                    self.send_data_v2(peer, &data_v2).await
+                } else {
+                    Ok(GossipResponse::Rejected(
+                        RejectionReason::UnsupportedFeature,
+                    ))
+                }
             }
-            GossipDataV2::ExecutionPayload(execution_payload) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::ExecutionPayload,
-                    &execution_payload,
-                    ProtocolVersion::V2,
-                )
-                .await
-            }
-            GossipDataV2::IngressProof(ingress_proof) => {
-                self.send_data_internal(
-                    &peer.address.gossip,
-                    GossipRoutes::IngressProof,
-                    ingress_proof,
-                    ProtocolVersion::V2,
-                )
-                .await
-            }
+            ProtocolVersion::VersionPD => self.send_data_version_pd(peer, data).await,
         }
     }
 
@@ -1143,6 +1078,174 @@ impl GossipClient {
         }
     }
 
+    async fn send_data_v2(
+        &self,
+        peer: &PeerListItem,
+        data: &irys_types::v2::GossipDataV2,
+    ) -> GossipResult<GossipResponse<()>> {
+        use irys_types::v2::GossipDataV2;
+        match data {
+            GossipDataV2::Chunk(unpacked_chunk) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
+                    unpacked_chunk,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::Transaction(irys_transaction_header) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
+                    irys_transaction_header,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::CommitmentTransaction(commitment_tx) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
+                    commitment_tx,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::BlockHeader(irys_block_header) => {
+                if irys_block_header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::send_data",
+                        block.hash = ?irys_block_header.block_hash,
+                        "Sending a block header without the POA chunk"
+                    );
+                }
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
+                    &irys_block_header,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::BlockBody(block_body) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::BlockBody,
+                    &block_body,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::ExecutionPayload(execution_payload) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
+                    &execution_payload,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::IngressProof(ingress_proof) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
+                    ingress_proof,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn send_data_version_pd(
+        &self,
+        peer: &PeerListItem,
+        data: &GossipDataVersionPD,
+    ) -> GossipResult<GossipResponse<()>> {
+        match data {
+            GossipDataVersionPD::Chunk(unpacked_chunk) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
+                    unpacked_chunk,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::Transaction(irys_transaction_header) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
+                    irys_transaction_header,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::CommitmentTransaction(commitment_tx) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
+                    commitment_tx,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::BlockHeader(irys_block_header) => {
+                if irys_block_header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::send_data",
+                        block.hash = ?irys_block_header.block_hash,
+                        "Sending a block header without the POA chunk"
+                    );
+                }
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
+                    &irys_block_header,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::BlockBody(block_body) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::BlockBody,
+                    &block_body,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::ExecutionPayload(execution_payload) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
+                    &execution_payload,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::IngressProof(ingress_proof) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
+                    ingress_proof,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+            GossipDataVersionPD::PdChunk(pd_chunk) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::PdChunk,
+                    pd_chunk,
+                    ProtocolVersion::VersionPD,
+                )
+                .await
+            }
+        }
+    }
+
     #[instrument(name = "send_data_internal", skip_all, fields(%route, ?protocol_version))]
     async fn send_data_internal<T, R>(
         &self,
@@ -1184,6 +1287,10 @@ impl GossipClient {
                     .json(&req)
                     .send()
                     .await
+            }
+            ProtocolVersion::VersionPD => {
+                let req = self.create_request_version_pd(data.clone());
+                self.client.post(&url).json(&req).send().await
             }
         };
 
@@ -1293,7 +1400,7 @@ impl GossipClient {
     pub fn send_data_and_update_the_score_detached(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: Arc<GossipDataV2>,
+        data: Arc<GossipDataVersionPD>,
         peer_list: &PeerList,
         cache: Arc<GossipCache>,
         gossip_cache_key: GossipCacheKey,
@@ -1320,7 +1427,7 @@ impl GossipClient {
     pub fn send_data_without_score_update(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: Arc<GossipDataV2>,
+        data: Arc<GossipDataVersionPD>,
     ) {
         let client = self.clone();
         let peer = peer.1.clone();
@@ -1337,7 +1444,7 @@ impl GossipClient {
     pub fn send_data_and_update_score_for_request(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: Arc<GossipDataV2>,
+        data: Arc<GossipDataVersionPD>,
         peer_list: &PeerList,
     ) {
         let client = self.clone();
@@ -1375,6 +1482,14 @@ impl GossipClient {
 
     fn create_request_v2<T>(&self, data: T) -> irys_types::GossipRequestV2<T> {
         irys_types::GossipRequestV2 {
+            peer_id: self.peer_id,
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
+    fn create_request_version_pd<T>(&self, data: T) -> irys_types::GossipRequestVersionPD<T> {
+        irys_types::GossipRequestVersionPD {
             peer_id: self.peer_id,
             miner_address: self.mining_address,
             data,

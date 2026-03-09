@@ -155,13 +155,13 @@ impl PeerNetworkServiceState {
         handshake_request
     }
 
-    fn create_handshake_request_v2(&self) -> HandshakeRequestV2 {
+    fn create_handshake_request_v2(&self, protocol_version: ProtocolVersion) -> HandshakeRequestV2 {
         let peer_id = self.config.peer_id();
         let mut handshake_request = HandshakeRequestV2 {
             address: self.peer_address,
             chain_id: self.chain_id,
             peer_id,
-            protocol_version: ProtocolVersion::V2,
+            protocol_version,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
             consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
@@ -251,9 +251,12 @@ impl PeerNetworkServiceInner {
         state.create_handshake_request_v1()
     }
 
-    async fn create_handshake_request_v2(&self) -> HandshakeRequestV2 {
+    async fn create_handshake_request_v2(
+        &self,
+        protocol_version: ProtocolVersion,
+    ) -> HandshakeRequestV2 {
         let state = self.state.lock().await;
-        state.create_handshake_request_v2()
+        state.create_handshake_request_v2(protocol_version)
     }
 
     fn sender(&self) -> PeerNetworkSender {
@@ -976,10 +979,10 @@ impl PeerNetworkService {
                     .post_handshake_v1(gossip_address, handshake_request)
                     .await
             }
-            ProtocolVersion::V2 => {
-                let handshake_request = inner.create_handshake_request_v2().await;
+            ProtocolVersion::V2 | ProtocolVersion::VersionPD => {
+                let handshake_request = inner.create_handshake_request_v2(protocol_version).await;
                 gossip_client
-                    .post_handshake_v2(gossip_address, handshake_request)
+                    .post_handshake_v2(gossip_address, handshake_request, protocol_version)
                     .await
             }
         }

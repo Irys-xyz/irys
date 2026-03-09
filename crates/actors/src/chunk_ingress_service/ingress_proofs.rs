@@ -8,7 +8,7 @@ use irys_database::{
 use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::version_pd::GossipBroadcastMessageVersionPD;
 use irys_types::{
     BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
 };
@@ -107,7 +107,7 @@ impl ChunkIngressServiceInner {
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let data_root = ingress_proof.data_root;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(ingress_proof);
+        let gossip_broadcast_message = GossipBroadcastMessageVersionPD::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send_traced(gossip_broadcast_message) {
             tracing::error!(
@@ -318,7 +318,7 @@ pub fn generate_and_store_ingress_proof(
     config: &Config,
     data_root: DataRoot,
     anchor_hint: Option<H256>,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
     cache_sender: &CacheServiceSender,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     let signer: IrysSigner = config.irys_signer();
@@ -419,7 +419,7 @@ pub fn reanchor_and_store_ingress_proof(
     config: &Config,
     signer: &IrysSigner,
     proof: &IngressProof,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
     cache_sender: &CacheServiceSender,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     // Only staked nodes should reanchor ingress proofs
@@ -506,7 +506,7 @@ pub fn reanchor_and_store_ingress_proof(
 }
 
 pub fn gossip_ingress_proof(
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageVersionPD>>,
     ingress_proof: &IngressProof,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -520,7 +520,7 @@ pub fn gossip_ingress_proof(
         ingress_proof,
     ) {
         Ok(()) => {
-            let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
+            let msg = GossipBroadcastMessageVersionPD::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send_traced(msg) {
                 tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
             }

@@ -23,7 +23,8 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
+use irys_types::version_pd::GossipDataVersionPD;
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PdChunkMessage, PeerNetworkError, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
@@ -138,6 +139,91 @@ where
                 self.cache
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
+            Err(error) => {
+                record_gossip_inbound_error(error.error_type(), error.is_advisory());
+
+                Err(match error {
+                    ChunkIngressError::Critical(err) => match err {
+                        CriticalChunkIngressError::InvalidProof => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof)
+                        }
+                        CriticalChunkIngressError::InvalidDataHash => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash)
+                        }
+                        CriticalChunkIngressError::InvalidChunkSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
+                        }
+                        CriticalChunkIngressError::InvalidDataSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize)
+                        }
+                        CriticalChunkIngressError::InvalidOffset(msg) => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
+                        }
+                        CriticalChunkIngressError::DatabaseError => GossipError::Internal(
+                            InternalGossipError::Database("Chunk ingress database error".into()),
+                        ),
+                        CriticalChunkIngressError::ServiceUninitialized => {
+                            GossipError::Internal(InternalGossipError::ServiceUninitialized)
+                        }
+                        CriticalChunkIngressError::Other(other) => {
+                            GossipError::Internal(InternalGossipError::Unknown(other))
+                        }
+                    },
+                    ChunkIngressError::Advisory(err) => {
+                        GossipError::Advisory(AdvisoryGossipError::ChunkIngress(err))
+                    }
+                })
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "info", skip_all, err)]
+    pub(crate) async fn handle_pd_chunk(
+        &self,
+        pd_chunk_request: GossipRequestV2<PdChunkMessage>,
+    ) -> GossipResult<()> {
+        let source_peer_id = pd_chunk_request.peer_id;
+        let pd_chunk_message = pd_chunk_request.data;
+
+        // Validate timestamp freshness
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        const MAX_AGE_SECS: u64 = 5 * 60; // 5 minutes
+        const MAX_FUTURE_SECS: u64 = 30; // 30 seconds
+
+        if pd_chunk_message.timestamp.saturating_add(MAX_AGE_SECS) < now {
+            return Err(GossipError::InvalidData(
+                InvalidDataError::PdChunkTimestampExpired,
+            ));
+        }
+        if pd_chunk_message.timestamp > now.saturating_add(MAX_FUTURE_SECS) {
+            return Err(GossipError::InvalidData(
+                InvalidDataError::PdChunkTimestampFuture,
+            ));
+        }
+
+        // Validate range specifier
+        if pd_chunk_message.range_specifier.chunk_count == 0 {
+            return Err(GossipError::InvalidData(
+                InvalidDataError::PdChunkInvalidRangeSpecifier,
+            ));
+        }
+
+        let range_specifier = pd_chunk_message.range_specifier;
+        let chunk = pd_chunk_message.chunk;
+        let chunk_size = chunk.bytes.0.len() as u64;
+        let chunk_path_hash = chunk.chunk_path_hash();
+
+        record_gossip_chunk_received(chunk_size);
+
+        match self.chunk_ingress.handle_chunk_ingress(chunk).await {
+            Ok(()) => self.cache.record_seen(
+                source_peer_id,
+                GossipCacheKey::PdChunk(chunk_path_hash, range_specifier),
+            ),
             Err(error) => {
                 record_gossip_inbound_error(error.error_type(), error.is_advisory());
 
@@ -858,15 +944,121 @@ where
             return Err(GossipError::RateLimited);
         }
 
-        match self
-            .resolve_data_request(&request.data, request.miner_address)
-            .await?
-        {
-            Some(data) => {
-                self.send_gossip_data((&request.peer_id, peer_info), Arc::new(data), &check_result);
-                Ok(true)
+        match request.data {
+            GossipDataRequestV2::BlockHeader(block_hash) => {
+                let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
+
+                match maybe_block {
+                    Some(block) => {
+                        if block.poa.chunk.is_none() {
+                            error!(
+                                target = "p2p::gossip_data_handler::handle_get_data",
+                                block.hash = ?block.block_hash,
+                                "Block pool returned a block without a POA chunk"
+                            );
+                        }
+                        let data = Arc::new(GossipDataVersionPD::BlockHeader(block));
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                }
             }
-            None => Ok(false),
+            GossipDataRequestV2::BlockBody(block_hash) => {
+                debug!(
+                    "Node {}: handling block body request for block {:?}",
+                    self.gossip_client.mining_address, block_hash
+                );
+                let block_body = get_block_body(
+                    &block_hash,
+                    &self.block_pool,
+                    &self.mempool,
+                    &self.block_tree,
+                )
+                .await?;
+
+                if let Some(block_body) = block_body {
+                    let data = Arc::new(GossipDataVersionPD::BlockBody(Arc::clone(&block_body)));
+                    self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
+                debug!(
+                    "Node {}: Handling execution payload request for block {:?}",
+                    self.gossip_client.mining_address, evm_block_hash
+                );
+                let maybe_evm_block = self
+                    .execution_payload_cache
+                    .get_locally_stored_evm_block(&evm_block_hash)
+                    .await;
+
+                match maybe_evm_block {
+                    Some(evm_block) => {
+                        let data = Arc::new(GossipDataVersionPD::ExecutionPayload(evm_block));
+                        self.send_gossip_data((&request.peer_id, peer_info), data, &check_result);
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                }
+            }
+            GossipDataRequestV2::Transaction(tx_id) => {
+                debug!(
+                    "Node {}: Handling transaction request for tx {:?}",
+                    self.gossip_client.mining_address, tx_id
+                );
+
+                let vec = vec![tx_id];
+                let mempool_guard = &self.block_pool.mempool_guard;
+                let db = &self.block_pool.db;
+
+                // Try commitment txs first
+                match get_commitment_tx_in_parallel(&vec, mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            let data = Arc::new(GossipDataVersionPD::CommitmentTransaction(tx));
+                            self.send_gossip_data(
+                                (&request.peer_id, peer_info),
+                                data,
+                                &check_result,
+                            );
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve commitment tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
+
+                // Try data txs
+                match get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            let data = Arc::new(GossipDataVersionPD::Transaction(tx));
+                            self.send_gossip_data(
+                                (&request.peer_id, peer_info),
+                                data,
+                                &check_result,
+                            );
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve data tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
+
+                Ok(false)
+            }
+            GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
 
@@ -1003,7 +1195,7 @@ where
     fn send_gossip_data(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
-        data: Arc<GossipDataV2>,
+        data: Arc<GossipDataVersionPD>,
         check_result: &RequestCheckResult,
     ) {
         if check_result.should_update_score() {
