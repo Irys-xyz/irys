@@ -689,12 +689,16 @@ fn test_canonical_deserializes_execution_payload() {
 
 #[test]
 fn test_canonical_deserializes_v1_execution_payload_variant() {
-    assert_canonical_deserializes_fixture::<wire::GossipDataV1>("v1_gossip_data_execution_payload");
+    assert_canonical_deserializes_fixture::<irys_types::gossip::v1::GossipDataV1>(
+        "v1_gossip_data_execution_payload",
+    );
 }
 
 #[test]
 fn test_canonical_deserializes_v2_execution_payload_variant() {
-    assert_canonical_deserializes_fixture::<wire::GossipDataV2>("v2_gossip_data_execution_payload");
+    assert_canonical_deserializes_fixture::<irys_types::gossip::v2::GossipDataV2>(
+        "v2_gossip_data_execution_payload",
+    );
 }
 
 #[test]
