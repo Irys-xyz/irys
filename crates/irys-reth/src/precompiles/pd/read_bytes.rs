@@ -130,6 +130,11 @@ impl ReadBytesRangeByIndexArgs {
     }
 }
 
+/// Read a full byte range from PD storage, selected by access list index.
+///
+/// `_gas_limit` is accepted for interface compatibility but intentionally unused.
+/// PD chunk I/O is metered via per-chunk fees in IRYS tokens (deducted in
+/// `IrysEvm::transact_raw`), not via EVM gas. See [`PD_BASE_GAS_COST`] for details.
 pub fn read_bytes_range_by_index(
     call_data: &Bytes,
     _gas_limit: u64,
@@ -194,6 +199,11 @@ impl ReadPartialByteRangeArgs {
     }
 }
 
+/// Read a sub-range of bytes from a PD byte range, selected by access list index.
+///
+/// `_gas_limit` is accepted for interface compatibility but intentionally unused.
+/// PD chunk I/O is metered via per-chunk fees in IRYS tokens (deducted in
+/// `IrysEvm::transact_raw`), not via EVM gas. See [`PD_BASE_GAS_COST`] for details.
 pub fn read_partial_byte_range(
     call_data: &Bytes,
     _gas_limit: u64,
@@ -341,6 +351,9 @@ pub fn read_bytes_range(
         "Byte range extraction successful"
     );
 
+    // gas_used is intentionally 0 — PD chunk I/O costs are paid via per-chunk fees
+    // in IRYS tokens (deducted in IrysEvm::transact_raw), not via EVM gas.
+    // The caller (pd_precompile) adds PD_BASE_GAS_COST on top of this value.
     Ok(PrecompileOutput {
         gas_used: 0,
         gas_refunded: 0,

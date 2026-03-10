@@ -68,6 +68,10 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             }
         })?;
 
+        // Note: available_gas is passed to read functions for interface compatibility but
+        // is intentionally unused. PD chunk I/O is metered via per-chunk IRYS token fees
+        // (deducted in IrysEvm::transact_raw), not via EVM gas. The only EVM gas charged
+        // is the flat PD_BASE_GAS_COST.
         let available_gas = gas_limit.saturating_sub(PD_BASE_GAS_COST);
 
         let res = match decoded_id {
