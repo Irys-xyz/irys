@@ -474,7 +474,7 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     let slot0_last_height = perm_slots[0].last_height;
     info!(
         "Perm slots: {}, slot0 last_height: {}",
-        num_slots, slot0_last_height
+        perm_slots.len(), slot0_last_height
     );
 
     let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
@@ -620,7 +620,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         last_slot.is_expired
     );
 
-    // --- Assertion 3: All last-slot partitions still have ledger assignment ---
+    // --- Assertion 3: All last-slot partitions still have Publish ledger assignment ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
     for partition_hash in &last_slot.partitions {
         let assignment = partition_assignments
@@ -632,9 +632,10 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
                 )
             });
         assert!(
-            assignment.ledger_id.is_some(),
-            "Last-slot partition {:?} should still be assigned to Publish, not capacity pool",
-            partition_hash
+            assignment.ledger_id == Some(DataLedger::Publish as u32),
+            "Last-slot partition {:?} should still be assigned to Publish, but has ledger_id={:?}",
+            partition_hash,
+            assignment.ledger_id
         );
     }
     info!("Verified all last-slot partitions remain assigned to Publish");
@@ -781,7 +782,7 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
         final_height
     );
 
-    // --- Assertion 2: All Publish partition assignments still active ---
+    // --- Assertion 2: All Publish partition assignments still have Publish ledger ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         for partition_hash in &slot.partitions {
@@ -794,9 +795,9 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
                     )
                 });
             assert!(
-                assignment.ledger_id.is_some(),
-                "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id=None",
-                partition_hash, slot_index
+                assignment.ledger_id == Some(DataLedger::Publish as u32),
+                "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id={:?}",
+                partition_hash, slot_index, assignment.ledger_id
             );
         }
     }

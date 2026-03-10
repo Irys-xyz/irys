@@ -877,6 +877,16 @@ mod tests {
             .publish_ledger_epoch_length = None;
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_ok());
+
+        // u64::MAX should fail (overflow with num_blocks_in_epoch)
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
     }
 
     #[test]

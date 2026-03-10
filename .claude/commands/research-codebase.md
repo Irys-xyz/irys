@@ -27,7 +27,7 @@ I'm ready to research the codebase. Please provide your research question or are
 
 Then wait for the user's research query.
 
-## Steps to follow after receiving the research query:
+## Steps after receiving the research query:
 
 1. **Read any directly mentioned files first:**
    - If the user mentions specific files (tickets, docs, JSON), read them FULLY first
@@ -179,6 +179,7 @@ Then wait for the user's research query.
    - Continue updating the document and syncing
 
 ## Important notes:
+
 - Always use parallel Task agents to maximize efficiency and minimize context usage
 - Always run fresh codebase research - never rely solely on existing research documents
 - The thoughts/ directory provides historical context to supplement live findings
