@@ -21,25 +21,9 @@ last_updated_by: rob
 
 ## Critical Issues (Fix Immediately)
 
-### 1. Zero Gas Metering for PD Precompile I/O
+### ~~1. Zero Gas Metering for PD Precompile I/O~~ → Moved to Verified Non-Issues
 
-**File**: `crates/irys-reth/src/precompiles/pd/read_bytes.rs:345`
-
-Every PD precompile call costs a flat 5000 gas regardless of how many chunks it reads. `gas_used` is always returned as `0` from `read_bytes_range`. An attacker can read 65,535 chunks (~16GB) for 5000 gas — the primary EVM anti-DoS mechanism is completely bypassed.
-
-```rust
-// read_bytes.rs:344-349
-Ok(PrecompileOutput {
-    gas_used: 0,       // <--- Always zero regardless of work done
-    gas_refunded: 0,
-    bytes: extracted,
-    reverted: false,
-})
-```
-
-The `_gas_limit` parameter passed to `read_bytes_range_by_index` and `read_partial_byte_range` is never consulted (note the `_` prefix).
-
-**Recommendation**: Charge gas proportional to the number of chunks fetched and bytes returned. Validate gas budget *before* performing I/O work.
+**Status**: Downgraded — see [Verified Non-Issues](#verified-non-issues) section.
 
 ### 2. Unbounded Memory Allocation from `chunk_count`
 
@@ -49,9 +33,11 @@ The `_gas_limit` parameter passed to `read_bytes_range_by_index` and `read_parti
 Vec::with_capacity((*chunk_count as u64 * chunk_size) as usize);
 ```
 
-`chunk_count` is `u16` (max 65535). With 256KB chunks, this allocates **~16GB** in a single call, with no gas check preventing it (see #1). The EVM's access list gas cost model limits to ~15,000 keys at 30M gas, but combined with zero gas metering this is fully exploitable.
+`chunk_count` is `u16` (max 65535). With 256KB chunks, this allocates **~16GB** in a single call. While the per-chunk PD fee model (see Verified Non-Issues, "Zero Gas Metering") means this is economically expensive, it does not prevent a well-funded attacker from forcing a large allocation. The `MAX_PD_CHUNKS_PER_BLOCK` cap (7,500) limits total chunks per block, but not per access list entry.
 
-**Recommendation**: Add a hard cap on chunk count per precompile call. Use `checked_mul` and validate against gas budget before allocation.
+**Severity**: Downgraded from Critical to **Medium** — the PD fee model removes the zero-cost exploit path, but the lack of a per-call cap on `chunk_count` remains a defense-in-depth gap.
+
+**Recommendation**: Add a hard cap on chunk count per access list entry (e.g., `MAX_PD_CHUNKS_PER_BLOCK`). Use `checked_mul` before allocation.
 
 ### 3. `block_tracker` HashMap Never Cleaned Up
 
@@ -597,6 +583,7 @@ Charge per-chunk and per-byte gas, validated *before* performing I/O. This is th
 - **PdChunkBudget overflow**: `saturating_add` prevents arithmetic overflow. `U256` multiplication uses `saturating_mul`. Budget accounting is internally consistent.
 - **Payload ID hash collisions**: PayloadId is 8 bytes (per Ethereum Engine API spec). Birthday collision probability is ~2^32. Per-node, per-session namespace makes this acceptable.
 - **`known_pd_txs` memory growth in monitor**: Replaced wholesale each tick; bounded by pool size.
+- **Zero Gas Metering for PD Precompile I/O (formerly Critical #1)**: The precompile reports `gas_used: 0` and charges only a flat 5000 gas (`PD_BASE_GAS_COST`), regardless of chunks read. This is **by design** — EVM gas is not the anti-DoS mechanism for PD chunk I/O. Instead, PD transactions pay per-chunk fees in IRYS tokens deducted at EVM execution time in `IrysEvm::transact_raw()` (`evm.rs`): `total_pd_fees = (base_fee_per_chunk + priority_fee_per_chunk) × chunk_count`. Additional protections: (1) `MAX_PD_CHUNKS_PER_BLOCK` (7,500) caps total chunks per block, (2) minimum USD-denominated transaction cost validated against IRYS/USD oracle price, (3) sender balance checked before execution. The `_gas_limit` parameter in read functions and the `available_gas` variable in the precompile entry point are unused — documented in code. Remaining defense-in-depth gap: no per-access-list-entry cap on `chunk_count` (see #2, downgraded to Medium).
 
 ---
 
@@ -604,7 +591,7 @@ Charge per-chunk and per-byte gas, validated *before* performing I/O. This is th
 
 | Component | Critical | High | Medium | Low |
 |-----------|----------|------|--------|-----|
-| PD Precompile | 2 (#1, #2) | 1 (#8) | 5 (#17, #21, #22, #23, #17) | 3 (#31, #32, #29) |
+| PD Precompile | — | 1 (#8) | 6 (#2, #17, #21, #22, #23, #17) | 3 (#31, #32, #29) |
 | PdService / Cache | 2 (#3, #4) | 1 (#6) | 3 (#11, #19, #20) | 6 (#25, #26, #27, #30, #35, #36) |
 | Payload Builder | — | 1 (#7) | 3 (#13, #14, #15) | 1 (#38) |
 | Mempool Monitor | — | — | 2 (#10, #16) | 1 (#34) |
