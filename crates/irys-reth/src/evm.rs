@@ -232,10 +232,7 @@ impl IrysBlockExecutorFactory {
     ///
     /// Reconstructs this factory with the `chunk_data_index` set on the inner
     /// [`IrysEvmFactory`], leaving the receipt builder and spec unchanged.
-    pub fn with_chunk_data_index(
-        self,
-        index: irys_types::chunk_provider::ChunkDataIndex,
-    ) -> Self {
+    pub fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
         let receipt_builder = *self.inner.receipt_builder();
         let spec = Arc::clone(self.inner.spec());
         let evm_factory = self
@@ -458,9 +455,7 @@ impl EvmFactory for IrysEvmFactory {
 
         // Use manager-backed context for payload building, storage-backed for validation.
         let pd_context = match &self.chunk_data_index {
-            Some(index) => {
-                PdContext::new_with_manager(self.context.chunk_config(), index.clone())
-            }
+            Some(index) => PdContext::new_with_manager(self.context.chunk_config(), index.clone()),
             None => self.context.clone_for_new_evm(),
         };
 
@@ -508,9 +503,7 @@ impl EvmFactory for IrysEvmFactory {
 
         // Use manager-backed context for payload building, storage-backed for validation.
         let pd_context = match &self.chunk_data_index {
-            Some(index) => {
-                PdContext::new_with_manager(self.context.chunk_config(), index.clone())
-            }
+            Some(index) => PdContext::new_with_manager(self.context.chunk_config(), index.clone()),
             None => self.context.clone_for_new_evm(),
         };
 

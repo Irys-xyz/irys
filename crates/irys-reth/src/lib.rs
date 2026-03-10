@@ -155,7 +155,6 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
-                chunk_data_index: self.chunk_data_index.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
@@ -239,7 +238,6 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
@@ -247,7 +245,6 @@ impl std::fmt::Debug for IrysExecutorBuilder {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
-            .field("chunk_data_index", &"<index>")
             .finish()
     }
 }

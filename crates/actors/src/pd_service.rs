@@ -6,7 +6,7 @@ use dashmap::DashSet;
 use irys_types::chunk_provider::{PdChunkMessage, PdChunkReceiver, RethChunkProvider};
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use provisioning::{ProvisioningState, ProvisioningTracker};
-use reth::revm::primitives::{B256, bytes::Bytes};
+use reth::revm::primitives::B256;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
