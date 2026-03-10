@@ -15,39 +15,41 @@ pub struct ChunkKey {
     pub offset: u64,
 }
 
-/// A cached chunk entry with reference tracking and lock support.
+/// A cached chunk entry with reference tracking.
 pub struct CachedChunkEntry {
     /// The unpacked chunk data.
     pub data: Arc<Bytes>,
     /// Transactions currently referencing this chunk (prevents eviction when non-empty).
     pub referencing_txs: HashSet<B256>,
-    /// Number of active execution locks on this chunk.
-    pub lock_count: u32,
     /// When this chunk was first cached.
     pub cached_at: Instant,
 }
 
-/// LRU-backed chunk cache with reference counting and lock pinning.
+/// LRU-backed chunk cache with reference counting.
 ///
-/// Chunks referenced by transactions or locked for execution are pinned —
-/// the LRU only evicts unreferenced, unlocked entries.
+/// Chunks referenced by transactions are pinned —
+/// the LRU only evicts unreferenced entries.
 pub struct ChunkCache {
     chunks: LruCache<ChunkKey, CachedChunkEntry>,
+    /// Shared index for lock-free chunk reads. Mirrors data stored in the LRU.
+    shared_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl ChunkCache {
     /// Create a new chunk cache with the given capacity.
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    pub fn new(capacity: NonZeroUsize, shared_index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
         Self {
             chunks: LruCache::new(capacity),
+            shared_index,
         }
     }
 
     /// Create a new chunk cache with the default capacity.
-    pub fn with_default_capacity() -> Self {
+    pub fn with_default_capacity(shared_index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
         Self::new(
             NonZeroUsize::new(DEFAULT_CACHE_CAPACITY)
                 .expect("DEFAULT_CACHE_CAPACITY must be non-zero"),
+            shared_index,
         )
     }
 
@@ -68,8 +70,8 @@ impl ChunkCache {
 
     /// Insert a chunk into the cache, referenced by the given transaction.
     ///
-    /// If the cache is at capacity, unreferenced and unlocked entries may be
-    /// evicted first. If the chunk already exists, just adds the tx reference.
+    /// If the cache is at capacity, unreferenced entries may be evicted first.
+    /// If the chunk already exists, just adds the tx reference.
     ///
     /// Returns `true` if the chunk was newly inserted (not already present).
     pub fn insert(&mut self, key: ChunkKey, data: Arc<Bytes>, tx_hash: B256) -> bool {
@@ -78,7 +80,7 @@ impl ChunkCache {
             return false;
         }
 
-        // Before inserting, evict unreferenced/unlocked entries if at capacity.
+        // Before inserting, evict unreferenced entries if at capacity.
         // If all entries are pinned, temporarily grow capacity so push() doesn't
         // evict a pinned entry.
         self.make_room_for_insert();
@@ -89,12 +91,15 @@ impl ChunkCache {
         self.chunks.push(
             key,
             CachedChunkEntry {
-                data,
+                data: Arc::clone(&data),
                 referencing_txs,
-                lock_count: 0,
                 cached_at: Instant::now(),
             },
         );
+
+        // Mirror into shared index for lock-free reads
+        self.shared_index.insert((key.ledger, key.offset), data);
+
         true
     }
 
@@ -110,37 +115,20 @@ impl ChunkCache {
     }
 
     /// Remove a transaction reference from a cached chunk.
-    /// Returns `true` if the chunk has no remaining references and is not locked.
+    /// Returns `true` if the chunk has no remaining references.
     pub fn remove_reference(&mut self, key: &ChunkKey, tx_hash: &B256) -> bool {
         if let Some(entry) = self.chunks.get_mut(key) {
             entry.referencing_txs.remove(tx_hash);
-            entry.referencing_txs.is_empty() && entry.lock_count == 0
+            entry.referencing_txs.is_empty()
         } else {
             false
-        }
-    }
-
-    /// Increment the lock count for all given chunks.
-    pub fn lock_chunks(&mut self, keys: &HashSet<ChunkKey>) {
-        for key in keys {
-            if let Some(entry) = self.chunks.get_mut(key) {
-                entry.lock_count = entry.lock_count.saturating_add(1);
-            }
-        }
-    }
-
-    /// Decrement the lock count for all given chunks.
-    pub fn unlock_chunks(&mut self, keys: &HashSet<ChunkKey>) {
-        for key in keys {
-            if let Some(entry) = self.chunks.get_mut(key) {
-                entry.lock_count = entry.lock_count.saturating_sub(1);
-            }
         }
     }
 
     /// Remove a chunk from the cache entirely (e.g., after all references removed).
     pub fn remove(&mut self, key: &ChunkKey) {
         self.chunks.pop(key);
+        self.shared_index.remove(&(key.ledger, key.offset));
     }
 
     /// Number of entries currently in the cache.
@@ -153,7 +141,7 @@ impl ChunkCache {
         self.chunks.is_empty()
     }
 
-    /// Make room for one new entry. If at capacity, try to evict an unreferenced/unlocked
+    /// Make room for one new entry. If at capacity, try to evict an unreferenced
     /// entry. If all entries are pinned, temporarily grow the LRU capacity so `push()` won't
     /// evict a pinned entry.
     fn make_room_for_insert(&mut self) {
@@ -166,11 +154,12 @@ impl ChunkCache {
             .chunks
             .iter()
             .rev() // LRU order: least-recently-used first
-            .find(|(_, entry)| entry.referencing_txs.is_empty() && entry.lock_count == 0)
+            .find(|(_, entry)| entry.referencing_txs.is_empty())
             .map(|(key, _)| *key);
 
         if let Some(key) = evictable {
             self.chunks.pop(&key);
+            self.shared_index.remove(&(key.ledger, key.offset));
         } else {
             // All entries are pinned — grow capacity to avoid evicting a pinned entry.
             // The capacity will shrink back naturally as pinned entries are released and evicted.
@@ -184,6 +173,8 @@ impl ChunkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dashmap::DashMap;
+    use std::sync::Arc;
 
     fn make_key(offset: u64) -> ChunkKey {
         ChunkKey { ledger: 0, offset }
@@ -195,7 +186,8 @@ mod tests {
 
     #[test]
     fn test_insert_and_get() {
-        let mut cache = ChunkCache::with_default_capacity();
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::with_default_capacity(shared_index);
         let key = make_key(1);
         let data = make_data(0xAA);
         let tx = B256::ZERO;
@@ -207,7 +199,8 @@ mod tests {
 
     #[test]
     fn test_duplicate_insert_adds_reference() {
-        let mut cache = ChunkCache::with_default_capacity();
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::with_default_capacity(shared_index);
         let key = make_key(1);
         let data = make_data(0xAA);
         let tx1 = B256::ZERO;
@@ -221,7 +214,8 @@ mod tests {
 
     #[test]
     fn test_reference_removal() {
-        let mut cache = ChunkCache::with_default_capacity();
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::with_default_capacity(shared_index);
         let key = make_key(1);
         let tx1 = B256::ZERO;
         let tx2 = B256::with_last_byte(1);
@@ -238,7 +232,8 @@ mod tests {
     #[test]
     fn test_lru_eviction_skips_referenced() {
         let cap = NonZeroUsize::new(2).unwrap();
-        let mut cache = ChunkCache::new(cap);
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(cap, shared_index);
         let tx = B256::ZERO;
 
         // Fill cache
@@ -258,7 +253,8 @@ mod tests {
     #[test]
     fn test_lru_eviction_removes_unreferenced() {
         let cap = NonZeroUsize::new(2).unwrap();
-        let mut cache = ChunkCache::new(cap);
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(cap, shared_index);
         let tx = B256::ZERO;
 
         cache.insert(make_key(1), make_data(1), tx);
@@ -277,23 +273,35 @@ mod tests {
     }
 
     #[test]
-    fn test_lock_prevents_eviction() {
+    fn test_shared_index_mirrors_insert_and_remove() {
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::with_default_capacity(Arc::clone(&shared_index));
+        let key = make_key(1);
+        let tx = B256::ZERO;
+
+        cache.insert(key, make_data(0xAA), tx);
+        assert!(shared_index.contains_key(&(key.ledger, key.offset)));
+
+        cache.remove(&key);
+        assert!(!shared_index.contains_key(&(key.ledger, key.offset)));
+    }
+
+    #[test]
+    fn test_shared_index_mirrors_lru_eviction() {
         let cap = NonZeroUsize::new(2).unwrap();
-        let mut cache = ChunkCache::new(cap);
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(cap, Arc::clone(&shared_index));
         let tx = B256::ZERO;
 
         cache.insert(make_key(1), make_data(1), tx);
         cache.insert(make_key(2), make_data(2), tx);
-
-        // Remove all references from key 1 but lock it
         cache.remove_reference(&make_key(1), &tx);
-        let keys = HashSet::from([make_key(1)]);
-        cache.lock_chunks(&keys);
 
-        // Insert new entry — key 1 is locked so should not be evicted
-        let tx2 = B256::with_last_byte(1);
-        cache.insert(make_key(3), make_data(3), tx2);
+        // This eviction should also remove from shared_index
+        cache.insert(make_key(3), make_data(3), B256::with_last_byte(1));
 
-        assert!(cache.contains(&make_key(1)));
+        assert!(!shared_index.contains_key(&(0u32, 1u64)));
+        assert!(shared_index.contains_key(&(0u32, 2u64)));
+        assert!(shared_index.contains_key(&(0u32, 3u64)));
     }
 }
