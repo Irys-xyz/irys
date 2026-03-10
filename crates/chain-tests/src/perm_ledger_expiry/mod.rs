@@ -152,16 +152,21 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         if slot_index < num_slots - 1 && slot.is_expired {
             for partition_hash in &slot.partitions {
-                if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
-                    // Expired perm partitions should have no ledger_id (returned to capacity)
-                    assert!(
-                        assignment.ledger_id.is_none(),
-                        "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                        partition_hash,
-                        slot_index,
-                        assignment.ledger_id
-                    );
-                }
+                let assignment = partition_assignments
+                    .get_assignment(*partition_hash)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing partition assignment for {:?} at slot {}",
+                            partition_hash, slot_index
+                        )
+                    });
+                assert!(
+                    assignment.ledger_id.is_none(),
+                    "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
+                    partition_hash,
+                    slot_index,
+                    assignment.ledger_id
+                );
             }
         }
     }
@@ -359,13 +364,19 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     for (slot_index, slot) in submit_slots.iter().enumerate() {
         if slot.is_expired {
             for partition_hash in &slot.partitions {
-                if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
-                    assert!(
-                        assignment.ledger_id.is_none(),
-                        "Expired submit partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                        partition_hash, slot_index, assignment.ledger_id
-                    );
-                }
+                let assignment = partition_assignments
+                    .get_assignment(*partition_hash)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing partition assignment for {:?} at slot {}",
+                            partition_hash, slot_index
+                        )
+                    });
+                assert!(
+                    assignment.ledger_id.is_none(),
+                    "Expired submit partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
+                    partition_hash, slot_index, assignment.ledger_id
+                );
             }
         }
     }
@@ -375,13 +386,19 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         if slot_index < perm_num - 1 && slot.is_expired {
             for partition_hash in &slot.partitions {
-                if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
-                    assert!(
-                        assignment.ledger_id.is_none(),
-                        "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                        partition_hash, slot_index, assignment.ledger_id
-                    );
-                }
+                let assignment = partition_assignments
+                    .get_assignment(*partition_hash)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing partition assignment for {:?} at slot {}",
+                            partition_hash, slot_index
+                        )
+                    });
+                assert!(
+                    assignment.ledger_id.is_none(),
+                    "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
+                    partition_hash, slot_index, assignment.ledger_id
+                );
             }
         }
     }
@@ -394,10 +411,10 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
 
 /// Tests that a perm slot is NOT expired one epoch before its boundary, but IS expired
 /// at the exact boundary. Best defense against off-by-one bugs in expiry logic.
+/// Requires 2+ slots to exercise the boundary case (not last-slot protection).
 /// Validates:
 /// - At pre_expiry_epoch: slot 0 is NOT expired
-/// - At expiry_epoch (multi-slot): slot 0 IS expired
-/// - At expiry_epoch (single-slot): slot 0 is NOT expired (last-slot protection)
+/// - At expiry_epoch: slot 0 IS expired
 #[test_log::test(tokio::test)]
 async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
@@ -449,7 +466,11 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     // Read slot state and compute exact boundaries
     let snapshot = node.get_canonical_epoch_snapshot();
     let perm_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
-    let num_slots = perm_slots.len();
+    assert!(
+        perm_slots.len() >= 2,
+        "Expected 2+ publish slots so this test exercises exact-boundary expiry instead of last-slot protection, got {}",
+        perm_slots.len()
+    );
     let slot0_last_height = perm_slots[0].last_height;
     info!(
         "Perm slots: {}, slot0 last_height: {}",
@@ -491,28 +512,20 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
         node.mine_block().await?;
     }
 
-    // --- Assertion 2/3: At expiry_epoch, check based on slot count ---
+    // --- Assertion 2: At expiry_epoch, slot 0 should be expired (multi-slot guaranteed above) ---
     let post_snapshot = node.get_canonical_epoch_snapshot();
     let post_perm_slots = post_snapshot.ledgers.get_slots(DataLedger::Publish);
-    let post_num_slots = post_perm_slots.len();
-
-    if post_num_slots > 1 {
-        // Multi-slot: slot 0 should be expired
-        assert!(
-            post_perm_slots[0].is_expired,
-            "Slot 0 should be expired at expiry epoch height {} (multi-slot, {} slots)",
-            expiry_epoch, post_num_slots
-        );
-        info!("Confirmed slot 0 IS expired at expiry epoch (multi-slot)");
-    } else {
-        // Single slot: last-slot protection prevents expiry
-        assert!(
-            !post_perm_slots[0].is_expired,
-            "Slot 0 should NOT be expired at expiry epoch height {} (last-slot protection)",
-            expiry_epoch
-        );
-        info!("Confirmed slot 0 is NOT expired at expiry epoch (last-slot protection)");
-    }
+    assert!(
+        post_perm_slots.len() >= 2,
+        "Expected 2+ publish slots at expiry epoch, got {}",
+        post_perm_slots.len()
+    );
+    assert!(
+        post_perm_slots[0].is_expired,
+        "Slot 0 should be expired exactly at expiry epoch height {}",
+        expiry_epoch
+    );
+    info!("Confirmed slot 0 IS expired at expiry epoch");
 
     info!("Exact boundary expiry test passed!");
     node.stop().await;
@@ -590,6 +603,12 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     // --- Assertion 1: Last perm slot is NOT expired ---
     let epoch_snapshot = node.get_canonical_epoch_snapshot();
     let perm_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert_eq!(
+        perm_slots.len(),
+        1,
+        "Expected exactly 1 perm slot (single-slot test), got {}",
+        perm_slots.len()
+    );
     let last_slot = perm_slots.last().unwrap();
     assert!(
         !last_slot.is_expired,
@@ -601,25 +620,22 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         last_slot.is_expired
     );
 
-    // --- Assertion 2: If only 1 slot, it must not be expired ---
-    if perm_slots.len() == 1 {
-        assert!(
-            !perm_slots[0].is_expired,
-            "Single perm slot should never expire (last-slot protection)"
-        );
-        info!("Confirmed single-slot protection: slot 0 is not expired");
-    }
-
     // --- Assertion 3: All last-slot partitions still have ledger assignment ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
     for partition_hash in &last_slot.partitions {
-        if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
-            assert!(
-                assignment.ledger_id.is_some(),
-                "Last-slot partition {:?} should still be assigned to Publish, not capacity pool",
-                partition_hash
-            );
-        }
+        let assignment = partition_assignments
+            .get_assignment(*partition_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing partition assignment for last-slot partition {:?}",
+                    partition_hash
+                )
+            });
+        assert!(
+            assignment.ledger_id.is_some(),
+            "Last-slot partition {:?} should still be assigned to Publish, not capacity pool",
+            partition_hash
+        );
     }
     info!("Verified all last-slot partitions remain assigned to Publish");
 
@@ -769,13 +785,19 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     let partition_assignments = &epoch_snapshot.partition_assignments;
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         for partition_hash in &slot.partitions {
-            if let Some(assignment) = partition_assignments.get_assignment(*partition_hash) {
-                assert!(
-                    assignment.ledger_id.is_some(),
-                    "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id=None",
-                    partition_hash, slot_index
-                );
-            }
+            let assignment = partition_assignments
+                .get_assignment(*partition_hash)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Missing partition assignment for {:?} at slot {}",
+                        partition_hash, slot_index
+                    )
+                });
+            assert!(
+                assignment.ledger_id.is_some(),
+                "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id=None",
+                partition_hash, slot_index
+            );
         }
     }
     info!("Verified all Publish partition assignments remain active");

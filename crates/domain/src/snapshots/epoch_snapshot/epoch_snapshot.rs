@@ -1198,8 +1198,7 @@ impl EpochSnapshot {
     /// Used during block production to produce epoch blocks with the correct term fee distributions.
     pub fn get_expiring_partition_info(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
         // expiring at next next block
-        let ledgers = self.ledgers.clone();
-        ledgers.get_expiring_partitions(epoch_height)
+        self.ledgers.get_expiring_partitions(epoch_height)
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {

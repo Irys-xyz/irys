@@ -146,12 +146,19 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
-        // publish_ledger_epoch_length must be > 0 if set
+        // publish_ledger_epoch_length must be > 0 if set, and must not overflow when multiplied
         if let Some(n) = self.consensus.epoch.publish_ledger_epoch_length {
             ensure!(
                 n > 0,
                 "publish_ledger_epoch_length must be > 0 when set (got {})",
                 n
+            );
+            ensure!(
+                n.checked_mul(self.consensus.epoch.num_blocks_in_epoch)
+                    .is_some(),
+                "publish_ledger_epoch_length ({}) * num_blocks_in_epoch ({}) overflows u64",
+                n,
+                self.consensus.epoch.num_blocks_in_epoch
             );
         }
 

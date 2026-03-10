@@ -8,6 +8,7 @@ model: opus
 You are tasked with conducting comprehensive research across the codebase to answer user questions by spawning parallel sub-agents and synthesizing their findings.
 
 ## CRITICAL: YOUR ONLY JOB IS TO DOCUMENT AND EXPLAIN THE CODEBASE AS IT EXISTS TODAY
+
 - DO NOT suggest improvements or changes unless the user explicitly asks for them
 - DO NOT perform root cause analysis unless the user explicitly asks for them
 - DO NOT propose future enhancements unless the user explicitly asks for them
@@ -19,7 +20,8 @@ You are tasked with conducting comprehensive research across the codebase to ans
 ## Initial Setup:
 
 When this command is invoked, respond with:
-```
+
+```text
 I'm ready to research the codebase. Please provide your research question or area of interest, and I'll analyze it thoroughly by exploring relevant components and connections.
 ```
 
@@ -94,8 +96,9 @@ Then wait for the user's research query.
        - Without ticket: `2025-01-08-authentication-flow.md`
 
 6. **Generate research document:**
-   - Use the metadata gathered in step 4
+   - Use the metadata gathered in step 5
    - Structure the document with YAML frontmatter followed by content:
+
      ```markdown
      ---
      date: [Current date and time with timezone in ISO format]
@@ -112,10 +115,10 @@ Then wait for the user's research query.
 
      # Research: [User's Question/Topic]
 
-     **Date**: [Current date and time with timezone from step 4]
+     **Date**: [Current date and time with timezone from step 5]
      **Researcher**: [Researcher name from thoughts status]
-     **Git Commit**: [Current commit hash from step 4]
-     **Branch**: [Current branch name from step 4]
+     **Git Commit**: [Current commit hash from step 5]
+     **Branch**: [Current branch name from step 5]
      **Repository**: [Repository name]
 
      ## Research Question
