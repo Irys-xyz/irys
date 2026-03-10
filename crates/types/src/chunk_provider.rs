@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use bytes::Bytes;
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -35,42 +36,22 @@ pub trait RethChunkProvider: Send + Sync + std::fmt::Debug {
 // ============================================================================
 
 /// Messages for the unified PD chunk manager.
-///
-/// The manager handles the full lifecycle per PD transaction:
-/// Pending → Provisioning → Ready → Locked → Completed
 #[derive(Debug)]
 pub enum PdChunkMessage {
-    /// New PD transaction detected - start provisioning chunks.
+    /// New PD transaction detected — start provisioning chunks.
     NewTransaction {
         tx_hash: B256,
         chunk_specs: Vec<ChunkRangeSpecifier>,
     },
     /// Transaction removed from mempool (included in block or evicted).
     TransactionRemoved { tx_hash: B256 },
-    /// Query if chunks for a transaction are ready (response via channel).
-    IsReady {
-        tx_hash: B256,
-        response: oneshot::Sender<bool>,
-    },
-    /// Lock chunks for execution.
-    /// Only succeeds if state is Ready.
-    Lock {
-        tx_hash: B256,
-        response: oneshot::Sender<bool>,
-    },
-    /// Unlock chunks after execution completes.
-    Unlock { tx_hash: B256 },
-    /// Get cached chunk during EVM execution.
-    /// Chunks are stored in a global cache keyed by (ledger, offset).
-    /// No tx_hash needed - chunks are immutable data identified by position.
+    /// Get cached chunk during EVM execution (removed in Phase 2).
     GetChunk {
         ledger: u32,
         offset: u64,
         response: oneshot::Sender<Option<Arc<Bytes>>>,
     },
     /// Provision chunks needed for validating a peer block.
-    /// Loads chunks from local storage into cache.
-    /// Responds with Ok(()) when all chunks are cached, or Err with list of missing (ledger, offset).
     ProvisionBlockChunks {
         block_hash: B256,
         chunk_specs: Vec<ChunkRangeSpecifier>,
@@ -85,6 +66,11 @@ pub type PdChunkSender = mpsc::UnboundedSender<PdChunkMessage>;
 
 /// Receiver for PD chunk messages.
 pub type PdChunkReceiver = mpsc::UnboundedReceiver<PdChunkMessage>;
+
+/// Shared chunk data index for lock-free chunk reads during EVM execution.
+/// PdService populates this during provisioning; the PD precompile reads it directly.
+/// Keys are `(ledger: u32, offset: u64)` tuples matching `ChunkKey` semantics.
+pub type ChunkDataIndex = Arc<DashMap<(u32, u64), Arc<Bytes>>>;
 
 /// Mock chunk provider that returns zero-filled chunks.
 #[cfg(any(test, feature = "test-utils"))]
