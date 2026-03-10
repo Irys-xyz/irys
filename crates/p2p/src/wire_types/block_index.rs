@@ -37,12 +37,12 @@ super::impl_mirror_from!(irys_types::block::LedgerIndexItem => LedgerIndexItem {
 
 // --- BlockIndexItemV1 conversions (preserves num_ledgers) ---
 
-impl From<&irys_types::block::BlockIndexItem> for BlockIndexItemV1 {
-    fn from(src: &irys_types::block::BlockIndexItem) -> Self {
+impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV1 {
+    fn from(src: irys_types::block::BlockIndexItem) -> Self {
         Self {
             block_hash: src.block_hash,
             num_ledgers: src.num_ledgers,
-            ledgers: src.ledgers.iter().map(Into::into).collect(),
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -59,18 +59,19 @@ impl From<BlockIndexItemV1> for irys_types::block::BlockIndexItem {
 
 // --- BlockIndexItemV2 conversions (derives num_ledgers from ledgers.len()) ---
 
-impl From<&irys_types::block::BlockIndexItem> for BlockIndexItemV2 {
-    fn from(src: &irys_types::block::BlockIndexItem) -> Self {
+impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV2 {
+    fn from(src: irys_types::block::BlockIndexItem) -> Self {
         Self {
             block_hash: src.block_hash,
-            ledgers: src.ledgers.iter().map(Into::into).collect(),
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 impl From<BlockIndexItemV2> for irys_types::block::BlockIndexItem {
     fn from(src: BlockIndexItemV2) -> Self {
-        let num_ledgers = src.ledgers.len() as u8;
+        let num_ledgers = u8::try_from(src.ledgers.len())
+            .expect("ledger count exceeds u8::MAX; protocol supports at most 255 ledgers");
         Self {
             block_hash: src.block_hash,
             num_ledgers,

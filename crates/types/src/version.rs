@@ -514,7 +514,6 @@ pub enum RejectionReason {
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
-    #[serde(with = "string_u64")]
     pub peer_count: u64,
     #[serde(with = "string_u64")]
     pub chain_id: u64,
@@ -763,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
-        let canonical_json = r#"{"version":"1.0.0","peerCount":"10","chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
+        let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
         let node_info: NodeInfo = serde_json::from_str(canonical_json)?;
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);

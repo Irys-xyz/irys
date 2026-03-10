@@ -129,8 +129,8 @@ super::impl_mirror_from!(irys_types::SystemTransactionLedger => SystemTransactio
     ledger_id, tx_ids,
 });
 
-impl From<&irys_types::IrysBlockHeader> for IrysBlockHeader {
-    fn from(h: &irys_types::IrysBlockHeader) -> Self {
+impl From<irys_types::IrysBlockHeader> for IrysBlockHeader {
+    fn from(h: irys_types::IrysBlockHeader) -> Self {
         match h {
             irys_types::IrysBlockHeader::V1(inner) => Self::V1(IrysBlockHeaderV1Inner {
                 block_hash: inner.block_hash,
@@ -145,15 +145,15 @@ impl From<&irys_types::IrysBlockHeader> for IrysBlockHeader {
                 chunk_hash: inner.chunk_hash,
                 previous_block_hash: inner.previous_block_hash,
                 previous_cumulative_diff: inner.previous_cumulative_diff,
-                poa: (&inner.poa).into(),
+                poa: inner.poa.into(),
                 reward_address: inner.reward_address,
                 reward_amount: inner.reward_amount,
                 miner_address: inner.miner_address,
                 timestamp: inner.timestamp,
-                system_ledgers: inner.system_ledgers.iter().map(Into::into).collect(),
-                data_ledgers: inner.data_ledgers.iter().map(Into::into).collect(),
+                system_ledgers: inner.system_ledgers.into_iter().map(Into::into).collect(),
+                data_ledgers: inner.data_ledgers.into_iter().map(Into::into).collect(),
                 evm_block_hash: inner.evm_block_hash,
-                vdf_limiter_info: (&inner.vdf_limiter_info).into(),
+                vdf_limiter_info: inner.vdf_limiter_info.into(),
                 oracle_irys_price: inner.oracle_irys_price,
                 ema_irys_price: inner.ema_irys_price,
                 treasury: inner.treasury,
@@ -195,12 +195,16 @@ impl From<IrysBlockHeader> for irys_types::IrysBlockHeader {
     }
 }
 
-impl From<&irys_types::BlockBody> for BlockBody {
-    fn from(b: &irys_types::BlockBody) -> Self {
+impl From<irys_types::BlockBody> for BlockBody {
+    fn from(b: irys_types::BlockBody) -> Self {
         Self {
             block_hash: b.block_hash,
-            data_transactions: b.data_transactions.iter().map(Into::into).collect(),
-            commitment_transactions: b.commitment_transactions.iter().map(Into::into).collect(),
+            data_transactions: b.data_transactions.into_iter().map(Into::into).collect(),
+            commitment_transactions: b
+                .commitment_transactions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }

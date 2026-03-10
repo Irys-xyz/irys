@@ -42,7 +42,7 @@ where
 pub struct NodeInfo {
     pub version: String,
     #[serde(rename = "peerCount")]
-    pub peer_count: u32,
+    pub peer_count: u64,
     #[serde(rename = "chainId")]
     pub chain_id: String,
     pub height: String,

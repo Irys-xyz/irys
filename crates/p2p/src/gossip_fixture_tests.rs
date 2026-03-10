@@ -39,59 +39,59 @@ fn test_peer_address() -> PeerAddress {
 }
 
 fn fixture_unpacked_chunk() -> wire::UnpackedChunk {
-    (&canonical_unpacked_chunk()).into()
+    canonical_unpacked_chunk().into()
 }
 
 fn fixture_data_tx_header() -> wire::DataTransactionHeader {
-    (&canonical_data_tx_header()).into()
+    canonical_data_tx_header().into()
 }
 
 fn fixture_commitment_v1_stake() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v1_stake()).into()
+    canonical_commitment_v1_stake().into()
 }
 
 fn fixture_commitment_v1_pledge() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v1_pledge()).into()
+    canonical_commitment_v1_pledge().into()
 }
 
 fn fixture_commitment_v1_unpledge() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v1_unpledge()).into()
+    canonical_commitment_v1_unpledge().into()
 }
 
 fn fixture_commitment_v1_unstake() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v1_unstake()).into()
+    canonical_commitment_v1_unstake().into()
 }
 
 fn fixture_commitment_v2_stake() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v2_stake()).into()
+    canonical_commitment_v2_stake().into()
 }
 
 fn fixture_commitment_v2_pledge() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v2_pledge()).into()
+    canonical_commitment_v2_pledge().into()
 }
 
 fn fixture_commitment_v2_unpledge() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v2_unpledge()).into()
+    canonical_commitment_v2_unpledge().into()
 }
 
 fn fixture_commitment_v2_unstake() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v2_unstake()).into()
+    canonical_commitment_v2_unstake().into()
 }
 
 fn fixture_commitment_v2_update_reward_address() -> wire::CommitmentTransaction {
-    (&canonical_commitment_v2_update_reward_address()).into()
+    canonical_commitment_v2_update_reward_address().into()
 }
 
 fn fixture_block_header() -> wire::IrysBlockHeader {
-    (&canonical_block_header()).into()
+    canonical_block_header().into()
 }
 
 fn fixture_ingress_proof() -> wire::IngressProof {
-    (&canonical_ingress_proof()).into()
+    canonical_ingress_proof().into()
 }
 
 fn fixture_block_body() -> wire::BlockBody {
-    (&canonical_block_body()).into()
+    canonical_block_body().into()
 }
 
 // --- None-variant helpers (optional fields cleared) ---
@@ -106,7 +106,7 @@ fn fixture_data_tx_header_none() -> wire::DataTransactionHeader {
             tx: inner,
             metadata: Default::default(),
         });
-    (&canonical).into()
+    canonical.into()
 }
 
 /// IrysBlockHeader with all nested optional fields set to None:
@@ -172,7 +172,7 @@ fn fixture_block_header_none() -> wire::IrysBlockHeader {
         ema_irys_price: irys_types::storage_pricing::Amount::new(U256::from(95_u64)),
         treasury: U256::from(999_999_u64),
     });
-    (&header).into()
+    header.into()
 }
 
 /// BlockBody with data transactions that have optional fields set to None.
@@ -188,24 +188,28 @@ fn fixture_execution_payload() -> RethBlock {
     canonical_execution_payload()
 }
 
-fn fixture_node_info() -> wire::NodeInfo {
-    (&canonical_node_info()).into()
+fn fixture_node_info() -> wire::NodeInfoV1 {
+    canonical_node_info().into()
+}
+
+fn fixture_node_info_v2() -> wire::NodeInfoV2 {
+    canonical_node_info().into()
 }
 
 fn fixture_block_index_item_v1() -> wire::BlockIndexItemV1 {
-    (&canonical_block_index_item()).into()
+    canonical_block_index_item().into()
 }
 
 fn fixture_block_index_item() -> wire::BlockIndexItemV2 {
-    (&canonical_block_index_item()).into()
+    canonical_block_index_item().into()
 }
 
 fn fixture_irys_tx_response_storage() -> wire::IrysTransactionResponse {
-    (&canonical_irys_tx_response_storage()).into()
+    canonical_irys_tx_response_storage().into()
 }
 
 fn fixture_irys_tx_response_commitment() -> wire::IrysTransactionResponse {
-    (&canonical_irys_tx_response_commitment()).into()
+    canonical_irys_tx_response_commitment().into()
 }
 
 // =============================================================================
@@ -558,6 +562,7 @@ fixture_tests! {
         cumulative_difficulty: U256::from(50_000_u64),
     },
     wire_node_info => fixture_node_info(),
+    wire_node_info_v2 => fixture_node_info_v2(),
 
     // BlockIndexItem / LedgerIndexItem
     block_index_item_v1 => fixture_block_index_item_v1(),

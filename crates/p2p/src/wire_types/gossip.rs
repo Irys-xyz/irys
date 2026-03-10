@@ -61,18 +61,18 @@ pub struct GossipRequestV2<T> {
     pub data: T,
 }
 
-impl From<&irys_types::gossip::v1::GossipDataV1> for GossipDataV1 {
-    fn from(d: &irys_types::gossip::v1::GossipDataV1) -> Self {
+impl From<irys_types::gossip::v1::GossipDataV1> for GossipDataV1 {
+    fn from(d: irys_types::gossip::v1::GossipDataV1) -> Self {
         match d {
             irys_types::gossip::v1::GossipDataV1::Chunk(c) => Self::Chunk(c.into()),
             irys_types::gossip::v1::GossipDataV1::Transaction(t) => Self::Transaction(t.into()),
             irys_types::gossip::v1::GossipDataV1::CommitmentTransaction(c) => {
                 Self::CommitmentTransaction(c.into())
             }
-            irys_types::gossip::v1::GossipDataV1::Block(b) => Self::Block(b.as_ref().into()),
-            irys_types::gossip::v1::GossipDataV1::ExecutionPayload(p) => {
-                Self::ExecutionPayload(p.clone())
+            irys_types::gossip::v1::GossipDataV1::Block(b) => {
+                Self::Block(Arc::unwrap_or_clone(b).into())
             }
+            irys_types::gossip::v1::GossipDataV1::ExecutionPayload(p) => Self::ExecutionPayload(p),
             irys_types::gossip::v1::GossipDataV1::IngressProof(p) => Self::IngressProof(p.into()),
         }
     }
@@ -94,23 +94,23 @@ impl From<GossipDataV1> for irys_types::gossip::v1::GossipDataV1 {
     }
 }
 
-impl From<&irys_types::gossip::v2::GossipDataV2> for GossipDataV2 {
-    fn from(d: &irys_types::gossip::v2::GossipDataV2) -> Self {
+impl From<irys_types::gossip::v2::GossipDataV2> for GossipDataV2 {
+    fn from(d: irys_types::gossip::v2::GossipDataV2) -> Self {
         match d {
-            irys_types::gossip::v2::GossipDataV2::Chunk(c) => Self::Chunk(c.as_ref().into()),
+            irys_types::gossip::v2::GossipDataV2::Chunk(c) => {
+                Self::Chunk(Arc::unwrap_or_clone(c).into())
+            }
             irys_types::gossip::v2::GossipDataV2::Transaction(t) => Self::Transaction(t.into()),
             irys_types::gossip::v2::GossipDataV2::CommitmentTransaction(c) => {
                 Self::CommitmentTransaction(c.into())
             }
             irys_types::gossip::v2::GossipDataV2::BlockHeader(b) => {
-                Self::BlockHeader(b.as_ref().into())
+                Self::BlockHeader(Arc::unwrap_or_clone(b).into())
             }
             irys_types::gossip::v2::GossipDataV2::BlockBody(b) => {
-                Self::BlockBody(b.as_ref().into())
+                Self::BlockBody(Arc::unwrap_or_clone(b).into())
             }
-            irys_types::gossip::v2::GossipDataV2::ExecutionPayload(p) => {
-                Self::ExecutionPayload(p.clone())
-            }
+            irys_types::gossip::v2::GossipDataV2::ExecutionPayload(p) => Self::ExecutionPayload(p),
             irys_types::gossip::v2::GossipDataV2::IngressProof(p) => Self::IngressProof(p.into()),
         }
     }

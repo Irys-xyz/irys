@@ -985,9 +985,36 @@ where
         )
         .await;
 
+        let wire_info: wire_types::NodeInfoV1 = node_info.into();
         HttpResponse::Ok()
             .content_type(ContentType::json())
-            .json(GossipResponse::Accepted(node_info))
+            .json(GossipResponse::Accepted(wire_info))
+    }
+
+    async fn handle_info_v2(server: Data<Self>) -> HttpResponse {
+        let block_index = &server.data_handler.block_index;
+        let block_tree = &server.data_handler.block_tree;
+        let peer_list = &server.peer_list;
+        let sync_state = &server.data_handler.sync_state;
+        let started_at = server.data_handler.started_at;
+        let mining_address = server.data_handler.gossip_client.mining_address;
+        let chain_id = server.data_handler.config.consensus.chain_id;
+
+        let node_info = get_node_info(
+            block_index,
+            block_tree,
+            peer_list,
+            sync_state,
+            started_at,
+            mining_address,
+            chain_id,
+        )
+        .await;
+
+        let wire_info: wire_types::NodeInfoV2 = node_info.into();
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(GossipResponse::Accepted(wire_info))
     }
 
     #[expect(
@@ -1251,7 +1278,9 @@ where
             .read()
             .get_range(height as u64, limit);
 
-        HttpResponse::Ok().json(GossipResponse::Accepted(requested_blocks))
+        let wire_blocks: Vec<wire_types::BlockIndexItemV1> =
+            requested_blocks.into_iter().map(Into::into).collect();
+        HttpResponse::Ok().json(GossipResponse::Accepted(wire_blocks))
     }
 
     #[expect(
@@ -1334,7 +1363,7 @@ where
             Ok(maybe_data) => match maybe_data {
                 Some(data_v2) => match data_v2.to_v1() {
                     Some(data_v1) => {
-                        let wire_v1: wire_types::GossipDataV1 = (&data_v1).into();
+                        let wire_v1: wire_types::GossipDataV1 = data_v1.into();
                         HttpResponse::Ok().json(GossipResponse::Accepted(Some(wire_v1)))
                     }
                     None => {
@@ -1453,8 +1482,7 @@ where
             .await
         {
             Ok(maybe_data) => {
-                let wire_data: Option<wire_types::GossipDataV2> =
-                    maybe_data.as_ref().map(Into::into);
+                let wire_data: Option<wire_types::GossipDataV2> = maybe_data.map(Into::into);
                 HttpResponse::Ok().json(GossipResponse::Accepted(wire_data))
             }
             Err(error) => {
@@ -1519,7 +1547,7 @@ where
                     )
                     .route(
                         GossipRoutes::Info.as_str(),
-                        web::get().to(Self::handle_info),
+                        web::get().to(Self::handle_info_v2),
                     )
                     .route(
                         GossipRoutes::PeerList.as_str(),

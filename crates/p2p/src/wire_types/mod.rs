@@ -28,20 +28,12 @@ pub(crate) mod test_helpers;
 mod tests;
 
 pub(crate) use block::*;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "used by tests; server adoption pending")
-)]
 pub(crate) use block_index::*;
 pub(crate) use chunk::*;
 pub(crate) use commitment::*;
 pub(crate) use gossip::*;
 pub(crate) use handshake::*;
 pub(crate) use ingress::*;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "used by tests; server adoption pending")
-)]
 pub(crate) use node_info::*;
 pub(crate) use transaction::*;
 
@@ -122,13 +114,16 @@ pub(crate) use impl_json_version_tagged_serde;
 /// Generates bidirectional `From` impls between a canonical type and a mirror
 /// wire type that has the same field names.
 ///
-/// - `From<&$canonical> for $wire` — clones each field (works for both Copy and Clone types)
+/// - `From<$canonical> for $wire` — moves each field
 /// - `From<$wire> for $canonical` — moves each field
+///
+/// Both conversions take ownership. If you only have a reference and need to
+/// convert, clone explicitly at the call site.
 macro_rules! impl_mirror_from {
     ($canonical:ty => $wire:ty { $($field:ident),* $(,)? }) => {
-        impl From<&$canonical> for $wire {
-            fn from(src: &$canonical) -> Self {
-                Self { $( $field: src.$field.clone(), )* }
+        impl From<$canonical> for $wire {
+            fn from(src: $canonical) -> Self {
+                Self { $( $field: src.$field, )* }
             }
         }
         impl From<$wire> for $canonical {
@@ -144,8 +139,11 @@ pub(crate) use impl_mirror_from;
 /// Generates bidirectional `From` impls between a canonical enum and a mirror
 /// wire enum that has the same variant names and field names.
 ///
-/// - `From<&$canonical> for $wire` — clones each field/value
+/// - `From<$canonical> for $wire` — moves each field/value
 /// - `From<$wire> for $canonical` — moves each field/value
+///
+/// Both conversions take ownership. If you only have a reference and need to
+/// convert, clone explicitly at the call site.
 ///
 /// Two forms:
 /// - **Struct/unit variants** (curly braces): `Type, Wire { Variant { field }, Unit, ... }`
@@ -160,11 +158,11 @@ macro_rules! impl_mirror_enum_from {
     }) => {
         const _: () = {
             type _Canonical = $canonical;
-            impl From<&_Canonical> for $wire {
-                fn from(src: &_Canonical) -> Self {
+            impl From<_Canonical> for $wire {
+                fn from(src: _Canonical) -> Self {
                     match src {
                         $( _Canonical::$variant $({ $($field),* })? =>
-                            Self::$variant $({ $($field: $field.clone()),* })?, )*
+                            Self::$variant $({ $($field),* })?, )*
                     }
                 }
             }
@@ -183,10 +181,10 @@ macro_rules! impl_mirror_enum_from {
     ($canonical:path, $wire:ident ( $( $variant:ident ),* $(,)? )) => {
         const _: () = {
             type _Canonical = $canonical;
-            impl From<&_Canonical> for $wire {
-                fn from(src: &_Canonical) -> Self {
+            impl From<_Canonical> for $wire {
+                fn from(src: _Canonical) -> Self {
                     match src {
-                        $( _Canonical::$variant(v) => Self::$variant(v.clone()), )*
+                        $( _Canonical::$variant(v) => Self::$variant(v), )*
                     }
                 }
             }
@@ -206,7 +204,7 @@ pub(crate) use impl_mirror_enum_from;
 /// Generates bidirectional `From` impls for versioned transaction enums that
 /// use the `*WithMetadata { tx, metadata }` wrapper pattern.
 ///
-/// - `From<&$canonical_enum> for $wire_enum` — clones fields, calls `.into()` on `convert` fields
+/// - `From<$canonical_enum> for $wire_enum` — moves fields, calls `.into()` on `convert` fields
 /// - `From<$wire_enum> for $canonical_enum` — moves fields, calls `.into()` on `convert` fields,
 ///   sets `metadata: Default::default()`
 ///
@@ -226,13 +224,13 @@ macro_rules! impl_versioned_tx_from {
     ) => {
         const _: () = {
             type _Canonical = $canonical_enum;
-            impl From<&_Canonical> for $wire_enum {
-                fn from(ct: &_Canonical) -> Self {
+            impl From<_Canonical> for $wire_enum {
+                fn from(ct: _Canonical) -> Self {
                     match ct {
                         $(
                             _Canonical::$variant(wm) => Self::$variant($gossip_inner {
-                                $( $field: wm.tx.$field.clone(), )*
-                                $($( $conv_field: (&wm.tx.$conv_field).into(), )*)?
+                                $( $field: wm.tx.$field, )*
+                                $($( $conv_field: wm.tx.$conv_field.into(), )*)?
                             }),
                         )+
                     }

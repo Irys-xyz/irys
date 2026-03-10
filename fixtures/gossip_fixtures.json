@@ -179,7 +179,7 @@
       "height": "42",
       "isSyncing": false,
       "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-      "peerCount": "5",
+      "peerCount": 5,
       "pendingBlocks": "2",
       "uptimeSecs": "3600",
       "version": "1.2.3"
@@ -445,7 +445,7 @@
     "height": "42",
     "isSyncing": false,
     "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
-    "peerCount": "5",
+    "peerCount": 5,
     "pendingBlocks": "2",
     "uptimeSecs": "3600",
     "version": "1.2.3"
@@ -1163,6 +1163,21 @@
     "peer_id": "3chLuAB9CqrCNL42WFwjPLk4GEtr"
   },
   "wire_node_info": {
+    "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+    "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
+    "blockIndexHeight": "40",
+    "chainId": "1270",
+    "cumulativeDifficulty": "50000",
+    "currentSyncHeight": "42",
+    "height": "42",
+    "isSyncing": false,
+    "miningAddress": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+    "peerCount": 5,
+    "pendingBlocks": "2",
+    "uptimeSecs": "3600",
+    "version": "1.2.3"
+  },
+  "wire_node_info_v2": {
     "blockHash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
     "blockIndexHash": "DhkZucYvB4qbE22R1AKjha6QtrYqcx5A3iJMxTRdTddu",
     "blockIndexHeight": "40",
