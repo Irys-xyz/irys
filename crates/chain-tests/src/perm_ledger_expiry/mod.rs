@@ -621,7 +621,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         last_slot.is_expired
     );
 
-    // --- Assertion 3: All last-slot partitions still have Publish ledger assignment ---
+    // --- Assertion 2: All last-slot partitions still have Publish ledger assignment ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
     for partition_hash in &last_slot.partitions {
         let assignment = partition_assignments
@@ -641,7 +641,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     }
     info!("Verified all last-slot partitions remain assigned to Publish");
 
-    // --- Assertion 4: No TermFeeReward shadow txs in any epoch block past min_blocks ---
+    // --- Assertion 3: No TermFeeReward shadow txs in any epoch block past min_blocks ---
     let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
     let mut epoch_height = min_blocks;
     while epoch_height <= final_height {
