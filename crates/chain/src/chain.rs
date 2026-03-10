@@ -1157,22 +1157,28 @@ impl IrysNode {
         // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
         let mock_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider> =
             Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let (node_handle, reth_node) =
-            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height, mock_provider, pd_chunk_tx)
-                .in_current_span()
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(
-                        "Failed to start reth node at block height {}: {:?}",
-                        latest_block_height, e
-                    );
-                    return ShutdownReason::FatalError(format!(
-                        "start_reth_node failed at block height {latest_block_height}: {e}"
-                    ));
-                }
-            };
+        let (node_handle, reth_node) = match start_reth_node(
+            exec,
+            reth_chainspec,
+            config.clone(),
+            latest_block_height,
+            mock_provider,
+            pd_chunk_tx,
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(
+                    "Failed to start reth node at block height {}: {:?}",
+                    latest_block_height, e
+                );
+                return ShutdownReason::FatalError(format!(
+                    "start_reth_node failed at block height {latest_block_height}: {e}"
+                ));
+            }
+        };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
