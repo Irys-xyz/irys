@@ -149,6 +149,7 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
 
     // --- Assertion 3: Expired partitions returned to capacity pool ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
+    let mut checked_partitions = 0_usize;
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         if slot_index < num_slots - 1 && slot.is_expired {
             for partition_hash in &slot.partitions {
@@ -167,10 +168,18 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
                     slot_index,
                     assignment.ledger_id
                 );
+                checked_partitions += 1;
             }
         }
     }
-    info!("Verified expired perm partitions are in capacity pool");
+    assert!(
+        checked_partitions > 0,
+        "Expected to verify at least one expired partition, but none were found"
+    );
+    info!(
+        "Verified {} expired perm partitions are in capacity pool",
+        checked_partitions
+    );
 
     // --- Assertion 4: User balance unchanged after perm expiry ---
     let post_expiry_block = node.get_block_by_height(final_height).await?;
@@ -361,6 +370,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
 
     // --- Assertion 4: All expired Submit partitions returned to capacity pool ---
     let partition_assignments = &epoch_snapshot.partition_assignments;
+    let mut checked_submit_partitions = 0_usize;
     for (slot_index, slot) in submit_slots.iter().enumerate() {
         if slot.is_expired {
             for partition_hash in &slot.partitions {
@@ -377,12 +387,21 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
                     "Expired submit partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
                     partition_hash, slot_index, assignment.ledger_id
                 );
+                checked_submit_partitions += 1;
             }
         }
     }
-    info!("Verified expired submit partitions are in capacity pool");
+    assert!(
+        checked_submit_partitions > 0,
+        "Expected to verify at least one expired submit partition, but none were found"
+    );
+    info!(
+        "Verified {} expired submit partitions are in capacity pool",
+        checked_submit_partitions
+    );
 
     // --- Assertion 5: All expired non-last Publish partitions returned to capacity pool ---
+    let mut checked_perm_partitions = 0_usize;
     for (slot_index, slot) in perm_slots.iter().enumerate() {
         if slot_index < perm_num - 1 && slot.is_expired {
             for partition_hash in &slot.partitions {
@@ -399,10 +418,18 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
                     "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
                     partition_hash, slot_index, assignment.ledger_id
                 );
+                checked_perm_partitions += 1;
             }
         }
     }
-    info!("Verified expired perm partitions are in capacity pool");
+    assert!(
+        checked_perm_partitions > 0,
+        "Expected to verify at least one expired perm partition, but none were found"
+    );
+    info!(
+        "Verified {} expired perm partitions are in capacity pool",
+        checked_perm_partitions
+    );
 
     info!("Simultaneous perm+term expiry test passed!");
     node.stop().await;
