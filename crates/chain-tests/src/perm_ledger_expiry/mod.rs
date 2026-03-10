@@ -147,38 +147,34 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
         target_height
     );
 
-    // --- Assertion 3: Expired partitions returned to capacity pool ---
-    let partition_assignments = &epoch_snapshot.partition_assignments;
-    let mut checked_partitions = 0_usize;
-    for (slot_index, slot) in perm_slots.iter().enumerate() {
-        if slot_index < num_slots - 1 && slot.is_expired {
-            for partition_hash in &slot.partitions {
-                let assignment = partition_assignments
-                    .get_assignment(*partition_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Missing partition assignment for {:?} at slot {}",
-                            partition_hash, slot_index
-                        )
-                    });
-                assert!(
-                    assignment.ledger_id.is_none(),
-                    "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                    partition_hash,
-                    slot_index,
-                    assignment.ledger_id
-                );
-                checked_partitions += 1;
-            }
-        }
-    }
+    // --- Assertion 3: Expired partitions were processed and removed from original slots ---
+    // NOTE: After expiry, slot.partitions is empty (removed by return_expired_partition_to_capacity)
+    // and allocate_additional_capacity() may reassign those partitions to new slots. So we verify
+    // via expired_partition_infos (the durable record) and confirm removal from the original slot.
+    let expired_infos = epoch_snapshot
+        .expired_partition_infos
+        .as_ref()
+        .expect("expired_partition_infos should be set after expiry");
+    let perm_expired_partitions: Vec<_> = expired_infos
+        .iter()
+        .filter(|info| info.ledger_id == DataLedger::Publish)
+        .collect();
     assert!(
-        checked_partitions > 0,
-        "Expected to verify at least one expired partition, but none were found"
+        !perm_expired_partitions.is_empty(),
+        "Expected at least one expired Publish partition in expired_partition_infos"
     );
+    for info in &perm_expired_partitions {
+        let slot = &perm_slots[info.slot_index];
+        assert!(slot.is_expired, "Slot {} should be expired", info.slot_index);
+        assert!(
+            !slot.partitions.contains(&info.partition_hash),
+            "Expired partition {:?} should have been removed from slot {}",
+            info.partition_hash, info.slot_index
+        );
+    }
     info!(
-        "Verified {} expired perm partitions are in capacity pool",
-        checked_partitions
+        "Verified {} Publish partitions expired and removed from original slots",
+        perm_expired_partitions.len()
     );
 
     // --- Assertion 4: User balance unchanged after perm expiry ---
@@ -251,7 +247,9 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
         .await?;
 
-    // Mine 1 block to include both txs (tx2 gets promoted to Publish)
+    // Mine 1 block to include both txs, then another so block migration
+    // (block_migration_depth=1) promotes tx2 to Publish.
+    node.mine_block().await?;
     node.mine_block().await?;
 
     // Verify promotion state before expiry
@@ -372,67 +370,43 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
          even when Publish expires simultaneously"
     );
 
-    // --- Assertion 4: All expired Submit partitions returned to capacity pool ---
-    let partition_assignments = &epoch_snapshot.partition_assignments;
-    let mut checked_submit_partitions = 0_usize;
-    for (slot_index, slot) in submit_slots.iter().enumerate() {
-        if slot.is_expired {
-            for partition_hash in &slot.partitions {
-                let assignment = partition_assignments
-                    .get_assignment(*partition_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Missing partition assignment for {:?} at slot {}",
-                            partition_hash, slot_index
-                        )
-                    });
-                assert!(
-                    assignment.ledger_id.is_none(),
-                    "Expired submit partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                    partition_hash, slot_index, assignment.ledger_id
-                );
-                checked_submit_partitions += 1;
-            }
+    // --- Assertion 4 & 5: Expired partitions were processed for both ledgers ---
+    // NOTE: After expiry processing, slot.partitions is empty (partitions are removed
+    // from slots by return_expired_partition_to_capacity). And allocate_additional_capacity()
+    // may reassign those partitions back to data ledger slots. So we verify expiry happened
+    // by checking expired_partition_infos rather than current partition assignment state.
+    let expired_infos = epoch_snapshot
+        .expired_partition_infos
+        .as_ref()
+        .expect("expired_partition_infos should be set after expiry");
+    let mut submit_expired_count = 0_usize;
+    let mut perm_expired_count = 0_usize;
+    for info in expired_infos {
+        let slots = epoch_snapshot.ledgers.get_slots(info.ledger_id);
+        let slot = &slots[info.slot_index];
+        assert!(slot.is_expired, "Slot {} should be expired", info.slot_index);
+        assert!(
+            !slot.partitions.contains(&info.partition_hash),
+            "Expired partition {:?} should have been removed from {:?} slot {}",
+            info.partition_hash, info.ledger_id, info.slot_index
+        );
+        if info.ledger_id == DataLedger::Submit {
+            submit_expired_count += 1;
+        } else if info.ledger_id == DataLedger::Publish {
+            perm_expired_count += 1;
         }
     }
     assert!(
-        checked_submit_partitions > 0,
-        "Expected to verify at least one expired submit partition, but none were found"
+        submit_expired_count > 0,
+        "Expected at least one expired Submit partition in expired_partition_infos"
     );
-    info!(
-        "Verified {} expired submit partitions are in capacity pool",
-        checked_submit_partitions
-    );
-
-    // --- Assertion 5: All expired non-last Publish partitions returned to capacity pool ---
-    let mut checked_perm_partitions = 0_usize;
-    for (slot_index, slot) in perm_slots.iter().enumerate() {
-        if slot_index < perm_num - 1 && slot.is_expired {
-            for partition_hash in &slot.partitions {
-                let assignment = partition_assignments
-                    .get_assignment(*partition_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Missing partition assignment for {:?} at slot {}",
-                            partition_hash, slot_index
-                        )
-                    });
-                assert!(
-                    assignment.ledger_id.is_none(),
-                    "Expired perm partition {:?} at slot {} should be in capacity pool but has ledger_id={:?}",
-                    partition_hash, slot_index, assignment.ledger_id
-                );
-                checked_perm_partitions += 1;
-            }
-        }
-    }
     assert!(
-        checked_perm_partitions > 0,
-        "Expected to verify at least one expired perm partition, but none were found"
+        perm_expired_count > 0,
+        "Expected at least one expired Publish partition in expired_partition_infos"
     );
     info!(
-        "Verified {} expired perm partitions are in capacity pool",
-        checked_perm_partitions
+        "Verified {} Submit + {} Publish partitions expired and removed from original slots",
+        submit_expired_count, perm_expired_count
     );
 
     info!("Simultaneous perm+term expiry test passed!");
