@@ -147,10 +147,11 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
         target_height
     );
 
-    // --- Assertion 3: Expired partitions were processed and removed from original slots ---
-    // NOTE: After expiry, slot.partitions is empty (removed by return_expired_partition_to_capacity)
-    // and allocate_additional_capacity() may reassign those partitions to new slots. So we verify
-    // via expired_partition_infos (the durable record) and confirm removal from the original slot.
+    // --- Assertion 3: Expired partitions have coherent assignment state ---
+    // After expiry, backfill_missing_partitions() may reassign expired partitions to new
+    // non-expired slots. We verify: (a) the partition was removed from its original expired
+    // slot, and (b) its current assignment is coherent — either still in the capacity pool
+    // (None, None) or reassigned to a valid non-expired slot with matching slot membership.
     let expired_infos = epoch_snapshot
         .expired_partition_infos
         .as_ref()
@@ -164,16 +165,59 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
         "Expected at least one expired Publish partition in expired_partition_infos"
     );
     for info in &perm_expired_partitions {
-        let slot = &perm_slots[info.slot_index];
-        assert!(slot.is_expired, "Slot {} should be expired", info.slot_index);
+        let orig_slot = &perm_slots[info.slot_index];
         assert!(
-            !slot.partitions.contains(&info.partition_hash),
-            "Expired partition {:?} should have been removed from slot {}",
-            info.partition_hash, info.slot_index
+            orig_slot.is_expired,
+            "Slot {} should be expired",
+            info.slot_index
         );
+        assert!(
+            !orig_slot.partitions.contains(&info.partition_hash),
+            "Expired partition {:?} should have been removed from slot {}",
+            info.partition_hash,
+            info.slot_index
+        );
+        // Coherence: assignment must exist and be in a valid state
+        let assignment = epoch_snapshot
+            .partition_assignments
+            .get_assignment(info.partition_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expired partition {:?} vanished from both data and capacity maps",
+                    info.partition_hash
+                )
+            });
+        match (assignment.ledger_id, assignment.slot_index) {
+            (None, None) => { /* still in capacity pool — valid */ }
+            (Some(new_ledger_id), Some(new_slot_index)) => {
+                let new_ledger = DataLedger::try_from(new_ledger_id).unwrap();
+                let new_slot = &epoch_snapshot.ledgers.get_slots(new_ledger)[new_slot_index];
+                assert!(
+                    !new_slot.is_expired,
+                    "Expired partition {:?} was reassigned to expired {:?} slot {}",
+                    info.partition_hash, new_ledger, new_slot_index
+                );
+                assert!(
+                    new_slot.partitions.contains(&info.partition_hash),
+                    "Partition {:?} assigned to {:?} slot {} but not in slot's partition list",
+                    info.partition_hash,
+                    new_ledger,
+                    new_slot_index
+                );
+                assert!(
+                    new_ledger != info.ledger_id || new_slot_index != info.slot_index,
+                    "Partition {:?} still assigned to original expired slot",
+                    info.partition_hash
+                );
+            }
+            (lid, sid) => panic!(
+                "Malformed assignment for expired partition {:?}: ledger_id={:?}, slot_index={:?}",
+                info.partition_hash, lid, sid
+            ),
+        }
     }
     info!(
-        "Verified {} Publish partitions expired and removed from original slots",
+        "Verified {} Publish partitions expired with coherent assignment state",
         perm_expired_partitions.len()
     );
 
@@ -370,11 +414,11 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
          even when Publish expires simultaneously"
     );
 
-    // --- Assertion 4 & 5: Expired partitions were processed for both ledgers ---
-    // NOTE: After expiry processing, slot.partitions is empty (partitions are removed
-    // from slots by return_expired_partition_to_capacity). And allocate_additional_capacity()
-    // may reassign those partitions back to data ledger slots. So we verify expiry happened
-    // by checking expired_partition_infos rather than current partition assignment state.
+    // --- Assertion 4 & 5: Expired partitions have coherent assignment state (both ledgers) ---
+    // After expiry, backfill_missing_partitions() may reassign expired partitions to new
+    // non-expired slots. We verify: (a) the partition was removed from its original expired
+    // slot, and (b) its current assignment is coherent — either still in the capacity pool
+    // (None, None) or reassigned to a valid non-expired slot with matching slot membership.
     let expired_infos = epoch_snapshot
         .expired_partition_infos
         .as_ref()
@@ -382,14 +426,58 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     let mut submit_expired_count = 0_usize;
     let mut perm_expired_count = 0_usize;
     for info in expired_infos {
-        let slots = epoch_snapshot.ledgers.get_slots(info.ledger_id);
-        let slot = &slots[info.slot_index];
-        assert!(slot.is_expired, "Slot {} should be expired", info.slot_index);
+        let orig_slots = epoch_snapshot.ledgers.get_slots(info.ledger_id);
+        let orig_slot = &orig_slots[info.slot_index];
         assert!(
-            !slot.partitions.contains(&info.partition_hash),
-            "Expired partition {:?} should have been removed from {:?} slot {}",
-            info.partition_hash, info.ledger_id, info.slot_index
+            orig_slot.is_expired,
+            "Slot {} should be expired",
+            info.slot_index
         );
+        assert!(
+            !orig_slot.partitions.contains(&info.partition_hash),
+            "Expired partition {:?} should have been removed from {:?} slot {}",
+            info.partition_hash,
+            info.ledger_id,
+            info.slot_index
+        );
+        // Coherence: assignment must exist and be in a valid state
+        let assignment = epoch_snapshot
+            .partition_assignments
+            .get_assignment(info.partition_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expired partition {:?} vanished from both data and capacity maps",
+                    info.partition_hash
+                )
+            });
+        match (assignment.ledger_id, assignment.slot_index) {
+            (None, None) => { /* still in capacity pool — valid */ }
+            (Some(new_ledger_id), Some(new_slot_index)) => {
+                let new_ledger = DataLedger::try_from(new_ledger_id).unwrap();
+                let new_slot = &epoch_snapshot.ledgers.get_slots(new_ledger)[new_slot_index];
+                assert!(
+                    !new_slot.is_expired,
+                    "Expired partition {:?} was reassigned to expired {:?} slot {}",
+                    info.partition_hash, new_ledger, new_slot_index
+                );
+                assert!(
+                    new_slot.partitions.contains(&info.partition_hash),
+                    "Partition {:?} assigned to {:?} slot {} but not in slot's partition list",
+                    info.partition_hash,
+                    new_ledger,
+                    new_slot_index
+                );
+                assert!(
+                    new_ledger != info.ledger_id || new_slot_index != info.slot_index,
+                    "Partition {:?} still assigned to original expired slot",
+                    info.partition_hash
+                );
+            }
+            (lid, sid) => panic!(
+                "Malformed assignment for expired partition {:?}: ledger_id={:?}, slot_index={:?}",
+                info.partition_hash, lid, sid
+            ),
+        }
         if info.ledger_id == DataLedger::Submit {
             submit_expired_count += 1;
         } else if info.ledger_id == DataLedger::Publish {
@@ -405,7 +493,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         "Expected at least one expired Publish partition in expired_partition_infos"
     );
     info!(
-        "Verified {} Submit + {} Publish partitions expired and removed from original slots",
+        "Verified {} Submit + {} Publish partitions expired with coherent assignment state",
         submit_expired_count, perm_expired_count
     );
 
