@@ -474,7 +474,8 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     let slot0_last_height = perm_slots[0].last_height;
     info!(
         "Perm slots: {}, slot0 last_height: {}",
-        perm_slots.len(), slot0_last_height
+        perm_slots.len(),
+        slot0_last_height
     );
 
     let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
