@@ -283,16 +283,20 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         submit_slots.len()
     );
 
-    // Derive expiry target from observed state (both epoch lengths are equal)
+    // Derive expiry target from observed state — compute each ledger's rounded
+    // expiry boundary separately so we catch cases where they would diverge.
     let perm_slot0_last_height = perm_slots[0].last_height;
     let submit_slot0_last_height = submit_slots[0].last_height;
-    let perm_min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
-    let submit_min_blocks = SUBMIT_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
-    let perm_earliest = perm_min_blocks + perm_slot0_last_height;
-    let submit_earliest = submit_min_blocks + submit_slot0_last_height;
-    let earliest = perm_earliest.max(submit_earliest);
-    // Round up to epoch boundary
-    let target_height = earliest.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let perm_earliest = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH + perm_slot0_last_height;
+    let submit_earliest = SUBMIT_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH + submit_slot0_last_height;
+    let perm_target = perm_earliest.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    let submit_target = submit_earliest.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    assert_eq!(
+        perm_target, submit_target,
+        "Perm and Submit expiry must land on the same epoch boundary \
+         (perm_target={perm_target}, submit_target={submit_target})"
+    );
+    let target_height = perm_target;
     info!(
         "Perm slot0 last_height={}, Submit slot0 last_height={}, target expiry height={}",
         perm_slot0_last_height, submit_slot0_last_height, target_height
