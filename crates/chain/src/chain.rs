@@ -1144,7 +1144,7 @@ impl IrysNode {
 
         // Shared indexes for lock-free PD chunk reads during EVM execution
         let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
-            Arc::new(dashmap::DashMap::new());
+            Arc::new(dashmap::DashMap::with_capacity(16_384));
         let ready_pd_txs = std::sync::Arc::new(dashmap::DashSet::new());
 
         // Phase 1: Start reth (sequential)

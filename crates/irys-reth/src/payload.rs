@@ -31,7 +31,6 @@
 use crate::IrysPayloadBuilderAttributes;
 use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use alloy_consensus::Transaction as _;
-use irys_types::chunk_provider::PdChunkSender;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -343,8 +342,6 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     max_pd_chunks_per_block: u64,
     /// Hardfork configuration for determining Sprite activation.
     hardforks: Arc<IrysHardforkConfig>,
-    /// PD chunk sender for provisioning messages.
-    pd_chunk_sender: PdChunkSender,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
@@ -363,7 +360,6 @@ where
             .field("builder_config", &self.builder_config)
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
-            .field("pd_chunk_sender", &"<sender>")
             .field("ready_pd_txs", &"<dashset>")
             .finish()
     }
@@ -376,8 +372,6 @@ pub struct CombinedTransactionIterator {
     pool_iter: BestTransactionsIter,
     /// Whether the Sprite hardfork is active (enables PD chunk budgeting)
     is_sprite_active: bool,
-    /// PD chunk sender for provisioning messages.
-    pd_chunk_sender: PdChunkSender,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
@@ -505,7 +499,7 @@ impl CombinedTransactionIterator {
         }
     }
 
-    /// Create a new iterator with a PD chunk sender and ready set.
+    /// Create a new iterator with a ready set for PD chunk readiness checks.
     /// PD transactions will be skipped if their chunks are not provisioned yet.
     pub fn new(
         timestamp: Instant,
@@ -513,7 +507,6 @@ impl CombinedTransactionIterator {
         pool_iter: BestTransactionsIter,
         max_pd_chunks_per_block: u64,
         is_sprite_active: bool,
-        pd_chunk_sender: PdChunkSender,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
     ) -> Self {
         Self {
@@ -521,7 +514,6 @@ impl CombinedTransactionIterator {
             pd_budget: PdChunkBudget::new(max_pd_chunks_per_block),
             pool_iter,
             is_sprite_active,
-            pd_chunk_sender,
             ready_pd_txs,
         }
     }
@@ -624,7 +616,6 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         builder_config: EthereumBuilderConfig,
         max_pd_chunks_per_block: u64,
         hardforks: Arc<IrysHardforkConfig>,
-        pd_chunk_sender: PdChunkSender,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
     ) -> Self {
         Self {
@@ -634,7 +625,6 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             builder_config,
             max_pd_chunks_per_block,
             hardforks,
-            pd_chunk_sender,
             ready_pd_txs,
         }
     }
@@ -661,14 +651,13 @@ where
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
 
-        // Create combined iterator with shadow txs from attributes and PD chunk sender
+        // Create combined iterator with shadow txs from attributes
         Box::new(CombinedTransactionIterator::new(
             timestamp,
             shadow_txs,
             pool_txs,
             self.max_pd_chunks_per_block,
             is_sprite_active,
-            self.pd_chunk_sender.clone(),
             self.ready_pd_txs.clone(),
         ))
     }
@@ -901,8 +890,6 @@ mod tests {
             make_valid(normal_tx, 13, timestamp),
         ]));
 
-        // Create a dummy PD chunk sender for testing (receiver is dropped, send will fail)
-        let (pd_chunk_sender, _) = tokio::sync::mpsc::unbounded_channel();
         // All PD txs are considered ready in this test
         let ready_pd_txs = Arc::new(dashmap::DashSet::new());
         ready_pd_txs.insert(revm_primitives::B256::from_slice(pd_small_hash.as_slice()));
@@ -915,7 +902,6 @@ mod tests {
             pool_iter,
             7_500,
             true,
-            pd_chunk_sender,
             ready_pd_txs,
         );
 

@@ -46,9 +46,6 @@ pub struct IrysPoolBuilder {
     /// The pool builder will spawn a monitoring task to detect
     /// PD transactions and send messages to the PdChunkManager.
     pd_chunk_sender: PdChunkSender,
-    /// Shared set of PD tx hashes whose chunks are fully provisioned.
-    /// Written by PdService, read by the payload builder.
-    ready_pd_txs: Arc<dashmap::DashSet<B256>>,
 }
 
 impl std::fmt::Debug for IrysPoolBuilder {
@@ -56,22 +53,16 @@ impl std::fmt::Debug for IrysPoolBuilder {
         f.debug_struct("IrysPoolBuilder")
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
-            .field("ready_pd_txs", &"<DashSet>")
             .finish()
     }
 }
 
 impl IrysPoolBuilder {
     /// Creates a new pool builder with the given hardfork configuration.
-    pub fn new(
-        hardfork_config: Arc<IrysHardforkConfig>,
-        pd_chunk_sender: PdChunkSender,
-        ready_pd_txs: Arc<dashmap::DashSet<B256>>,
-    ) -> Self {
+    pub fn new(hardfork_config: Arc<IrysHardforkConfig>, pd_chunk_sender: PdChunkSender) -> Self {
         Self {
             hardfork_config,
             pd_chunk_sender,
-            ready_pd_txs,
         }
     }
 }
@@ -470,8 +461,7 @@ async fn pd_transaction_monitor<P>(
     use reth_transaction_pool::TransactionListenerKind;
 
     let mut known_pd_txs: HashSet<B256> = HashSet::new();
-    let mut new_tx_listener =
-        pool.new_transactions_listener_for(TransactionListenerKind::All);
+    let mut new_tx_listener = pool.new_transactions_listener_for(TransactionListenerKind::All);
     let mut all_events = pool.all_transactions_event_listener();
 
     debug!(target: "reth::pd", "PD transaction monitor started (event-driven)");
@@ -501,26 +491,21 @@ async fn pd_transaction_monitor<P>(
 
                 if let Ok(Some(_)) =
                     crate::pd_tx::detect_and_decode_pd_header(tx.transaction.input())
+                    && known_pd_txs.insert(tx_hash)
+                    && let Some(access_list) = tx.transaction.access_list()
                 {
-                    if known_pd_txs.insert(tx_hash) {
-                        if let Some(access_list) = tx.transaction.access_list() {
-                            let chunk_specs =
-                                crate::pd_tx::extract_pd_chunk_specs(access_list);
-                            if !chunk_specs.is_empty() {
-                                trace!(
-                                    target: "reth::pd",
-                                    tx_hash = %tx_hash,
-                                    chunk_specs_count = chunk_specs.len(),
-                                    "Detected new PD transaction, sending for provisioning"
-                                );
-                                let _ = chunk_sender.send(
-                                    PdChunkMessage::NewTransaction {
-                                        tx_hash,
-                                        chunk_specs,
-                                    },
-                                );
-                            }
-                        }
+                    let chunk_specs = crate::pd_tx::extract_pd_chunk_specs(access_list);
+                    if !chunk_specs.is_empty() {
+                        trace!(
+                            target: "reth::pd",
+                            tx_hash = %tx_hash,
+                            chunk_specs_count = chunk_specs.len(),
+                            "Detected new PD transaction, sending for provisioning"
+                        );
+                        let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
+                            tx_hash,
+                            chunk_specs,
+                        });
                     }
                 }
             }
@@ -533,23 +518,20 @@ async fn pd_transaction_monitor<P>(
                     | FullTransactionEvent::Invalid(h)
                     | FullTransactionEvent::Mined { tx_hash: h, .. } => Some(h),
                     FullTransactionEvent::Replaced { transaction, .. } => {
+                        // `transaction` is the OLD tx being evicted (not the replacement)
                         Some(*transaction.hash())
                     }
                     _ => None,
                 };
-                if let Some(tx_hash) = removed_hash {
-                    if known_pd_txs.remove(&tx_hash) {
-                        trace!(
-                            target: "reth::pd",
-                            tx_hash = %tx_hash,
-                            "PD transaction removed from pool, notifying chunk manager"
-                        );
-                        let _ = chunk_sender.send(
-                            PdChunkMessage::TransactionRemoved {
-                                tx_hash,
-                            },
-                        );
-                    }
+                if let Some(tx_hash) = removed_hash
+                    && known_pd_txs.remove(&tx_hash)
+                {
+                    trace!(
+                        target: "reth::pd",
+                        tx_hash = %tx_hash,
+                        "PD transaction removed from pool, notifying chunk manager"
+                    );
+                    let _ = chunk_sender.send(PdChunkMessage::TransactionRemoved { tx_hash });
                 }
             }
         }
