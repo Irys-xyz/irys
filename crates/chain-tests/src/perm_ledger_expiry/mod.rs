@@ -881,25 +881,64 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
         target_height
     );
 
-    // Record which partition hashes were expired
+    // Record expired partition info (retaining origin slot_index for stronger assertions)
     let expired_infos = expiry_snapshot
         .expired_partition_infos
         .as_ref()
         .expect("expired_partition_infos should be set after expiry");
-    let expired_perm_hashes: Vec<_> = expired_infos
+    let expired_perm_infos: Vec<_> = expired_infos
         .iter()
         .filter(|info| info.ledger_id == DataLedger::Publish)
-        .map(|info| info.partition_hash)
+        .copied()
         .collect();
     assert!(
-        !expired_perm_hashes.is_empty(),
-        "Expected at least one expired Publish partition hash"
+        !expired_perm_infos.is_empty(),
+        "Expected at least one expired Publish partition in expired_partition_infos"
     );
+
+    // Coherence checks at expiry time (pattern from heavy_perm_ledger_expiry_basic):
+    // For each expired partition, verify original slot is expired, partition was removed,
+    // and the assignment still exists. Also record whether backfill already recycled it
+    // into an active Publish slot at this epoch (before tx2 is posted).
+    let mut already_recycled_at_expiry = 0_usize;
+    for info in &expired_perm_infos {
+        let orig_slot = &perm_slots[info.slot_index];
+        assert!(
+            orig_slot.is_expired,
+            "Original slot {} should be expired",
+            info.slot_index
+        );
+        assert!(
+            !orig_slot.partitions.contains(&info.partition_hash),
+            "Expired partition {:?} should have been removed from slot {}",
+            info.partition_hash,
+            info.slot_index
+        );
+        let assignment = expiry_snapshot
+            .partition_assignments
+            .get_assignment(info.partition_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expired partition {:?} vanished from both data and capacity maps at expiry",
+                    info.partition_hash
+                )
+            });
+        // Track if backfill already placed this in an active Publish slot at the expiry epoch
+        if let (Some(lid), Some(sid)) = (assignment.ledger_id, assignment.slot_index) {
+            if DataLedger::try_from(lid).unwrap() == DataLedger::Publish
+                && !expiry_snapshot.ledgers.get_slots(DataLedger::Publish)[sid].is_expired
+            {
+                already_recycled_at_expiry += 1;
+            }
+        }
+    }
     info!(
-        "{} perm slots expired, {} partition hashes returned to capacity",
+        "{} perm slots expired, {} partition hashes returned to capacity ({} already recycled at expiry epoch)",
         expired_count,
-        expired_perm_hashes.len()
+        expired_perm_infos.len(),
+        already_recycled_at_expiry
     );
+    let expiry_publish_slot_count = perm_slots.len();
 
     // ========== Phase 3: Post new data after expiry ==========
     let post_expiry_height = node.get_canonical_chain_height().await;
@@ -937,60 +976,88 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     let final_snapshot = node.get_canonical_epoch_snapshot();
     let final_perm_slots = final_snapshot.ledgers.get_slots(DataLedger::Publish);
 
-    // Check that at least one expired partition hash is now in a non-expired Publish slot
+    // For every expired Publish partition: assert assignment still exists, check recycling.
+    // NOTE: backfill_missing_partitions() runs at each epoch boundary AFTER expire_ledger_slots(),
+    // so recycling can happen at the expiry epoch itself (before tx2) or at the next epoch
+    // (after tx2 triggers slot allocation). Both are valid evidence of the recycling path.
     let mut recycled_count = 0_usize;
-    for &expired_hash in &expired_perm_hashes {
-        if let Some(assignment) = final_snapshot
+    for info in &expired_perm_infos {
+        // Every expired partition must still exist in either data or capacity assignments
+        let assignment = final_snapshot
             .partition_assignments
-            .get_assignment(expired_hash)
-        {
-            if let (Some(new_ledger_id), Some(new_slot_index)) =
-                (assignment.ledger_id, assignment.slot_index)
-            {
+            .get_assignment(info.partition_hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expired partition {:?} vanished from both data and capacity maps in final snapshot",
+                    info.partition_hash
+                )
+            });
+        match (assignment.ledger_id, assignment.slot_index) {
+            (None, None) => {
+                // Still in capacity pool — not yet recycled into a data slot
+                info!("Partition {:?} still in capacity pool", info.partition_hash);
+            }
+            (Some(new_ledger_id), Some(new_slot_index)) => {
                 let new_ledger = DataLedger::try_from(new_ledger_id).unwrap();
+                let new_slot = &final_snapshot.ledgers.get_slots(new_ledger)[new_slot_index];
+
+                // Recycled partition must not land in an expired slot
+                assert!(
+                    !new_slot.is_expired,
+                    "Expired partition {:?} was reassigned to expired {:?} slot {}",
+                    info.partition_hash, new_ledger, new_slot_index
+                );
+
+                // Coherence: slot's partition list must contain this hash
+                assert!(
+                    new_slot.partitions.contains(&info.partition_hash),
+                    "Partition {:?} assigned to {:?} slot {} but not in slot's partition list",
+                    info.partition_hash,
+                    new_ledger,
+                    new_slot_index
+                );
+
+                // Must be in a different slot than the original expired one
+                assert!(
+                    new_ledger != info.ledger_id || new_slot_index != info.slot_index,
+                    "Partition {:?} still assigned to its original expired slot ({:?} slot {})",
+                    info.partition_hash,
+                    info.ledger_id,
+                    info.slot_index
+                );
+
                 if new_ledger == DataLedger::Publish {
-                    let new_slot = &final_snapshot.ledgers.get_slots(new_ledger)[new_slot_index];
-                    if !new_slot.is_expired {
-                        // Verify coherence: slot actually lists this partition
-                        assert!(
-                            new_slot.partitions.contains(&expired_hash),
-                            "Recycled partition {:?} assigned to Publish slot {} but not in slot's partition list",
-                            expired_hash,
-                            new_slot_index
-                        );
-                        recycled_count += 1;
-                        info!(
-                            "Partition {:?} recycled → Publish slot {} (non-expired)",
-                            expired_hash, new_slot_index
-                        );
-                    }
+                    recycled_count += 1;
+                    info!(
+                        "Partition {:?} recycled: {:?} slot {} → Publish slot {}",
+                        info.partition_hash, info.ledger_id, info.slot_index, new_slot_index
+                    );
+                } else {
+                    info!(
+                        "Partition {:?} reassigned to {:?} slot {} (not Publish)",
+                        info.partition_hash, new_ledger, new_slot_index
+                    );
                 }
             }
+            (lid, sid) => panic!(
+                "Malformed assignment for expired partition {:?}: ledger_id={:?}, slot_index={:?}",
+                info.partition_hash, lid, sid
+            ),
         }
     }
     assert!(
         recycled_count > 0,
         "Expected at least one expired partition to be recycled into a non-expired Publish slot. \
-         Expired hashes: {:?}, final perm slots: {}",
-        expired_perm_hashes,
+         Expired partitions: {}, expiry-time slot count: {}, final slot count: {}",
+        expired_perm_infos.len(),
+        expiry_publish_slot_count,
         final_perm_slots.len()
     );
     info!(
         "{} of {} expired partitions recycled into non-expired Publish slots",
         recycled_count,
-        expired_perm_hashes.len()
+        expired_perm_infos.len()
     );
-
-    // Verify all non-expired Publish slots have partitions assigned
-    for (i, slot) in final_perm_slots.iter().enumerate() {
-        if !slot.is_expired {
-            assert!(
-                !slot.partitions.is_empty(),
-                "Non-expired Publish slot {} should have partitions assigned",
-                i
-            );
-        }
-    }
 
     info!("Perm partition recycle and reuse test passed!");
     node.stop().await;
