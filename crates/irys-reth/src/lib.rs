@@ -142,9 +142,12 @@ impl IrysEthereumNode {
                 PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
             >,
     {
-        // Create pool builder with PD chunk sender
-        let pool_builder =
-            IrysPoolBuilder::new(self.hardfork_config.clone(), self.pd_chunk_sender.clone());
+        // Create pool builder with PD chunk sender and ready PD txs set
+        let pool_builder = IrysPoolBuilder::new(
+            self.hardfork_config.clone(),
+            self.pd_chunk_sender.clone(),
+            self.ready_pd_txs.clone(),
+        );
 
         ComponentsBuilder::default()
             .node_types::<Node>()
