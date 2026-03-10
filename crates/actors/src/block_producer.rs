@@ -1,7 +1,8 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
-    mempool_service::{MempoolServiceMessage, MempoolTxs},
+    mempool_service::MempoolTxs,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     pd_pricing::base_fee,
@@ -18,7 +19,6 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{OptionExt as _, eyre};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
@@ -28,6 +28,7 @@ use irys_reth::{
     IrysBuiltPayload, IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
     IrysPayloadTypes, compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
 };
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::SystemLedger;
@@ -183,6 +184,10 @@ pub struct BlockProducerInner {
     pub block_index: BlockIndex,
     /// Read guard for mempool state
     pub mempool_guard: MempoolReadGuard,
+    /// Reth node adapter for RPC queries (balance checks during tx selection)
+    pub reth_node_adapter: IrysRethNodeAdapter,
+    /// Shared state handle for chunk ingress (used by tx selection)
+    pub chunk_ingress_state: ChunkIngressState,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
@@ -440,23 +445,13 @@ pub trait BlockProdStrategy {
 
     /// Fetches a block header from mempool or database
     async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
-        // Try mempool first
-        let (tx, rx) = oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send_traced(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
-
-        match rx.await? {
-            Some(header) => Ok(header),
-            None => {
-                // Fall back to database
-                self.inner()
-                    .db
-                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
-            }
-        }
+        crate::block_tree_service::get_block_header(
+            &self.inner().block_tree_guard,
+            &self.inner().db,
+            block_hash,
+            false,
+        )?
+        .ok_or_else(|| eyre!("No block header found for hash {}", block_hash))
     }
 
     /// Gets the EMA snapshot for a given block
@@ -1417,7 +1412,9 @@ pub trait BlockProdStrategy {
         block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
-        let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        let mut mempool_txs = self
+            .fetch_best_mempool_txs(prev_block_header, block_timestamp)
+            .await?;
         // Sort txs to be of deterministic order
         mempool_txs
             .submit_tx
@@ -1509,17 +1506,22 @@ pub trait BlockProdStrategy {
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxs> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send_traced(MempoolServiceMessage::GetBestMempoolTxs(
-                prev_block_header.block_hash,
-                tx,
-            ))
-            .expect("to send MempoolServiceMessage");
-        rx.await.expect("to receive txns")
+        let ctx = crate::tx_selector::TxSelectionContext {
+            block_tree: &self.inner().block_tree_guard,
+            db: &self.inner().db,
+            reth_adapter: &self.inner().reth_node_adapter,
+            config: &self.inner().config,
+            mempool_state: self.inner().mempool_guard.atomic_state(),
+            chunk_ingress_state: &self.inner().chunk_ingress_state,
+        };
+        crate::tx_selector::select_best_txs(
+            prev_block_header.block_hash,
+            block_timestamp.to_secs(),
+            &ctx,
+        )
+        .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

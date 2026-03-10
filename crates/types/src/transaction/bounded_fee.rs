@@ -3,8 +3,9 @@
 //! Wraps [`U256`] to ensure `term_fee + perm_fee` saturates at MAX instead
 //! of wrapping to zero, which would bypass balance checks.
 
-use crate::U256;
+use crate::{H256, U256};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
@@ -52,6 +53,13 @@ impl BoundedFee {
     #[inline]
     pub const fn max_value() -> Self {
         Self(U256::MAX)
+    }
+
+    /// Compare two (fee, tx_id) pairs by fee ascending, breaking ties by tx id.
+    /// Use `.reverse()` on the result for descending fee order.
+    #[inline]
+    pub fn cmp_fee_then_id(a: (&Self, &H256), b: (&Self, &H256)) -> Ordering {
+        a.0.cmp(b.0).then_with(|| a.1.cmp(b.1))
     }
 }
 
@@ -249,6 +257,58 @@ mod tests {
         assert!(smaller < fee);
         assert!(smaller <= fee);
         assert!(amount <= fee);
+    }
+
+    #[test]
+    fn cmp_fee_then_id_orders_by_fee_ascending() {
+        let low = BoundedFee::from_u64(10);
+        let high = BoundedFee::from_u64(20);
+        let id = H256::zero();
+
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&low, &id), (&high, &id)),
+            Ordering::Less
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&high, &id), (&low, &id)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&low, &id), (&low, &id)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn cmp_fee_then_id_breaks_ties_by_tx_id() {
+        let fee = BoundedFee::from_u64(100);
+        let id_low = H256::from_low_u64_be(1);
+        let id_high = H256::from_low_u64_be(2);
+
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&fee, &id_low), (&fee, &id_high)),
+            Ordering::Less
+        );
+        assert_eq!(
+            BoundedFee::cmp_fee_then_id((&fee, &id_high), (&fee, &id_low)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn cmp_fee_then_id_reverse_yields_opposite() {
+        let low = BoundedFee::from_u64(5);
+        let high = BoundedFee::from_u64(50);
+        let id_a = H256::from_low_u64_be(1);
+        let id_b = H256::from_low_u64_be(2);
+
+        // Different fees
+        let fwd = BoundedFee::cmp_fee_then_id((&low, &id_a), (&high, &id_b));
+        assert_eq!(fwd.reverse(), Ordering::Greater);
+
+        // Same fee, different ids
+        let fwd = BoundedFee::cmp_fee_then_id((&low, &id_a), (&low, &id_b));
+        assert_eq!(fwd.reverse(), Ordering::Greater);
     }
 
     #[test]

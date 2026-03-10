@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 #[tokio::test]
-async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
+async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
 
@@ -59,7 +59,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
+async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     let mut fixtures = vec![
         GossipServiceTestFixture::new(),
         GossipServiceTestFixture::new(),
@@ -126,7 +126,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 }
 
 #[tokio::test]
-async fn heavy3_should_not_resend_recently_seen_data() -> eyre::Result<()> {
+async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -170,7 +170,7 @@ async fn heavy3_should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -212,7 +212,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
+async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let fixture2 = GossipServiceTestFixture::new();
 
@@ -238,7 +238,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
+async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -267,7 +267,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     // Set up the mock API client to return the transactions
     fixture1.add_tx_to_mempool(tx1.clone()).await;
     fixture1.add_tx_to_mempool(tx2.clone()).await;
-    fixture1.add_block_header_to_mempool(block_header.clone());
+    fixture1.persist_block_header_to_db(&block_header);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
@@ -300,7 +300,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
 }
 
 #[tokio::test]
-async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<()> {
+async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -355,7 +355,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
 }
 
 #[tokio::test]
-async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
+async fn should_gossip_execution_payloads() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -395,7 +395,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
         .await;
-    fixture1.add_block_header_to_mempool(block.clone());
+    fixture1.persist_block_header_to_db(&block);
 
     let execution_payload_provider2 = fixture2.execution_payload_provider.clone();
     let mut sync_rx = fixture2._sync_rx.take().expect("expect to have a sync rx");

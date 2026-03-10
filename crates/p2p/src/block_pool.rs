@@ -7,8 +7,6 @@ use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
-use irys_database::block_header_by_hash;
-use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 
 #[cfg(test)]
@@ -134,6 +132,7 @@ where
     config: Config,
     service_senders: ServiceSenders,
     pub mempool_guard: MempoolReadGuard,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 #[derive(Clone, Debug)]
@@ -408,6 +407,7 @@ where
         config: Config,
         service_senders: ServiceSenders,
         mempool_guard: MempoolReadGuard,
+        runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             db,
@@ -421,6 +421,7 @@ where
             config,
             service_senders,
             mempool_guard,
+            runtime_handle,
         }
     }
 
@@ -859,7 +860,7 @@ where
         {
             let mempool = self.mempool.clone();
             let block_transactions = Arc::clone(block_transactions);
-            tokio::spawn(async move {
+            self.runtime_handle.spawn(async move {
                 for commitment_tx in
                     block_transactions.get_ledger_system_txs(SystemLedger::Commitment)
                 {
@@ -1042,7 +1043,7 @@ where
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
         let chain_sync_sender = self.sync_service_sender.clone();
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             match Self::pull_and_seal_execution_payload(
                 &execution_payload_provider,
                 &chain_sync_sender,
@@ -1121,33 +1122,17 @@ where
             return Ok(Some(Arc::clone(sealed.header())));
         }
 
-        if let Some(sealed) = self
-            .block_status_provider
-            .block_tree_read_guard()
-            .read()
-            .get_sealed_block(block_hash)
-        {
-            return Ok(Some(Arc::clone(sealed.header())));
-        }
-
-        match self.mempool.get_block_header(*block_hash, true).await {
-            Ok(Some(header)) => return Ok(Some(Arc::new(header))),
-            Ok(None) => {}
-            Err(err) => {
-                return Err(CriticalBlockPoolError::MempoolError(format!(
-                    "Mempool error: {:?}",
-                    err
-                ))
-                .into());
-            }
-        }
-
-        self.db
-            .view_eyre(|tx| block_header_by_hash(tx, block_hash, true))
-            .map_err(|db_error| {
-                CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into()
-            })
-            .map(|block| block.map(Arc::new))
+        irys_actors::block_tree_service::get_block_header(
+            self.block_status_provider.block_tree_read_guard(),
+            &self.db,
+            *block_hash,
+            true,
+        )
+        .map_err(|db_error| {
+            CriticalBlockPoolError::DatabaseError(format!("block_hash={block_hash}: {db_error:?}"))
+                .into()
+        })
+        .map(|block| block.map(Arc::new))
     }
 
     pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {

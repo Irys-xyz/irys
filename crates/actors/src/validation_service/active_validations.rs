@@ -141,14 +141,18 @@ pub(super) struct VdfScheduler {
 
     /// VDF task completion notifier
     vdf_notify: Arc<Notify>,
+
+    /// Tokio runtime handle for spawning tasks
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl VdfScheduler {
-    pub(super) fn new(vdf_notify: Arc<Notify>) -> Self {
+    pub(super) fn new(vdf_notify: Arc<Notify>, runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
             vdf_notify,
+            runtime_handle,
         }
     }
 
@@ -214,7 +218,7 @@ impl VdfScheduler {
             cancel_u8: Arc::clone(&cancel_u8),
             vdf_notify: Arc::clone(&self.vdf_notify),
         };
-        let handle = tokio::spawn(
+        let handle = self.runtime_handle.spawn(
             preemptible
                 .execute()
                 .instrument(tracing::info_span!(
@@ -281,9 +285,13 @@ pub(super) struct ValidationCoordinator {
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>) -> Self {
+    pub(super) fn new(
+        block_tree_guard: BlockTreeReadGuard,
+        vdf_notify: Arc<Notify>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
         Self {
-            vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify)),
+            vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify), runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
             block_tree_guard,
@@ -662,12 +670,16 @@ mod tests {
     /// Expected: Extension blocks (4-5) become Fork, fork blocks (3-5) become Canonical,
     ///          remaining fork blocks (6-10) become CanonicalExtension.
     /// Verifies: calculate_priority() correctly determines block priorities after reorg.
-    #[test]
-    fn test_priority_calculation_after_fork_becomes_canonical() {
+    #[tokio::test]
+    async fn test_priority_calculation_after_fork_becomes_canonical() {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let vdf_notify = Arc::new(Notify::new());
-        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), vdf_notify);
+        let coordinator = ValidationCoordinator::new(
+            block_tree_guard.clone(),
+            vdf_notify,
+            tokio::runtime::Handle::current(),
+        );
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
