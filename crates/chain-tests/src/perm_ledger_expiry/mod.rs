@@ -766,6 +766,237 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Tests the full Publish ledger recycling cycle: data posted → promoted → partition expires →
+/// partition returns to capacity pool → partition reassigned to new slot → new data posted and
+/// promoted into the recycled partition.
+///
+/// This is the only test that proves the **complete** recycling path. Other expiry tests stop at
+/// verifying coherent assignment state; this one goes further by posting new data after expiry and
+/// confirming the recycled partition is actually reused for live storage.
+///
+/// Verifies:
+/// - tx1 is promoted to Publish before expiry
+/// - Slot 0 expires and its partitions are returned to capacity
+/// - tx2 (posted after expiry) is promoted to Publish
+/// - At least one previously-expired partition hash is reassigned to a new non-expired Publish slot
+/// - The recycled partition's assignment is coherent (ledger_id, slot_index, slot membership)
+#[test_log::test(tokio::test)]
+async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
+    const CHUNK_SIZE: u64 = 32;
+    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const BLOCKS_PER_EPOCH: u64 = 3;
+    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
+    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().block_migration_depth = 1;
+    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
+    config.consensus.get_mut().num_chunks_in_partition = 4;
+    config.consensus.get_mut().num_chunks_in_recall_range = 1;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
+    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
+    // Set Submit epoch length very high so Submit expiry doesn't interfere
+    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 100;
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(INITIAL_BALANCE).into(),
+            ..Default::default()
+        },
+    )]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("perm_recycle_test", 30)
+        .await;
+
+    // ========== Phase 1: Post initial data and promote to Publish ==========
+    let anchor = node.get_block_by_height(0).await?.block_hash;
+
+    let tx1 = node
+        .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx1.header.id, 10).await?;
+    node.upload_chunks(&tx1).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx1.header.id], 20)
+        .await?;
+
+    // Mine 2 blocks: 1 to include tx, 1 for migration (block_migration_depth=1) → promotion
+    node.mine_block().await?;
+    node.mine_block().await?;
+
+    assert!(
+        node.get_is_promoted(&tx1.header.id).await?,
+        "tx1 should be promoted to Publish before expiry"
+    );
+    info!("tx1 promoted to Publish");
+
+    // Mine to first epoch boundary → triggers slot allocation (need 2+ Publish slots)
+    let (_, epoch_height) = node.mine_until_next_epoch().await?;
+    info!("Reached first epoch boundary at height {}", epoch_height);
+
+    // Record pre-expiry state
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        perm_slots.len() >= 2,
+        "Expected 2+ perm slots after epoch boundary, got {}",
+        perm_slots.len()
+    );
+    let slot0_last_height = perm_slots[0].last_height;
+    info!(
+        "Pre-expiry: {} perm slots, slot0 last_height={}",
+        perm_slots.len(),
+        slot0_last_height
+    );
+
+    // ========== Phase 2: Expire Publish slots ==========
+    let min_blocks = PUBLISH_LEDGER_EPOCH_LENGTH * BLOCKS_PER_EPOCH;
+    let earliest_expiry = min_blocks + slot0_last_height;
+    let target_height = earliest_expiry.div_ceil(BLOCKS_PER_EPOCH) * BLOCKS_PER_EPOCH;
+    info!(
+        "Expiry target height={} (earliest_expiry={})",
+        target_height, earliest_expiry
+    );
+
+    let current_height = node.get_canonical_chain_height().await;
+    for _ in current_height..target_height {
+        node.mine_block().await?;
+    }
+
+    // Verify expiry occurred
+    let expiry_snapshot = node.get_canonical_epoch_snapshot();
+    let perm_slots = expiry_snapshot.ledgers.get_slots(DataLedger::Publish);
+    let num_slots = perm_slots.len();
+    let expired_count = perm_slots
+        .iter()
+        .enumerate()
+        .filter(|(i, slot)| *i < num_slots - 1 && slot.is_expired)
+        .count();
+    assert!(
+        expired_count > 0,
+        "Expected at least one non-last perm slot to be expired at height {}",
+        target_height
+    );
+
+    // Record which partition hashes were expired
+    let expired_infos = expiry_snapshot
+        .expired_partition_infos
+        .as_ref()
+        .expect("expired_partition_infos should be set after expiry");
+    let expired_perm_hashes: Vec<_> = expired_infos
+        .iter()
+        .filter(|info| info.ledger_id == DataLedger::Publish)
+        .map(|info| info.partition_hash)
+        .collect();
+    assert!(
+        !expired_perm_hashes.is_empty(),
+        "Expected at least one expired Publish partition hash"
+    );
+    info!(
+        "{} perm slots expired, {} partition hashes returned to capacity",
+        expired_count,
+        expired_perm_hashes.len()
+    );
+
+    // ========== Phase 3: Post new data after expiry ==========
+    let post_expiry_height = node.get_canonical_chain_height().await;
+    let anchor2 = node
+        .get_block_by_height(post_expiry_height)
+        .await?
+        .block_hash;
+
+    let tx2 = node
+        .post_data_tx(anchor2, vec![2_u8; DATA_SIZE], &signer)
+        .await;
+    node.wait_for_mempool(tx2.header.id, 10).await?;
+    node.upload_chunks(&tx2).await?;
+    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
+        .await?;
+
+    // Mine 2 blocks: 1 to include tx2, 1 for migration → promotion
+    node.mine_block().await?;
+    node.mine_block().await?;
+
+    // Mine to next epoch boundary → triggers slot allocation for new data + backfill with
+    // recycled partitions
+    let (_, epoch_height2) = node.mine_until_next_epoch().await?;
+    info!("Reached second epoch boundary at height {}", epoch_height2);
+
+    // ========== Phase 4: Verify recycling worked ==========
+    // Verify tx2 is promoted
+    assert!(
+        node.get_is_promoted(&tx2.header.id).await?,
+        "tx2 should be promoted to Publish after expiry"
+    );
+    info!("tx2 promoted to Publish after recycling");
+
+    // Get final snapshot and check recycled partitions
+    let final_snapshot = node.get_canonical_epoch_snapshot();
+    let final_perm_slots = final_snapshot.ledgers.get_slots(DataLedger::Publish);
+
+    // Check that at least one expired partition hash is now in a non-expired Publish slot
+    let mut recycled_count = 0_usize;
+    for &expired_hash in &expired_perm_hashes {
+        if let Some(assignment) = final_snapshot
+            .partition_assignments
+            .get_assignment(expired_hash)
+        {
+            if let (Some(new_ledger_id), Some(new_slot_index)) =
+                (assignment.ledger_id, assignment.slot_index)
+            {
+                let new_ledger = DataLedger::try_from(new_ledger_id).unwrap();
+                if new_ledger == DataLedger::Publish {
+                    let new_slot = &final_snapshot.ledgers.get_slots(new_ledger)[new_slot_index];
+                    if !new_slot.is_expired {
+                        // Verify coherence: slot actually lists this partition
+                        assert!(
+                            new_slot.partitions.contains(&expired_hash),
+                            "Recycled partition {:?} assigned to Publish slot {} but not in slot's partition list",
+                            expired_hash,
+                            new_slot_index
+                        );
+                        recycled_count += 1;
+                        info!(
+                            "Partition {:?} recycled → Publish slot {} (non-expired)",
+                            expired_hash, new_slot_index
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        recycled_count > 0,
+        "Expected at least one expired partition to be recycled into a non-expired Publish slot. \
+         Expired hashes: {:?}, final perm slots: {}",
+        expired_perm_hashes,
+        final_perm_slots.len()
+    );
+    info!(
+        "{} of {} expired partitions recycled into non-expired Publish slots",
+        recycled_count,
+        expired_perm_hashes.len()
+    );
+
+    // Verify all non-expired Publish slots have partitions assigned
+    for (i, slot) in final_perm_slots.iter().enumerate() {
+        if !slot.is_expired {
+            assert!(
+                !slot.partitions.is_empty(),
+                "Non-expired Publish slot {} should have partitions assigned",
+                i
+            );
+        }
+    }
+
+    info!("Perm partition recycle and reuse test passed!");
+    node.stop().await;
+    Ok(())
+}
+
 /// Tests that perm slots never expire when publish_ledger_epoch_length is None (mainnet config).
 /// Uses multi-slot setup to distinguish the None config gate from last-slot protection.
 /// Verifies:
