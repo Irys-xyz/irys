@@ -37,7 +37,10 @@ pub struct ChunkCache {
 
 impl ChunkCache {
     /// Create a new chunk cache with the given capacity.
-    pub fn new(capacity: NonZeroUsize, shared_index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
+    pub fn new(
+        capacity: NonZeroUsize,
+        shared_index: irys_types::chunk_provider::ChunkDataIndex,
+    ) -> Self {
         Self {
             chunks: LruCache::new(capacity),
             shared_index,
@@ -300,8 +303,8 @@ mod tests {
         // This eviction should also remove from shared_index
         cache.insert(make_key(3), make_data(3), B256::with_last_byte(1));
 
-        assert!(!shared_index.contains_key(&(0u32, 1u64)));
-        assert!(shared_index.contains_key(&(0u32, 2u64)));
-        assert!(shared_index.contains_key(&(0u32, 3u64)));
+        assert!(!shared_index.contains_key(&(0_u32, 1_u64)));
+        assert!(shared_index.contains_key(&(0_u32, 2_u64)));
+        assert!(shared_index.contains_key(&(0_u32, 3_u64)));
     }
 }

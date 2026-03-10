@@ -51,6 +51,7 @@ reth-consensus-common.workspace = true
 reth-errors.workspace = true
 
 
+dashmap.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 serde.workspace = true

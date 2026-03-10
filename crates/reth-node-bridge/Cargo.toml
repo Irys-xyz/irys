@@ -4,8 +4,10 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 
 [dependencies]
+dashmap.workspace = true
 irys-database.workspace = true
 irys-types.workspace = true
+revm-primitives.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 tokio.workspace = true

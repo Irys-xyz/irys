@@ -97,10 +97,10 @@ pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
     pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// PD chunk sender for unified chunk management.
-    /// - PD transactions in the payload builder will be skipped if their chunks are not ready
-    /// - The mempool will monitor for PD transactions and send messages to the PdChunkManager
+    /// PD chunk sender for provisioning messages.
     pub pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+    /// Shared set of ready PD tx hashes for lock-free readiness checks.
+    pub ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
@@ -109,6 +109,7 @@ impl std::fmt::Debug for IrysEthereumNode {
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
+            .field("ready_pd_txs", &"<dashset>")
             .finish()
     }
 }
@@ -157,6 +158,7 @@ impl IrysEthereumNode {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
                 pd_chunk_sender: self.pd_chunk_sender.clone(),
+                ready_pd_txs: self.ready_pd_txs.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -3361,6 +3363,7 @@ pub mod test_utils {
                                 .clone(),
                         ),
                         pd_chunk_sender,
+                        ready_pd_txs: Arc::new(dashmap::DashSet::new()),
                     }
                 })
                 .launch()

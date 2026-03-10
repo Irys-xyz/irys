@@ -22,8 +22,10 @@ use crate::{IrysBuiltPayload, IrysPayloadAttributes, IrysPayloadBuilderAttribute
 pub struct IrysPayloadBuilderBuilder {
     pub max_pd_chunks_per_block: u64,
     pub hardforks: Arc<IrysHardforkConfig>,
-    /// PD chunk sender for querying readiness.
+    /// PD chunk sender for provisioning messages.
     pub pd_chunk_sender: PdChunkSender,
+    /// Shared set of ready PD tx hashes for lock-free readiness checks.
+    pub ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
 
 impl std::fmt::Debug for IrysPayloadBuilderBuilder {
@@ -32,6 +34,7 @@ impl std::fmt::Debug for IrysPayloadBuilderBuilder {
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
             .field("pd_chunk_sender", &"<sender>")
+            .field("ready_pd_txs", &"<dashset>")
             .finish()
     }
 }
@@ -77,6 +80,7 @@ where
             self.max_pd_chunks_per_block,
             self.hardforks,
             self.pd_chunk_sender,
+            self.ready_pd_txs,
         ))
     }
 }

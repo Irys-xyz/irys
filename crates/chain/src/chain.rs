@@ -347,6 +347,7 @@ async fn start_reth_node(
     latest_block: u64,
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+    ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -357,6 +358,7 @@ async fn start_reth_node(
         random_ports,
         chunk_provider,
         pd_chunk_sender,
+        ready_pd_txs,
     )
     .in_current_span()
     .await?;
@@ -1140,6 +1142,11 @@ impl IrysNode {
         // The manager handles chunk provisioning for PD transactions
         let (pd_chunk_tx, pd_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // Shared indexes for lock-free PD chunk reads during EVM execution
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::new());
+        let ready_pd_txs = std::sync::Arc::new(dashmap::DashSet::new());
+
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
         // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
@@ -1151,6 +1158,7 @@ impl IrysNode {
             latest_block_height,
             Arc::new(mock_provider),
             pd_chunk_tx.clone(),
+            ready_pd_txs.clone(),
         )
         .in_current_span()
         .await
@@ -1184,6 +1192,8 @@ impl IrysNode {
                 shutdown_token.clone(),
                 pd_chunk_rx,
                 pd_chunk_tx,
+                chunk_data_index,
+                ready_pd_txs,
             )
             .in_current_span()
             .await
@@ -1376,6 +1386,8 @@ impl IrysNode {
         shutdown_token: CancellationToken,
         pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
         pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+        ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -1816,8 +1828,9 @@ impl IrysNode {
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
             pd_chunk_rx,
             chunk_provider.clone(),
-            service_senders.subscribe_block_state_updates(),
             runtime_handle.clone(),
+            chunk_data_index.clone(),
+            ready_pd_txs.clone(),
         );
         debug!("PD service initialized");
 

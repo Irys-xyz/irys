@@ -2,6 +2,7 @@ pub mod cache;
 pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
+use dashmap::DashSet;
 use irys_types::chunk_provider::{PdChunkMessage, PdChunkReceiver, RethChunkProvider};
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use provisioning::{ProvisioningState, ProvisioningTracker};
@@ -9,28 +10,25 @@ use reth::revm::primitives::{B256, bytes::Bytes};
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tracing::{Instrument as _, debug, info, trace, warn};
 
-use crate::block_tree_service::BlockStateUpdated;
 use irys_types::TokioServiceHandle;
 
 /// The PD (Programmable Data) Service manages chunk provisioning for PD transactions.
 ///
 /// It handles the full lifecycle:
 /// 1. New PD transaction → fetch required chunks from storage into LRU cache
-/// 2. Payload building → check readiness, lock chunks during execution
+/// 2. Payload building → check readiness via shared `ready_pd_txs` set
 /// 3. Transaction removal → release references, let LRU evict unused chunks
-/// 4. Block state updates → expire stale provisioning entries
 pub struct PdService {
     shutdown: Shutdown,
     msg_rx: PdChunkReceiver,
     cache: ChunkCache,
     tracker: ProvisioningTracker,
     storage_provider: Arc<dyn RethChunkProvider>,
-    block_state_rx: broadcast::Receiver<BlockStateUpdated>,
-    current_height: Option<u64>,
     block_tracker: HashMap<B256, Vec<ChunkKey>>,
+    /// Shared set of ready PD tx hashes. Written on provision/release.
+    ready_pd_txs: Arc<DashSet<B256>>,
 }
 
 impl PdService {
@@ -38,20 +36,20 @@ impl PdService {
     pub fn spawn_service(
         msg_rx: PdChunkReceiver,
         storage_provider: Arc<dyn RethChunkProvider>,
-        block_state_rx: broadcast::Receiver<BlockStateUpdated>,
         runtime_handle: tokio::runtime::Handle,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+        ready_pd_txs: Arc<DashSet<B256>>,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
         let service = Self {
             shutdown,
             msg_rx,
-            cache: ChunkCache::with_default_capacity(),
+            cache: ChunkCache::with_default_capacity(chunk_data_index),
             tracker: ProvisioningTracker::new(),
             storage_provider,
-            block_state_rx,
-            current_height: None,
             block_tracker: HashMap::new(),
+            ready_pd_txs,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -89,24 +87,6 @@ impl PdService {
                         }
                     }
                 }
-
-                result = self.block_state_rx.recv() => {
-                    match result {
-                        Ok(event) if !event.discarded => {
-                            self.handle_block_state_update(event.height);
-                        }
-                        Ok(_) => {
-                            // Discarded block — don't advance height or expire entries.
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(skipped = n, "PdService lagged on block state events");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            info!("PdService block state channel closed");
-                            break;
-                        }
-                    }
-                }
             }
         }
 
@@ -123,17 +103,6 @@ impl PdService {
             }
             PdChunkMessage::TransactionRemoved { tx_hash } => {
                 self.handle_release_chunks(&tx_hash);
-            }
-            PdChunkMessage::IsReady { tx_hash, response } => {
-                let ready = self.handle_is_ready(&tx_hash);
-                let _ = response.send(ready);
-            }
-            PdChunkMessage::Lock { tx_hash, response } => {
-                let locked = self.handle_lock(&tx_hash);
-                let _ = response.send(locked);
-            }
-            PdChunkMessage::Unlock { tx_hash } => {
-                self.handle_unlock(&tx_hash);
             }
             PdChunkMessage::GetChunk {
                 ledger,
@@ -225,9 +194,7 @@ impl PdService {
         );
 
         // Register the transaction
-        let tx_state = self
-            .tracker
-            .register(tx_hash, required_chunks.clone(), self.current_height);
+        let tx_state = self.tracker.register(tx_hash, required_chunks.clone());
 
         // Fetch missing chunks
         let mut fetched = 0;
@@ -289,6 +256,7 @@ impl PdService {
         tx_state.missing_chunks = missing;
         if tx_state.missing_chunks.is_empty() {
             tx_state.state = ProvisioningState::Ready;
+            self.ready_pd_txs.insert(tx_hash);
         } else {
             tx_state.state = ProvisioningState::PartiallyReady {
                 found: fetched,
@@ -307,13 +275,9 @@ impl PdService {
 
     /// Release chunks when a transaction is removed from the mempool.
     fn handle_release_chunks(&mut self, tx_hash: &B256) {
-        if let Some(tx_state) = self.tracker.remove(tx_hash) {
-            // If this transaction was locked, unlock its cache entries first
-            // to prevent lock_count from leaking and pinning chunks forever.
-            if tx_state.state == ProvisioningState::Locked {
-                self.cache.unlock_chunks(&tx_state.required_chunks);
-            }
+        self.ready_pd_txs.remove(tx_hash);
 
+        if let Some(tx_state) = self.tracker.remove(tx_hash) {
             let mut evicted = 0;
             for key in &tx_state.required_chunks {
                 let unreferenced = self.cache.remove_reference(key, tx_hash);
@@ -332,61 +296,10 @@ impl PdService {
         }
     }
 
-    /// Check if chunks for a transaction are ready.
-    fn handle_is_ready(&self, tx_hash: &B256) -> bool {
-        self.tracker.is_ready(tx_hash)
-    }
-
-    /// Lock chunks for EVM execution.
-    fn handle_lock(&mut self, tx_hash: &B256) -> bool {
-        if !self.tracker.lock(tx_hash) {
-            return false;
-        }
-
-        // If tracker had state, lock the chunks in cache
-        if let Some(state) = self.tracker.get(tx_hash) {
-            self.cache.lock_chunks(&state.required_chunks);
-        }
-        true
-    }
-
-    /// Unlock chunks after execution.
-    fn handle_unlock(&mut self, tx_hash: &B256) {
-        // Unlock chunks in cache before changing tracker state
-        if let Some(state) = self.tracker.get(tx_hash)
-            && state.state == ProvisioningState::Locked
-        {
-            self.cache.unlock_chunks(&state.required_chunks);
-        }
-        self.tracker.unlock(tx_hash);
-    }
-
     /// Get a chunk from the cache by ledger and offset.
     fn handle_get_chunk(&mut self, ledger: u32, offset: u64) -> Option<Arc<Bytes>> {
         let key = ChunkKey { ledger, offset };
         self.cache.get(&key)
-    }
-
-    /// Handle block state update — expire stale provisioning entries and track height.
-    fn handle_block_state_update(&mut self, height: u64) {
-        self.current_height = Some(height);
-
-        let expired = self.tracker.expire_at_height(height);
-        if !expired.is_empty() {
-            debug!(
-                expired_count = expired.len(),
-                height, "Expiring stale PD provisioning entries"
-            );
-
-            for (tx_hash, required_chunks) in &expired {
-                for key in required_chunks {
-                    let unreferenced = self.cache.remove_reference(key, tx_hash);
-                    if unreferenced {
-                        self.cache.remove(key);
-                    }
-                }
-            }
-        }
     }
 
     /// Provision chunks needed for validating a peer block.
@@ -492,6 +405,7 @@ impl PdService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dashmap::DashMap;
     use irys_types::chunk_provider::MockChunkProvider;
     use irys_types::range_specifier::ChunkRangeSpecifier;
     use tokio::sync::{mpsc, oneshot};
@@ -499,18 +413,18 @@ mod tests {
     /// Create a PdService for testing with a mock provider.
     fn test_service() -> PdService {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let (_, block_state_rx) = tokio::sync::broadcast::channel(16);
         let provider = Arc::new(MockChunkProvider::new());
         let (_, shutdown) = reth::tasks::shutdown::signal();
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let ready_pd_txs = Arc::new(DashSet::new());
         PdService {
             shutdown,
             msg_rx: rx,
-            cache: ChunkCache::with_default_capacity(),
+            cache: ChunkCache::with_default_capacity(chunk_data_index),
             tracker: ProvisioningTracker::new(),
             storage_provider: provider,
-            block_state_rx,
-            current_height: None,
             block_tracker: HashMap::new(),
+            ready_pd_txs,
         }
     }
 
@@ -642,5 +556,27 @@ mod tests {
             ledger: 0,
             offset: 1
         }));
+    }
+
+    #[test]
+    fn test_provisioning_populates_ready_set_and_chunk_index() {
+        let mut service = test_service();
+        let ready_set = service.ready_pd_txs.clone();
+        let tx_hash = B256::with_last_byte(0x01);
+
+        let specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 3,
+        }];
+
+        service.handle_provision_chunks(tx_hash, specs);
+
+        // Check tx is marked ready
+        assert!(ready_set.contains(&tx_hash));
+
+        // Release — should remove from ready set
+        service.handle_release_chunks(&tx_hash);
+        assert!(!ready_set.contains(&tx_hash));
     }
 }
