@@ -106,6 +106,7 @@ pub async fn run_node(
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -236,6 +237,7 @@ pub async fn run_node(
             hardfork_config: std::sync::Arc::new(hardfork_config.clone()),
             pd_chunk_sender,
             ready_pd_txs,
+            chunk_data_index,
         })
         .launch_with_debug_capabilities()
         .into_future()

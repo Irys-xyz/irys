@@ -348,6 +348,7 @@ async fn start_reth_node(
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -359,6 +360,7 @@ async fn start_reth_node(
         chunk_provider,
         pd_chunk_sender,
         ready_pd_txs,
+        chunk_data_index,
     )
     .in_current_span()
     .await?;
@@ -1159,6 +1161,7 @@ impl IrysNode {
             Arc::new(mock_provider),
             pd_chunk_tx.clone(),
             ready_pd_txs.clone(),
+            chunk_data_index.clone(),
         )
         .in_current_span()
         .await

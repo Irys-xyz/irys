@@ -101,6 +101,8 @@ pub struct IrysEthereumNode {
     pub pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     pub ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Shared chunk data index for lock-free chunk reads during EVM execution.
+    pub chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
@@ -110,6 +112,7 @@ impl std::fmt::Debug for IrysEthereumNode {
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
             .field("ready_pd_txs", &"<dashset>")
+            .field("chunk_data_index", &"<index>")
             .finish()
     }
 }
@@ -152,13 +155,14 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
-                pd_chunk_sender: self.pd_chunk_sender.clone(),
+                chunk_data_index: self.chunk_data_index.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
                 pd_chunk_sender: self.pd_chunk_sender.clone(),
                 ready_pd_txs: self.ready_pd_txs.clone(),
+                chunk_data_index: self.chunk_data_index.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -235,7 +239,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
@@ -243,7 +247,7 @@ impl std::fmt::Debug for IrysExecutorBuilder {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
-            .field("pd_chunk_sender", &"<sender>")
+            .field("chunk_data_index", &"<index>")
             .finish()
     }
 }
@@ -259,8 +263,10 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config)
-            .with_pd_chunk_sender(self.pd_chunk_sender);
+        // Note: IrysExecutorBuilder does not set chunk_data_index on the factory —
+        // the executor uses Storage mode (direct chunk provider). Only the payload
+        // builder sets chunk_data_index via IrysPayloadBuilderBuilder.
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -3364,6 +3370,7 @@ pub mod test_utils {
                         ),
                         pd_chunk_sender,
                         ready_pd_txs: Arc::new(dashmap::DashSet::new()),
+                        chunk_data_index: Arc::new(dashmap::DashMap::new()),
                     }
                 })
                 .launch()

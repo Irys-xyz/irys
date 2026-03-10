@@ -104,14 +104,6 @@ impl PdService {
             PdChunkMessage::TransactionRemoved { tx_hash } => {
                 self.handle_release_chunks(&tx_hash);
             }
-            PdChunkMessage::GetChunk {
-                ledger,
-                offset,
-                response,
-            } => {
-                let chunk = self.handle_get_chunk(ledger, offset);
-                let _ = response.send(chunk);
-            }
             PdChunkMessage::ProvisionBlockChunks {
                 block_hash,
                 chunk_specs,
@@ -294,12 +286,6 @@ impl PdService {
                 "PD transaction removed, references decremented"
             );
         }
-    }
-
-    /// Get a chunk from the cache by ledger and offset.
-    fn handle_get_chunk(&mut self, ledger: u32, offset: u64) -> Option<Arc<Bytes>> {
-        let key = ChunkKey { ledger, offset };
-        self.cache.get(&key)
     }
 
     /// Provision chunks needed for validating a peer block.

@@ -228,18 +228,21 @@ impl IrysBlockExecutorFactory {
         self.inner.evm_factory()
     }
 
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
+    /// Configure for payload building mode — PD chunks read from shared lock-free index.
     ///
-    /// Reconstructs this factory with the `pd_chunk_sender` set on the inner
+    /// Reconstructs this factory with the `chunk_data_index` set on the inner
     /// [`IrysEvmFactory`], leaving the receipt builder and spec unchanged.
-    pub fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
+    pub fn with_chunk_data_index(
+        self,
+        index: irys_types::chunk_provider::ChunkDataIndex,
+    ) -> Self {
         let receipt_builder = *self.inner.receipt_builder();
         let spec = Arc::clone(self.inner.spec());
         let evm_factory = self
             .inner
             .evm_factory()
             .clone()
-            .with_pd_chunk_sender(sender);
+            .with_chunk_data_index(index);
         Self::new(receipt_builder, spec, evm_factory)
     }
 }
@@ -348,32 +351,32 @@ impl ConfigureEvm for IrysEvmConfig {
 }
 
 impl IrysEvmConfig {
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
+    /// Configure for payload building mode — PD chunks read from shared lock-free index.
     ///
-    /// Sets a [`PdChunkSender`] on the inner [`IrysEvmFactory`] so that all EVMs
+    /// Sets a [`ChunkDataIndex`] on the inner [`IrysEvmFactory`] so that all EVMs
     /// created by the payload builder use `PdContext::new_with_manager()` instead
     /// of the storage-backed path used during block validation.
-    pub fn with_pd_chunk_sender(
+    pub fn with_chunk_data_index(
         mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
+        index: irys_types::chunk_provider::ChunkDataIndex,
     ) -> Self {
-        self.executor_factory = self.executor_factory.with_pd_chunk_sender(sender);
+        self.executor_factory = self.executor_factory.with_chunk_data_index(index);
         self
     }
 }
 
 /// Marker trait for EVM configurations that can be switched to manager-mode PD chunk fetching.
 ///
-/// Implement this for your EVM config type to allow the payload builder builder to wire
-/// the [`PdChunkSender`] after receiving the (cloned) EVM config from reth's component system.
-pub trait ConfigurePdChunkSender: Sized {
-    /// Configure `self` to use the given sender for PD chunk fetching.
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self;
+/// Implement this for your EVM config type to allow the payload builder to wire
+/// the [`ChunkDataIndex`] after receiving the (cloned) EVM config from reth's component system.
+pub trait ConfigureChunkDataIndex: Sized {
+    /// Configure `self` to use the given index for PD chunk fetching.
+    fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self;
 }
 
-impl ConfigurePdChunkSender for IrysEvmConfig {
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        Self::with_pd_chunk_sender(self, sender)
+impl ConfigureChunkDataIndex for IrysEvmConfig {
+    fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
+        Self::with_chunk_data_index(self, index)
     }
 }
 
@@ -382,9 +385,9 @@ impl ConfigurePdChunkSender for IrysEvmConfig {
 pub struct IrysEvmFactory {
     context: PdContext,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// When set, creates `PdContext` in Manager mode for payload building.
+    /// When set, creates Manager-mode `PdContext` for payload building.
     /// When `None`, uses the Storage-backed `PdContext` (block validation).
-    pd_chunk_sender: Option<irys_types::chunk_provider::PdChunkSender>,
+    chunk_data_index: Option<irys_types::chunk_provider::ChunkDataIndex>,
 }
 
 impl IrysEvmFactory {
@@ -396,16 +399,16 @@ impl IrysEvmFactory {
         Self {
             context,
             hardfork_config,
-            pd_chunk_sender: None,
+            chunk_data_index: None,
         }
     }
 
-    /// Configure for payload building mode — chunks fetched from `PdChunkManager` cache.
-    pub fn with_pd_chunk_sender(
+    /// Configure for payload building mode — chunks read from shared `ChunkDataIndex`.
+    pub fn with_chunk_data_index(
         mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
+        index: irys_types::chunk_provider::ChunkDataIndex,
     ) -> Self {
-        self.pd_chunk_sender = Some(sender);
+        self.chunk_data_index = Some(index);
         self
     }
 
@@ -454,9 +457,9 @@ impl EvmFactory for IrysEvmFactory {
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
         // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
+        let pd_context = match &self.chunk_data_index {
+            Some(index) => {
+                PdContext::new_with_manager(self.context.chunk_config(), index.clone())
             }
             None => self.context.clone_for_new_evm(),
         };
@@ -504,9 +507,9 @@ impl EvmFactory for IrysEvmFactory {
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
         // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
+        let pd_context = match &self.chunk_data_index {
+            Some(index) => {
+                PdContext::new_with_manager(self.context.chunk_config(), index.clone())
             }
             None => self.context.clone_for_new_evm(),
         };

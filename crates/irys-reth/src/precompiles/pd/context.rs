@@ -3,22 +3,26 @@
 use alloy_eips::eip2930::AccessListItem;
 use alloy_primitives::B256;
 use bytes::Bytes;
-use irys_types::chunk_provider::{ChunkConfig, PdChunkMessage, PdChunkSender, RethChunkProvider};
+use irys_types::chunk_provider::{ChunkConfig, RethChunkProvider};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-/// Chunk source for PD precompile - either from PdChunkManager cache or direct storage.
+/// Chunk source for PD precompile - either from shared index or direct storage.
 enum ChunkSource {
-    /// Fetch chunks via PdChunkManager (for payload building with cached chunks)
-    Manager(PdChunkSender),
-    /// Fetch chunks directly from storage (for block validation)
+    /// Fetch chunks via shared index (payload building with cached chunks).
+    Manager {
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+    },
+    /// Fetch chunks directly from storage (for block validation).
     Storage(Arc<dyn RethChunkProvider>),
 }
 
 impl Clone for ChunkSource {
     fn clone(&self) -> Self {
         match self {
-            Self::Manager(sender) => Self::Manager(sender.clone()),
+            Self::Manager { chunk_data_index } => Self::Manager {
+                chunk_data_index: chunk_data_index.clone(),
+            },
             Self::Storage(provider) => Self::Storage(Arc::clone(provider)),
         }
     }
@@ -51,13 +55,16 @@ impl Clone for PdContext {
 }
 
 impl PdContext {
-    /// Create a PdContext that uses PdChunkManager for chunk retrieval.
+    /// Create a PdContext that uses the shared ChunkDataIndex for chunk retrieval.
     /// Use this for payload building where chunks are pre-cached.
-    pub fn new_with_manager(chunk_sender: PdChunkSender, chunk_config: ChunkConfig) -> Self {
+    pub fn new_with_manager(
+        chunk_config: ChunkConfig,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+    ) -> Self {
         Self {
             tx_hash: Arc::new(RwLock::new(None)),
             access_list: Arc::new(RwLock::new(Vec::new())),
-            chunk_source: ChunkSource::Manager(chunk_sender),
+            chunk_source: ChunkSource::Manager { chunk_data_index },
             chunk_config,
         }
     }
@@ -111,35 +118,26 @@ impl PdContext {
         self.chunk_config
     }
 
-    /// Get chunk from the appropriate source (manager cache or direct storage).
+    /// Get chunk from the appropriate source (shared index or direct storage).
     ///
     /// When using manager mode (for payload building):
-    /// - Chunks are pre-cached by PdChunkManager in a global cache
-    /// - No tx_hash needed - chunks are identified by (ledger, offset)
+    /// - Chunks are pre-populated in the shared ChunkDataIndex DashMap by PdService
+    /// - Lock-free read directly from the index by (ledger, offset)
     ///
     /// When using storage mode (for block validation):
     /// - Fetches directly from storage provider
     pub fn get_chunk(&self, ledger: u32, offset: u64) -> eyre::Result<Option<Bytes>> {
         match &self.chunk_source {
-            ChunkSource::Manager(sender) => {
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                sender
-                    .send(PdChunkMessage::GetChunk {
-                        ledger,
-                        offset,
-                        response: resp_tx,
-                    })
-                    .map_err(|e| eyre::eyre!("Failed to send GetChunk message: {}", e))?;
-
-                // Blocking receive since EVM execution is sync.
-                // block_in_place is required when called from within a tokio runtime.
-                let chunk = tokio::task::block_in_place(|| resp_rx.blocking_recv())
-                    .map_err(|e| eyre::eyre!("Failed to receive chunk response: {}", e))?;
-
-                Ok(chunk.map(|arc| (*arc).clone()))
+            ChunkSource::Manager { chunk_data_index } => {
+                match chunk_data_index.get(&(ledger, offset)) {
+                    Some(data) => Ok(Some((**data).clone())),
+                    None => {
+                        tracing::warn!(ledger, offset, "Chunk not found in shared index");
+                        Ok(None)
+                    }
+                }
             }
             ChunkSource::Storage(provider) => {
-                // Fetch directly from storage
                 provider.get_unpacked_chunk_by_ledger_offset(ledger, offset)
             }
         }

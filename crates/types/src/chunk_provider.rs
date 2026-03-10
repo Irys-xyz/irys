@@ -45,12 +45,6 @@ pub enum PdChunkMessage {
     },
     /// Transaction removed from mempool (included in block or evicted).
     TransactionRemoved { tx_hash: B256 },
-    /// Get cached chunk during EVM execution (removed in Phase 2).
-    GetChunk {
-        ledger: u32,
-        offset: u64,
-        response: oneshot::Sender<Option<Arc<Bytes>>>,
-    },
     /// Provision chunks needed for validating a peer block.
     ProvisionBlockChunks {
         block_hash: B256,
