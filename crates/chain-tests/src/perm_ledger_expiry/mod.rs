@@ -2,8 +2,58 @@ use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, U256};
+use irys_types::{irys::IrysSigner, ConsensusConfig, DataLedger, NodeConfig, U256};
 use tracing::info;
+
+struct PermLedgerExpiryTestSetup {
+    node: IrysNodeTest<crate::utils::IrysNodeCtx>,
+    signer: IrysSigner,
+    #[allow(dead_code)]
+    config: NodeConfig,
+}
+
+impl PermLedgerExpiryTestSetup {
+    async fn new(
+        test_name: &str,
+        publish_ledger_epoch_length: Option<u64>,
+        blocks_per_epoch: u64,
+        overrides: impl FnOnce(&mut ConsensusConfig),
+    ) -> Self {
+        const CHUNK_SIZE: u64 = 32;
+        const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+
+        let mut config = NodeConfig::testing();
+        config.consensus.get_mut().block_migration_depth = 1;
+        config.consensus.get_mut().chunk_size = CHUNK_SIZE;
+        config.consensus.get_mut().num_chunks_in_partition = 4;
+        config.consensus.get_mut().num_chunks_in_recall_range = 1;
+        config.consensus.get_mut().epoch.num_blocks_in_epoch = blocks_per_epoch;
+        config.consensus.get_mut().epoch.publish_ledger_epoch_length =
+            publish_ledger_epoch_length;
+
+        // Apply test-specific overrides
+        overrides(config.consensus.get_mut());
+
+        let signer = IrysSigner::random_signer(&config.consensus_config());
+        config.consensus.extend_genesis_accounts(vec![(
+            signer.address(),
+            GenesisAccount {
+                balance: U256::from(INITIAL_BALANCE).into(),
+                ..Default::default()
+            },
+        )]);
+
+        let node = IrysNodeTest::new_genesis(config.clone())
+            .start_and_wait_for_packing(test_name, 30)
+            .await;
+
+        Self {
+            node,
+            signer,
+            config,
+        }
+    }
+}
 
 /// Tests that publish ledger slots expire when publish_ledger_epoch_length is configured.
 /// Verifies:
@@ -14,33 +64,19 @@ use tracing::info;
 /// - User balance is unchanged by perm expiry (no fees or refunds)
 #[test_log::test(tokio::test)]
 async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
     const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
-        },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_expiry_test", 30)
-        .await;
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_expiry_test",
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH),
+        BLOCKS_PER_EPOCH,
+        |_| {},
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
@@ -228,7 +264,7 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     );
 
     info!("Publish ledger expiry test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
 
@@ -240,35 +276,22 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
 /// - All expired partitions from both ledgers are reassigned to non-expired slots
 #[test_log::test(tokio::test)]
 async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
     const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
     const SUBMIT_LEDGER_EPOCH_LENGTH: u64 = 2;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-    config.consensus.get_mut().epoch.submit_ledger_epoch_length = SUBMIT_LEDGER_EPOCH_LENGTH;
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_term_expiry_test",
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH),
+        BLOCKS_PER_EPOCH,
+        |c| {
+            c.epoch.submit_ledger_epoch_length = SUBMIT_LEDGER_EPOCH_LENGTH;
         },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_term_expiry_test", 30)
-        .await;
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
@@ -491,7 +514,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     );
 
     info!("Simultaneous perm+term expiry test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
 
@@ -503,33 +526,19 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
 /// - At expiry_epoch: slot 0 IS expired
 #[test_log::test(tokio::test)]
 async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
     const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
-        },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_exact_boundary_test", 30)
-        .await;
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_exact_boundary_test",
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH),
+        BLOCKS_PER_EPOCH,
+        |_| {},
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
@@ -615,7 +624,7 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     info!("Confirmed slot 0 IS expired at expiry epoch");
 
     info!("Exact boundary expiry test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
 
@@ -626,35 +635,21 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
 /// - No TermFeeReward shadow txs are generated in any epoch block past min_blocks
 #[test_log::test(tokio::test)]
 async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
     const DATA_SIZE: usize = 32;
     const BLOCKS_PER_EPOCH: u64 = 3;
-    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 1; // Very short — expiry would trigger quickly
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
+    const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 1;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-    // Set Submit epoch length very high so Submit never expires during this test
-    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 100;
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_last_slot_test",
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH),
+        BLOCKS_PER_EPOCH,
+        |c| {
+            c.epoch.submit_ledger_epoch_length = 100;
         },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_last_slot_test", 30)
-        .await;
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
@@ -755,7 +750,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
     }
 
     info!("Last-slot protection test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
 
@@ -775,39 +770,22 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
 /// - The recycled partition's assignment is coherent (ledger_id, slot_index, slot membership)
 #[test_log::test(tokio::test)]
 async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
     const PUBLISH_LEDGER_EPOCH_LENGTH: u64 = 2;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    // 1 partition per slot makes recycling deterministic: each expired slot yields exactly
-    // 1 capacity partition, and each new Publish slot needs exactly 1. Publish is processed
-    // first in backfill, so the expired partition must land back in Publish.
-    config.consensus.get_mut().num_partitions_per_slot = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-        Some(PUBLISH_LEDGER_EPOCH_LENGTH);
-    // Set Submit epoch length very high so Submit expiry doesn't interfere
-    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 100;
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_recycle_test",
+        Some(PUBLISH_LEDGER_EPOCH_LENGTH),
+        BLOCKS_PER_EPOCH,
+        |c| {
+            c.num_partitions_per_slot = 1;
+            c.epoch.submit_ledger_epoch_length = 100;
         },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_recycle_test", 30)
-        .await;
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     // ========== Phase 1: Post initial data and promote to Publish ==========
     let anchor = node.get_block_by_height(0).await?.block_hash;
@@ -1019,7 +997,7 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     );
 
     info!("Perm partition recycle and reuse test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
 
@@ -1031,33 +1009,20 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
 /// - All Publish partition assignments remain active (not returned to capacity pool)
 #[test_log::test(tokio::test)]
 async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
-    const CHUNK_SIZE: u64 = 32;
-    const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
+    const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
-    const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_migration_depth = 1;
-    config.consensus.get_mut().chunk_size = CHUNK_SIZE;
-    config.consensus.get_mut().num_chunks_in_partition = 4;
-    config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().num_partitions_per_slot = 1;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
-    // Mainnet config: perm expiry disabled
-    config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
-
-    let signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.extend_genesis_accounts(vec![(
-        signer.address(),
-        GenesisAccount {
-            balance: U256::from(INITIAL_BALANCE).into(),
-            ..Default::default()
+    let setup = PermLedgerExpiryTestSetup::new(
+        "perm_expiry_disabled_test",
+        None,
+        BLOCKS_PER_EPOCH,
+        |c| {
+            c.num_partitions_per_slot = 1;
         },
-    )]);
-
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .start_and_wait_for_packing("perm_expiry_disabled_test", 30)
-        .await;
+    )
+    .await;
+    let node = &setup.node;
+    let signer = &setup.signer;
 
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
@@ -1155,6 +1120,6 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     info!("Verified all Publish partition assignments remain active");
 
     info!("Perm expiry disabled (mainnet safety) test passed!");
-    node.stop().await;
+    setup.node.stop().await;
     Ok(())
 }
