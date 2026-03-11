@@ -305,7 +305,8 @@ impl Ledgers {
                 .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
             if epoch_height >= min_blocks {
                 let expiry_height = epoch_height - min_blocks;
-                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id).unwrap();
+                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id)
+                    .expect("perm.ledger_id is always DataLedger::Publish");
                 let num_slots = self.perm.slots.len();
                 let last_slot_index = num_slots.saturating_sub(1);
 
@@ -330,7 +331,8 @@ impl Ledgers {
 
         // Collect expired partition hashes from term ledgers
         for term_ledger in &mut self.term {
-            let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
+            let ledger_id = DataLedger::try_from(term_ledger.ledger_id)
+                .expect("term ledger_id is always constructed from a valid DataLedger variant");
             for expired_index in term_ledger.expire_old_slots(epoch_height) {
                 for partition_hash in term_ledger.slots[expired_index].partitions.iter() {
                     expired_partitions.push(ExpiringPartitionInfo {
@@ -357,7 +359,8 @@ impl Ledgers {
                 .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
             if epoch_height >= min_blocks {
                 let expiry_height = epoch_height - min_blocks;
-                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id).unwrap();
+                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id)
+                    .expect("perm.ledger_id is always DataLedger::Publish");
                 let num_slots = self.perm.slots.len();
                 let last_slot_index = num_slots.saturating_sub(1);
 
@@ -380,7 +383,8 @@ impl Ledgers {
 
         // Collect from term ledgers (existing logic)
         for term_ledger in &self.term {
-            let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
+            let ledger_id = DataLedger::try_from(term_ledger.ledger_id)
+                .expect("term ledger_id is always constructed from a valid DataLedger variant");
             for expiring_slot_index in term_ledger.get_expired_slot_indexes(epoch_height) {
                 for partition_hash in term_ledger.slots[expiring_slot_index].partitions.iter() {
                     expired_partitions.push(ExpiringPartitionInfo {
