@@ -761,6 +761,34 @@ mod tests {
     }
 
     #[test]
+    fn test_node_info_numeric_json_deserialization() {
+        // Verify that string_u64 fields accept numeric JSON values (not just strings).
+        // This exercises the string_or_number_to_int compatibility branch.
+        let json = r#"{
+            "version": "1.0.0",
+            "peerCount": 5,
+            "chainId": 1270,
+            "height": 100,
+            "blockHash": "11111111111111111111111111111111",
+            "blockIndexHeight": 50,
+            "blockIndexHash": "11111111111111111111111111111111",
+            "pendingBlocks": 3,
+            "isSyncing": true,
+            "currentSyncHeight": 0,
+            "uptimeSecs": 9999,
+            "miningAddress": "11111111111111111111",
+            "cumulativeDifficulty": "0"
+        }"#;
+        let node_info: NodeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(node_info.current_sync_height, 0);
+        assert_eq!(node_info.chain_id, 1270);
+        assert_eq!(node_info.height, 100);
+        assert_eq!(node_info.block_index_height, 50);
+        assert_eq!(node_info.pending_blocks, 3);
+        assert_eq!(node_info.uptime_secs, 9999);
+    }
+
+    #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
         let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
         let node_info: NodeInfo = serde_json::from_str(canonical_json)?;
