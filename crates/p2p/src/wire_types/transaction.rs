@@ -67,20 +67,8 @@ pub enum IrysTransactionResponse {
     Storage(DataTransactionHeader),
 }
 
-impl From<irys_types::IrysTransactionResponse> for IrysTransactionResponse {
-    fn from(r: irys_types::IrysTransactionResponse) -> Self {
-        match r {
-            irys_types::IrysTransactionResponse::Commitment(c) => Self::Commitment(c.into()),
-            irys_types::IrysTransactionResponse::Storage(s) => Self::Storage(s.into()),
-        }
+super::impl_mirror_enum_from!(
+    irys_types::IrysTransactionResponse, IrysTransactionResponse mixed {
+        convert: Commitment, Storage;
     }
-}
-
-impl From<IrysTransactionResponse> for irys_types::IrysTransactionResponse {
-    fn from(r: IrysTransactionResponse) -> Self {
-        match r {
-            IrysTransactionResponse::Commitment(c) => Self::Commitment(c.into()),
-            IrysTransactionResponse::Storage(s) => Self::Storage(s.into()),
-        }
-    }
-}
+);

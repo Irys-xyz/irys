@@ -23,18 +23,8 @@ super::impl_mirror_from!(irys_types::ingress::IngressProofV1 => IngressProofV1In
     signature, data_root, proof, chain_id, anchor,
 });
 
-impl From<irys_types::IngressProof> for IngressProof {
-    fn from(p: irys_types::IngressProof) -> Self {
-        match p {
-            irys_types::IngressProof::V1(inner) => Self::V1(inner.into()),
-        }
+super::impl_mirror_enum_from!(
+    irys_types::IngressProof, IngressProof mixed {
+        convert: V1;
     }
-}
-
-impl From<IngressProof> for irys_types::IngressProof {
-    fn from(p: IngressProof) -> Self {
-        match p {
-            IngressProof::V1(inner) => Self::V1(inner.into()),
-        }
-    }
-}
+);

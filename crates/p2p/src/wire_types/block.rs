@@ -137,22 +137,24 @@ super::impl_mirror_from!(irys_types::IrysBlockHeaderV1 => IrysBlockHeaderV1Inner
 } convert { poa, vdf_limiter_info }
   convert_iter { system_ledgers, data_ledgers });
 
-impl From<irys_types::IrysBlockHeader> for IrysBlockHeader {
-    fn from(h: irys_types::IrysBlockHeader) -> Self {
-        match h {
-            irys_types::IrysBlockHeader::V1(inner) => Self::V1(inner.into()),
-        }
+super::impl_mirror_enum_from!(
+    irys_types::IrysBlockHeader, IrysBlockHeader mixed {
+        convert: V1;
     }
-}
-
-impl From<IrysBlockHeader> for irys_types::IrysBlockHeader {
-    fn from(h: IrysBlockHeader) -> Self {
-        match h {
-            IrysBlockHeader::V1(inner) => Self::V1(inner.into()),
-        }
+);
+// TODO: remove/streamline
+impl From<std::sync::Arc<irys_types::IrysBlockHeader>> for IrysBlockHeader {
+    fn from(arc: std::sync::Arc<irys_types::IrysBlockHeader>) -> Self {
+        std::sync::Arc::unwrap_or_clone(arc).into()
     }
 }
 
 super::impl_mirror_from!(irys_types::BlockBody => BlockBody {
     block_hash,
 } convert_iter { data_transactions, commitment_transactions });
+
+impl From<std::sync::Arc<irys_types::BlockBody>> for BlockBody {
+    fn from(arc: std::sync::Arc<irys_types::BlockBody>) -> Self {
+        std::sync::Arc::unwrap_or_clone(arc).into()
+    }
+}

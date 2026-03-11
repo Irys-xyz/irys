@@ -15,3 +15,9 @@ pub struct UnpackedChunk {
 super::impl_mirror_from!(irys_types::UnpackedChunk => UnpackedChunk {
     data_root, data_size, data_path, bytes, tx_offset,
 });
+
+impl From<std::sync::Arc<irys_types::UnpackedChunk>> for UnpackedChunk {
+    fn from(arc: std::sync::Arc<irys_types::UnpackedChunk>) -> Self {
+        std::sync::Arc::unwrap_or_clone(arc).into()
+    }
+}

@@ -237,6 +237,41 @@ macro_rules! impl_mirror_enum_from {
             }
         };
     };
+
+    // Tuple variant form with mixed conversion strategies:
+    // - `identity`: same type on both sides, just move the value
+    // - `convert`: call `.into()` in both directions
+    // - `arc_wrap`: canonical side wraps in `Arc`, wire side does not —
+    //   canonical→wire calls `.into()` (requires a `From<Arc<T>>` impl on
+    //   the wire type that handles the unwrap), wire→canonical wraps in Arc
+    ($canonical:path, $wire:ident mixed {
+        $(identity: $($id_var:ident),* ;)?
+        $(convert: $($conv_var:ident),* ;)?
+        $(arc_wrap: $($arc_var:ident),* ;)?
+    }) => {
+        const _: () = {
+            type _Canonical = $canonical;
+            impl From<_Canonical> for $wire {
+                fn from(src: _Canonical) -> Self {
+                    match src {
+                        $($( _Canonical::$id_var(v) => Self::$id_var(v), )*)?
+                        $($( _Canonical::$conv_var(v) => Self::$conv_var(v.into()), )*)?
+                        $($( _Canonical::$arc_var(v) => Self::$arc_var(v.into()), )*)?
+                    }
+                }
+            }
+            impl From<$wire> for _Canonical {
+                fn from(src: $wire) -> Self {
+                    match src {
+                        $($( $wire::$id_var(v) => Self::$id_var(v), )*)?
+                        $($( $wire::$conv_var(v) => Self::$conv_var(v.into()), )*)?
+                        $($( $wire::$arc_var(v) =>
+                            Self::$arc_var(::std::sync::Arc::new(v.into())), )*)?
+                    }
+                }
+            }
+        };
+    };
 }
 
 pub(crate) use impl_mirror_enum_from;
