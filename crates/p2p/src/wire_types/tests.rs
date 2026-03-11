@@ -410,18 +410,36 @@ fn test_block_index_item_roundtrip() {
 
 #[test]
 fn test_block_index_item_v2_rejects_oversized_ledger_list() {
-    let wire_type = wire::BlockIndexItemV2 {
-        block_hash: test_h256(0xBB),
-        ledgers: (0..=255)
+    let make_ledgers = |count: usize| -> Vec<wire::LedgerIndexItem> {
+        (0..count)
             .map(|i| wire::LedgerIndexItem {
                 total_chunks: i as u64,
-                tx_root: test_h256(i as u8),
+                tx_root: test_h256((i & 0xFF) as u8),
                 ledger: irys_types::block::DataLedger::Publish,
             })
-            .collect(),
+            .collect()
+    };
+
+    // 256 ledgers must be rejected with the specific size-bound error
+    let wire_type = wire::BlockIndexItemV2 {
+        block_hash: test_h256(0xBB),
+        ledgers: make_ledgers(256),
     };
     let result: Result<irys_types::block::BlockIndexItem, _> = wire_type.try_into();
-    assert!(result.is_err());
+    match result {
+        Err(wire::BlockIndexItemV2ConversionError { ledger_count }) => {
+            assert_eq!(ledger_count, 256);
+        }
+        Ok(_) => panic!("expected BlockIndexItemV2ConversionError for 256 ledgers, got Ok"),
+    }
+
+    // 255 ledgers (u8::MAX) must succeed — boundary check
+    let wire_type = wire::BlockIndexItemV2 {
+        block_hash: test_h256(0xBB),
+        ledgers: make_ledgers(255),
+    };
+    let result: Result<irys_types::block::BlockIndexItem, _> = wire_type.try_into();
+    assert!(result.is_ok(), "255 ledgers should be accepted (u8::MAX)");
 }
 
 // =============================================================================
