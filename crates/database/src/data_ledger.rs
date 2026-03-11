@@ -299,8 +299,7 @@ impl Ledgers {
         let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
         // Expire perm ledger slots using shared helper
-        for (slot_index, partition_hashes, ledger_id) in
-            self.get_perm_expiring_slots(epoch_height)
+        for (slot_index, partition_hashes, ledger_id) in self.get_perm_expiring_slots(epoch_height)
         {
             self.perm.slots[slot_index].is_expired = true;
             for partition_hash in partition_hashes {
@@ -336,8 +335,7 @@ impl Ledgers {
         let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
         // Check perm ledger slots using shared helper
-        for (slot_index, partition_hashes, ledger_id) in
-            self.get_perm_expiring_slots(epoch_height)
+        for (slot_index, partition_hashes, ledger_id) in self.get_perm_expiring_slots(epoch_height)
         {
             for partition_hash in partition_hashes {
                 expired_partitions.push(ExpiringPartitionInfo {
@@ -412,11 +410,7 @@ impl Ledgers {
                 continue;
             }
             if slot.last_height <= expiry_height && !slot.is_expired {
-                result.push((
-                    slot_index,
-                    slot.partitions.clone(),
-                    perm_ledger_id,
-                ));
+                result.push((slot_index, slot.partitions.clone(), perm_ledger_id));
             }
         }
         result

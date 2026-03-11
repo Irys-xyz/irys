@@ -28,8 +28,7 @@ impl PermLedgerExpiryTestSetup {
         config.consensus.get_mut().num_chunks_in_partition = 4;
         config.consensus.get_mut().num_chunks_in_recall_range = 1;
         config.consensus.get_mut().epoch.num_blocks_in_epoch = blocks_per_epoch;
-        config.consensus.get_mut().epoch.publish_ledger_epoch_length =
-            publish_ledger_epoch_length;
+        config.consensus.get_mut().epoch.publish_ledger_epoch_length = publish_ledger_epoch_length;
 
         // Apply test-specific overrides
         overrides(config.consensus.get_mut());
@@ -1012,15 +1011,11 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     const DATA_SIZE: usize = 64;
     const BLOCKS_PER_EPOCH: u64 = 3;
 
-    let setup = PermLedgerExpiryTestSetup::new(
-        "perm_expiry_disabled_test",
-        None,
-        BLOCKS_PER_EPOCH,
-        |c| {
+    let setup =
+        PermLedgerExpiryTestSetup::new("perm_expiry_disabled_test", None, BLOCKS_PER_EPOCH, |c| {
             c.num_partitions_per_slot = 1;
-        },
-    )
-    .await;
+        })
+        .await;
     let node = &setup.node;
     let signer = &setup.signer;
 
