@@ -595,110 +595,163 @@ fixture_tests! {
 }
 
 // =============================================================================
-// Exhaustive coverage: compile-time enforcement that every enum variant has a
-// fixture test. Adding a new variant without a fixture entry causes a build
-// error from the non-exhaustive match.
+// Exhaustive fixture coverage
+//
+// These checks enforce — at compile time — that every variant of each wire
+// enum has a corresponding entry in gossip_fixtures.json.
+//
+// HOW IT WORKS: each variant is mapped to its fixture name exactly once via a
+// `pattern => "fixture_name"` arm.  A `const` block compiles an exhaustive
+// match over those patterns — if you add a variant without a mapping, the
+// compiler errors.  The same fixture names drive a runtime assertion that the
+// fixture file actually contains them.
+//
+// There is no separate `values` list — the patterns and fixture names are the
+// single source of truth, eliminating any possibility of the two diverging.
+//
+// WHEN YOU ADD A NEW VARIANT:
+//   1. Add a fixture_tests! entry for it (with a golden JSON value).
+//   2. Add a `Pattern => "fixture_name"` arm in the matching block below.
+//   3. Regenerate fixtures: cargo test -p irys-p2p generate_fixture_json -- --ignored
 // =============================================================================
 
-/// Maps every [`RejectionReason`] variant to the fixture name that covers it.
-/// The exhaustive match is the key mechanism — the compiler will refuse to
-/// build if a new variant is added without a corresponding fixture entry.
-fn rejection_reason_fixture_names() -> Vec<&'static str> {
-    let all = [
-        RejectionReason::HandshakeRequired(None),
-        RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
-        )),
-        RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
-        )),
-        RejectionReason::HandshakeRequired(Some(
-            HandshakeRequirementReason::MinerAddressIsUnknown,
-        )),
-        RejectionReason::GossipDisabled,
-        RejectionReason::InvalidData,
-        RejectionReason::RateLimited,
-        RejectionReason::UnableToVerifyOrigin,
-        RejectionReason::InvalidCredentials,
-        RejectionReason::ProtocolMismatch,
-        RejectionReason::UnsupportedProtocolVersion(0),
-        RejectionReason::UnsupportedFeature,
-    ];
-    all.iter()
-        .map(|r| match r {
-            RejectionReason::HandshakeRequired(inner) => match inner {
-                None => "gossip_response_rejected_handshake_required_none",
-                Some(reason) => match reason {
-                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList => {
-                        "gossip_response_rejected_handshake_required_not_in_peer_list"
-                    }
-                    HandshakeRequirementReason::RequestOriginDoesNotMatchExpected => {
-                        "gossip_response_rejected_handshake_required_origin_mismatch"
-                    }
-                    HandshakeRequirementReason::MinerAddressIsUnknown => {
-                        "gossip_response_rejected_handshake_required_unknown_miner"
-                    }
-                },
-            },
-            RejectionReason::GossipDisabled => "gossip_response_rejected_gossip_disabled",
-            RejectionReason::InvalidData => "gossip_response_rejected_invalid_data",
-            RejectionReason::RateLimited => "gossip_response_rejected_rate_limited",
-            RejectionReason::UnableToVerifyOrigin => {
-                "gossip_response_rejected_unable_to_verify_origin"
+/// Compile-time + runtime enforcement that every enum variant has a fixture.
+///
+/// The `const` block contains an exhaustive match over `$enum_ty` — this is
+/// the compile-time mechanism.  The `#[test]` collects fixture names from the
+/// same arms and verifies they exist in `gossip_fixtures.json`.
+macro_rules! assert_fixture_coverage {
+    (
+        $test_name:ident, $enum_ty:ty,
+        $( $pat:pat => $fixture_name:expr ),+ $(,)?
+    ) => {
+        // Compile-time: exhaustive match ensures every variant maps to a fixture.
+        const _: () = {
+            fn _exhaustive_check(v: &$enum_ty) -> &'static str {
+                match v { $( $pat => $fixture_name ),+ }
             }
-            RejectionReason::InvalidCredentials => {
-                "gossip_response_rejected_invalid_credentials"
+            _ = _exhaustive_check;
+        };
+
+        // Runtime: verify each fixture name actually exists in the golden file.
+        #[test]
+        fn $test_name() {
+            let fixtures = FIXTURES.get_or_init(load_fixtures);
+            for name in [ $($fixture_name),+ ] {
+                assert!(
+                    fixtures.contains_key(name),
+                    "Missing fixture for {} variant: '{name}'. \
+                     Add a fixture_tests! entry and regenerate fixtures.",
+                    stringify!($enum_ty),
+                );
             }
-            RejectionReason::ProtocolMismatch => "gossip_response_rejected_protocol_mismatch",
-            RejectionReason::UnsupportedProtocolVersion(_) => {
-                "gossip_response_rejected_unsupported_protocol_version"
-            }
-            RejectionReason::UnsupportedFeature => {
-                "gossip_response_rejected_unsupported_feature"
-            }
-        })
-        .collect()
+        }
+    };
 }
 
-/// Verifies that every [`GossipResponse`] variant is represented in the
-/// fixture file. The exhaustive match ensures compile-time enforcement.
-fn gossip_response_fixture_names() -> Vec<&'static str> {
-    // GossipResponse<()> covers the envelope variants
-    let all: [GossipResponse<()>; 2] = [
-        GossipResponse::Accepted(()),
-        GossipResponse::Rejected(RejectionReason::GossipDisabled),
-    ];
-    all.iter()
-        .map(|r| match r {
-            GossipResponse::Accepted(_) => "gossip_response_accepted",
-            GossipResponse::Rejected(_) => "gossip_response_rejected_gossip_disabled",
-        })
-        .collect()
-}
+assert_fixture_coverage!(
+    test_all_gossip_response_variants_covered,
+    GossipResponse<()>,
+    GossipResponse::Accepted(_) => "gossip_response_accepted",
+    GossipResponse::Rejected(_) => "gossip_response_rejected_gossip_disabled",
+);
 
-#[test]
-fn test_all_rejection_reasons_covered_by_fixtures() {
-    let fixtures = FIXTURES.get_or_init(load_fixtures);
-    for name in rejection_reason_fixture_names() {
-        assert!(
-            fixtures.contains_key(name),
-            "Missing fixture for RejectionReason variant: '{name}'. \
-             Add a fixture_tests! entry for this variant."
-        );
-    }
-}
+assert_fixture_coverage!(
+    test_all_rejection_reasons_covered,
+    RejectionReason,
+    RejectionReason::HandshakeRequired(None) =>
+        "gossip_response_rejected_handshake_required_none",
+    RejectionReason::HandshakeRequired(Some(
+        HandshakeRequirementReason::RequestOriginIsNotInThePeerList
+    )) => "gossip_response_rejected_handshake_required_not_in_peer_list",
+    RejectionReason::HandshakeRequired(Some(
+        HandshakeRequirementReason::RequestOriginDoesNotMatchExpected
+    )) => "gossip_response_rejected_handshake_required_origin_mismatch",
+    RejectionReason::HandshakeRequired(Some(
+        HandshakeRequirementReason::MinerAddressIsUnknown
+    )) => "gossip_response_rejected_handshake_required_unknown_miner",
+    RejectionReason::GossipDisabled => "gossip_response_rejected_gossip_disabled",
+    RejectionReason::InvalidData => "gossip_response_rejected_invalid_data",
+    RejectionReason::RateLimited => "gossip_response_rejected_rate_limited",
+    RejectionReason::UnableToVerifyOrigin =>
+        "gossip_response_rejected_unable_to_verify_origin",
+    RejectionReason::InvalidCredentials =>
+        "gossip_response_rejected_invalid_credentials",
+    RejectionReason::ProtocolMismatch => "gossip_response_rejected_protocol_mismatch",
+    RejectionReason::UnsupportedProtocolVersion(_) =>
+        "gossip_response_rejected_unsupported_protocol_version",
+    RejectionReason::UnsupportedFeature =>
+        "gossip_response_rejected_unsupported_feature",
+);
 
-#[test]
-fn test_all_gossip_response_variants_covered_by_fixtures() {
-    let fixtures = FIXTURES.get_or_init(load_fixtures);
-    for name in gossip_response_fixture_names() {
-        assert!(
-            fixtures.contains_key(name),
-            "Missing fixture for GossipResponse variant: '{name}'. \
-             Add a fixture_tests! entry for this variant."
-        );
-    }
-}
+assert_fixture_coverage!(
+    test_all_gossip_data_v1_variants_covered,
+    wire::GossipDataV1,
+    wire::GossipDataV1::Chunk(_) => "v1_gossip_data_chunk",
+    wire::GossipDataV1::Transaction(_) => "v1_gossip_data_transaction",
+    wire::GossipDataV1::CommitmentTransaction(_) => "v1_gossip_data_commitment_stake",
+    wire::GossipDataV1::Block(_) => "v1_gossip_data_block",
+    wire::GossipDataV1::ExecutionPayload(_) => "v1_gossip_data_execution_payload",
+    wire::GossipDataV1::IngressProof(_) => "v1_gossip_data_ingress_proof",
+);
+
+assert_fixture_coverage!(
+    test_all_gossip_data_v2_variants_covered,
+    wire::GossipDataV2,
+    wire::GossipDataV2::Chunk(_) => "v2_gossip_data_chunk",
+    wire::GossipDataV2::Transaction(_) => "v2_gossip_data_transaction",
+    wire::GossipDataV2::CommitmentTransaction(_) => "v2_gossip_data_commitment_v2_stake",
+    wire::GossipDataV2::BlockHeader(_) => "v2_gossip_data_block_header",
+    wire::GossipDataV2::BlockBody(_) => "v2_gossip_data_block_body",
+    wire::GossipDataV2::ExecutionPayload(_) => "v2_gossip_data_execution_payload",
+    wire::GossipDataV2::IngressProof(_) => "v2_gossip_data_ingress_proof",
+);
+
+assert_fixture_coverage!(
+    test_all_gossip_data_request_v1_variants_covered,
+    wire::GossipDataRequestV1,
+    wire::GossipDataRequestV1::ExecutionPayload(_) => "v1_data_request_execution_payload",
+    wire::GossipDataRequestV1::Block(_) => "v1_data_request_block",
+    wire::GossipDataRequestV1::Chunk(_) => "v1_data_request_chunk",
+    wire::GossipDataRequestV1::Transaction(_) => "v1_data_request_transaction",
+);
+
+assert_fixture_coverage!(
+    test_all_gossip_data_request_v2_variants_covered,
+    wire::GossipDataRequestV2,
+    wire::GossipDataRequestV2::ExecutionPayload(_) => "v2_data_request_execution_payload",
+    wire::GossipDataRequestV2::BlockHeader(_) => "v2_data_request_block_header",
+    wire::GossipDataRequestV2::BlockBody(_) => "v2_data_request_block_body",
+    wire::GossipDataRequestV2::Chunk(_) => "v2_data_request_chunk",
+    wire::GossipDataRequestV2::Transaction(_) => "v2_data_request_transaction",
+);
+
+assert_fixture_coverage!(
+    test_all_commitment_type_v1_variants_covered,
+    wire::CommitmentTypeV1,
+    wire::CommitmentTypeV1::Stake => "v1_gossip_data_commitment_stake",
+    wire::CommitmentTypeV1::Pledge { .. } => "v1_gossip_data_commitment_pledge",
+    wire::CommitmentTypeV1::Unpledge { .. } => "v1_gossip_data_commitment_unpledge",
+    wire::CommitmentTypeV1::Unstake => "v1_gossip_data_commitment_unstake",
+);
+
+assert_fixture_coverage!(
+    test_all_commitment_type_v2_variants_covered,
+    wire::CommitmentTypeV2,
+    wire::CommitmentTypeV2::Stake => "v2_gossip_data_commitment_v2_stake",
+    wire::CommitmentTypeV2::Pledge { .. } => "v2_gossip_data_commitment_v2_pledge",
+    wire::CommitmentTypeV2::Unpledge { .. } => "v2_gossip_data_commitment_v2_unpledge",
+    wire::CommitmentTypeV2::Unstake => "v2_gossip_data_commitment_v2_unstake",
+    wire::CommitmentTypeV2::UpdateRewardAddress { .. } =>
+        "v2_gossip_data_commitment_v2_update_reward_address",
+);
+
+assert_fixture_coverage!(
+    test_all_irys_transaction_response_variants_covered,
+    wire::IrysTransactionResponse,
+    wire::IrysTransactionResponse::Storage(_) => "irys_transaction_response_storage",
+    wire::IrysTransactionResponse::Commitment(_) => "irys_transaction_response_commitment",
+);
 
 // =============================================================================
 // Test: Generate fixtures (run with --nocapture to see JSON output)

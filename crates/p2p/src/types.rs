@@ -226,12 +226,16 @@ pub enum AdvisoryGossipError {
 
 pub type GossipResult<T> = Result<T, GossipError>;
 
+/// Wire type — serialized directly in gossip HTTP responses.
+/// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipResponse<T> {
     Accepted(T),
     Rejected(RejectionReason),
 }
 
+/// Wire type — serialized as part of [`RejectionReason::HandshakeRequired`].
+/// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum HandshakeRequirementReason {
     RequestOriginIsNotInThePeerList,
@@ -239,6 +243,8 @@ pub enum HandshakeRequirementReason {
     MinerAddressIsUnknown,
 }
 
+/// Wire type — serialized as part of [`GossipResponse::Rejected`].
+/// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum RejectionReason {
     HandshakeRequired(Option<HandshakeRequirementReason>),

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, impl_mirror_enum_from, impl_versioned_tx_from};
 
+/// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
+/// fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV1 {
@@ -20,6 +22,8 @@ pub enum CommitmentTypeV1 {
     Unstake,
 }
 
+/// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
+/// fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CommitmentTypeV2 {

@@ -10,6 +10,9 @@ use super::{
     UnpackedChunk,
 };
 
+/// Adding a variant? Update the `From` impls below AND add a fixture entry
+/// in `gossip_fixture_tests.rs` (the exhaustive coverage test will fail to
+/// compile until you do).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV1 {
     Chunk(UnpackedChunk),
@@ -20,6 +23,9 @@ pub enum GossipDataV1 {
     IngressProof(IngressProof),
 }
 
+/// Adding a variant? Update the `From` impls below AND add a fixture entry
+/// in `gossip_fixture_tests.rs` (the exhaustive coverage test will fail to
+/// compile until you do).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipDataV2 {
     Chunk(UnpackedChunk),
@@ -31,6 +37,8 @@ pub enum GossipDataV2 {
     IngressProof(IngressProof),
 }
 
+/// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
+/// fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV1 {
     ExecutionPayload(B256),
@@ -39,6 +47,8 @@ pub enum GossipDataRequestV1 {
     Transaction(H256),
 }
 
+/// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
+/// fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequestV2 {
     ExecutionPayload(B256),

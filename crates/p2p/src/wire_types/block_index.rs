@@ -93,11 +93,10 @@ impl TryFrom<BlockIndexItemV2> for irys_types::block::BlockIndexItem {
     type Error = BlockIndexItemV2ConversionError;
 
     fn try_from(src: BlockIndexItemV2) -> Result<Self, Self::Error> {
-        let num_ledgers = u8::try_from(src.ledgers.len()).map_err(|_| {
-            BlockIndexItemV2ConversionError {
+        let num_ledgers =
+            u8::try_from(src.ledgers.len()).map_err(|_| BlockIndexItemV2ConversionError {
                 ledger_count: src.ledgers.len(),
-            }
-        })?;
+            })?;
         Ok(Self {
             block_hash: src.block_hash,
             num_ledgers,

@@ -54,6 +54,9 @@ impl_versioned_tx_from!(
 ///
 /// Mirrors the `#[serde(tag = "type", rename_all = "camelCase")]` representation
 /// so that upstream changes to the tagging or variant names are detected.
+///
+/// Adding a variant? Update the `From` impls below AND add a fixture entry
+/// in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum IrysTransactionResponse {
