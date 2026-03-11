@@ -754,6 +754,135 @@ assert_fixture_coverage!(
 );
 
 // =============================================================================
+// Wire type coverage enforcement
+//
+// Parses every `wire_types/*.rs` source file with `syn`, extracts all public
+// struct/enum names, and asserts each one appears somewhere in the test
+// sources (this file, tests.rs, or test_helpers.rs).  If a new wire type is
+// added without any test coverage, this test fails with instructions.
+// =============================================================================
+
+/// Verifies that every public struct/enum in `wire_types/` appears in the
+/// test sources, catching newly added wire types that lack test coverage.
+///
+/// If this test fails, either:
+/// 1. Add a `fixture_tests!` entry and/or roundtrip test for the new type.
+/// 2. If the type is an inner struct tested via its wrapper enum, add it to
+///    `EXCLUDED` below with a reason.
+#[test]
+fn all_wire_types_have_fixture_coverage() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let wire_types_dir = manifest_dir.join("src/wire_types");
+
+    // Collect test source text to check type name references against.
+    let test_sources: String = [
+        manifest_dir.join("src/gossip_fixture_tests.rs"),
+        wire_types_dir.join("tests.rs"),
+        wire_types_dir.join("test_helpers.rs"),
+    ]
+    .iter()
+    .map(|p| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    // Types intentionally excluded from direct fixture coverage.
+    // Inner types are always tested through their version-tagged wrapper enum;
+    // the fixture snapshot will break if their serialization changes.
+    const EXCLUDED: &[(&str, &str)] = &[
+        (
+            "BlockIndexItemV2ConversionError",
+            "error type, not a wire message",
+        ),
+        (
+            "IrysBlockHeaderV1Inner",
+            "tested via IrysBlockHeader version-tagged enum",
+        ),
+        (
+            "CommitmentTransactionV1Inner",
+            "tested via CommitmentTransaction version-tagged enum",
+        ),
+        (
+            "CommitmentTransactionV2Inner",
+            "tested via CommitmentTransaction version-tagged enum",
+        ),
+        (
+            "DataTransactionHeaderV1Inner",
+            "tested via DataTransactionHeader version-tagged enum",
+        ),
+        (
+            "IngressProofV1Inner",
+            "tested via IngressProof version-tagged enum",
+        ),
+    ];
+    let excluded_names: std::collections::HashSet<&str> =
+        EXCLUDED.iter().map(|(name, _)| *name).collect();
+
+    // Parse all wire type source files (skip mod.rs, tests.rs, test_helpers.rs).
+    let mut all_source_types = std::collections::HashSet::new();
+    let mut missing = Vec::new();
+
+    for entry in std::fs::read_dir(&wire_types_dir).expect("read wire_types dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+
+        if !filename.ends_with(".rs")
+            || filename == "mod.rs"
+            || filename == "tests.rs"
+            || filename == "test_helpers.rs"
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let file =
+            syn::parse_file(&content).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+
+        for item in &file.items {
+            let name = match item {
+                syn::Item::Struct(s) if matches!(s.vis, syn::Visibility::Public(_)) => {
+                    s.ident.to_string()
+                }
+                syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => {
+                    e.ident.to_string()
+                }
+                _ => continue,
+            };
+
+            all_source_types.insert(name.clone());
+
+            if excluded_names.contains(name.as_str()) {
+                continue;
+            }
+
+            if !test_sources.contains(&name) {
+                missing.push(format!("  {name} (in wire_types/{filename})"));
+            }
+        }
+    }
+
+    // Verify excluded types actually exist in source (catch stale entries).
+    for (name, _reason) in EXCLUDED {
+        assert!(
+            all_source_types.contains(*name),
+            "Stale EXCLUDED entry: '{name}' no longer exists in wire_types/. Remove it.",
+        );
+    }
+
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "\n\nWire types missing from fixture/roundtrip tests:\n{}\n\n\
+         To fix:\n\
+         1. Add a fixture_tests! entry and/or roundtrip test for each type.\n\
+         2. If the type is tested via a wrapper, add it to EXCLUDED with a reason.\n\
+         3. Regenerate fixtures: cargo test -p irys-p2p generate_fixture_json -- --ignored\n",
+        missing.join("\n"),
+    );
+}
+
+// =============================================================================
 // Test: Generate fixtures (run with --nocapture to see JSON output)
 // =============================================================================
 

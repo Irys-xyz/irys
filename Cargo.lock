@@ -5243,6 +5243,7 @@ dependencies = [
  "semver 1.0.27",
  "serde",
  "serde_json",
+ "syn 2.0.114",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

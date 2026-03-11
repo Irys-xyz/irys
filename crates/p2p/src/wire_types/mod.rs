@@ -11,6 +11,11 @@
 //! 1. Create a struct with matching serde attributes in the appropriate file.
 //! 2. Add `From` impls in both directions (canonical ↔ wire).
 //! 3. Add a roundtrip test in `tests.rs`.
+//! 4. Add a `fixture_tests!` entry in `gossip_fixture_tests.rs`.
+//!
+//! Step 4 is enforced by the `all_wire_types_have_fixture_coverage` test,
+//! which parses every source file in this directory with `syn` and verifies
+//! each public type appears in the test sources.
 
 mod block;
 mod block_index;
