@@ -21,7 +21,8 @@ use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
+    parse_user_agent, BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction,
+    DataTransactionHeader,
     GossipRequest, GossipRequestV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
     PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
@@ -1250,14 +1251,10 @@ where
             .json(GossipResponse::Accepted(response))
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
-    async fn handle_block_index(
-        server: Data<Self>,
-        query: web::Query<BlockIndexQuery>,
-    ) -> HttpResponse {
+    fn query_block_index(
+        server: &Data<Self>,
+        query: &BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>, HttpResponse> {
         const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
         const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
 
@@ -1267,20 +1264,51 @@ where
             query.limit
         };
         if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Err(HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData)));
         }
-        let height = query.height;
 
-        let requested_blocks = server
+        Ok(server
             .data_handler
             .block_index
             .read()
-            .get_range(height as u64, limit);
+            .get_range(query.height as u64, limit))
+    }
 
-        let wire_blocks: Vec<wire_types::BlockIndexItemV1> =
-            requested_blocks.into_iter().map(Into::into).collect();
-        HttpResponse::Ok().json(GossipResponse::Accepted(wire_blocks))
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_block_index(
+        server: Data<Self>,
+        query: web::Query<BlockIndexQuery>,
+    ) -> HttpResponse {
+        match Self::query_block_index(&server, &query) {
+            Ok(blocks) => {
+                let wire_blocks: Vec<wire_types::BlockIndexItemV1> =
+                    blocks.into_iter().map(Into::into).collect();
+                HttpResponse::Ok().json(GossipResponse::Accepted(wire_blocks))
+            }
+            Err(resp) => resp,
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_block_index_v2(
+        server: Data<Self>,
+        query: web::Query<BlockIndexQuery>,
+    ) -> HttpResponse {
+        match Self::query_block_index(&server, &query) {
+            Ok(blocks) => {
+                let wire_blocks: Vec<wire_types::BlockIndexItemV2> =
+                    blocks.into_iter().map(Into::into).collect();
+                HttpResponse::Ok().json(GossipResponse::Accepted(wire_blocks))
+            }
+            Err(resp) => resp,
+        }
     }
 
     #[expect(
@@ -1555,7 +1583,7 @@ where
                     )
                     .route(
                         GossipRoutes::BlockIndex.as_str(),
-                        web::get().to(Self::handle_block_index),
+                        web::get().to(Self::handle_block_index_v2),
                     ),
             )
             .route(
