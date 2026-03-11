@@ -2,7 +2,6 @@
 //! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
 use crate::evm::ConfigureChunkDataIndex;
-use irys_types::chunk_provider::PdChunkSender;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_chainspec::{EthChainSpec as _, EthereumHardforks};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
@@ -22,8 +21,6 @@ use crate::{IrysBuiltPayload, IrysPayloadAttributes, IrysPayloadBuilderAttribute
 pub struct IrysPayloadBuilderBuilder {
     pub max_pd_chunks_per_block: u64,
     pub hardforks: Arc<IrysHardforkConfig>,
-    /// PD chunk sender for provisioning messages.
-    pub pd_chunk_sender: PdChunkSender,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     pub ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
     /// Shared chunk data index for lock-free chunk reads during EVM execution.
@@ -35,7 +32,6 @@ impl std::fmt::Debug for IrysPayloadBuilderBuilder {
         f.debug_struct("IrysPayloadBuilderBuilder")
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
-            .field("pd_chunk_sender", &"<sender>")
             .field("ready_pd_txs", &"<dashset>")
             .field("chunk_data_index", &"<index>")
             .finish()

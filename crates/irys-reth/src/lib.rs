@@ -159,7 +159,6 @@ impl IrysEthereumNode {
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
-                pd_chunk_sender: self.pd_chunk_sender.clone(),
                 ready_pd_txs: self.ready_pd_txs.clone(),
                 chunk_data_index: self.chunk_data_index.clone(),
             }))
