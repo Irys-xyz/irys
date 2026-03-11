@@ -155,6 +155,7 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
+                chunk_data_index: self.chunk_data_index.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
@@ -237,6 +238,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
@@ -244,6 +246,7 @@ impl std::fmt::Debug for IrysExecutorBuilder {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
+            .field("chunk_data_index", &"<ChunkDataIndex>")
             .finish()
     }
 }
@@ -259,10 +262,12 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        // Note: IrysExecutorBuilder does not set chunk_data_index on the factory —
-        // the executor uses Storage mode (direct chunk provider). Only the payload
-        // builder sets chunk_data_index via IrysPayloadBuilderBuilder.
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
+        // Both executor and payload builder use ChunkDataIndex for PD chunk reads.
+        // PdService populates the DashMap before EVM execution in both paths:
+        //   - Self-built blocks: populated during NewTransaction handling
+        //   - Peer blocks: populated during ProvisionBlockChunks (awaited before newPayload)
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config)
+            .with_chunk_data_index(self.chunk_data_index);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),

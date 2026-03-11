@@ -1151,7 +1151,8 @@ impl IrysNode {
 
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
-        // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
+        // MockChunkProvider is used only for ChunkConfig extraction by IrysEvmFactory.
+        // Actual chunk reads go through ChunkDataIndex (DashMap), not through this provider.
         let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
         let (node_handle, reth_node) = match start_reth_node(
             exec,
