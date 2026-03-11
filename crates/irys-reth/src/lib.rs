@@ -95,7 +95,7 @@ pub fn compose_shadow_tx(
 #[derive(Clone)]
 pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
-    pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pub chunk_config: irys_types::chunk_provider::ChunkConfig,
     pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
     /// PD chunk sender for provisioning messages.
     pub pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
@@ -108,7 +108,7 @@ pub struct IrysEthereumNode {
 impl std::fmt::Debug for IrysEthereumNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysEthereumNode")
-            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("chunk_config", &self.chunk_config)
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
             .field("ready_pd_txs", &"<dashset>")
@@ -153,7 +153,7 @@ impl IrysEthereumNode {
             .node_types::<Node>()
             .pool(pool_builder)
             .executor(IrysExecutorBuilder {
-                chunk_provider: self.chunk_provider.clone(),
+                chunk_config: self.chunk_config,
                 hardfork_config: self.hardfork_config.clone(),
                 chunk_data_index: self.chunk_data_index.clone(),
             })
@@ -161,7 +161,6 @@ impl IrysEthereumNode {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
                 ready_pd_txs: self.ready_pd_txs.clone(),
-                chunk_data_index: self.chunk_data_index.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -236,7 +235,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 /// A regular ethereum evm and executor builder.
 #[derive(Clone)]
 pub struct IrysExecutorBuilder {
-    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
     chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
@@ -244,7 +243,7 @@ pub struct IrysExecutorBuilder {
 impl std::fmt::Debug for IrysExecutorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysExecutorBuilder")
-            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("chunk_config", &self.chunk_config)
             .field("hardfork_config", &self.hardfork_config)
             .field("chunk_data_index", &"<ChunkDataIndex>")
             .finish()
@@ -262,12 +261,11 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        // Both executor and payload builder use ChunkDataIndex for PD chunk reads.
-        // PdService populates the DashMap before EVM execution in both paths:
-        //   - Self-built blocks: populated during NewTransaction handling
-        //   - Peer blocks: populated during ProvisionBlockChunks (awaited before newPayload)
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config)
-            .with_chunk_data_index(self.chunk_data_index);
+        let evm_factory = IrysEvmFactory::new(
+            self.chunk_config,
+            self.hardfork_config,
+            self.chunk_data_index,
+        );
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -2590,14 +2588,11 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
-            let mock_chunk_provider =
-                std::sync::Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
             let (nodes, tasks, _wallet, ready_pd_txs_per_node) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
-                mock_chunk_provider,
             )
             .await?;
 
@@ -3327,7 +3322,6 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     ) -> eyre::Result<(
         Vec<NodeHelperType<IrysEthereumNode>>,
         Runtime,
@@ -3380,7 +3374,9 @@ pub mod test_utils {
                     IrysEthereumNode {
                         // Use default value for tests
                         max_pd_chunks_per_block: 7_500,
-                        chunk_provider: chunk_provider.clone(),
+                        chunk_config: irys_types::chunk_provider::ChunkConfig::from_consensus(
+                            &irys_types::config::ConsensusConfig::testing(),
+                        ),
                         // Use testing hardfork config with Sprite enabled from genesis
                         hardfork_config: std::sync::Arc::new(
                             irys_types::config::ConsensusConfig::testing()

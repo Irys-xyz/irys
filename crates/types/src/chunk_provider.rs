@@ -17,6 +17,17 @@ pub struct ChunkConfig {
     pub chain_id: u16,
 }
 
+impl ChunkConfig {
+    pub fn from_consensus(consensus: &crate::ConsensusConfig) -> Self {
+        Self {
+            num_chunks_in_partition: consensus.num_chunks_in_partition,
+            chunk_size: consensus.chunk_size,
+            entropy_packing_iterations: consensus.entropy_packing_iterations as u8,
+            chain_id: consensus.chain_id as u16,
+        }
+    }
+}
+
 /// Provides unpacked chunks to PD precompile.
 /// Used as storage backend by PdChunkManager.
 pub trait RethChunkProvider: Send + Sync + std::fmt::Debug {

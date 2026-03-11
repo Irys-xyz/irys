@@ -3,30 +3,9 @@
 use alloy_eips::eip2930::AccessListItem;
 use alloy_primitives::B256;
 use bytes::Bytes;
-use irys_types::chunk_provider::{ChunkConfig, RethChunkProvider};
+use irys_types::chunk_provider::ChunkConfig;
 use parking_lot::RwLock;
 use std::sync::Arc;
-
-/// Chunk source for PD precompile - either from shared index or direct storage.
-enum ChunkSource {
-    /// Fetch chunks via shared index (payload building with cached chunks).
-    Manager {
-        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
-    },
-    /// Fetch chunks directly from storage (for block validation).
-    Storage(Arc<dyn RethChunkProvider>),
-}
-
-impl Clone for ChunkSource {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Manager { chunk_data_index } => Self::Manager {
-                chunk_data_index: chunk_data_index.clone(),
-            },
-            Self::Storage(provider) => Self::Storage(Arc::clone(provider)),
-        }
-    }
-}
 
 pub struct PdContext {
     /// Current transaction hash being executed.
@@ -35,8 +14,8 @@ pub struct PdContext {
     /// Access list for the current transaction.
     /// Arc<RwLock> allows sharing within a single EVM instance.
     access_list: Arc<RwLock<Vec<AccessListItem>>>,
-    /// Where to get chunks from
-    chunk_source: ChunkSource,
+    /// Shared chunk data index for lock-free chunk reads.
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
     /// Chunk configuration (size, etc.)
     chunk_config: ChunkConfig,
 }
@@ -48,7 +27,7 @@ impl Clone for PdContext {
         Self {
             tx_hash: Arc::clone(&self.tx_hash),
             access_list: Arc::clone(&self.access_list),
-            chunk_source: self.chunk_source.clone(),
+            chunk_data_index: self.chunk_data_index.clone(),
             chunk_config: self.chunk_config,
         }
     }
@@ -56,27 +35,14 @@ impl Clone for PdContext {
 
 impl PdContext {
     /// Create a PdContext that uses the shared ChunkDataIndex for chunk retrieval.
-    /// Use this for payload building where chunks are pre-cached.
-    pub fn new_with_manager(
+    pub fn new(
         chunk_config: ChunkConfig,
         chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
     ) -> Self {
         Self {
             tx_hash: Arc::new(RwLock::new(None)),
             access_list: Arc::new(RwLock::new(Vec::new())),
-            chunk_source: ChunkSource::Manager { chunk_data_index },
-            chunk_config,
-        }
-    }
-
-    /// Create a PdContext that fetches chunks directly from storage.
-    /// Use this for block validation where we don't have a PdChunkManager.
-    pub fn new(chunk_provider: Arc<dyn RethChunkProvider>) -> Self {
-        let chunk_config = chunk_provider.config();
-        Self {
-            tx_hash: Arc::new(RwLock::new(None)),
-            access_list: Arc::new(RwLock::new(Vec::new())),
-            chunk_source: ChunkSource::Storage(chunk_provider),
+            chunk_data_index,
             chunk_config,
         }
     }
@@ -88,7 +54,7 @@ impl PdContext {
         Self {
             tx_hash: Arc::new(RwLock::new(*self.tx_hash.read())),
             access_list: Arc::new(RwLock::new(self.access_list.read().clone())),
-            chunk_source: self.chunk_source.clone(),
+            chunk_data_index: self.chunk_data_index.clone(),
             chunk_config: self.chunk_config,
         }
     }
@@ -118,27 +84,16 @@ impl PdContext {
         self.chunk_config
     }
 
-    /// Get chunk from the appropriate source (shared index or direct storage).
+    /// Get chunk from the shared ChunkDataIndex.
     ///
-    /// When using manager mode (for payload building):
-    /// - Chunks are pre-populated in the shared ChunkDataIndex DashMap by PdService
-    /// - Lock-free read directly from the index by (ledger, offset)
-    ///
-    /// When using storage mode (for block validation):
-    /// - Fetches directly from storage provider
+    /// Chunks are pre-populated in the shared ChunkDataIndex DashMap by PdService.
+    /// Lock-free read directly from the index by (ledger, offset).
     pub fn get_chunk(&self, ledger: u32, offset: u64) -> eyre::Result<Option<Bytes>> {
-        match &self.chunk_source {
-            ChunkSource::Manager { chunk_data_index } => {
-                match chunk_data_index.get(&(ledger, offset)) {
-                    Some(data) => Ok(Some((**data).clone())),
-                    None => {
-                        tracing::warn!(ledger, offset, "Chunk not found in shared index");
-                        Ok(None)
-                    }
-                }
-            }
-            ChunkSource::Storage(provider) => {
-                provider.get_unpacked_chunk_by_ledger_offset(ledger, offset)
+        match self.chunk_data_index.get(&(ledger, offset)) {
+            Some(data) => Ok(Some((**data).clone())),
+            None => {
+                tracing::warn!(ledger, offset, "chunk not found in chunk_data_index");
+                Ok(None)
             }
         }
     }

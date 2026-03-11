@@ -227,21 +227,6 @@ impl IrysBlockExecutorFactory {
     pub const fn evm_factory(&self) -> &IrysEvmFactory {
         self.inner.evm_factory()
     }
-
-    /// Configure for payload building mode — PD chunks read from shared lock-free index.
-    ///
-    /// Reconstructs this factory with the `chunk_data_index` set on the inner
-    /// [`IrysEvmFactory`], leaving the receipt builder and spec unchanged.
-    pub fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
-        let receipt_builder = *self.inner.receipt_builder();
-        let spec = Arc::clone(self.inner.spec());
-        let evm_factory = self
-            .inner
-            .evm_factory()
-            .clone()
-            .with_chunk_data_index(index);
-        Self::new(receipt_builder, spec, evm_factory)
-    }
 }
 
 impl BlockExecutorFactory for IrysBlockExecutorFactory
@@ -347,72 +332,25 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-impl IrysEvmConfig {
-    /// Configure for payload building mode — PD chunks read from shared lock-free index.
-    ///
-    /// Sets a [`ChunkDataIndex`] on the inner [`IrysEvmFactory`] so that all EVMs
-    /// created by the payload builder use `PdContext::new_with_manager()` instead
-    /// of the storage-backed path used during block validation.
-    pub fn with_chunk_data_index(
-        mut self,
-        index: irys_types::chunk_provider::ChunkDataIndex,
-    ) -> Self {
-        self.executor_factory = self.executor_factory.with_chunk_data_index(index);
-        self
-    }
-}
-
-/// Marker trait for EVM configurations that can be switched to manager-mode PD chunk fetching.
-///
-/// Implement this for your EVM config type to allow the payload builder to wire
-/// the [`ChunkDataIndex`] after receiving the (cloned) EVM config from reth's component system.
-pub trait ConfigureChunkDataIndex: Sized {
-    /// Configure `self` to use the given index for PD chunk fetching.
-    fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self;
-}
-
-impl ConfigureChunkDataIndex for IrysEvmConfig {
-    fn with_chunk_data_index(self, index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
-        Self::with_chunk_data_index(self, index)
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IrysEvmFactory {
-    context: PdContext,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// When set, creates Manager-mode `PdContext` for payload building.
-    /// When `None`, uses the Storage-backed `PdContext` (block validation).
-    chunk_data_index: Option<irys_types::chunk_provider::ChunkDataIndex>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl IrysEvmFactory {
     pub fn new(
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+        chunk_config: irys_types::chunk_provider::ChunkConfig,
         hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
     ) -> Self {
-        let context = PdContext::new(chunk_provider);
         Self {
-            context,
+            chunk_config,
             hardfork_config,
-            chunk_data_index: None,
+            chunk_data_index,
         }
-    }
-
-    /// Configure for payload building mode — chunks read from shared `ChunkDataIndex`.
-    pub fn with_chunk_data_index(
-        mut self,
-        index: irys_types::chunk_provider::ChunkDataIndex,
-    ) -> Self {
-        self.chunk_data_index = Some(index);
-        self
-    }
-
-    /// Provides access to the PdContext for test setup.
-    #[cfg(test)]
-    pub fn context(&self) -> &PdContext {
-        &self.context
     }
 
     /// Provides access to the hardfork config.
@@ -421,12 +359,12 @@ impl IrysEvmFactory {
     }
 
     /// Creates a new factory for testing with Sprite hardfork enabled from genesis.
-    #[cfg(test)]
-    pub fn new_for_testing(
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> Self {
-        let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
-        Self::new(chunk_provider, hardfork_config)
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_testing(chunk_data_index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
+        let consensus = irys_types::config::ConsensusConfig::testing();
+        let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&consensus);
+        let hardfork_config = Arc::new(consensus.hardforks);
+        Self::new(chunk_config, hardfork_config, chunk_data_index)
     }
 }
 
@@ -453,11 +391,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.chunk_data_index {
-            Some(index) => PdContext::new_with_manager(self.context.chunk_config(), index.clone()),
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = PdContext::new(self.chunk_config, self.chunk_data_index.clone());
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -501,11 +435,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.chunk_data_index {
-            Some(index) => PdContext::new_with_manager(self.context.chunk_config(), index.clone()),
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = PdContext::new(self.chunk_config, self.chunk_data_index.clone());
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -1898,8 +1828,9 @@ mod tests {
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::new());
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1936,8 +1867,9 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::new());
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();

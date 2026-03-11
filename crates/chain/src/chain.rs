@@ -345,7 +345,7 @@ async fn start_reth_node(
     chainspec: Arc<ChainSpec>,
     config: Config,
     latest_block: u64,
-    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
     chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
@@ -357,7 +357,7 @@ async fn start_reth_node(
         config.node_config.clone(),
         latest_block,
         random_ports,
-        chunk_provider,
+        chunk_config,
         pd_chunk_sender,
         ready_pd_txs,
         chunk_data_index,
@@ -1151,15 +1151,14 @@ impl IrysNode {
 
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
-        // MockChunkProvider is used only for ChunkConfig extraction by IrysEvmFactory.
-        // Actual chunk reads go through ChunkDataIndex (DashMap), not through this provider.
-        let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
+        let chunk_config =
+            irys_types::chunk_provider::ChunkConfig::from_consensus(&config.consensus);
         let (node_handle, reth_node) = match start_reth_node(
             exec,
             reth_chainspec,
             config.clone(),
             latest_block_height,
-            Arc::new(mock_provider),
+            chunk_config,
             pd_chunk_tx.clone(),
             ready_pd_txs.clone(),
             chunk_data_index.clone(),

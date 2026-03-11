@@ -103,7 +103,7 @@ pub async fn run_node(
     node_config: irys_types::NodeConfig,
     latest_block: u64,
     random_ports: bool,
-    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
     chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
@@ -233,7 +233,7 @@ pub async fn run_node(
     let handle = builder
         .node(IrysEthereumNode {
             max_pd_chunks_per_block,
-            chunk_provider,
+            chunk_config,
             hardfork_config: std::sync::Arc::new(hardfork_config.clone()),
             pd_chunk_sender,
             ready_pd_txs,

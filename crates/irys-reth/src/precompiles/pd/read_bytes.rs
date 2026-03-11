@@ -367,14 +367,29 @@ mod tests {
     use super::*;
     use crate::precompiles::pd::context::PdContext;
     use crate::precompiles::pd::utils::ParsedAccessLists;
-    use irys_types::chunk_provider::MockChunkProvider;
+    use dashmap::DashMap;
     use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
     use std::sync::Arc;
 
-    /// Creates a test PD context with a mock chunk provider (storage mode).
+    /// Creates a test PD context with a ChunkDataIndex pre-populated with zero-filled chunks.
     fn create_test_context() -> PdContext {
-        let mock_provider = Arc::new(MockChunkProvider::new());
-        PdContext::new(mock_provider)
+        create_test_context_with_chunks(1)
+    }
+
+    /// Creates a test PD context with N pre-populated zero-filled chunks at offsets 0..N.
+    fn create_test_context_with_chunks(num_chunks: u64) -> PdContext {
+        let chunk_config = irys_types::chunk_provider::ChunkConfig {
+            num_chunks_in_partition: 100,
+            chunk_size: 256_000,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        };
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 256_000]));
+        for offset in 0..num_chunks {
+            chunk_data_index.insert((0_u32, offset), chunk.clone());
+        }
+        PdContext::new(chunk_config, chunk_data_index)
     }
 
     /// Creates parsed access lists from chunk and byte range specifiers.
