@@ -7,10 +7,10 @@ use tracing::info;
 
 /// Tests that publish ledger slots expire when publish_ledger_epoch_length is configured.
 /// Verifies:
-/// - Perm data is stored and accessible before expiry
+/// - Perm data is posted and promoted before expiry
 /// - After epoch_length epochs, perm slots are marked expired
 /// - No fee distribution shadow transactions are generated for perm expiry
-/// - Expired perm partitions are returned to capacity pool
+/// - Expired perm partitions are reassigned to non-expired slots via backfill
 /// - User balance is unchanged by perm expiry (no fees or refunds)
 #[test_log::test(tokio::test)]
 async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
@@ -148,8 +148,8 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     );
 
     // --- Assertion 3: Expired partitions are reassigned to non-expired slots ---
-    // With num_partitions_per_slot=1 (testing default) and unfilled slots from epoch 3's
-    // allocation, backfill deterministically reassigns every expired partition at this epoch.
+    // With num_partitions_per_slot=1 and unfilled slots from epoch 1's allocation,
+    // backfill deterministically reassigns every expired partition at this epoch.
     let expired_infos = epoch_snapshot
         .expired_partition_infos
         .as_ref()
@@ -237,7 +237,7 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
 /// - Both perm and term slots expire when both epoch lengths are reached simultaneously
 /// - TermFeeReward shadow txs are generated (Submit fee distribution runs)
 /// - Publish expiry does not block Submit fee distribution
-/// - All expired partitions from both ledgers are returned to capacity pool
+/// - All expired partitions from both ledgers are reassigned to non-expired slots
 #[test_log::test(tokio::test)]
 async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
@@ -411,14 +411,9 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     );
 
     // --- Assertion 4 & 5: Expired partitions have coherent assignment state (both ledgers) ---
-    // After expiry, backfill_missing_partitions() may reassign expired partitions to new
-    // non-expired slots. We verify: (a) the partition was removed from its original expired
-    // slot, and (b) its current assignment is coherent — either still in the capacity pool
-    // (None, None) or reassigned to a valid non-expired slot with matching slot membership.
-    // With num_partitions_per_slot=1 (testing default) and unfilled slots from epoch 3's
-    // allocation, backfill deterministically reassigns every expired partition at this epoch.
-    // Cross-ledger reassignment is expected: expired Publish partitions may land in Submit
-    // slots and vice versa, since backfill draws from the global capacity pool.
+    // Verify each expired partition was removed from its original slot and reassigned to a
+    // valid non-expired slot. Cross-ledger reassignment is expected since backfill draws
+    // from the global capacity pool.
     let expired_infos = epoch_snapshot
         .expired_partition_infos
         .as_ref()
