@@ -2061,6 +2061,9 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder includes it
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
         let _add_result = node
             .inner
             .pool
@@ -2358,6 +2361,9 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder includes it
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
 
         // Submit transaction to mempool
         let _add_result = node
@@ -2532,6 +2538,10 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder considers it
+        // (rejection in block 1 is due to fee mismatch, not readiness)
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
         node.inner
             .pool
             .add_transaction(TransactionOrigin::Local, pooled)
@@ -2691,6 +2701,10 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder considers it
+        // (rejection in block 1 is due to insufficient balance, not readiness)
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
 
         // Submit to mempool - should be accepted (mempool doesn't check PD fee balance)
         node.inner

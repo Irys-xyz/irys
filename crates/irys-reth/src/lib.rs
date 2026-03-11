@@ -2556,6 +2556,8 @@ pub mod test_utils {
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
         pub tasks: Runtime,
+        /// Ready PD tx sets per node — tests can pre-populate these for PD transactions.
+        pub ready_pd_txs_per_node: Vec<Arc<dashmap::DashSet<revm_primitives::B256>>>,
     }
 
     impl std::fmt::Debug for TestContext {
@@ -2586,7 +2588,7 @@ pub mod test_utils {
                 vec![block_producer_a.address(), block_producer_b.address()];
             let mock_chunk_provider =
                 std::sync::Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-            let (nodes, tasks, ..) = setup_irys_reth(
+            let (nodes, tasks, _wallet, ready_pd_txs_per_node) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
@@ -2614,6 +2616,7 @@ pub mod test_utils {
                 normal_signer,
                 target_account,
                 genesis_blockhash,
+                ready_pd_txs_per_node,
             })
         }
 
@@ -2640,6 +2643,11 @@ pub mod test_utils {
             let second = self.nodes.pop().unwrap();
             let first = self.nodes.pop().unwrap();
             Ok(((first, second), self))
+        }
+
+        /// Get the ready_pd_txs DashSet for the first node (convenience for single-node tests).
+        pub fn ready_pd_txs(&self) -> &Arc<dashmap::DashSet<revm_primitives::B256>> {
+            &self.ready_pd_txs_per_node[0]
         }
     }
 
@@ -3316,7 +3324,12 @@ pub mod test_utils {
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
         chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, Runtime, Wallet)>
+    ) -> eyre::Result<(
+        Vec<NodeHelperType<IrysEthereumNode>>,
+        Runtime,
+        Wallet,
+        Vec<Arc<dashmap::DashSet<revm_primitives::B256>>>,
+    )>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
@@ -3335,6 +3348,7 @@ pub mod test_utils {
 
         // Create nodes and peer them
         let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+        let mut ready_sets = Vec::new();
 
         for (idx, producer) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
@@ -3345,6 +3359,10 @@ pub mod test_utils {
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
+
+            let ready_pd_txs = Arc::new(dashmap::DashSet::new());
+            let chunk_data_index = Arc::new(dashmap::DashMap::new());
+            ready_sets.push(ready_pd_txs.clone());
 
             let NodeHandle {
                 node,
@@ -3366,8 +3384,8 @@ pub mod test_utils {
                                 .clone(),
                         ),
                         pd_chunk_sender,
-                        ready_pd_txs: Arc::new(dashmap::DashSet::new()),
-                        chunk_data_index: Arc::new(dashmap::DashMap::new()),
+                        ready_pd_txs,
+                        chunk_data_index,
                     }
                 })
                 .launch()
@@ -3402,6 +3420,7 @@ pub mod test_utils {
             nodes,
             tasks,
             Wallet::default().with_chain_id(chain_spec.chain().into()),
+            ready_sets,
         ))
     }
 
