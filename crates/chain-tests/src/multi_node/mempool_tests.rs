@@ -750,6 +750,10 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
         );
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
+        // Wait for the fork block's tx to be processed into peer2's mempool before mining
+        peer2_node
+            .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
+            .await?;
         peer2_node.mine_block().await?;
         expected_height += 1;
         peer2_node.get_block_by_height(expected_height).await?
@@ -759,6 +763,10 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
         );
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
+        // Wait for the fork block's tx to be processed into peer1's mempool before mining
+        peer1_node
+            .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
+            .await?;
         peer1_node.mine_block().await?;
         expected_height += 1;
         peer1_node.get_block_by_height(expected_height).await?
