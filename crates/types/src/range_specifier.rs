@@ -199,6 +199,17 @@ mod range_specifier_tests {
 
         assert_eq!(max_values, decoded);
     }
+
+    #[test]
+    fn pd_access_list_arg_decode_rejects_invalid_type_id() {
+        use crate::range_specifier::PdAccessListArg;
+        let mut bytes = [0_u8; 32];
+        bytes[0] = 2; // invalid type ID (only 0 and 1 are valid)
+        assert!(PdAccessListArg::decode(&bytes).is_err());
+
+        bytes[0] = 255;
+        assert!(PdAccessListArg::decode(&bytes).is_err());
+    }
 }
 
 pub type U34 = Uint<34, 1>;

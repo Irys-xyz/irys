@@ -63,17 +63,21 @@ impl Compact for GlobalChunkOffset {
     }
 }
 #[cfg(test)]
-#[test]
-fn global_chunk_offset_compact_roundtrip() {
+mod global_chunk_offset_tests {
+    use super::*;
     use bytes::BytesMut;
+    use proptest::prelude::*;
 
-    let original_value = GlobalChunkOffset(U232::MAX);
-    let mut buf = BytesMut::with_capacity(29);
-    original_value.to_compact(&mut buf);
-    // Call from_compact to convert the bytes back to U256
-    let (decoded_value, _) = GlobalChunkOffset::from_compact(&buf[..], buf.len());
-    // Check that the decoded value matches the original value
-    assert_eq!(decoded_value, original_value);
+    proptest! {
+        #[test]
+        fn global_chunk_offset_compact_roundtrip(bytes in proptest::array::uniform29(0_u8..)) {
+            let original = GlobalChunkOffset(U232::from_le_bytes(bytes));
+            let mut buf = BytesMut::with_capacity(29);
+            let len = original.to_compact(&mut buf);
+            let (decoded, _) = GlobalChunkOffset::from_compact(&buf[..], len);
+            prop_assert_eq!(decoded, original);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
@@ -189,33 +193,54 @@ pub fn data_size_to_chunk_count(data_size: u64, chunk_size: u64) -> eyre::Result
 #[cfg(test)]
 mod tests {
     use super::data_size_to_chunk_count;
+    use proptest::prelude::*;
 
-    // Zero-size should return an error (no panic), as it is an illegal state
-    #[test]
-    fn data_size_zero_returns_error() {
-        assert!(data_size_to_chunk_count(0, 64).is_err());
-    }
+    proptest! {
+        #[test]
+        fn chunk_count_covers_data_size(
+            data_size in 1_u64..=10_000_000,
+            chunk_size in 1_u64..=262_144,
+        ) {
+            let count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+            let count_u64 = u64::from(count);
+            prop_assert!(
+                count_u64 * chunk_size >= data_size,
+                "chunk_count * chunk_size must cover data_size: {} * {} < {}",
+                count, chunk_size, data_size
+            );
+        }
 
-    // Exact multiple of chunk_size should return a single chunk
-    #[test]
-    fn exact_chunk_size_returns_one() {
-        assert_eq!(data_size_to_chunk_count(64, 64).unwrap(), 1);
-    }
+        #[test]
+        fn chunk_count_is_minimal(
+            data_size in 1_u64..=10_000_000,
+            chunk_size in 1_u64..=262_144,
+        ) {
+            let count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+            if count > 1 {
+                let fewer = u64::from(count - 1);
+                prop_assert!(
+                    fewer * chunk_size < data_size,
+                    "(count-1) * chunk_size must be insufficient: {} * {} >= {}",
+                    count - 1, chunk_size, data_size
+                );
+            }
+        }
 
-    // Ceil rounding behavior for small sizes across a single boundary
-    #[test]
-    fn round_up_behavior_small() {
-        assert_eq!(data_size_to_chunk_count(1, 64).unwrap(), 1);
-        assert_eq!(data_size_to_chunk_count(65, 64).unwrap(), 2);
-        assert_eq!(data_size_to_chunk_count(128, 64).unwrap(), 2);
-    }
+        #[test]
+        fn zero_data_size_is_error(chunk_size in 1_u64..=262_144) {
+            prop_assert!(data_size_to_chunk_count(0, chunk_size).is_err());
+        }
 
-    // Ceil rounding for varied chunk sizes including boundary crossing
-    #[test]
-    fn round_up_behavior_varied_chunk_sizes() {
-        assert_eq!(data_size_to_chunk_count(100, 64).unwrap(), 2);
-        assert_eq!(data_size_to_chunk_count(129, 128).unwrap(), 2);
-        assert_eq!(data_size_to_chunk_count(256, 128).unwrap(), 2);
-        assert_eq!(data_size_to_chunk_count(257, 128).unwrap(), 3);
+        #[test]
+        fn exact_multiples_yield_exact_quotient(
+            chunk_size in 1_u64..=262_144,
+            multiplier in 1_u32..=100,
+        ) {
+            let data_size = chunk_size.saturating_mul(u64::from(multiplier));
+            if data_size > 0 {
+                let count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+                prop_assert_eq!(count, multiplier);
+            }
+        }
     }
 }

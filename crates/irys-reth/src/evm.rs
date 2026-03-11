@@ -734,12 +734,12 @@ where
         // eventually we *should* be able to modify the associated type to allow for this.
         let tx_hash: &FixedBytes<32> = &[0; 32].into();
 
-        // the EVM factory should produce a new struct for every invocation
-        assert!(
-            self.state.is_empty(),
-            "Custom IrysEVM state should be empty, but got: {:?}",
-            &self.state.iter().collect::<Vec<_>>()
-        );
+        if !self.state.is_empty() {
+            return Err(Self::create_internal_error(format!(
+                "Custom IrysEVM state should be empty, but got: {:?}",
+                &self.state.iter().collect::<Vec<_>>()
+            )));
+        }
 
         self.distribute_priority_fee(total_fee, fee_payer_address, beneficiary)?;
 
@@ -935,15 +935,27 @@ where
         let (target_state, beneficiary_state) =
             self.prepare_fee_transfer(target, beneficiary, total_fee)?;
 
-        let bef = self.load_account(beneficiary)?.unwrap();
+        let beneficiary_before = self.load_account(beneficiary)?;
 
         self.commit_account_change(target, target_state);
-        self.commit_account_change(beneficiary, beneficiary_state.clone());
+        self.commit_account_change(beneficiary, beneficiary_state.clone()); // clone: required by commit_account_change taking owned Account
 
-        let aft = self.load_account(beneficiary)?.unwrap();
+        let aft = self.load_account(beneficiary)?.ok_or_else(|| {
+            Self::create_internal_error(format!(
+                "beneficiary account missing after commit: {beneficiary}"
+            ))
+        })?;
 
-        assert_ne!(bef, aft);
-        assert_eq!(beneficiary_state, aft);
+        if beneficiary_before.as_ref() == Some(&aft) {
+            return Err(Self::create_internal_error(format!(
+                "priority fee distribution had no effect on beneficiary {beneficiary}"
+            )));
+        }
+        if beneficiary_state != aft {
+            return Err(Self::create_internal_error(format!(
+                "beneficiary state mismatch after commit for {beneficiary}"
+            )));
+        }
 
         Ok(())
     }

@@ -12,6 +12,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+proptest.workspace = true
+test-log.workspace = true
 
 [lints]
 workspace = true

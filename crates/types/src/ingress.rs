@@ -235,36 +235,14 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
 
 #[cfg(test)]
 mod tests {
-    use alloy_rlp::{Decodable as _, Encodable as _};
     use rand::Rng as _;
 
     use crate::{
-        generate_data_root, generate_leaves, hash_sha256,
-        ingress::{verify_ingress_proof, IngressProofV1},
-        irys::IrysSigner,
-        ConsensusConfig, IngressProof, H256,
+        generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
+        irys::IrysSigner, ConsensusConfig, H256,
     };
 
     use super::generate_ingress_proof;
-
-    #[test]
-    fn ingress_proof_rlp_roundtrip_test() {
-        use bytes::BytesMut;
-        let original = IngressProof::V1(IngressProofV1 {
-            signature: crate::IrysSignature::default(),
-            proof: H256::from([12_u8; 32]),
-            chain_id: 1_u64,
-            data_root: H256::from([13_u8; 32]),
-            anchor: H256::from([14_u8; 32]),
-        });
-
-        let mut buf = BytesMut::new();
-        original.encode(&mut buf);
-        let mut slice = buf.as_ref();
-        let decoded = IngressProof::decode(&mut slice).unwrap();
-        assert_eq!(original, decoded);
-        assert!(slice.is_empty());
-    }
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {
@@ -422,5 +400,113 @@ mod tests {
         )?);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod prop_ingress_tests {
+    use super::*;
+    use alloy_rlp::Decodable as _;
+    use proptest::prelude::*;
+
+    fn arb_ingress_proof_v1() -> impl Strategy<Value = IngressProofV1> {
+        (
+            proptest::array::uniform32(any::<u8>()),
+            proptest::array::uniform32(any::<u8>()),
+            any::<u64>(),
+            proptest::array::uniform32(any::<u8>()),
+        )
+            .prop_map(|(data_root, proof, chain_id, anchor)| IngressProofV1 {
+                signature: IrysSignature::default(),
+                data_root: H256(data_root),
+                proof: H256(proof),
+                chain_id,
+                anchor: H256(anchor),
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn prop_ingress_proof_rlp_roundtrip(
+            inner in arb_ingress_proof_v1(),
+        ) {
+            let original = IngressProof::V1(inner);
+            let mut buf = bytes::BytesMut::new();
+            original.encode(&mut buf);
+            let mut slice = buf.as_ref();
+            let decoded = IngressProof::decode(&mut slice).unwrap();
+            prop_assert_eq!(&original, &decoded);
+            prop_assert!(slice.is_empty(), "trailing bytes after decode");
+        }
+
+        #[test]
+        fn prop_ingress_proof_rlp_strips_signature(
+            data_root in proptest::array::uniform32(any::<u8>()),
+            proof_hash in proptest::array::uniform32(any::<u8>()),
+            chain_id in any::<u64>(),
+            anchor in proptest::array::uniform32(any::<u8>()),
+        ) {
+            let non_default_sig = IrysSignature::new(
+                crate::Signature::test_signature()
+            );
+            let with_sig = IngressProof::V1(IngressProofV1 {
+                signature: non_default_sig,
+                data_root: H256(data_root),
+                proof: H256(proof_hash),
+                chain_id,
+                anchor: H256(anchor),
+            });
+            let without_sig = IngressProof::V1(IngressProofV1 {
+                signature: IrysSignature::default(),
+                data_root: H256(data_root),
+                proof: H256(proof_hash),
+                chain_id,
+                anchor: H256(anchor),
+            });
+
+            prop_assert_ne!(with_sig.signature, without_sig.signature,
+                "precondition: signatures must differ");
+
+            let mut buf1 = bytes::BytesMut::new();
+            let mut buf2 = bytes::BytesMut::new();
+            with_sig.encode(&mut buf1);
+            without_sig.encode(&mut buf2);
+
+            prop_assert_eq!(buf1.as_ref(), buf2.as_ref(),
+                "encoding should be identical regardless of signature");
+
+            let mut slice = buf1.as_ref();
+            let decoded = IngressProof::decode(&mut slice).unwrap();
+            prop_assert_eq!(decoded.signature, IrysSignature::default());
+        }
+
+        #[test]
+        fn prop_ingress_proof_compact_roundtrip(
+            inner in arb_ingress_proof_v1(),
+        ) {
+            let original = IngressProof::V1(inner);
+            let mut buf = Vec::new();
+            let len = original.to_compact(&mut buf);
+            let (decoded, remaining) = IngressProof::from_compact(&buf, len);
+            prop_assert_eq!(&original, &decoded);
+            prop_assert!(remaining.is_empty(), "trailing bytes after compact decode");
+        }
+
+        #[test]
+        fn prop_ingress_proof_rlp_length_consistency(
+            inner in arb_ingress_proof_v1(),
+        ) {
+            let proof = IngressProof::V1(inner);
+            let reported_len = proof.length();
+            let mut buf = bytes::BytesMut::new();
+            proof.encode(&mut buf);
+            prop_assert_eq!(
+                reported_len, buf.len(),
+                "Encodable::length() disagrees with actual encoded size"
+            );
+        }
+
     }
 }

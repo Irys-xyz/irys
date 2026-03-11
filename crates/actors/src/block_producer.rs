@@ -1702,79 +1702,35 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 mod oracle_choice_tests {
     use super::choose_oracle_price;
     use irys_types::{UnixTimestamp, storage_pricing::Amount};
+    use rstest::rstest;
     use rust_decimal_macros::dec;
 
-    const MAX_AGE_SECS: u64 = 3 * 60; // 3 minutes
+    const MAX_AGE_SECS: u64 = 3 * 60;
 
-    #[test]
-    fn chooses_parent_when_oracle_is_too_stale() {
+    #[rstest]
+    #[case::stale_oracle(1000, 1000 - MAX_AGE_SECS - 1, true)]
+    #[case::at_tolerance_boundary(1000, 1000 - MAX_AGE_SECS, false)]
+    #[case::fresher_oracle(100, 200, false)]
+    #[case::equal_timestamps(500, 500, false)]
+    fn choose_oracle_price_scenarios(
+        #[case] parent_ts_secs: u64,
+        #[case] oracle_ts_secs: u64,
+        #[case] expect_parent: bool,
+    ) {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
 
-        // Oracle is more than 3 minutes behind parent - use parent
         let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(1000),
+            UnixTimestamp::from_secs(parent_ts_secs),
             parent_price,
             oracle_price,
-            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS - 1), // 181 seconds behind
+            UnixTimestamp::from_secs(oracle_ts_secs),
         );
-        assert_eq!(
-            chosen, parent_price,
-            "should choose parent price when oracle is more than 3 minutes stale"
-        );
-    }
 
-    #[test]
-    fn chooses_oracle_when_within_tolerance() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Oracle is exactly at the 3-minute tolerance boundary - still use oracle
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(1000),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS), // exactly 180 seconds behind
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when exactly at 3-minute tolerance"
-        );
-    }
-
-    #[test]
-    fn chooses_oracle_when_oracle_is_fresher() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Oracle is fresher than parent - definitely use oracle
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(100),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(200),
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when oracle is fresher"
-        );
-    }
-
-    #[test]
-    fn chooses_oracle_when_timestamps_are_equal() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Both at same second - prefer oracle (authoritative source)
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(500),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(500),
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when timestamps are equal"
-        );
+        if expect_parent {
+            assert_eq!(chosen, parent_price);
+        } else {
+            assert_eq!(chosen, oracle_price);
+        }
     }
 }

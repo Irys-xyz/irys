@@ -17,6 +17,30 @@ use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
 use tracing::debug;
 
+async fn wait_for_mempool_len(
+    fixture: &GossipServiceTestFixture,
+    expected_len: usize,
+    timeout: Duration,
+) -> eyre::Result<()> {
+    let start = tokio::time::Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    loop {
+        let current_len = fixture
+            .mempool_txs
+            .read()
+            .expect("to read mempool txs")
+            .len();
+        if current_len == expected_len {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            eyre::bail!("Expected {expected_len} transactions in mempool, but found {current_len}");
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 #[tokio::test]
 async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
@@ -284,12 +308,7 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block_header)))
         .expect("Failed to send block to service 2");
 
-    poll_until(
-        Duration::from_secs(10),
-        "Expected 2 transactions in service 2 mempool",
-        || fixture2.mempool_txs.read().expect("read mempool").len() == 2,
-    )
-    .await?;
+    wait_for_mempool_len(&fixture2, 2, Duration::from_secs(10)).await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
@@ -461,7 +480,7 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
     fixture2
         .execution_payload_provider
         .test_observe_sealed_block_arrival(block.evm_block_hash, Duration::from_secs(10))
-        .await;
+        .await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;

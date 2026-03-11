@@ -770,7 +770,7 @@ pub fn block_index_latest_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
 /// Returns the number of blocks stored in the block index.
 pub fn block_index_num_blocks<T: DbTx>(tx: &T) -> eyre::Result<u64> {
     let count = tx.entries::<MigratedBlockHashes>()?;
-    Ok(count as u64)
+    Ok(u64::try_from(count)?)
 }
 
 /// Deletes block index entries for all heights in the given range from both tables.
@@ -929,6 +929,7 @@ mod tests {
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
+        use rstest::rstest;
 
         use super::open_or_create_db;
         use crate::IrysDatabaseArgs as _;
@@ -944,9 +945,15 @@ mod tests {
             })
         }
 
-        /// Tx included at height 5 on canonical chain, queried with max_height=10 → found
-        #[test]
-        fn returns_header_when_included_on_canonical_chain_within_height() {
+        #[rstest]
+        #[case::within_height_and_migrated(10, true, true)]
+        #[case::height_exceeds_max(3, true, false)]
+        #[case::unmigrated_height(10, false, false)]
+        fn canonical_lookup(
+            #[case] max_height: u64,
+            #[case] insert_migration: bool,
+            #[case] expect_found: bool,
+        ) {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
@@ -963,83 +970,21 @@ mod tests {
                 insert_tx_header(tx, &tx_header)
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 set_data_tx_included_height(tx, &tx_id, 5)?;
-                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                if insert_migration {
+                    tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                }
                 Ok(())
             })
             .unwrap()
             .unwrap();
 
             let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
+                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, max_height))
                 .unwrap();
-            assert!(
+            assert_eq!(
                 result.is_some(),
-                "tx on canonical chain within height should be found"
-            );
-        }
-
-        /// Tx included at height 5, but queried with max_height=3 → rejected (too new for parent)
-        #[test]
-        fn rejects_header_when_included_height_exceeds_max() {
-            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
-            let db = open_or_create_db(
-                path.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().unwrap(),
-            )
-            .unwrap();
-
-            let tx_id = H256::random();
-            let tx_header = make_tx_header(tx_id);
-            let block_hash_at_5 = H256::random();
-
-            db.update(|tx| -> Result<(), DatabaseError> {
-                insert_tx_header(tx, &tx_header)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                set_data_tx_included_height(tx, &tx_id, 5)?;
-                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
-                Ok(())
-            })
-            .unwrap()
-            .unwrap();
-
-            let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 3))
-                .unwrap();
-            assert!(
-                result.is_none(),
-                "tx included at height 5 should be rejected when max_height is 3"
-            );
-        }
-
-        /// Tx included at height 5, no MigratedBlockHashes entry → rejected
-        #[test]
-        fn rejects_header_at_unmigrated_height() {
-            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
-            let db = open_or_create_db(
-                path.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().unwrap(),
-            )
-            .unwrap();
-            let tx_id = H256::random();
-            let tx_header = make_tx_header(tx_id);
-
-            db.update(|tx| -> Result<(), DatabaseError> {
-                insert_tx_header(tx, &tx_header)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                set_data_tx_included_height(tx, &tx_id, 5)?;
-                Ok(())
-            })
-            .unwrap()
-            .unwrap();
-
-            let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
-                .unwrap();
-            assert!(
-                result.is_none(),
-                "tx at unmigrated height should be rejected"
+                expect_found,
+                "max_height={max_height}, migrated={insert_migration} => found={expect_found}"
             );
         }
     }

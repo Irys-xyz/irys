@@ -404,4 +404,18 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn validate_signature_returns_false_for_wrong_address() {
+        let default_sig = IrysSignature::default();
+        let prehash = [0_u8; 32];
+        let wrong_address = IrysAddress::from([1_u8; 20]);
+        assert!(!default_sig.validate_signature(prehash, wrong_address));
+    }
+
+    #[test]
+    fn from_base58_rejects_oversized_input() {
+        let long_string = "A".repeat(MAX_BS58_SIG_STRING_LENGTH + 1);
+        assert!(IrysSignature::from_base58(&long_string).is_err());
+    }
 }

@@ -12,6 +12,9 @@ use tracing::info;
 
 const ONE_HOUR_SECS: u64 = 3600;
 const ACTIVATION_DELAY_SECS: u64 = 10;
+// Tests that must submit transactions BEFORE activation need a wider window to
+// account for node startup time under parallel CI load (can exceed 10s).
+const PRE_ACTIVATION_WINDOW_SECS: u64 = 45;
 const AURORA_MIN_VERSION: u8 = 2;
 const MAX_ACTIVATION_BLOCKS: u32 = 50;
 const MAX_BLOCKS_TO_SEARCH: u64 = 5;
@@ -328,7 +331,7 @@ mod boundary_crossing {
     async fn test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
@@ -413,7 +416,7 @@ mod edge_cases {
     async fn test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
@@ -630,7 +633,7 @@ mod epoch_block_filtering {
     async fn test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
-        // Hardfork activates slightly in the future
+        // Short delay: this test waits for wall clock to reach activation, so keep it tight
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         config.consensus.get_mut().hardforks = IrysHardforkConfig {

@@ -14,6 +14,11 @@ tracing = { workspace = true }
 irys-api-server.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
+
 [features]
 default = []
 test-utils = []

@@ -252,48 +252,42 @@ pub async fn get_unpledge_price(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
+    use proptest::prelude::*;
 
-    #[test]
-    fn test_price_info_bytes_serialization() {
-        let price_info = PriceInfo {
-            perm_fee: U256::from(1000),
-            term_fee: U256::from(2000),
-            ledger: 1,
-            bytes: u64::MAX,
-        };
+    proptest! {
+        #[test]
+        fn price_info_serialization_roundtrip(bytes_val: u64, ledger_val in 0_u32..=10) {
+            let price_info = PriceInfo {
+                perm_fee: U256::from(1000),
+                term_fee: U256::from(2000),
+                ledger: ledger_val,
+                bytes: bytes_val,
+            };
 
-        let json = serde_json::to_string(&price_info).unwrap();
-        assert!(json.contains(&format!("\"bytes\":\"{}\"", u64::MAX)));
+            let json = serde_json::to_string(&price_info).unwrap();
+            let deserialized: PriceInfo = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(deserialized, price_info);
+        }
 
-        let deserialized: PriceInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.bytes, u64::MAX);
-    }
+        #[test]
+        fn price_info_bytes_always_serialized_as_string(bytes_val: u64) {
+            let price_info = PriceInfo {
+                perm_fee: U256::from(1000),
+                term_fee: U256::from(2000),
+                ledger: 1,
+                bytes: bytes_val,
+            };
 
-    #[test]
-    fn test_price_info_javascript_compatibility() {
-        const JS_MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1; // 2^53 - 1
-        let above_safe_limit = JS_MAX_SAFE_INTEGER + 1;
-
-        let price_info = PriceInfo {
-            perm_fee: U256::from(1000),
-            term_fee: U256::from(2000),
-            ledger: 1,
-            bytes: above_safe_limit,
-        };
-
-        let json = serde_json::to_string(&price_info).unwrap();
-
-        // Should be string, not number
-        assert!(json.contains(&format!("\"bytes\":\"{above_safe_limit}\"")));
-
-        // Test JavaScript parsing would work
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        if let Some(bytes_str) = parsed.get("bytes").and_then(|v| v.as_str()) {
-            let parsed_bytes: u64 = bytes_str.parse().unwrap();
-            assert_eq!(parsed_bytes, above_safe_limit);
-        } else {
-            panic!("bytes should be serialized as string");
+            let json = serde_json::to_string(&price_info).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let bytes_field = parsed.get("bytes").unwrap();
+            prop_assert!(
+                bytes_field.is_string(),
+                "bytes must serialize as string, got: {}",
+                bytes_field
+            );
+            let parsed_bytes: u64 = bytes_field.as_str().unwrap().parse().unwrap();
+            prop_assert_eq!(parsed_bytes, bytes_val);
         }
     }
 }

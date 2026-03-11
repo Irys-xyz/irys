@@ -242,8 +242,12 @@ impl CommitmentSnapshot {
                 }
 
                 // Validate pledge count matches actual number of existing pledges
-                let current_pledge_count =
-                    Self::active_pledge_count(miner_commitments, pledges_in_epoch) as u64;
+                let Ok(current_pledge_count) = u64::try_from(Self::active_pledge_count(
+                    miner_commitments,
+                    pledges_in_epoch,
+                )) else {
+                    return CommitmentSnapshotStatus::InvalidPledgeCount;
+                };
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
                         "Invalid pledge count for {}: expected {}, but miner {} has {} pledges",
@@ -270,8 +274,12 @@ impl CommitmentSnapshot {
 
                 // Validate pledge count
                 let miner_commitments = self.commitments.entry(*signer).or_default();
-                let current_pledge_count =
-                    Self::active_pledge_count(miner_commitments, pledges_in_epoch) as u64;
+                let Ok(current_pledge_count) = u64::try_from(Self::active_pledge_count(
+                    miner_commitments,
+                    pledges_in_epoch,
+                )) else {
+                    return CommitmentSnapshotStatus::InvalidPledgeCount;
+                };
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
                         tx.id = ?commitment_tx.id(),
@@ -409,6 +417,7 @@ mod tests {
     use super::*;
     use irys_types::CommitmentStatus;
     use irys_types::{H256, IrysSignature, U256, partition::PartitionAssignment};
+    use rstest::rstest;
 
     fn create_test_commitment(
         signer: IrysAddress,
@@ -663,20 +672,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_pledge_without_stake() {
+    enum UnstakedCase {
+        Pledge,
+        Unstake,
+        UpdateRewardAddress,
+    }
+
+    #[rstest]
+    #[case::pledge(UnstakedCase::Pledge)]
+    #[case::unstake(UnstakedCase::Unstake)]
+    #[case::update_reward_address(UnstakedCase::UpdateRewardAddress)]
+    fn test_commitment_without_stake_is_rejected(#[case] variant: UnstakedCase) {
         let mut snapshot = CommitmentSnapshot::default();
         let signer = IrysAddress::random();
 
-        // Try to add pledge without stake
-        let pledge = create_test_commitment(
-            signer,
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing: 0,
-            },
-            U256::from(1000),
-        );
-        let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
+        let commitment = match variant {
+            UnstakedCase::Pledge => create_test_commitment(
+                signer,
+                CommitmentTypeV1::Pledge {
+                    pledge_count_before_executing: 0,
+                },
+                U256::from(1000),
+            ),
+            UnstakedCase::Unstake => {
+                create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000))
+            }
+            UnstakedCase::UpdateRewardAddress => {
+                let new_reward_address = IrysAddress::random();
+                create_test_commitment_v2(
+                    signer,
+                    CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
+                    U256::zero(),
+                )
+            }
+        };
+
+        let status = snapshot.add_commitment(&commitment, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 
@@ -768,33 +799,6 @@ mod tests {
         // Verify only one pledge exists
         assert_eq!(snapshot.commitments[&signer].pledges.len(), 1);
         assert_eq!(snapshot.commitments[&signer].pledges[0].id(), pledge_id);
-    }
-
-    #[test]
-    fn test_unstake_without_existing_stake_is_rejected() {
-        let mut snapshot = CommitmentSnapshot::default();
-        let signer = IrysAddress::random();
-
-        // Try to add unstake
-        let unstake = create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000));
-        let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
-    }
-
-    #[test]
-    fn test_update_reward_address_without_stake() {
-        let mut snapshot = CommitmentSnapshot::default();
-        let signer = IrysAddress::random();
-        let new_reward_address = IrysAddress::random();
-
-        // Try to update reward address without stake
-        let update_tx = create_test_commitment_v2(
-            signer,
-            CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
-            U256::zero(),
-        );
-        let status = snapshot.add_commitment(&update_tx, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 
     #[test]

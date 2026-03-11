@@ -369,22 +369,6 @@ async fn unique_addresses_per_slot_test() {
 }
 
 #[tokio::test]
-async fn capacity_projection_tests() {
-    let max_data_parts = 1000;
-    let config = ConsensusConfig::testing();
-    for i in (0..max_data_parts).step_by(10) {
-        let data_partition_count = i;
-        let capacity_count =
-            EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config);
-        let total = data_partition_count + capacity_count;
-        println!(
-            "data:{}, capacity:{}, total:{}",
-            data_partition_count, capacity_count, total
-        );
-    }
-}
-
-#[tokio::test]
 /*
 Summary:
 Verify that when a Submit ledger slot expires at an epoch boundary,

@@ -785,3 +785,165 @@ mod tests {
         assert_eq!(result, expected);
     }
 }
+
+#[cfg(test)]
+mod prop_serde_roundtrip_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_commitment_type_v2() -> impl Strategy<Value = CommitmentTypeV2> {
+        prop_oneof![
+            Just(CommitmentTypeV2::Stake),
+            any::<u64>().prop_map(|count| CommitmentTypeV2::Pledge {
+                pledge_count_before_executing: count,
+            }),
+            (any::<u64>(), proptest::array::uniform32(any::<u8>())).prop_map(|(count, hash)| {
+                CommitmentTypeV2::Unpledge {
+                    pledge_count_before_executing: count,
+                    partition_hash: H256(hash),
+                }
+            }),
+            Just(CommitmentTypeV2::Unstake),
+            proptest::array::uniform20(any::<u8>()).prop_map(|addr| {
+                CommitmentTypeV2::UpdateRewardAddress {
+                    new_reward_address: IrysAddress::from(addr),
+                }
+            }),
+        ]
+    }
+
+    fn arb_commitment_tx_v2() -> impl Strategy<Value = CommitmentTransactionV2> {
+        (
+            proptest::array::uniform32(any::<u8>()),
+            proptest::array::uniform32(any::<u8>()),
+            proptest::array::uniform20(any::<u8>()),
+            arb_commitment_type_v2(),
+            any::<u64>(),
+            any::<u64>(),
+            proptest::array::uniform32(any::<u8>()),
+        )
+            .prop_map(
+                |(id, anchor, signer, commitment_type, chain_id, fee, value_bytes)| {
+                    CommitmentTransactionV2 {
+                        id: H256(id),
+                        anchor: H256(anchor),
+                        signer: IrysAddress::from(signer),
+                        commitment_type,
+                        chain_id,
+                        fee,
+                        value: U256::from_be_bytes(value_bytes),
+                        signature: IrysSignature::default(),
+                    }
+                },
+            )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn prop_commitment_type_v2_json_roundtrip(
+            ct in arb_commitment_type_v2(),
+        ) {
+            let json = serde_json::to_string(&ct).unwrap();
+            let decoded: CommitmentTypeV2 = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&ct, &decoded);
+        }
+
+        #[test]
+        fn prop_commitment_tx_v2_json_roundtrip(
+            tx in arb_commitment_tx_v2(),
+        ) {
+            let json = serde_json::to_string(&tx).unwrap();
+            let decoded: CommitmentTransactionV2 = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&tx, &decoded);
+        }
+
+        #[test]
+        fn prop_commitment_status_json_roundtrip(
+            variant in 1_u8..=4_u8,
+        ) {
+            let status = CommitmentStatus::try_from(variant).unwrap();
+            let json = serde_json::to_string(&status).unwrap();
+            let decoded: CommitmentStatus = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(status, decoded);
+        }
+
+        #[test]
+        fn prop_commitment_transaction_rlp_roundtrip(
+            tx in arb_commitment_tx_v2(),
+        ) {
+            use alloy_rlp::{Decodable as _, Encodable as _};
+            let versioned = CommitmentTransaction::V2(CommitmentV2WithMetadata {
+                tx,
+                metadata: CommitmentTransactionMetadata::new(),
+            });
+            let mut buf = Vec::new();
+            versioned.encode(&mut buf);
+            let mut slice = &buf[..];
+            let decoded = CommitmentTransaction::decode(&mut slice).unwrap();
+            prop_assert!(matches!(&decoded, CommitmentTransaction::V2(_)), "expected V2 after RLP roundtrip");
+            prop_assert!(slice.is_empty(), "trailing bytes after RLP decode");
+            prop_assert_eq!(decoded.id(), H256::zero(), "id is rlp-skipped, should default");
+            prop_assert_eq!(versioned.fee(), decoded.fee());
+            prop_assert_eq!(versioned.value(), decoded.value());
+            prop_assert_eq!(versioned.signer(), decoded.signer());
+            prop_assert_eq!(versioned.anchor(), decoded.anchor());
+            prop_assert_eq!(versioned.commitment_type(), decoded.commitment_type());
+            if let (CommitmentTransaction::V2(orig), CommitmentTransaction::V2(got)) = (&versioned, &decoded) {
+                prop_assert_eq!(orig.tx.chain_id, got.tx.chain_id);
+            }
+        }
+
+        #[test]
+        fn prop_commitment_transaction_compact_roundtrip(
+            tx in arb_commitment_tx_v2(),
+        ) {
+            let versioned = CommitmentTransaction::V2(CommitmentV2WithMetadata {
+                tx,
+                metadata: CommitmentTransactionMetadata::new(),
+            });
+            let mut buf = Vec::new();
+            let len = versioned.to_compact(&mut buf);
+            let (decoded, remaining) = CommitmentTransaction::from_compact(&buf, len);
+            prop_assert!(matches!(&decoded, CommitmentTransaction::V2(_)), "expected V2 after compact roundtrip");
+            prop_assert_eq!(versioned.id(), decoded.id());
+            prop_assert_eq!(versioned.fee(), decoded.fee());
+            prop_assert_eq!(versioned.value(), decoded.value());
+            prop_assert_eq!(versioned.signer(), decoded.signer());
+            prop_assert_eq!(versioned.anchor(), decoded.anchor());
+            prop_assert_eq!(versioned.commitment_type(), decoded.commitment_type());
+            if let (CommitmentTransaction::V2(orig), CommitmentTransaction::V2(got)) = (&versioned, &decoded) {
+                prop_assert_eq!(orig.tx.chain_id, got.tx.chain_id);
+            }
+            prop_assert!(remaining.is_empty(), "trailing bytes after compact decode");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0)]
+    #[case::five(5)]
+    #[case::max(u8::MAX)]
+    fn commitment_status_try_from_rejects_invalid(#[case] value: u8) {
+        assert!(CommitmentStatus::try_from(value).is_err());
+    }
+
+    #[rstest::rstest]
+    #[case::pending(1, CommitmentStatus::Pending)]
+    #[case::active(2, CommitmentStatus::Active)]
+    #[case::inactive(3, CommitmentStatus::Inactive)]
+    #[case::slashed(4, CommitmentStatus::Slashed)]
+    fn commitment_status_try_from_valid(#[case] value: u8, #[case] expected: CommitmentStatus) {
+        assert_eq!(CommitmentStatus::try_from(value).unwrap(), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot set commitment type on V1 transaction")]
+    fn set_commitment_type_panics_on_v1() {
+        let mut tx = CommitmentTransaction::V1(crate::CommitmentV1WithMetadata {
+            tx: crate::CommitmentTransactionV1::default(),
+            metadata: Default::default(),
+        });
+        tx.set_commitment_type(CommitmentTypeV2::Stake);
+    }
+}

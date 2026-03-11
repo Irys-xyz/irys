@@ -29,6 +29,8 @@ heap-profile = []
 
 [dev-dependencies]
 tempfile = "3"
+rstest.workspace = true
+proptest.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }

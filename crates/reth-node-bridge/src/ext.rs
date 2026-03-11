@@ -142,7 +142,7 @@ where
                 BlockId::Number(block_number_or_tag) => match block_number_or_tag {
                     alloy_eips::BlockNumberOrTag::Latest => provider.latest()?,
 
-                    _ => unimplemented!(),
+                    other => eyre::bail!("unsupported BlockNumberOrTag variant: {other:?}"),
                 },
             }
         };

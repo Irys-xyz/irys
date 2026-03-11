@@ -54,7 +54,8 @@ impl ForkChoiceMarkers {
         let index_safe_height = block_index.latest_height();
         let migration_height =
             compute_migration_height(head_height, tree_safe_height, index_safe_height);
-        let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
+        let depth_delta = u64::try_from(prune_depth.saturating_sub(migration_depth))
+            .map_err(|e| eyre::eyre!("depth_delta overflow: {e}"))?;
         let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta);
 
         let head_block = block_at_height(
@@ -109,7 +110,8 @@ impl ForkChoiceMarkers {
 
         let head_height = block_index.latest_height();
         let migration_height = head_height;
-        let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
+        let depth_delta = u64::try_from(prune_depth.saturating_sub(migration_depth))
+            .map_err(|e| eyre::eyre!("depth_delta overflow: {e}"))?;
         let prune_height = head_height.saturating_sub(depth_delta);
 
         let head_block = marker_from_index_height(block_index, database, head_height)?;
@@ -214,4 +216,52 @@ pub(crate) fn compute_prune_height(
     let index_final_height = index_safe_height.saturating_sub(depth_delta);
     let desired_prune = migration_height.saturating_sub(depth_delta);
     desired_prune.max(index_final_height).min(migration_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn migration_height_never_exceeds_head(
+            head_height: u64,
+            tree_safe_height: u64,
+            index_safe_height: u64,
+        ) {
+            let result = compute_migration_height(head_height, tree_safe_height, index_safe_height);
+            prop_assert!(result <= head_height);
+        }
+
+        #[test]
+        fn migration_height_equals_clamped_max_safe(
+            head_height: u64,
+            tree_safe_height: u64,
+            index_safe_height: u64,
+        ) {
+            let result = compute_migration_height(head_height, tree_safe_height, index_safe_height);
+            let max_safe = tree_safe_height.max(index_safe_height);
+            prop_assert_eq!(result, max_safe.min(head_height));
+        }
+
+        #[test]
+        fn prune_height_never_exceeds_migration(
+            migration_height: u64,
+            index_safe_height: u64,
+            depth_delta: u64,
+        ) {
+            let result = compute_prune_height(migration_height, index_safe_height, depth_delta);
+            prop_assert!(result <= migration_height);
+        }
+
+        #[test]
+        fn prune_height_zero_delta_equals_migration(
+            migration_height: u64,
+            index_safe_height: u64,
+        ) {
+            let result = compute_prune_height(migration_height, index_safe_height, 0);
+            prop_assert_eq!(result, migration_height);
+        }
+    }
 }
