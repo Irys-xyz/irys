@@ -160,7 +160,7 @@ fn test_block_body_roundtrip() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::BlockBody = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::BlockBody = deserialized.into();
-    assert_eq!(canonical, roundtrip);
+    assert!(irys_types::cmp_block_body(&canonical, &roundtrip));
 }
 
 // =============================================================================
@@ -287,7 +287,7 @@ fn test_gossip_data_v1_roundtrip() {
         let json = serde_json::to_string(&wire).unwrap();
         let deserialized: wire::GossipDataV1 = serde_json::from_str(&json).unwrap();
         let roundtrip: gossip::v1::GossipDataV1 = deserialized.into();
-        assert_eq!(canonical, roundtrip);
+        assert!(gossip::v1::cmp_gossip_data_v1(&canonical, &roundtrip));
     }
 
     assert_roundtrip(gossip::v1::GossipDataV1::Chunk(canonical_unpacked_chunk()));
@@ -319,7 +319,7 @@ fn test_gossip_data_v2_roundtrip() {
         let json = serde_json::to_string(&wire).unwrap();
         let deserialized: wire::GossipDataV2 = serde_json::from_str(&json).unwrap();
         let roundtrip: gossip::v2::GossipDataV2 = deserialized.into();
-        assert_eq!(canonical, roundtrip);
+        assert!(gossip::v2::cmp_gossip_data_v2(&canonical, &roundtrip));
     }
 
     assert_roundtrip(gossip::v2::GossipDataV2::Chunk(Arc::new(

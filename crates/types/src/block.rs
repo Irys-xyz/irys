@@ -1135,18 +1135,20 @@ pub struct BlockBody {
     pub commitment_transactions: Vec<CommitmentTransaction>,
 }
 
-impl PartialEq for BlockBody {
-    fn eq(&self, other: &Self) -> bool {
-        self.block_hash == other.block_hash
-            && self.commitment_transactions == other.commitment_transactions
-            && self.data_transactions.len() == other.data_transactions.len()
-            && self
-                .data_transactions
-                .iter()
-                .zip(other.data_transactions.iter())
-                // note: use eq_tx here
-                .all(|(a, b)| a.eq_tx(b))
-    }
+/// Compare two [`BlockBody`] values for equality.
+///
+/// Uses [`DataTransactionHeader::eq_tx`] for data transaction comparison
+/// (which intentionally excludes metadata fields that don't survive serialization roundtrips).
+/// This is a standalone function rather than a `PartialEq` impl to avoid silently applying
+/// these custom comparison semantics wherever `==` is used.
+pub fn cmp_block_body(a: &BlockBody, b: &BlockBody) -> bool {
+    a.block_hash == b.block_hash
+        && a.commitment_transactions == b.commitment_transactions
+        && a.data_transactions.len() == b.data_transactions.len()
+        && a.data_transactions
+            .iter()
+            .zip(b.data_transactions.iter())
+            .all(|(a, b)| a.eq_tx(b))
 }
 
 impl BlockBody {
