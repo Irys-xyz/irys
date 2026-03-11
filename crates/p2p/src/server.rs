@@ -1114,7 +1114,7 @@ where
         let response = wire_types::HandshakeResponseV1 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
-            peers,
+            peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1236,7 +1236,7 @@ where
         let response = wire_types::HandshakeResponseV2 {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
-            peers,
+            peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
