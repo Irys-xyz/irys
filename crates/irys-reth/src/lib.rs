@@ -3311,7 +3311,7 @@ pub mod test_utils {
     /// - `chain_spec`: Chain spec to use
     /// - `is_dev`: Whether to run in dev mode
     /// - `attributes_generator`: Function to generate payload attributes
-    /// - `chunk_provider`: Implementation of RethChunkProvider to use for all nodes
+    /// - `chunk_config`: Chunk configuration for all nodes
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles

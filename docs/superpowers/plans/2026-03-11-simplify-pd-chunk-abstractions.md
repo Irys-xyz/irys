@@ -524,6 +524,11 @@ Update all callers of `setup_irys_reth` — remove the `MockChunkProvider` argum
 
 ## Phase 2: Rename + MockChunkProvider Relocation + Cargo.toml Cleanup
 
+> **Phase 1 completed in commit `59fcc69d`.** Notable deviations from plan:
+> - `IrysEvmFactory::new_for_testing` gate changed from `#[cfg(test)]` to `#[cfg(any(test, feature = "test-utils"))]` so integration tests can use it.
+> - `pd_context_isolation.rs` integration test constructs `IrysEvmFactory::new()` directly (avoiding feature-gate issues).
+> - Line numbers in Phase 2 below may be stale — read the actual files before editing.
+
 ### Overview
 Rename `RethChunkProvider` → `ChunkStorageProvider` everywhere, move `MockChunkProvider` from `irys-types` to `pd_service` test module, and clean up Cargo.toml feature flags. Corresponds to design spec Changes 5-6.
 
@@ -632,15 +637,15 @@ irys-reth = { workspace = true }
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo xtask check` passes
-- [ ] `cargo xtask test` passes (full test suite)
-- [ ] `cargo clippy --workspace --tests --all-targets` clean
-- [ ] `cargo fmt --all --check` clean
-- [ ] No `RethChunkProvider` references in codebase (grep confirms — only `ChunkStorageProvider`)
-- [ ] No `MockChunkProvider` in `crates/types/src/chunk_provider.rs`
-- [ ] `MockChunkProvider` exists only in `crates/actors/src/pd_service.rs` test module
-- [ ] `chain/Cargo.toml` does not have `test-utils` in `[dependencies]` for `irys-types`
-- [ ] `reth-node-bridge/Cargo.toml` does not have `test-utils` for `irys-reth`
+- [x] `cargo xtask check` passes
+- [x] `cargo xtask test` passes (full test suite)
+- [x] `cargo clippy --workspace --tests --all-targets` clean
+- [x] `cargo fmt --all --check` clean
+- [x] No `RethChunkProvider` references in codebase (grep confirms — only `ChunkStorageProvider`)
+- [x] No `MockChunkProvider` in `crates/types/src/chunk_provider.rs`
+- [x] `MockChunkProvider` exists only in `crates/actors/src/pd_service.rs` test module
+- [x] `chain/Cargo.toml` does not have `test-utils` in `[dependencies]` for `irys-types`
+- [x] `reth-node-bridge/Cargo.toml` does not have `test-utils` for `irys-reth`
 
 ---
 

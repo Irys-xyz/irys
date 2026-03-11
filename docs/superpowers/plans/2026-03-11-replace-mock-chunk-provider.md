@@ -214,7 +214,7 @@ New:
 Run: `cargo check -p irys-reth`
 Expected: Clean compile.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/irys-reth/src/lib.rs
@@ -248,7 +248,7 @@ New:
         let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add crates/chain/src/chain.rs
@@ -259,19 +259,19 @@ git commit -m "docs(chain): clarify MockChunkProvider role after executor ChunkD
 
 ### Task 3: Verify the fix
 
-- [ ] **Step 1: Run the previously failing integration tests**
+- [x] **Step 1: Run the previously failing integration tests**
 
 Run: `cargo nextest run -p irys-chain-tests heavy_test_pd_content_verification heavy_test_pd_headerless_access_list_reverts heavy_test_pd_multi_tx_single_block heavy_test_pd_single_chunk_read`
 
 Expected: All 5 tests pass (no more gas mismatch).
 
-- [ ] **Step 2: Run broader PD test suite**
+- [x] **Step 2: Run broader PD test suite**
 
 Run: `cargo nextest run -p irys-chain-tests programmable_data`
 
 Expected: All programmable_data tests pass.
 
-- [ ] **Step 3: Run clippy and fmt**
+- [x] **Step 3: Run clippy and fmt**
 
 Run: `cargo clippy --workspace --tests --all-targets && cargo fmt --all`
 

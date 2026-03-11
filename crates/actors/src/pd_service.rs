@@ -3,7 +3,7 @@ pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
 use dashmap::DashSet;
-use irys_types::chunk_provider::{PdChunkMessage, PdChunkReceiver, RethChunkProvider};
+use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkMessage, PdChunkReceiver};
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
@@ -25,7 +25,7 @@ pub struct PdService {
     msg_rx: PdChunkReceiver,
     cache: ChunkCache,
     tracker: ProvisioningTracker,
-    storage_provider: Arc<dyn RethChunkProvider>,
+    storage_provider: Arc<dyn ChunkStorageProvider>,
     block_tracker: HashMap<B256, Vec<ChunkKey>>,
     /// Shared set of ready PD tx hashes. Written on provision/release.
     ready_pd_txs: Arc<DashSet<B256>>,
@@ -35,7 +35,7 @@ impl PdService {
     /// Spawn the PD service as a tokio task.
     pub fn spawn_service(
         msg_rx: PdChunkReceiver,
-        storage_provider: Arc<dyn RethChunkProvider>,
+        storage_provider: Arc<dyn ChunkStorageProvider>,
         runtime_handle: tokio::runtime::Handle,
         chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
         ready_pd_txs: Arc<DashSet<B256>>,
@@ -392,14 +392,49 @@ impl PdService {
 mod tests {
     use super::*;
     use dashmap::DashMap;
-    use irys_types::chunk_provider::MockChunkProvider;
     use irys_types::range_specifier::ChunkRangeSpecifier;
     use tokio::sync::{mpsc, oneshot};
+
+    #[derive(Debug, Clone)]
+    struct MockChunkProvider {
+        config: irys_types::chunk_provider::ChunkConfig,
+        cached_chunk: reth::revm::primitives::bytes::Bytes,
+    }
+
+    impl MockChunkProvider {
+        fn new() -> Self {
+            let config = irys_types::chunk_provider::ChunkConfig {
+                num_chunks_in_partition: 100,
+                chunk_size: 256_000,
+                entropy_packing_iterations: 0,
+                chain_id: 1,
+            };
+            let cached_chunk = reth::revm::primitives::bytes::Bytes::from(vec![0_u8; 256_000]);
+            Self {
+                config,
+                cached_chunk,
+            }
+        }
+    }
+
+    impl irys_types::chunk_provider::ChunkStorageProvider for MockChunkProvider {
+        fn get_unpacked_chunk_by_ledger_offset(
+            &self,
+            _ledger: u32,
+            _ledger_offset: u64,
+        ) -> eyre::Result<Option<reth::revm::primitives::bytes::Bytes>> {
+            Ok(Some(self.cached_chunk.clone()))
+        }
+
+        fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
+            self.config
+        }
+    }
 
     /// Create a PdService for testing with a mock provider.
     fn test_service() -> PdService {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let provider = Arc::new(MockChunkProvider::new());
+        let provider: Arc<dyn ChunkStorageProvider> = Arc::new(MockChunkProvider::new());
         let (_, shutdown) = reth::tasks::shutdown::signal();
         let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
         let ready_pd_txs = Arc::new(DashSet::new());
