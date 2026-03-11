@@ -20,12 +20,12 @@
 mod block;
 mod block_index;
 mod chunk;
-mod commitment;
-mod gossip;
+mod commitment_transaction;
+mod data_transaction;
+mod gossip_data;
 mod handshake;
-mod ingress;
+mod ingress_proof;
 mod node_info;
-mod transaction;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
@@ -35,12 +35,12 @@ mod tests;
 pub(crate) use block::*;
 pub(crate) use block_index::*;
 pub(crate) use chunk::*;
-pub(crate) use commitment::*;
-pub(crate) use gossip::*;
+pub(crate) use commitment_transaction::*;
+pub(crate) use data_transaction::*;
+pub(crate) use gossip_data::*;
 pub(crate) use handshake::*;
-pub(crate) use ingress::*;
+pub(crate) use ingress_proof::*;
 pub(crate) use node_info::*;
-pub(crate) use transaction::*;
 
 // These envelope/response types live in `crate::types` but ARE wire types —
 // they're serialized directly into gossip HTTP responses. Re-exported here so
