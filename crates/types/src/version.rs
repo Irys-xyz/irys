@@ -510,7 +510,7 @@ pub enum RejectionReason {
     InternalError,      // Unable to complete request
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,

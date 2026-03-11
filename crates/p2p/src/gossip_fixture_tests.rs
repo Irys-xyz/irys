@@ -23,8 +23,9 @@ use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
-use crate::wire_types::{self as wire, test_helpers::*};
+use crate::wire_types::{
+    self as wire, test_helpers::*, GossipResponse, HandshakeRequirementReason, RejectionReason,
+};
 
 // =============================================================================
 // Additional test value constructors (not shared — specific to fixture tests)
@@ -591,6 +592,112 @@ fixture_tests! {
 
     // Protocol versions (returned by /protocol_version as bare Vec<u32>)
     protocol_versions => ProtocolVersion::supported_versions_u32().to_vec(),
+}
+
+// =============================================================================
+// Exhaustive coverage: compile-time enforcement that every enum variant has a
+// fixture test. Adding a new variant without a fixture entry causes a build
+// error from the non-exhaustive match.
+// =============================================================================
+
+/// Maps every [`RejectionReason`] variant to the fixture name that covers it.
+/// The exhaustive match is the key mechanism — the compiler will refuse to
+/// build if a new variant is added without a corresponding fixture entry.
+fn rejection_reason_fixture_names() -> Vec<&'static str> {
+    let all = [
+        RejectionReason::HandshakeRequired(None),
+        RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+        )),
+        RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+        )),
+        RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::MinerAddressIsUnknown,
+        )),
+        RejectionReason::GossipDisabled,
+        RejectionReason::InvalidData,
+        RejectionReason::RateLimited,
+        RejectionReason::UnableToVerifyOrigin,
+        RejectionReason::InvalidCredentials,
+        RejectionReason::ProtocolMismatch,
+        RejectionReason::UnsupportedProtocolVersion(0),
+        RejectionReason::UnsupportedFeature,
+    ];
+    all.iter()
+        .map(|r| match r {
+            RejectionReason::HandshakeRequired(inner) => match inner {
+                None => "gossip_response_rejected_handshake_required_none",
+                Some(reason) => match reason {
+                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList => {
+                        "gossip_response_rejected_handshake_required_not_in_peer_list"
+                    }
+                    HandshakeRequirementReason::RequestOriginDoesNotMatchExpected => {
+                        "gossip_response_rejected_handshake_required_origin_mismatch"
+                    }
+                    HandshakeRequirementReason::MinerAddressIsUnknown => {
+                        "gossip_response_rejected_handshake_required_unknown_miner"
+                    }
+                },
+            },
+            RejectionReason::GossipDisabled => "gossip_response_rejected_gossip_disabled",
+            RejectionReason::InvalidData => "gossip_response_rejected_invalid_data",
+            RejectionReason::RateLimited => "gossip_response_rejected_rate_limited",
+            RejectionReason::UnableToVerifyOrigin => {
+                "gossip_response_rejected_unable_to_verify_origin"
+            }
+            RejectionReason::InvalidCredentials => {
+                "gossip_response_rejected_invalid_credentials"
+            }
+            RejectionReason::ProtocolMismatch => "gossip_response_rejected_protocol_mismatch",
+            RejectionReason::UnsupportedProtocolVersion(_) => {
+                "gossip_response_rejected_unsupported_protocol_version"
+            }
+            RejectionReason::UnsupportedFeature => {
+                "gossip_response_rejected_unsupported_feature"
+            }
+        })
+        .collect()
+}
+
+/// Verifies that every [`GossipResponse`] variant is represented in the
+/// fixture file. The exhaustive match ensures compile-time enforcement.
+fn gossip_response_fixture_names() -> Vec<&'static str> {
+    // GossipResponse<()> covers the envelope variants
+    let all: [GossipResponse<()>; 2] = [
+        GossipResponse::Accepted(()),
+        GossipResponse::Rejected(RejectionReason::GossipDisabled),
+    ];
+    all.iter()
+        .map(|r| match r {
+            GossipResponse::Accepted(_) => "gossip_response_accepted",
+            GossipResponse::Rejected(_) => "gossip_response_rejected_gossip_disabled",
+        })
+        .collect()
+}
+
+#[test]
+fn test_all_rejection_reasons_covered_by_fixtures() {
+    let fixtures = FIXTURES.get_or_init(load_fixtures);
+    for name in rejection_reason_fixture_names() {
+        assert!(
+            fixtures.contains_key(name),
+            "Missing fixture for RejectionReason variant: '{name}'. \
+             Add a fixture_tests! entry for this variant."
+        );
+    }
+}
+
+#[test]
+fn test_all_gossip_response_variants_covered_by_fixtures() {
+    let fixtures = FIXTURES.get_or_init(load_fixtures);
+    for name in gossip_response_fixture_names() {
+        assert!(
+            fixtures.contains_key(name),
+            "Missing fixture for GossipResponse variant: '{name}'. \
+             Add a fixture_tests! entry for this variant."
+        );
+    }
 }
 
 // =============================================================================

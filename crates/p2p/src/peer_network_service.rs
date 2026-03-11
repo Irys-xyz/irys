@@ -1,4 +1,4 @@
-use crate::types::{GossipResponse, RejectionReason};
+use crate::wire_types::{GossipResponse, RejectionReason};
 use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use eyre::{Report, Result as EyreResult};
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};

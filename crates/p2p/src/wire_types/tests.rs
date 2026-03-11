@@ -351,20 +351,16 @@ fn test_gossip_data_v2_roundtrip() {
 
 #[test]
 fn test_node_info_roundtrip() {
-    let canonical_json = serde_json::to_string(&canonical_node_info()).unwrap();
     let wire_type: wire::NodeInfoV1 = canonical_node_info().into();
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::NodeInfoV1 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::version::NodeInfo = deserialized.into();
-    // NodeInfo doesn't derive PartialEq, so compare via JSON
-    let roundtrip_json = serde_json::to_string(&roundtrip).unwrap();
-    assert_eq!(canonical_json, roundtrip_json);
+    assert_eq!(canonical_node_info(), roundtrip);
 }
 
 #[test]
 fn test_node_info_v2_roundtrip() {
-    let canonical_json = serde_json::to_string(&canonical_node_info()).unwrap();
     let wire_type: wire::NodeInfoV2 = canonical_node_info().into();
 
     let wire_json = serde_json::to_string(&wire_type).unwrap();
@@ -375,9 +371,7 @@ fn test_node_info_v2_roundtrip() {
     );
     let deserialized: wire::NodeInfoV2 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::version::NodeInfo = deserialized.into();
-    // NodeInfo doesn't derive PartialEq, so compare via JSON
-    let roundtrip_json = serde_json::to_string(&roundtrip).unwrap();
-    assert_eq!(canonical_json, roundtrip_json);
+    assert_eq!(canonical_node_info(), roundtrip);
 }
 
 // =============================================================================
@@ -410,8 +404,24 @@ fn test_block_index_item_roundtrip() {
         "V2 wire format must not contain num_ledgers"
     );
     let deserialized: wire::BlockIndexItemV2 = serde_json::from_str(&wire_json).unwrap();
-    let roundtrip: irys_types::block::BlockIndexItem = deserialized.into();
+    let roundtrip: irys_types::block::BlockIndexItem = deserialized.try_into().unwrap();
     assert_eq!(canonical, roundtrip);
+}
+
+#[test]
+fn test_block_index_item_v2_rejects_oversized_ledger_list() {
+    let wire_type = wire::BlockIndexItemV2 {
+        block_hash: test_h256(0xBB),
+        ledgers: (0..=255)
+            .map(|i| wire::LedgerIndexItem {
+                total_chunks: i as u64,
+                tx_root: test_h256(i as u8),
+                ledger: irys_types::block::DataLedger::Publish,
+            })
+            .collect(),
+    };
+    let result: Result<irys_types::block::BlockIndexItem, _> = wire_type.try_into();
+    assert!(result.is_err());
 }
 
 // =============================================================================

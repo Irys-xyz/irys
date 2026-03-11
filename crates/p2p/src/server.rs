@@ -3,8 +3,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::block_pool::CriticalBlockPoolError;
-use crate::types::{GossipResponse, GossipRoutes, HandshakeRequirementReason, RejectionReason};
-use crate::wire_types;
+use crate::types::GossipRoutes;
+use crate::wire_types::{self, GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},

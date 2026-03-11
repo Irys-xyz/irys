@@ -3,8 +3,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::metrics::record_gossip_outbound_error;
-use crate::types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
-use crate::wire_types;
+use crate::types::{GossipError, GossipResult, GossipRoutes};
+use crate::wire_types::{self, GossipResponse, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
