@@ -298,34 +298,17 @@ impl Ledgers {
     pub fn expire_partitions(&mut self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
         let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
-        // Expire perm ledger slots if configured
-        if let Some(epoch_length) = self.publish_ledger_epoch_length {
-            let min_blocks = epoch_length
-                .checked_mul(self.num_blocks_in_epoch)
-                .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
-            if epoch_height >= min_blocks {
-                let expiry_height = epoch_height - min_blocks;
-                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id)
-                    .expect("perm.ledger_id is always DataLedger::Publish");
-                let num_slots = self.perm.slots.len();
-                let last_slot_index = num_slots.saturating_sub(1);
-
-                for (slot_index, slot) in self.perm.slots.iter_mut().enumerate() {
-                    // Never expire the last slot
-                    if num_slots > 0 && slot_index == last_slot_index {
-                        continue;
-                    }
-                    if slot.last_height <= expiry_height && !slot.is_expired {
-                        slot.is_expired = true;
-                        for partition_hash in slot.partitions.iter() {
-                            expired_partitions.push(ExpiringPartitionInfo {
-                                partition_hash: *partition_hash,
-                                ledger_id: perm_ledger_id,
-                                slot_index,
-                            });
-                        }
-                    }
-                }
+        // Expire perm ledger slots using shared helper
+        for (slot_index, partition_hashes, ledger_id) in
+            self.get_perm_expiring_slots(epoch_height)
+        {
+            self.perm.slots[slot_index].is_expired = true;
+            for partition_hash in partition_hashes {
+                expired_partitions.push(ExpiringPartitionInfo {
+                    partition_hash,
+                    ledger_id,
+                    slot_index,
+                });
             }
         }
 
@@ -352,32 +335,16 @@ impl Ledgers {
     pub fn get_expiring_partitions(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
         let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
-        // Check perm ledger slots if configured
-        if let Some(epoch_length) = self.publish_ledger_epoch_length {
-            let min_blocks = epoch_length
-                .checked_mul(self.num_blocks_in_epoch)
-                .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
-            if epoch_height >= min_blocks {
-                let expiry_height = epoch_height - min_blocks;
-                let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id)
-                    .expect("perm.ledger_id is always DataLedger::Publish");
-                let num_slots = self.perm.slots.len();
-                let last_slot_index = num_slots.saturating_sub(1);
-
-                for (slot_index, slot) in self.perm.slots.iter().enumerate() {
-                    if num_slots > 0 && slot_index == last_slot_index {
-                        continue;
-                    }
-                    if slot.last_height <= expiry_height && !slot.is_expired {
-                        for partition_hash in slot.partitions.iter() {
-                            expired_partitions.push(ExpiringPartitionInfo {
-                                partition_hash: *partition_hash,
-                                ledger_id: perm_ledger_id,
-                                slot_index,
-                            });
-                        }
-                    }
-                }
+        // Check perm ledger slots using shared helper
+        for (slot_index, partition_hashes, ledger_id) in
+            self.get_perm_expiring_slots(epoch_height)
+        {
+            for partition_hash in partition_hashes {
+                expired_partitions.push(ExpiringPartitionInfo {
+                    partition_hash,
+                    ledger_id,
+                    slot_index,
+                });
             }
         }
 
@@ -412,6 +379,47 @@ impl Ledgers {
             .iter_mut()
             .find(|l| l.ledger_id == ledger as u32)
             .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+    }
+
+    /// Returns (slot_index, partition_hashes, perm_ledger_id) for each perm slot
+    /// that would expire at `epoch_height`. Read-only — does not mark slots.
+    fn get_perm_expiring_slots(
+        &self,
+        epoch_height: u64,
+    ) -> Vec<(usize, Vec<PartitionHash>, DataLedger)> {
+        let Some(epoch_length) = self.publish_ledger_epoch_length else {
+            return Vec::new();
+        };
+
+        let min_blocks = epoch_length
+            .checked_mul(self.num_blocks_in_epoch)
+            .expect("publish_ledger_epoch_length * num_blocks_in_epoch overflows u64");
+
+        if epoch_height < min_blocks {
+            return Vec::new();
+        }
+
+        let expiry_height = epoch_height - min_blocks;
+        let perm_ledger_id = DataLedger::try_from(self.perm.ledger_id)
+            .expect("perm.ledger_id is always DataLedger::Publish");
+        let num_slots = self.perm.slots.len();
+        let last_slot_index = num_slots.saturating_sub(1);
+
+        let mut result = Vec::new();
+        for (slot_index, slot) in self.perm.slots.iter().enumerate() {
+            // Never expire the last slot
+            if num_slots > 0 && slot_index == last_slot_index {
+                continue;
+            }
+            if slot.last_height <= expiry_height && !slot.is_expired {
+                result.push((
+                    slot_index,
+                    slot.partitions.clone(),
+                    perm_ledger_id,
+                ));
+            }
+        }
+        result
     }
 
     pub fn get_slots(&self, ledger: DataLedger) -> &Vec<LedgerSlot> {
