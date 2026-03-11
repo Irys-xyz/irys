@@ -1141,14 +1141,32 @@ pub struct BlockBody {
 /// (which intentionally excludes metadata fields that don't survive serialization roundtrips).
 /// This is a standalone function rather than a `PartialEq` impl to avoid silently applying
 /// these custom comparison semantics wherever `==` is used.
+///
+/// Transactions are compared as **sets** (sorted by id) rather than by position,
+/// because `BlockBody` vecs may be flattened from a `HashMap` with nondeterministic
+/// iteration order.
+/// Note: expensive due to the above, but this is only used in fixture testing
 pub fn cmp_block_body(a: &BlockBody, b: &BlockBody) -> bool {
-    a.block_hash == b.block_hash
-        && a.commitment_transactions == b.commitment_transactions
-        && a.data_transactions.len() == b.data_transactions.len()
-        && a.data_transactions
-            .iter()
-            .zip(b.data_transactions.iter())
-            .all(|(a, b)| a.eq_tx(b))
+    if a.block_hash != b.block_hash
+        || a.data_transactions.len() != b.data_transactions.len()
+        || a.commitment_transactions.len() != b.commitment_transactions.len()
+    {
+        return false;
+    }
+
+    let mut a_data: Vec<_> = a.data_transactions.iter().collect();
+    let mut b_data: Vec<_> = b.data_transactions.iter().collect();
+    a_data.sort_by_key(|tx| tx.id);
+    b_data.sort_by_key(|tx| tx.id);
+    if !a_data.iter().zip(b_data.iter()).all(|(a, b)| a.eq_tx(b)) {
+        return false;
+    }
+
+    let mut a_commit: Vec<_> = a.commitment_transactions.iter().collect();
+    let mut b_commit: Vec<_> = b.commitment_transactions.iter().collect();
+    a_commit.sort_by_key(|tx| tx.id());
+    b_commit.sort_by_key(|tx| tx.id());
+    a_commit == b_commit
 }
 
 impl BlockBody {
