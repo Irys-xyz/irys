@@ -922,8 +922,6 @@ mod tests {
     }
 
     proptest! {
-        /// Property: publish ledger data_size is ALWAYS preferred over submit ledger,
-        /// regardless of the relative sizes.
         #[test]
         fn publish_ledger_always_preferred_over_submit(
             publish_size in 1..u64::MAX,
@@ -939,7 +937,6 @@ mod tests {
             prop_assert!(selected.is_from_publish_ledger);
         }
 
-        /// Property: single ledger type always selects max size
         #[test]
         fn single_ledger_type_selects_max(
             sizes in prop::collection::vec(1..u64::MAX, 1..10),
@@ -961,7 +958,6 @@ mod tests {
             prop_assert_eq!(selected.is_from_publish_ledger, is_publish);
         }
 
-        /// Property: with mixed ledgers, publish ledger max is always selected
         #[test]
         fn mixed_ledgers_selects_publish_max(
             publish_sizes in prop::collection::vec(1..u64::MAX, 1..5),

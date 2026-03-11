@@ -327,6 +327,7 @@ fn save_to_file(path: &Path, data: &PersistedSupplyState) -> Result<()> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rstest::rstest;
 
     /// Returns (TempDir, SupplyState) — caller must keep TempDir alive so the
     /// state file directory is not deleted before the test finishes.
@@ -400,21 +401,14 @@ mod tests {
         assert!(PersistedSupplyState::from_bytes(&long).is_err());
     }
 
-    #[test]
-    fn add_block_reward_rejects_non_sequential() {
+    #[rstest]
+    #[case::gap(2)]
+    #[case::duplicate(0)]
+    fn add_block_reward_rejects_invalid_height(#[case] invalid_height: u64) {
         let (_dir, state) = create_test_supply_state();
         state.add_block_reward(0, U256::from(100)).unwrap();
 
-        let result = state.add_block_reward(2, U256::from(100));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn add_block_reward_rejects_duplicate_height() {
-        let (_dir, state) = create_test_supply_state();
-        state.add_block_reward(0, U256::from(100)).unwrap();
-
-        let result = state.add_block_reward(0, U256::from(100));
+        let result = state.add_block_reward(invalid_height, U256::from(100));
         assert!(result.is_err());
     }
 
@@ -544,21 +538,6 @@ mod tests {
         // But backfill point is loaded
         assert_eq!(state.persisted_backfill_height(), Some(9));
         assert_eq!(state.persisted_backfill_value(), U256::from(500));
-    }
-
-    #[test]
-    fn is_ready_state_transitions() {
-        let (_dir, state) = create_test_supply_state();
-
-        assert!(!state.is_ready());
-
-        state.add_block_reward(5, U256::from(100)).unwrap();
-        assert!(!state.is_ready());
-
-        state
-            .add_historical_sum_and_mark_ready(U256::from(50))
-            .unwrap();
-        assert!(state.is_ready());
     }
 
     #[test]

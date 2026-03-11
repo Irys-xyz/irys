@@ -184,6 +184,7 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     #[rstest]
@@ -267,5 +268,21 @@ mod tests {
     fn test_parse_invalid_block_parameter(#[case] input: &str) {
         let result = parse_block_parameter(input);
         assert!(result.is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn parse_block_parameter_never_panics(s in ".*") {
+            let _ = parse_block_parameter(&s);
+        }
+
+        #[test]
+        fn parse_block_parameter_decimal_roundtrip(n: u64) {
+            let s = n.to_string();
+            let result = parse_block_parameter(&s);
+            prop_assert!(
+                matches!(result, Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(v))) if v == n)
+            );
+        }
     }
 }

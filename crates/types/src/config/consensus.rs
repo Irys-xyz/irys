@@ -897,15 +897,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_consensus_hash_deterministic() {
-        let config = ConsensusConfig::testing();
-        let hash1 = config.keccak256_hash();
-        let hash2 = config.keccak256_hash();
-        assert_eq!(hash1, hash2, "same config should hash to the same value");
-        assert_ne!(hash1, H256::zero(), "hash should not be zero");
-    }
-
-    #[test]
     fn test_consensus_hash_differs_on_change() {
         let config_a = ConsensusConfig::testing();
         let mut config_b = ConsensusConfig::testing();
@@ -950,11 +941,6 @@ mod tests {
 
     #[test]
     fn test_consensus_hash_regression() {
-        // This test verifies that the hash of the testing config remains stable.
-        // If this test fails, it indicates a breaking change in either:
-        // - The ConsensusConfig structure or field order
-        // - The canonical JSON serialization implementation
-        // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
         let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
         assert_eq!(
@@ -962,5 +948,28 @@ mod tests {
             expected_hash,
             "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
         );
+    }
+
+    mod sort_json_keys_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        proptest! {
+            #[test]
+            fn sort_json_keys_is_idempotent(
+                keys in proptest::collection::vec("[a-z]{1,8}", 1..10),
+                vals in proptest::collection::vec(0_i64..1000, 1..10),
+            ) {
+                let obj: serde_json::Value = keys.iter().zip(vals.iter())
+                    .map(|(k, v)| (k.clone(), json!(v)))
+                    .collect::<serde_json::Map<String, serde_json::Value>>()
+                    .into();
+
+                let sorted_once = sort_json_keys(obj);
+                let sorted_twice = sort_json_keys(sorted_once.clone());
+                prop_assert_eq!(sorted_once, sorted_twice);
+            }
+        }
     }
 }

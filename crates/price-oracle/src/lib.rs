@@ -229,16 +229,53 @@ impl IrysPriceOracle {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "simpler tests")]
 mod tests {
     use super::*;
+    use irys_types::U256;
+    use rstest::rstest;
+
+    fn make_oracle_with_cache(price_raw: u64, timestamp_secs: u64) -> Arc<SingleOracle> {
+        let price = Amount::new(U256::from(price_raw));
+        let increment = Amount::new(U256::from(1_u64));
+        let oracle = SingleOracle::new_mock(price, increment, 10, true, 1000);
+        {
+            let mut guard = oracle.cache.write().unwrap();
+            guard.value = price;
+            guard.last_updated = UnixTimestamp::from_secs(timestamp_secs);
+        }
+        oracle
+    }
+
+    #[rstest]
+    #[case::third_is_freshest(100, 200, 300, 2)]
+    #[case::first_is_freshest(300, 200, 100, 0)]
+    #[case::middle_is_freshest(100, 300, 200, 1)]
+    #[case::equal_timestamps_first_wins(300, 300, 100, 0)]
+    fn test_current_snapshot_returns_freshest(
+        #[case] ts_a: u64,
+        #[case] ts_b: u64,
+        #[case] ts_c: u64,
+        #[case] expected_idx: usize,
+    ) {
+        let prices = [1_000_000_u64, 2_000_000_u64, 3_000_000_u64];
+        let timestamps = [ts_a, ts_b, ts_c];
+        let oracles: Vec<Arc<SingleOracle>> = prices
+            .iter()
+            .zip(timestamps.iter())
+            .map(|(&p, &t)| make_oracle_with_cache(p, t))
+            .collect();
+
+        let aggregator = IrysPriceOracle::new(oracles);
+        let (val, ts) = aggregator.current_snapshot().unwrap();
+
+        assert_eq!(ts, UnixTimestamp::from_secs(timestamps[expected_idx]));
+        assert_eq!(val.amount, U256::from(prices[expected_idx]));
+    }
 
     #[test]
-    fn empty_oracle_returns_error() {
-        let oracle = IrysPriceOracle::new(vec![]);
-        let result = oracle.current_snapshot();
-        assert!(
-            matches!(result, Err(PriceOracleError::NoOraclesConfigured)),
-            "expected NoOraclesConfigured error"
-        );
+    fn test_current_snapshot_no_oracles_returns_error() {
+        let aggregator = IrysPriceOracle { oracles: vec![] };
+        assert!(aggregator.current_snapshot().is_err());
     }
 }

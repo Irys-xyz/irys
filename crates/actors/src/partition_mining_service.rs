@@ -78,7 +78,8 @@ impl PartitionMiningServiceInner {
                 num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
-            ),
+            )
+            .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig"),
             steps_guard,
             atomic_global_step_number,
         }
@@ -185,7 +186,7 @@ impl PartitionMiningServiceInner {
                 debug!("Getting stored steps from ({}..={})", start, step - 1);
                 let vdf_steps = self.steps_guard.read();
                 let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
-                self.ranges.reconstruct(&steps, partition_hash);
+                self.ranges.reconstruct(&steps, partition_hash)?;
             };
         }
 

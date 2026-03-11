@@ -1,3 +1,4 @@
+use eyre::bail;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -40,9 +41,7 @@ impl StorageSubmodulesConfig {
 
         let submodule_count = config.submodule_paths.len();
         if submodule_count < 3 {
-            // Eventually this should be based off the genesis config, but
-            // hard coded for now to help debug config / env issues.
-            panic!(
+            bail!(
                 "Insufficient submodules: found {}, but minimum of 3 required in .irys_submodules.toml for chain initialization",
                 submodule_count
             );
@@ -54,14 +53,12 @@ impl StorageSubmodulesConfig {
     pub fn load_for_test(instance_dir: PathBuf, num_submodules: usize) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
-        // Create test config with hardcoded paths
         tracing::info!(
             "Creating test config at {:?} with {} submodule paths",
             config_path_local,
             num_submodules
         );
 
-        // Create the submodule paths using a naming pattern
         let mut submodule_paths = Vec::new();
         for i in 0..num_submodules {
             submodule_paths
@@ -73,31 +70,26 @@ impl StorageSubmodulesConfig {
             submodule_paths,
         };
 
-        // Write and verify config
         fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
         let toml = toml::to_string(&config).expect("Able to serialize config");
         fs::write(&config_path_local, toml).unwrap_or_else(|_| {
             panic!("Failed to write config to {}", config_path_local.display())
         });
 
-        // Ensure the submodule paths exist, StorageModule::new() will do the rest
         for path in &config.submodule_paths {
             fs::create_dir_all(path).expect("to create submodule dir");
         }
 
-        // Load the config to verify it parses
         Self::from_toml(config_path_local)
     }
 
     pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
-        // Create base `storage_modules` directory if it doesn't exist
         let base_path = instance_dir.join("storage_modules");
-        fs::create_dir_all(base_path.clone()).expect("to create storage_modules directory");
+        fs::create_dir_all(base_path.clone()).expect("to create storage_modules directory"); // clone: needed below in multiple branches
 
-        // Start by removing all symlinks from the `storage_modules` dir
-        fs::read_dir(base_path.clone())
+        fs::read_dir(base_path.clone()) // clone: needed below in symlink creation
             .expect("to read storage_modules dir")
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
@@ -106,20 +98,17 @@ impl StorageSubmodulesConfig {
                 fs::remove_dir_all(e.path()).unwrap()
             });
 
-        // Try to read the config
         if config_path_local.exists() {
             let config = Self::from_toml(config_path_local).expect("To load the submodule config");
             if config.is_using_hardcoded_paths {
-                return Ok(config); // don't create symlinks
+                return Ok(config);
             };
-            // Create symlinks for each submodule
             let submodule_paths = &config.submodule_paths;
             for idx in 0..submodule_paths.len() {
                 let dest = submodule_paths.get(idx).unwrap();
                 if let Some(filename) = dest.components().next_back() {
                     let sm_path = base_path.join(filename.as_os_str());
 
-                    // Check if path exists and is a directory (not a symlink)
                     if sm_path.exists() && sm_path.is_dir() && !sm_path.is_symlink() {
                         panic!(
                             "Found unexpected folder {:?} in storage submodule path {:?} - please remove this folder, or set `is_using_hardcoded_paths` to `true`",
@@ -139,7 +128,6 @@ impl StorageSubmodulesConfig {
 
             Ok(config)
         } else {
-            // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
             let config = Self {
                 is_using_hardcoded_paths: true,
@@ -150,20 +138,114 @@ impl StorageSubmodulesConfig {
                 ],
             };
 
-            // Write and verify config
             fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
             let toml = toml::to_string(&config).expect("Able to serialize config");
             fs::write(&config_path_local, toml).unwrap_or_else(|_| {
                 panic!("Failed to write config to {}", config_path_local.display())
             });
 
-            // Ensure the submodule paths exist, StorageModule::new() will do the rest
             for path in &config.submodule_paths {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
 
-            // Load the config to verify it parses
             Self::from_toml(config_path_local)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+    use tempfile::tempdir;
+
+    fn arb_storage_submodules_config() -> impl Strategy<Value = StorageSubmodulesConfig> {
+        (
+            any::<bool>(),
+            prop::collection::vec("[a-zA-Z0-9_/]{1,50}".prop_map(PathBuf::from), 0..10),
+        )
+            .prop_map(|(is_using_hardcoded_paths, submodule_paths)| {
+                StorageSubmodulesConfig {
+                    is_using_hardcoded_paths,
+                    submodule_paths,
+                }
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn serde_roundtrip(config in arb_storage_submodules_config()) {
+            let toml_str = toml::to_string(&config)?;
+            let decoded: StorageSubmodulesConfig = toml::from_str(&toml_str)?;
+            prop_assert_eq!(config, decoded);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn from_toml_never_panics_on_arbitrary_input(input in "\\PC{0,200}") {
+            let dir = tempdir()?;
+            let path = dir.path().join("test.toml");
+            fs::write(&path, &input)?;
+            let _result = StorageSubmodulesConfig::from_toml(&path);
+        }
+    }
+
+    fn write_config_toml(dir: &Path, count: usize) -> eyre::Result<PathBuf> {
+        let paths: Vec<PathBuf> = (0..count).map(|i| dir.join(format!("sub_{}", i))).collect();
+        let config = StorageSubmodulesConfig {
+            is_using_hardcoded_paths: true,
+            submodule_paths: paths,
+        };
+        let toml_str = toml::to_string(&config)?;
+        let path = dir.join("test.toml");
+        fs::write(&path, &toml_str)?;
+        Ok(path)
+    }
+
+    #[rstest]
+    #[case(0, true)]
+    #[case(1, true)]
+    #[case(2, true)]
+    #[case(3, false)]
+    #[case(10, false)]
+    fn from_toml_submodule_count_boundary(
+        #[case] count: usize,
+        #[case] should_err: bool,
+    ) -> eyre::Result<()> {
+        let dir = tempdir()?;
+        let path = write_config_toml(dir.path(), count)?;
+        let result = StorageSubmodulesConfig::from_toml(&path);
+        assert_eq!(result.is_err(), should_err);
+        if should_err {
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Insufficient submodules"),
+                "expected 'Insufficient submodules' in error, got: {err_msg}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn load_creates_default_config_when_none_exists() -> eyre::Result<()> {
+        let dir = tempdir()?;
+        let config = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
+        assert_eq!(config.submodule_paths.len(), 3);
+        assert!(config.is_using_hardcoded_paths);
+        let config_path = dir.path().join(SUBMODULES_CONFIG_FILE_NAME);
+        assert!(config_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn load_reads_existing_config() -> eyre::Result<()> {
+        let dir = tempdir()?;
+        let first = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
+        let second = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
+        assert_eq!(first, second);
+        assert_eq!(second.submodule_paths.len(), 3);
+        Ok(())
     }
 }

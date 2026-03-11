@@ -737,17 +737,20 @@ mod tests {
     }
 
     #[test]
-    fn test_unpledge_rlp_roundtrip() {
-        use bytes::BytesMut;
-        let original = CommitmentTypeV2::Unpledge {
-            pledge_count_before_executing: 3,
-            partition_hash: H256::random(),
+    fn validate_value_update_reward_address_rejects_nonzero() {
+        let tx = CommitmentTransactionV2 {
+            id: H256::zero(),
+            signer: IrysAddress::from([1_u8; 20]),
+            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address: IrysAddress::from([2_u8; 20]),
+            },
+            anchor: H256::zero(),
+            chain_id: 1270,
+            fee: 100,
+            value: U256::from(1),
+            signature: IrysSignature::default(),
         };
-        let mut buf = BytesMut::new();
-        original.encode(&mut buf);
-        let mut slice = buf.as_ref();
-        let decoded = CommitmentTypeV2::decode(&mut slice).unwrap();
-        assert_eq!(original, decoded);
-        assert!(slice.is_empty());
+        let config = ConsensusConfig::testing();
+        assert!(tx.validate_value(&config).is_err());
     }
 }

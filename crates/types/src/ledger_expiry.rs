@@ -86,4 +86,31 @@ mod tests {
         assert_eq!(metadata.position_in_cycle, 250);
         assert_eq!(metadata.epoch_in_cycle, 2);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn expiry_never_zero(
+                block_height in 0_u64..1_000_000,
+                num_blocks_in_epoch in 1_u64..10_000,
+                submit_ledger_epoch_length in 1_u64..100,
+            ) {
+                let result = calculate_submit_ledger_expiry(
+                    block_height,
+                    num_blocks_in_epoch,
+                    submit_ledger_epoch_length,
+                );
+                prop_assert!(result >= 1, "expiry must be >= 1, got {}", result);
+                prop_assert!(
+                    result <= submit_ledger_epoch_length,
+                    "expiry {} exceeds epoch_length {}",
+                    result,
+                    submit_ledger_epoch_length
+                );
+            }
+        }
+    }
 }

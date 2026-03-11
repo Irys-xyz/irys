@@ -30,7 +30,9 @@ irys-utils.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
-
+proptest.workspace = true
+rstest.workspace = true
+serde_json.workspace = true
 
 [features]
 nvidia = ["irys-packing/nvidia"]

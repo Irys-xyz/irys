@@ -17,6 +17,10 @@ alloy-primitives.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
+proptest.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
+test-log.workspace = true
 
 [lints]
 workspace = true

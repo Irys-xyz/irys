@@ -26,7 +26,7 @@ pub fn unpack(
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        *packed_chunk.partition_offset as u64,
+        u64::from(*packed_chunk.partition_offset),
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
@@ -67,7 +67,7 @@ pub fn unpack_with_entropy(
         return unpacked_data;
     }
     // trim if this is the last chunk & if data_size isn't aligned to chunk_size
-    if (*packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
+    if u64::from(*packed_chunk.tx_offset) == num_chunks_in_tx - 1 {
         let trailing_bytes = data_size % chunk_size_u64;
         // 0 means this last chunk is a full chunk
         if trailing_bytes != 0 {
@@ -231,7 +231,7 @@ pub fn capacity_pack_range_with_data(
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
         capacity_single::compute_entropy_chunk(
             mining_address,
-            chunk_offset + pos as u64,
+            chunk_offset + u64::try_from(pos).expect("chunk position exceeds u64"),
             partition_hash.0,
             iterations,
             chunk_size,
@@ -256,7 +256,7 @@ pub fn capacity_pack_range_with_data_c(
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + pos as u64,
+            chunk_offset + u64::try_from(pos).expect("chunk position exceeds u64"),
             partition_hash,
             &mut entropy_chunk,
             entropy_packing_iterations,
@@ -329,11 +329,10 @@ pub fn calibrate_packing(runs: u64) -> u32 {
         );
 
         // adjust iterations based on the ratio of target time to actual time
-        iterations = (iterations as f64 * ratio).round() as u32;
-
-        if iterations == 0 {
-            iterations = 1;
-        }
+        // f64-to-u32: no TryFrom<f64> for u32 in std; value is positive and bounded by calibration
+        iterations = (f64::from(iterations) * ratio)
+            .round()
+            .clamp(1.0, f64::from(u32::MAX)) as u32;
     }
 
     println!(
@@ -709,5 +708,206 @@ mod tests {
         );
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);
+    }
+
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_chunk_and_key(max_len: usize) -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+            (1..=max_len).prop_flat_map(|len| {
+                (
+                    proptest::collection::vec(any::<u8>(), len),
+                    proptest::collection::vec(any::<u8>(), len),
+                )
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn xor_in_place_is_involution(
+                (mut data, key) in arb_chunk_and_key(512)
+            ) {
+                let original = data.clone(); // clone: need original for comparison
+                xor_vec_u8_arrays_in_place(&mut data, &key);
+                xor_vec_u8_arrays_in_place(&mut data, &key);
+                prop_assert_eq!(data, original);
+            }
+
+            #[test]
+            fn packing_xor_is_involution(
+                (data, entropy) in arb_chunk_and_key(512)
+            ) {
+                let packed = packing_xor_vec_u8(entropy.clone(), &data); // clone: need entropy for second xor
+                let mut unpacked = packed;
+                xor_vec_u8_arrays_in_place(&mut unpacked, &entropy);
+                prop_assert_eq!(&unpacked[..data.len()], &data[..]);
+            }
+
+            #[test]
+            fn xor_with_zero_is_identity(
+                data in proptest::collection::vec(any::<u8>(), 1..512_usize)
+            ) {
+                let zeros = vec![0_u8; data.len()];
+                let mut result = data.clone(); // clone: need original for comparison
+                xor_vec_u8_arrays_in_place(&mut result, &zeros);
+                prop_assert_eq!(result, data);
+            }
+
+            #[test]
+            fn xor_with_self_is_zero(
+                data in proptest::collection::vec(any::<u8>(), 1..512_usize)
+            ) {
+                let mut result = data.clone(); // clone: xor with self requires copy
+                xor_vec_u8_arrays_in_place(&mut result, &data);
+                prop_assert!(result.iter().all(|&b| b == 0));
+            }
+
+            #[test]
+            fn xor_is_commutative(
+                (a, b) in arb_chunk_and_key(512)
+            ) {
+                let mut r1 = a.clone(); // clone: need for second order comparison
+                xor_vec_u8_arrays_in_place(&mut r1, &b);
+                let r2 = packing_xor_vec_u8(b, &a);
+                prop_assert_eq!(&r1[..], &r2[..a.len()]);
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(8))]
+
+            #[test]
+            fn roundtrip_full_chunk(
+                chunk_data in proptest::collection::vec(any::<u8>(), 32..=32)
+            ) {
+                let mining_address = IrysAddress::random();
+                let partition_hash: [u8; SHA_HASH_SIZE] = [0xAB; SHA_HASH_SIZE];
+                let chunk_offset: u64 = 42;
+                let iterations = 64_u32;
+                let chunk_size = chunk_data.len();
+                let chain_id = ConsensusConfig::testing().chain_id;
+
+                let mut entropy = Vec::<u8>::with_capacity(chunk_size);
+                capacity_single::compute_entropy_chunk(
+                    mining_address,
+                    chunk_offset,
+                    partition_hash,
+                    iterations,
+                    chunk_size,
+                    &mut entropy,
+                    chain_id,
+                );
+
+                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data); // clone: need entropy for unpack
+                let packed_chunk = PackedChunk {
+                    data_root: H256::zero(),
+                    data_size: u64::try_from(chunk_size).unwrap(),
+                    data_path: Base64(vec![]),
+                    bytes: Base64(packed),
+                    tx_offset: TxChunkOffset::from(0),
+                    packing_address: mining_address,
+                    partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
+                    partition_hash: H256::from(partition_hash),
+                };
+
+                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id);
+                prop_assert_eq!(unpacked.bytes.0, chunk_data);
+            }
+
+            #[test]
+            fn roundtrip_partial_last_chunk(
+                data_len in 1..32_usize
+            ) {
+                let mining_address = IrysAddress::random();
+                let partition_hash: [u8; SHA_HASH_SIZE] = [0xCD; SHA_HASH_SIZE];
+                let chunk_offset: u64 = 7;
+                let iterations = 64_u32;
+                let chunk_size = 32_usize;
+                let chain_id = ConsensusConfig::testing().chain_id;
+
+                let chunk_data: Vec<u8> = (0..u8::try_from(data_len % 256).unwrap_or(0))
+                    .collect::<Vec<u8>>()
+                    .into_iter()
+                    .cycle()
+                    .take(data_len)
+                    .collect();
+
+                let mut entropy = Vec::<u8>::with_capacity(chunk_size);
+                capacity_single::compute_entropy_chunk(
+                    mining_address,
+                    chunk_offset,
+                    partition_hash,
+                    iterations,
+                    chunk_size,
+                    &mut entropy,
+                    chain_id,
+                );
+
+                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data); // clone: need entropy for unpack
+                let packed_chunk = PackedChunk {
+                    data_root: H256::zero(),
+                    data_size: u64::try_from(data_len).unwrap(),
+                    data_path: Base64(vec![]),
+                    bytes: Base64(packed),
+                    tx_offset: TxChunkOffset::from(0),
+                    packing_address: mining_address,
+                    partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
+                    partition_hash: H256::from(partition_hash),
+                };
+
+                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id);
+                prop_assert_eq!(unpacked.bytes.0, chunk_data);
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            #[test]
+            fn zero_data_size_returns_full_chunk(
+                entropy in proptest::collection::vec(any::<u8>(), 32..=32),
+                packed_bytes in proptest::collection::vec(any::<u8>(), 32..=32),
+            ) {
+                let pc = PackedChunk {
+                    data_size: 0,
+                    bytes: irys_types::Base64(packed_bytes),
+                    tx_offset: TxChunkOffset(0),
+                    ..Default::default()
+                };
+                let out = unpack_with_entropy(&pc, entropy, 32);
+                prop_assert_eq!(out.len(), 32);
+            }
+
+            #[test]
+            fn non_last_chunk_returns_full_size(
+                entropy in proptest::collection::vec(any::<u8>(), 32..=32),
+                packed_bytes in proptest::collection::vec(any::<u8>(), 32..=32),
+                tx_offset in 0..10_u32,
+            ) {
+                let num_chunks = u64::from(tx_offset) + 2;
+                let data_size = num_chunks * 32;
+                let pc = PackedChunk {
+                    data_size,
+                    bytes: irys_types::Base64(packed_bytes),
+                    tx_offset: TxChunkOffset(tx_offset),
+                    ..Default::default()
+                };
+                let out = unpack_with_entropy(&pc, entropy, 32);
+                prop_assert_eq!(out.len(), 32);
+            }
+        }
+
+        #[rstest::rstest]
+        #[case::cpu(PackingType::CPU)]
+        #[case::cuda(PackingType::CUDA)]
+        #[case::amd(PackingType::AMD)]
+        fn packing_type_json_roundtrip(#[case] pt: PackingType) {
+            let json = serde_json::to_string(&pt).unwrap();
+            let decoded: PackingType = serde_json::from_str(&json).unwrap();
+            assert_eq!(pt, decoded);
+        }
     }
 }
