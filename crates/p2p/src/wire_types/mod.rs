@@ -48,6 +48,12 @@ pub(crate) use node_info::*;
 // the rest of the wire types.
 pub(crate) use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
 
+// These envelope/response types live in `crate::types` but ARE wire types —
+// they're serialized directly into gossip HTTP responses. Re-exported here so
+// the wire protocol surface is defined in one place and fixture-tested alongside
+// the rest of the wire types.
+pub(crate) use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
+
 /// Implements JSON-specific `Serialize` and `Deserialize` for a versioned enum
 /// that flattens as `{"version": N, ...inner_fields}` (IntegerTagged-compatible).
 ///
