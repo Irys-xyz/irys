@@ -126,6 +126,7 @@ pub(crate) use impl_json_version_tagged_serde;
 /// Both conversions take ownership. If you only have a reference and need to
 /// convert, clone explicitly at the call site.
 macro_rules! impl_mirror_from {
+    // Basic form: all fields are moved verbatim.
     ($canonical:ty => $wire:ty { $($field:ident),* $(,)? }) => {
         impl From<$canonical> for $wire {
             fn from(src: $canonical) -> Self {
@@ -135,6 +136,34 @@ macro_rules! impl_mirror_from {
         impl From<$wire> for $canonical {
             fn from(src: $wire) -> Self {
                 Self { $( $field: src.$field, )* }
+            }
+        }
+    };
+
+    // Extended form: `move` fields are moved verbatim, `convert` fields call
+    // `.into()`, and `convert_iter` fields call `.into_iter().map(Into::into).collect()`.
+    ($canonical:ty => $wire:ty {
+        $($field:ident),* $(,)?
+    }
+    $(convert { $($conv:ident),* $(,)? })?
+    $(convert_iter { $($conv_iter:ident),* $(,)? })?
+    ) => {
+        impl From<$canonical> for $wire {
+            fn from(src: $canonical) -> Self {
+                Self {
+                    $( $field: src.$field, )*
+                    $($( $conv: src.$conv.into(), )*)?
+                    $($( $conv_iter: src.$conv_iter.into_iter().map(Into::into).collect(), )*)?
+                }
+            }
+        }
+        impl From<$wire> for $canonical {
+            fn from(src: $wire) -> Self {
+                Self {
+                    $( $field: src.$field, )*
+                    $($( $conv: src.$conv.into(), )*)?
+                    $($( $conv_iter: src.$conv_iter.into_iter().map(Into::into).collect(), )*)?
+                }
             }
         }
     };

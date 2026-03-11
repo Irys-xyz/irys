@@ -129,35 +129,18 @@ super::impl_mirror_from!(irys_types::SystemTransactionLedger => SystemTransactio
     ledger_id, tx_ids,
 });
 
+super::impl_mirror_from!(irys_types::IrysBlockHeaderV1 => IrysBlockHeaderV1Inner {
+    block_hash, signature, height, diff, cumulative_diff, solution_hash,
+    last_diff_timestamp, previous_solution_hash, last_epoch_hash, chunk_hash,
+    previous_block_hash, previous_cumulative_diff, reward_address, reward_amount,
+    miner_address, timestamp, evm_block_hash, oracle_irys_price, ema_irys_price, treasury,
+} convert { poa, vdf_limiter_info }
+  convert_iter { system_ledgers, data_ledgers });
+
 impl From<irys_types::IrysBlockHeader> for IrysBlockHeader {
     fn from(h: irys_types::IrysBlockHeader) -> Self {
         match h {
-            irys_types::IrysBlockHeader::V1(inner) => Self::V1(IrysBlockHeaderV1Inner {
-                block_hash: inner.block_hash,
-                signature: inner.signature,
-                height: inner.height,
-                diff: inner.diff,
-                cumulative_diff: inner.cumulative_diff,
-                solution_hash: inner.solution_hash,
-                last_diff_timestamp: inner.last_diff_timestamp,
-                previous_solution_hash: inner.previous_solution_hash,
-                last_epoch_hash: inner.last_epoch_hash,
-                chunk_hash: inner.chunk_hash,
-                previous_block_hash: inner.previous_block_hash,
-                previous_cumulative_diff: inner.previous_cumulative_diff,
-                poa: inner.poa.into(),
-                reward_address: inner.reward_address,
-                reward_amount: inner.reward_amount,
-                miner_address: inner.miner_address,
-                timestamp: inner.timestamp,
-                system_ledgers: inner.system_ledgers.into_iter().map(Into::into).collect(),
-                data_ledgers: inner.data_ledgers.into_iter().map(Into::into).collect(),
-                evm_block_hash: inner.evm_block_hash,
-                vdf_limiter_info: inner.vdf_limiter_info.into(),
-                oracle_irys_price: inner.oracle_irys_price,
-                ema_irys_price: inner.ema_irys_price,
-                treasury: inner.treasury,
-            }),
+            irys_types::IrysBlockHeader::V1(inner) => Self::V1(inner.into()),
         }
     }
 }
@@ -165,60 +148,11 @@ impl From<irys_types::IrysBlockHeader> for IrysBlockHeader {
 impl From<IrysBlockHeader> for irys_types::IrysBlockHeader {
     fn from(h: IrysBlockHeader) -> Self {
         match h {
-            IrysBlockHeader::V1(inner) => Self::V1(irys_types::IrysBlockHeaderV1 {
-                block_hash: inner.block_hash,
-                signature: inner.signature,
-                height: inner.height,
-                diff: inner.diff,
-                cumulative_diff: inner.cumulative_diff,
-                solution_hash: inner.solution_hash,
-                last_diff_timestamp: inner.last_diff_timestamp,
-                previous_solution_hash: inner.previous_solution_hash,
-                last_epoch_hash: inner.last_epoch_hash,
-                chunk_hash: inner.chunk_hash,
-                previous_block_hash: inner.previous_block_hash,
-                previous_cumulative_diff: inner.previous_cumulative_diff,
-                poa: inner.poa.into(),
-                reward_address: inner.reward_address,
-                reward_amount: inner.reward_amount,
-                miner_address: inner.miner_address,
-                timestamp: inner.timestamp,
-                system_ledgers: inner.system_ledgers.into_iter().map(Into::into).collect(),
-                data_ledgers: inner.data_ledgers.into_iter().map(Into::into).collect(),
-                evm_block_hash: inner.evm_block_hash,
-                vdf_limiter_info: inner.vdf_limiter_info.into(),
-                oracle_irys_price: inner.oracle_irys_price,
-                ema_irys_price: inner.ema_irys_price,
-                treasury: inner.treasury,
-            }),
+            IrysBlockHeader::V1(inner) => Self::V1(inner.into()),
         }
     }
 }
 
-impl From<irys_types::BlockBody> for BlockBody {
-    fn from(b: irys_types::BlockBody) -> Self {
-        Self {
-            block_hash: b.block_hash,
-            data_transactions: b.data_transactions.into_iter().map(Into::into).collect(),
-            commitment_transactions: b
-                .commitment_transactions
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
-    }
-}
-
-impl From<BlockBody> for irys_types::BlockBody {
-    fn from(b: BlockBody) -> Self {
-        Self {
-            block_hash: b.block_hash,
-            data_transactions: b.data_transactions.into_iter().map(Into::into).collect(),
-            commitment_transactions: b
-                .commitment_transactions
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::BlockBody => BlockBody {
+    block_hash,
+} convert_iter { data_transactions, commitment_transactions });

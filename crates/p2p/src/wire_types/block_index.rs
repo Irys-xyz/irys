@@ -39,25 +39,9 @@ super::impl_mirror_from!(irys_types::block::LedgerIndexItem => LedgerIndexItem {
 
 // --- BlockIndexItemV1 conversions (preserves num_ledgers) ---
 
-impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV1 {
-    fn from(src: irys_types::block::BlockIndexItem) -> Self {
-        Self {
-            block_hash: src.block_hash,
-            num_ledgers: src.num_ledgers,
-            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl From<BlockIndexItemV1> for irys_types::block::BlockIndexItem {
-    fn from(src: BlockIndexItemV1) -> Self {
-        Self {
-            block_hash: src.block_hash,
-            num_ledgers: src.num_ledgers,
-            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
-        }
-    }
-}
+super::impl_mirror_from!(irys_types::block::BlockIndexItem => BlockIndexItemV1 {
+    block_hash, num_ledgers,
+} convert_iter { ledgers });
 
 // --- BlockIndexItemV2 conversions (derives num_ledgers from ledgers.len()) ---
 
