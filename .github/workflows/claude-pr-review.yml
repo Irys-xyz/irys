@@ -122,10 +122,13 @@ jobs:
           COMMENTS=$(gh api --paginate \
             "repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments" \
             --jq '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          REVIEW_COMMENTS=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments" \
+            --jq '[.[] | "**@\(.user.login) (review on \(.path)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
           REVIEWS=$(gh api --paginate \
             "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews" \
             --jq '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
-          COMBINED="${COMMENTS}"$'\n\n'"${REVIEWS}"
+          COMBINED=$(printf '%s\n\n%s\n\n%s' "$COMMENTS" "$REVIEW_COMMENTS" "$REVIEWS")
           DELIM="PR_COMMENTS_$(date +%s%N)"
           if printf '%s' "$COMBINED" | grep -qF "$DELIM"; then
             echo "::error::Delimiter collision in PR comments content"
@@ -196,6 +199,8 @@ jobs:
           ALLOWED_DIR = os.path.realpath("design/docs")
           FILENAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*\.md$')
 
+          written = 0
+          rejected = 0
           for d in decisions:
               filename = d.get("filename", "")
               action = d.get("action", "")
@@ -203,35 +208,47 @@ jobs:
 
               if action not in ("create", "append"):
                   print(f"SKIP: invalid action '{action}' for {filename}")
+                  rejected += 1
                   continue
               if not FILENAME_RE.match(filename):
                   print(f"SKIP: invalid filename '{filename}'")
+                  rejected += 1
                   continue
 
               filepath = os.path.realpath(os.path.join("design/docs", filename))
               if not filepath.startswith(ALLOWED_DIR + os.sep):
                   print(f"SKIP: path traversal in '{filename}'")
+                  rejected += 1
                   continue
               if os.path.islink(os.path.join("design/docs", filename)):
                   print(f"SKIP: symlink detected for '{filename}'")
+                  rejected += 1
                   continue
 
               if action == "create":
                   if os.path.exists(filepath):
                       print(f"SKIP: '{filename}' already exists (action=create)")
+                      rejected += 1
                       continue
                   with open(filepath, "w") as f:
                       f.write(content)
+                  written += 1
                   print(f"CREATED: {filename}")
               elif action == "append":
                   if not os.path.exists(filepath):
                       print(f"SKIP: '{filename}' does not exist (action=append)")
+                      rejected += 1
                       continue
                   with open(filepath, "a") as f:
                       f.write("\n\n" + content)
+                  written += 1
                   print(f"UPDATED: {filename}")
 
           print(f"\nSummary: {data.get('summary', 'Done')}")
+          print(f"Written: {written}, Rejected: {rejected}")
+          if rejected or written == 0:
+              print("ERROR: Claude output did not pass validation cleanly.")
+              sys.exit(1)
           PYEOF
 
       - name: Validate output
