@@ -44,6 +44,7 @@ jobs:
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(echo "$PR_JSON" | jq -r '.head.sha')" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
           echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
           IS_FORK=$(echo "$PR_JSON" | jq -r '.head.repo.full_name != .base.repo.full_name')
           echo "is_fork=${IS_FORK}" >> "$GITHUB_OUTPUT"
@@ -91,7 +92,12 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Ensure design docs directory
-        run: mkdir -p design/docs
+        run: |
+          if [ -L design ] || [ -L design/docs ]; then
+            echo "::error::Symlink detected at design/ or design/docs/ — aborting"
+            exit 1
+          fi
+          mkdir -p design/docs
 
       - name: Extract design plan section
         id: design-plan
@@ -197,6 +203,10 @@ jobs:
               sys.exit(0)
 
           ALLOWED_DIR = os.path.realpath("design/docs")
+          WORKSPACE = os.path.realpath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+          if not ALLOWED_DIR.startswith(WORKSPACE + os.sep):
+              print(f"ERROR: design/docs resolves outside workspace: {ALLOWED_DIR}")
+              sys.exit(1)
           FILENAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*\.md$')
 
           written = 0
@@ -268,7 +278,7 @@ jobs:
           git add design/docs/
           if ! git diff --staged --quiet; then
             git commit -m "ci: extract design decisions from PR #${{ steps.pr.outputs.number }}"
-            git push
+            git push origin HEAD:${{ steps.pr.outputs.head_ref }}
           fi
 
       - name: Add design-extracted label
