@@ -43,6 +43,7 @@ use tracing::{Instrument as _, debug, error, info, warn};
 
 mod active_validations;
 mod block_validation_task;
+pub(crate) mod pd_block_guard;
 
 #[derive(Debug)]
 pub enum VdfValidationResult {

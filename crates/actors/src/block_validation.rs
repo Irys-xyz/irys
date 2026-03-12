@@ -1317,7 +1317,7 @@ pub fn poa_is_valid(
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
-pub async fn shadow_transactions_are_valid(
+pub(crate) async fn shadow_transactions_are_valid(
     config: &Config,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -1332,7 +1332,11 @@ pub async fn shadow_transactions_are_valid(
     block_index: BlockIndex,
     transactions: &BlockTransactions,
     pd_chunk_sender: &irys_types::chunk_provider::PdChunkSender,
-) -> eyre::Result<ExecutionData> {
+) -> eyre::Result<(
+    ExecutionData,
+    Option<crate::validation_service::pd_block_guard::PdBlockGuard>,
+)> {
+    let mut pd_guard: Option<crate::validation_service::pd_block_guard::PdBlockGuard> = None;
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
@@ -1490,6 +1494,13 @@ pub async fn shadow_transactions_are_valid(
                     block_hash = %block.block_hash,
                     "PD chunks provisioned for block validation"
                 );
+                // Create RAII guard — will send ReleaseBlockChunks on drop
+                pd_guard = Some(
+                    crate::validation_service::pd_block_guard::PdBlockGuard::new(
+                        pd_chunk_sender.clone(),
+                        block.block_hash.into(),
+                    ),
+                );
             }
             Err(missing) => {
                 tracing::warn!(
@@ -1555,7 +1566,7 @@ pub async fn shadow_transactions_are_valid(
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
     // 5. Return the execution data for reuse
-    Ok(execution_data)
+    Ok((execution_data, pd_guard))
 }
 
 /// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.

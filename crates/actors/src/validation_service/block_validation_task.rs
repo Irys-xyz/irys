@@ -566,17 +566,12 @@ impl BlockValidationTask {
         );
 
         // Check shadow_tx_result first to extract ExecutionData
-        let execution_data = match shadow_tx_result {
+        let (execution_data, _pd_guard) = match shadow_tx_result {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                // Release any PD chunks that may have been provisioned during
-                // shadow tx validation before the error occurred.
-                let _ = self.service_inner.pd_chunk_sender.send(
-                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
-                        block_hash: self.sealed_block.header().block_hash.into(),
-                    },
-                );
+                // pd_guard was never created (it's inside the Err variant of eyre::Result)
+                // — no manual release needed
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
@@ -612,13 +607,6 @@ impl BlockValidationTask {
                 ))
                 .await;
 
-                // Release PD chunks provisioned for this block (fire-and-forget)
-                let _ = self.service_inner.pd_chunk_sender.send(
-                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
-                        block_hash: self.sealed_block.header().block_hash.into(),
-                    },
-                );
-
                 match reth_result {
                     Ok(()) => {
                         tracing::debug!("Reth execution layer validation successful");
@@ -635,12 +623,7 @@ impl BlockValidationTask {
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
 
-                // Release any PD chunks that may have been provisioned
-                let _ = self.service_inner.pd_chunk_sender.send(
-                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
-                        block_hash: self.sealed_block.header().block_hash.into(),
-                    },
-                );
+                // _pd_guard drops here automatically, sending ReleaseBlockChunks
 
                 // At least one validation failed, return the first Invalid result
                 let first_invalid = [
