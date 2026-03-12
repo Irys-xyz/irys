@@ -33,6 +33,8 @@ pub struct ChunkCache {
     chunks: LruCache<ChunkKey, CachedChunkEntry>,
     /// Shared index for lock-free chunk reads. Mirrors data stored in the LRU.
     shared_index: irys_types::chunk_provider::ChunkDataIndex,
+    /// The capacity the cache was created with — used by `try_shrink_to_fit()`.
+    initial_capacity: NonZeroUsize,
 }
 
 impl ChunkCache {
@@ -44,6 +46,7 @@ impl ChunkCache {
         Self {
             chunks: LruCache::new(capacity),
             shared_index,
+            initial_capacity: capacity,
         }
     }
 
@@ -165,10 +168,25 @@ impl ChunkCache {
             self.shared_index.remove(&(key.ledger, key.offset));
         } else {
             // All entries are pinned — grow capacity to avoid evicting a pinned entry.
-            // The capacity will shrink back naturally as pinned entries are released and evicted.
+            // Capacity is shrunk back by `try_shrink_to_fit()` called during release.
             let new_cap =
                 NonZeroUsize::new(self.chunks.cap().get() + 1).expect("cap + 1 must be non-zero");
             self.chunks.resize(new_cap);
+        }
+    }
+
+    /// Shrink the LRU capacity back to the initial capacity if the number
+    /// of live entries has fallen at or below it.
+    ///
+    /// This reverses capacity growth from [`make_room_for_insert`] once the burst
+    /// of pinned entries has been released. The `len() <= target` guard ensures
+    /// `LruCache::resize()` will not call `pop_lru()` internally, so no
+    /// `shared_index` mirroring is bypassed.
+    pub fn try_shrink_to_fit(&mut self) {
+        if self.chunks.cap() > self.initial_capacity
+            && self.chunks.len() <= self.initial_capacity.get()
+        {
+            self.chunks.resize(self.initial_capacity);
         }
     }
 }
@@ -306,5 +324,72 @@ mod tests {
         assert!(!shared_index.contains_key(&(0_u32, 1_u64)));
         assert!(shared_index.contains_key(&(0_u32, 2_u64)));
         assert!(shared_index.contains_key(&(0_u32, 3_u64)));
+    }
+
+    #[test]
+    fn test_capacity_shrinks_after_burst() {
+        let cap = NonZeroUsize::new(2).unwrap();
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(cap, shared_index);
+        let tx1 = B256::ZERO;
+        let tx2 = B256::with_last_byte(1);
+        let tx3 = B256::with_last_byte(2);
+
+        // Fill to cap with pinned entries
+        cache.insert(make_key(1), make_data(1), tx1);
+        cache.insert(make_key(2), make_data(2), tx2);
+        // Third insert forces capacity growth (both existing entries are pinned)
+        cache.insert(make_key(3), make_data(3), tx3);
+        assert!(cache.chunks.cap().get() > 2, "capacity should have grown");
+
+        // Release all references and remove entries
+        cache.remove_reference(&make_key(1), &tx1);
+        cache.remove(&make_key(1));
+        cache.remove_reference(&make_key(2), &tx2);
+        cache.remove(&make_key(2));
+        cache.remove_reference(&make_key(3), &tx3);
+        cache.remove(&make_key(3));
+
+        assert_eq!(cache.len(), 0);
+        // Cap is still inflated
+        assert!(cache.chunks.cap().get() > 2);
+
+        cache.try_shrink_to_fit();
+        // Cap is back to initial
+        assert_eq!(cache.chunks.cap().get(), 2);
+    }
+
+    #[test]
+    fn test_shrink_noop_when_not_inflated() {
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::with_default_capacity(shared_index);
+        let original_cap = cache.chunks.cap();
+
+        cache.try_shrink_to_fit();
+        assert_eq!(cache.chunks.cap(), original_cap, "should be a no-op");
+    }
+
+    #[test]
+    fn test_shrink_waits_until_len_below_initial() {
+        let cap = NonZeroUsize::new(2).unwrap();
+        let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(cap, shared_index);
+        let tx1 = B256::ZERO;
+        let tx2 = B256::with_last_byte(1);
+        let tx3 = B256::with_last_byte(2);
+
+        cache.insert(make_key(1), make_data(1), tx1);
+        cache.insert(make_key(2), make_data(2), tx2);
+        cache.insert(make_key(3), make_data(3), tx3);
+        // Cap grew, len is 3
+        assert!(cache.chunks.cap().get() > 2);
+
+        // Remove only one entry — len is still 2 = initial cap
+        cache.remove_reference(&make_key(3), &tx3);
+        cache.remove(&make_key(3));
+
+        cache.try_shrink_to_fit();
+        // Should shrink because len (2) <= initial cap (2)
+        assert_eq!(cache.chunks.cap().get(), 2);
     }
 }

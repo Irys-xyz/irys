@@ -285,6 +285,7 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
+                            coordinator.active_concurrent_hashes.remove(&validation.block_hash);
 
                             if let Err(e) = self.inner.service_senders.block_tree.send_traced(
                                 crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
@@ -301,6 +302,9 @@ impl ValidationService {
                         }
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
+                            if let Some(hash) = &removed {
+                                coordinator.active_concurrent_hashes.remove(hash);
+                            }
                             let message = if e.is_cancelled() {
                                 "Concurrent validation task was cancelled"
                             } else {

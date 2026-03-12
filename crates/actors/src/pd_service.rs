@@ -285,6 +285,7 @@ impl PdService {
                 remaining_cached = self.cache.len(),
                 "PD transaction removed, references decremented"
             );
+            self.cache.try_shrink_to_fit();
         }
     }
 
@@ -361,6 +362,7 @@ impl PdService {
                 }
             }
             let _ = response.send(Err(missing));
+            self.cache.try_shrink_to_fit();
         }
 
         debug!(
@@ -384,6 +386,7 @@ impl PdService {
                 released_keys = chunk_keys.len(),
                 "Released block validation chunks"
             );
+            self.cache.try_shrink_to_fit();
         }
     }
 }
