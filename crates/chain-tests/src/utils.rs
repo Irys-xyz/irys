@@ -123,8 +123,7 @@ pub async fn capacity_chunk_solution(
         };
 
         // Calculate last step checkpoints for current_step - 1
-        let mut hasher = Sha256::new();
-        let mut salt = irys_types::U256::from(step_number_to_salt_number(
+        let salt = irys_types::U256::from(step_number_to_salt_number(
             &config.vdf,
             current_step.saturating_sub(1),
         ));
@@ -134,8 +133,7 @@ pub async fn capacity_chunk_solution(
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
 
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),
@@ -244,8 +242,7 @@ pub async fn capacity_chunk_solution(
         checkpoints: H256List(
             // recompute checkpoints for fallback
             {
-                let mut h = Sha256::new();
-                let mut s = irys_types::U256::from(step_number_to_salt_number(
+                let s = irys_types::U256::from(step_number_to_salt_number(
                     &config.vdf,
                     current_step.saturating_sub(1),
                 ));
@@ -253,8 +250,7 @@ pub async fn capacity_chunk_solution(
                 let mut cps: Vec<H256> =
                     vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
-                    &mut h,
-                    &mut s,
+                    s,
                     &mut sd,
                     config.vdf.num_checkpoints_in_vdf_step,
                     config.vdf.num_iterations_per_checkpoint(),
@@ -3613,15 +3609,13 @@ pub async fn solution_context_with_poa_chunk(
         };
 
         // Compute checkpoints for (step-1)
-        let mut hasher = Sha256::new();
-        let mut salt =
+        let salt =
             irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
         let mut seed = steps[0];
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             node_ctx.config.vdf.num_checkpoints_in_vdf_step,
             node_ctx.config.vdf.num_iterations_per_checkpoint(),
