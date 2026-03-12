@@ -1,0 +1,199 @@
+name: Claude PR Review
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: design-extraction-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  extract-design-decisions:
+    if: >-
+      github.event.review.state == 'approved'
+      && !contains(github.event.pull_request.labels.*.name, 'design-extracted')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, misc-runner]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Ensure design docs directory
+        run: mkdir -p design/docs
+
+      - name: Extract design plan section
+        id: design-plan
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          PLAN=$(python3 -c "
+          import os, re
+          body = os.environ['PR_BODY']
+          m = re.search(r'<!--\s*design plan\s*-->(.*?)<!--\s*end of design plan\s*-->', body, re.DOTALL)
+          print(m.group(1).strip() if m else '')
+          ")
+          DELIM="DESIGN_PLAN_$(date +%s%N)"
+          if printf '%s' "$PLAN" | grep -qF "$DELIM"; then
+            echo "::error::Delimiter collision in design plan content"
+            exit 1
+          fi
+          echo "content<<${DELIM}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$PLAN" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR comments
+        id: pr-comments
+        if: steps.design-plan.outputs.content != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMENTS=$(gh api --paginate \
+            "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          REVIEWS=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
+            --jq '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          COMBINED="${COMMENTS}"$'\n\n'"${REVIEWS}"
+          DELIM="PR_COMMENTS_$(date +%s%N)"
+          if printf '%s' "$COMBINED" | grep -qF "$DELIM"; then
+            echo "::error::Delimiter collision in PR comments content"
+            exit 1
+          fi
+          echo "content<<${DELIM}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$COMBINED" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract design decisions
+        if: steps.design-plan.outputs.content != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DESIGN_PLAN: ${{ steps.design-plan.outputs.content }}
+          PR_COMMENTS: ${{ steps.pr-comments.outputs.content }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PROMPT=$(envsubst '$DESIGN_PLAN $PR_COMMENTS $PR_NUMBER $PR_TITLE' \
+            < .github/prompts/design-extraction.md)
+          claude -p "$PROMPT" \
+            --model claude-sonnet-4-20250514 \
+            --allowedTools "Read,Glob" \
+            --output-format json \
+            > /tmp/claude-output.json
+
+      - name: Write design documents
+        if: steps.design-plan.outputs.content != ''
+        run: |
+          python3 <<'PYEOF'
+          import json, os, re, sys
+
+          with open("/tmp/claude-output.json") as f:
+              raw = f.read()
+
+          try:
+              envelope = json.loads(raw)
+              if isinstance(envelope, dict) and "result" in envelope:
+                  if envelope.get("is_error"):
+                      print(f"Claude error: {envelope.get('result', 'unknown')}")
+                      sys.exit(1)
+                  text = envelope["result"]
+              else:
+                  text = raw
+          except json.JSONDecodeError:
+              text = raw
+
+          data = None
+          try:
+              data = json.loads(text)
+          except (json.JSONDecodeError, TypeError):
+              match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+              if match:
+                  try:
+                      data = json.loads(match.group(1))
+                  except json.JSONDecodeError:
+                      pass
+
+          if data is None:
+              print("No valid JSON in Claude output. Skipping.")
+              sys.exit(0)
+
+          decisions = data.get("decisions", [])
+          if not decisions:
+              print(data.get("summary", "No decisions to write."))
+              sys.exit(0)
+
+          ALLOWED_DIR = os.path.abspath("design/docs")
+          FILENAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*\.md$')
+
+          for d in decisions:
+              filename = d.get("filename", "")
+              action = d.get("action", "")
+              content = d.get("content", "")
+
+              if action not in ("create", "append"):
+                  print(f"SKIP: invalid action '{action}' for {filename}")
+                  continue
+              if not FILENAME_RE.match(filename):
+                  print(f"SKIP: invalid filename '{filename}'")
+                  continue
+
+              filepath = os.path.abspath(os.path.join("design/docs", filename))
+              if not filepath.startswith(ALLOWED_DIR + os.sep):
+                  print(f"SKIP: path traversal in '{filename}'")
+                  continue
+
+              if action == "create":
+                  if os.path.exists(filepath):
+                      print(f"SKIP: '{filename}' already exists (action=create)")
+                      continue
+                  with open(filepath, "w") as f:
+                      f.write(content)
+                  print(f"CREATED: {filename}")
+              elif action == "append":
+                  if not os.path.exists(filepath):
+                      print(f"SKIP: '{filename}' does not exist (action=append)")
+                      continue
+                  with open(filepath, "a") as f:
+                      f.write("\n\n" + content)
+                  print(f"UPDATED: {filename}")
+
+          print(f"\nSummary: {data.get('summary', 'Done')}")
+          PYEOF
+
+      - name: Validate output
+        if: steps.design-plan.outputs.content != ''
+        run: |
+          INVALID=$(git diff --name-only | grep -v '^design/docs/' || true)
+          if [ -n "$INVALID" ]; then
+            echo "::error::Files modified outside design/docs/: $INVALID"
+            exit 1
+          fi
+
+      - name: Commit and push
+        if: steps.design-plan.outputs.content != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add design/docs/
+          if ! git diff --staged --quiet; then
+            git commit -m "ci: extract design decisions from PR #${{ github.event.pull_request.number }}"
+            git push
+          fi
+
+      - name: Add design-extracted label
+        if: steps.design-plan.outputs.content != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "${{ github.event.pull_request.number }}" --add-label "design-extracted"
