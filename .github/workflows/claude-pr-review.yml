@@ -154,9 +154,9 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
         run: |
-          PROMPT=$(envsubst '$DESIGN_PLAN $PR_COMMENTS $PR_NUMBER $PR_TITLE' \
-            < trusted-base/.github/prompts/design-extraction.md)
-          npx claude -p "$PROMPT" \
+          envsubst '$DESIGN_PLAN $PR_COMMENTS $PR_NUMBER $PR_TITLE' \
+            < trusted-base/.github/prompts/design-extraction.md \
+          | npx claude \
             --model claude-sonnet-4-20250514 \
             --allowedTools "Read,Glob" \
             --output-format json \
@@ -265,7 +265,10 @@ jobs:
       - name: Validate output
         if: steps.design-plan.outputs.content != ''
         run: |
-          INVALID=$(git diff --name-only | grep -v '^design/docs/' || true)
+          INVALID=$( {
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | grep -v '^design/docs/' || true)
           if [ -n "$INVALID" ]; then
             echo "::error::Files modified outside design/docs/: $INVALID"
             exit 1
