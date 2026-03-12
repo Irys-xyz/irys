@@ -33,6 +33,7 @@ tracing.workspace = true
 arbitrary.workspace = true
 nodit.workspace = true
 bytes.workspace = true
+dashmap = { workspace = true }
 modular-bitfield.workspace = true
 alloy-rlp.workspace = true
 zerocopy = "0.8.9"

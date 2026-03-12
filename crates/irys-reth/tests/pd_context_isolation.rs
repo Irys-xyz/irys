@@ -6,13 +6,14 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_evm::Evm as _;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256, aliases::U200};
+use dashmap::DashMap;
 use irys_reth::evm::IrysEvmFactory;
-use irys_types::chunk_provider::MockChunkProvider;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{
     ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
 };
-use reth_evm::{EvmEnv, EvmFactory as _};
+use reth_evm::EvmEnv;
+use reth_evm::EvmFactory as _;
 use revm::context::{BlockEnv, CfgEnv, TxEnv};
 use revm::database::EmptyDB;
 use revm::primitives::hardfork::SpecId;
@@ -62,10 +63,16 @@ fn create_pd_transaction(access_list: AccessList) -> TxEnv {
 
 #[test]
 fn test_evm_instances_have_isolated_pd_contexts() {
-    // Create a single factory with test hardfork config (Sprite enabled from genesis)
-    let mock_chunk_provider = Arc::new(MockChunkProvider::new());
-    let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
-    let factory = IrysEvmFactory::new(mock_chunk_provider, hardfork_config);
+    // Create a ChunkDataIndex pre-populated with enough chunks for both EVMs
+    let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+    let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 256_000]));
+    for offset in 0..10_u64 {
+        chunk_data_index.insert((0_u32, offset), chunk.clone());
+    }
+    let consensus = irys_types::config::ConsensusConfig::testing();
+    let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&consensus);
+    let hardfork_config = Arc::new(consensus.hardforks);
+    let factory = IrysEvmFactory::new(chunk_config, hardfork_config, chunk_data_index);
 
     // Create two EVMs from the same factory
     let mut cfg_env = CfgEnv::default();

@@ -101,6 +101,8 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// Chain sync state for recording diagnostic info
     pub(crate) chain_sync_state: ChainSyncState,
+    /// PD chunk sender for provisioning chunks during block validation
+    pub(crate) pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
 }
 
 impl ValidationService {
@@ -119,6 +121,7 @@ impl ValidationService {
         rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
         chain_sync_state: ChainSyncState,
+        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
         info!("Spawning validation service");
 
@@ -154,6 +157,7 @@ impl ValidationService {
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
                         chain_sync_state,
+                        pd_chunk_sender,
                     }),
                 };
 

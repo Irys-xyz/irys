@@ -95,20 +95,24 @@ pub fn compose_shadow_tx(
 #[derive(Clone)]
 pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
-    pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pub chunk_config: irys_types::chunk_provider::ChunkConfig,
     pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// PD chunk sender for unified chunk management.
-    /// - PD transactions in the payload builder will be skipped if their chunks are not ready
-    /// - The mempool will monitor for PD transactions and send messages to the PdChunkManager
+    /// PD chunk sender for provisioning messages.
     pub pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+    /// Shared set of ready PD tx hashes for lock-free readiness checks.
+    pub ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Shared chunk data index for lock-free chunk reads during EVM execution.
+    pub chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysEthereumNode")
-            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("chunk_config", &self.chunk_config)
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
+            .field("ready_pd_txs", &"<dashset>")
+            .field("chunk_data_index", &"<index>")
             .finish()
     }
 }
@@ -149,13 +153,14 @@ impl IrysEthereumNode {
             .node_types::<Node>()
             .pool(pool_builder)
             .executor(IrysExecutorBuilder {
-                chunk_provider: self.chunk_provider.clone(),
+                chunk_config: self.chunk_config,
                 hardfork_config: self.hardfork_config.clone(),
+                chunk_data_index: self.chunk_data_index.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
-                pd_chunk_sender: self.pd_chunk_sender.clone(),
+                ready_pd_txs: self.ready_pd_txs.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -230,15 +235,17 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 /// A regular ethereum evm and executor builder.
 #[derive(Clone)]
 pub struct IrysExecutorBuilder {
-    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysExecutorBuilder")
-            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("chunk_config", &self.chunk_config)
             .field("hardfork_config", &self.hardfork_config)
+            .field("chunk_data_index", &"<ChunkDataIndex>")
             .finish()
     }
 }
@@ -254,7 +261,11 @@ where
         let evm_config = EthEvmConfig::new(ctx.chain_spec());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
+        let evm_factory = IrysEvmFactory::new(
+            self.chunk_config,
+            self.hardfork_config,
+            self.chunk_data_index,
+        );
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -2547,6 +2558,8 @@ pub mod test_utils {
         pub target_account: Arc<dyn TxSigner<Signature> + Send + Sync>,
         pub genesis_blockhash: FixedBytes<32>,
         pub tasks: Runtime,
+        /// Ready PD tx sets per node — tests can pre-populate these for PD transactions.
+        pub ready_pd_txs_per_node: Vec<Arc<dashmap::DashSet<revm_primitives::B256>>>,
     }
 
     impl std::fmt::Debug for TestContext {
@@ -2575,14 +2588,11 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
-            let mock_chunk_provider =
-                std::sync::Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-            let (nodes, tasks, ..) = setup_irys_reth(
+            let (nodes, tasks, _wallet, ready_pd_txs_per_node) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
-                mock_chunk_provider,
             )
             .await?;
 
@@ -2605,6 +2615,7 @@ pub mod test_utils {
                 normal_signer,
                 target_account,
                 genesis_blockhash,
+                ready_pd_txs_per_node,
             })
         }
 
@@ -2631,6 +2642,11 @@ pub mod test_utils {
             let second = self.nodes.pop().unwrap();
             let first = self.nodes.pop().unwrap();
             Ok(((first, second), self))
+        }
+
+        /// Get the ready_pd_txs DashSet for the first node (convenience for single-node tests).
+        pub fn ready_pd_txs(&self) -> &Arc<dashmap::DashSet<revm_primitives::B256>> {
+            &self.ready_pd_txs_per_node[0]
         }
     }
 
@@ -3295,7 +3311,7 @@ pub mod test_utils {
     /// - `chain_spec`: Chain spec to use
     /// - `is_dev`: Whether to run in dev mode
     /// - `attributes_generator`: Function to generate payload attributes
-    /// - `chunk_provider`: Implementation of RethChunkProvider to use for all nodes
+    /// - `chunk_config`: Chunk configuration for all nodes
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
@@ -3306,8 +3322,12 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, Runtime, Wallet)>
+    ) -> eyre::Result<(
+        Vec<NodeHelperType<IrysEthereumNode>>,
+        Runtime,
+        Wallet,
+        Vec<Arc<dashmap::DashSet<revm_primitives::B256>>>,
+    )>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<
@@ -3326,6 +3346,7 @@ pub mod test_utils {
 
         // Create nodes and peer them
         let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
+        let mut ready_sets = Vec::new();
 
         for (idx, producer) in num_nodes.iter().enumerate() {
             let node_config = NodeConfig::new(chain_spec.clone())
@@ -3336,6 +3357,10 @@ pub mod test_utils {
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
+
+            let ready_pd_txs = Arc::new(dashmap::DashSet::new());
+            let chunk_data_index = Arc::new(dashmap::DashMap::new());
+            ready_sets.push(ready_pd_txs.clone());
 
             let NodeHandle {
                 node,
@@ -3349,7 +3374,9 @@ pub mod test_utils {
                     IrysEthereumNode {
                         // Use default value for tests
                         max_pd_chunks_per_block: 7_500,
-                        chunk_provider: chunk_provider.clone(),
+                        chunk_config: irys_types::chunk_provider::ChunkConfig::from_consensus(
+                            &irys_types::config::ConsensusConfig::testing(),
+                        ),
                         // Use testing hardfork config with Sprite enabled from genesis
                         hardfork_config: std::sync::Arc::new(
                             irys_types::config::ConsensusConfig::testing()
@@ -3357,6 +3384,8 @@ pub mod test_utils {
                                 .clone(),
                         ),
                         pd_chunk_sender,
+                        ready_pd_txs,
+                        chunk_data_index,
                     }
                 })
                 .launch()
@@ -3391,6 +3420,7 @@ pub mod test_utils {
             nodes,
             tasks,
             Wallet::default().with_chain_id(chain_spec.chain().into()),
+            ready_sets,
         ))
     }
 

@@ -447,6 +447,7 @@ impl BlockValidationTask {
                 parent_commitment_snapshot,
                 block_index,
                 sealed_block_for_shadow.transactions(),
+                &self.service_inner.pd_chunk_sender,
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",
@@ -569,6 +570,13 @@ impl BlockValidationTask {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
+                // Release any PD chunks that may have been provisioned during
+                // shadow tx validation before the error occurred.
+                let _ = self.service_inner.pd_chunk_sender.send(
+                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
+                        block_hash: self.sealed_block.header().block_hash.into(),
+                    },
+                );
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
@@ -604,6 +612,13 @@ impl BlockValidationTask {
                 ))
                 .await;
 
+                // Release PD chunks provisioned for this block (fire-and-forget)
+                let _ = self.service_inner.pd_chunk_sender.send(
+                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
+                        block_hash: self.sealed_block.header().block_hash.into(),
+                    },
+                );
+
                 match reth_result {
                     Ok(()) => {
                         tracing::debug!("Reth execution layer validation successful");
@@ -619,6 +634,14 @@ impl BlockValidationTask {
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
+
+                // Release any PD chunks that may have been provisioned
+                let _ = self.service_inner.pd_chunk_sender.send(
+                    irys_types::chunk_provider::PdChunkMessage::ReleaseBlockChunks {
+                        block_hash: self.sealed_block.header().block_hash.into(),
+                    },
+                );
+
                 // At least one validation failed, return the first Invalid result
                 let first_invalid = [
                     &recall_result,

@@ -68,6 +68,10 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             }
         })?;
 
+        // Note: available_gas is passed to read functions for interface compatibility but
+        // is intentionally unused. PD chunk I/O is metered via per-chunk IRYS token fees
+        // (deducted in IrysEvm::transact_raw), not via EVM gas. The only EVM gas charged
+        // is the flat PD_BASE_GAS_COST.
         let available_gas = gas_limit.saturating_sub(PD_BASE_GAS_COST);
 
         let res = match decoded_id {
@@ -138,11 +142,23 @@ mod tests {
     use alloy_eips::eip2930::AccessList;
     use alloy_evm::{Evm as _, EvmFactory as _};
     use alloy_primitives::{Address, Bytes};
+    use dashmap::DashMap;
     use reth_evm::EvmEnv;
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
     use revm::primitives::{TxKind, U256, hardfork::SpecId};
     use std::sync::Arc;
+
+    /// Creates a ChunkDataIndex pre-populated with zero-filled chunks for offsets 0..num_chunks.
+    /// Chunk size matches the testing ConsensusConfig (256_000 bytes).
+    fn test_chunk_data_index(num_chunks: u64) -> irys_types::chunk_provider::ChunkDataIndex {
+        let index = Arc::new(DashMap::new());
+        let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 256_000]));
+        for offset in 0..num_chunks {
+            index.insert((0_u32, offset), chunk.clone());
+        }
+        index
+    }
 
     /// Creates a default TxEnv for testing PD precompile.
     fn tx_env_default(data: Bytes, access_list: AccessList) -> TxEnv {
@@ -168,9 +184,10 @@ mod tests {
     fn execute_precompile(
         input: Vec<u8>,
         access_list: AccessList,
+        num_chunks: u64,
     ) -> revm::context::result::ResultAndState {
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(num_chunks);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
 
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -217,7 +234,7 @@ mod tests {
             ],
         }]);
 
-        let result = execute_precompile(vec![0, 0], access_list);
+        let result = execute_precompile(vec![0, 0], access_list, 1);
         assert!(result.result.is_success(), "transaction should succeed");
 
         // Verify gas cost is at least the base cost
@@ -246,8 +263,8 @@ mod tests {
         use alloy_eips::eip2930::AccessList;
         use alloy_evm::{Evm as _, EvmFactory as _};
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(0);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -272,8 +289,8 @@ mod tests {
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(2);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -326,8 +343,8 @@ mod tests {
         use alloy_eips::eip2930::AccessList;
         use alloy_evm::{Evm as _, EvmFactory as _};
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(0);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -352,8 +369,8 @@ mod tests {
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(1);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -398,8 +415,8 @@ mod tests {
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(20);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -454,8 +471,8 @@ mod tests {
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(0);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -509,8 +526,8 @@ mod tests {
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index = test_chunk_data_index(1000);
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
