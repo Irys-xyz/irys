@@ -40,7 +40,10 @@ jobs:
             echo "::error::No PR number provided"
             exit 1
           fi
-          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}")
+          PR_JSON=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${PR_NUMBER}")
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(echo "$PR_JSON" | jq -r '.head.sha')" >> "$GITHUB_OUTPUT"
@@ -136,15 +139,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMENTS=$(gh api --paginate \
-            "repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments" \
-            --jq '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
-          REVIEW_COMMENTS=$(gh api --paginate \
-            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments" \
-            --jq '[.[] | "**@\(.user.login) (review on \(.path)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
-          REVIEWS=$(gh api --paginate \
-            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews" \
-            --jq '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          COMMENTS=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments?per_page=100" \
+            | jq -r '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          REVIEW_COMMENTS=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments?per_page=100" \
+            | jq -r '[.[] | "**@\(.user.login) (review on \(.path)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
+          REVIEWS=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews?per_page=100" \
+            | jq -r '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
           COMBINED=$(printf '%s\n\n%s\n\n%s' "$COMMENTS" "$REVIEW_COMMENTS" "$REVIEWS")
           DELIM="PR_COMMENTS_$(date +%s%N)"
           if printf '%s' "$COMBINED" | grep -qF "$DELIM"; then
@@ -215,4 +224,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr edit "${{ steps.pr.outputs.number }}" --add-label "design-extracted"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/labels" \
+            -d '{"labels":["design-extracted"]}'
