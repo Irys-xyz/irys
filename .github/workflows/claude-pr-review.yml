@@ -46,6 +46,7 @@ jobs:
           echo "head_sha=$(echo "$PR_JSON" | jq -r '.head.sha')" >> "$GITHUB_OUTPUT"
           echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
           echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(echo "$PR_JSON" | jq -r '.base.sha')" >> "$GITHUB_OUTPUT"
           IS_FORK=$(echo "$PR_JSON" | jq -r '.head.repo.full_name != .base.repo.full_name')
           echo "is_fork=${IS_FORK}" >> "$GITHUB_OUTPUT"
           HAS_LABEL=$(echo "$PR_JSON" | jq -r '[.labels[].name] | any(. == "design-extracted")')
@@ -83,13 +84,13 @@ jobs:
       - name: Checkout trusted prompt from base branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.base_ref }}
+          ref: ${{ steps.pr.outputs.base_sha }}
           path: trusted-base
           sparse-checkout: .github/prompts
           fetch-depth: 1
 
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install @anthropic-ai/claude-code@2.1.73
 
       - name: Ensure design docs directory
         run: |
@@ -155,7 +156,7 @@ jobs:
         run: |
           PROMPT=$(envsubst '$DESIGN_PLAN $PR_COMMENTS $PR_NUMBER $PR_TITLE' \
             < trusted-base/.github/prompts/design-extraction.md)
-          claude -p "$PROMPT" \
+          npx claude -p "$PROMPT" \
             --model claude-sonnet-4-20250514 \
             --allowedTools "Read,Glob" \
             --output-format json \
@@ -199,8 +200,8 @@ jobs:
 
           decisions = data.get("decisions", [])
           if not decisions:
-              print(data.get("summary", "No decisions to write."))
-              sys.exit(0)
+              print("ERROR: Claude returned no decisions.")
+              sys.exit(1)
 
           ALLOWED_DIR = os.path.realpath("design/docs")
           WORKSPACE = os.path.realpath(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
