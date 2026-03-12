@@ -4964,7 +4964,7 @@ dependencies = [
 
 [[package]]
 name = "irys-chain"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "actix-web",
  "alloy-contract",
@@ -5240,9 +5240,11 @@ dependencies = [
  "reth",
  "reth-ethereum-primitives",
  "reth-tasks",
+ "rstest",
  "semver 1.0.27",
  "serde",
  "serde_json",
+ "syn 2.0.114",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

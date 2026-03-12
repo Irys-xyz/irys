@@ -29,7 +29,7 @@ pub async fn get_node_info(
 
     NodeInfo {
         version: "0.0.1".into(),
-        peer_count: peer_list.peer_count(),
+        peer_count: peer_list.peer_count() as u64,
         chain_id,
         height: latest.height(),
         block_hash: latest.block_hash(),
@@ -37,7 +37,7 @@ pub async fn get_node_info(
         block_index_hash,
         pending_blocks: blocks as u64,
         is_syncing: sync_state.is_syncing(),
-        current_sync_height: sync_state.sync_target_height(),
+        current_sync_height: sync_state.sync_target_height() as u64,
         uptime_secs: started_at.elapsed().as_secs(),
         cumulative_difficulty: max_diff.0,
         mining_address,

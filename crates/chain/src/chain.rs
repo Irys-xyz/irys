@@ -1029,7 +1029,7 @@ impl IrysNode {
                 );
 
                     metrics::record_block_height(info.height);
-                    metrics::record_peer_count(info.peer_count as u64);
+                    metrics::record_peer_count(info.peer_count);
                     metrics::record_pending_chunks(mempool_status.pending_chunks_count as u64);
                     metrics::record_pending_data_txs(mempool_status.data_tx_count as u64);
                     metrics::record_sync_state(!info.is_syncing);
