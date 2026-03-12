@@ -1492,7 +1492,7 @@ impl IrysNode {
 
         // start the epoch service
         let replay_data =
-            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
+            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, config).await?;
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
