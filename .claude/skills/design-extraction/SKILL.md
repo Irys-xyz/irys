@@ -9,7 +9,7 @@ Extract architectural and design decisions from a GitHub PR and write them as AD
 
 ## Command
 
-```
+```text
 /design-extraction <pr-number>
 ```
 
@@ -47,7 +47,7 @@ Display the PR title and URL for context.
 
 The PR body may contain a design plan between HTML comment markers:
 
-```
+```html
 <!-- design plan -->
 ... design content here ...
 <!-- end of design plan -->
@@ -61,7 +61,7 @@ If no design plan markers exist, use the full PR body as the source material —
 
 If the design plan (or PR body) contains no concrete decisions — it's a placeholder like "TBD", "TODO", "see Slack", "WIP", or just a feature description without architectural rationale — stop and tell the user:
 
-```
+```text
 No actionable design decisions found in PR #<number>.
 ```
 
@@ -69,7 +69,7 @@ A "decision" means a deliberate choice between alternatives with stated rational
 
 ### 4. Read Existing Design Docs
 
-```
+```text
 Glob: design/docs/*.md
 ```
 
@@ -140,7 +140,7 @@ PR #<number> — <title>
 
 After writing, display:
 
-```
+```text
 Design Extraction Complete — PR #<number>: <title>
 
   Created: <list of new files>

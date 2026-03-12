@@ -102,9 +102,13 @@ jobs:
 
       - name: Install trusted skill
         run: |
-          rm -rf .claude/skills/design-extraction
-          mkdir -p .claude/skills
-          cp -r trusted-base/.claude/skills/design-extraction .claude/skills/design-extraction
+          if [ -d trusted-base/.claude/skills/design-extraction ]; then
+            rm -rf .claude/skills/design-extraction
+            mkdir -p .claude/skills
+            cp -r trusted-base/.claude/skills/design-extraction .claude/skills/design-extraction
+          else
+            echo "::warning::Skill not found on base branch — using PR version (bootstrap)"
+          fi
 
       - name: Extract design plan section
         id: design-plan
@@ -115,7 +119,7 @@ jobs:
           import os, re
           body = os.environ['PR_BODY']
           m = re.search(r'<!--\s*design plan\s*-->(.*?)<!--\s*end of design plan\s*-->', body, re.DOTALL)
-          print(m.group(1).strip() if m else '')
+          print(m.group(1).strip() if m else body.strip())
           ")
           DELIM="DESIGN_PLAN_$(date +%s%N)"
           if printf '%s' "$PLAN" | grep -qF "$DELIM"; then
@@ -189,7 +193,7 @@ jobs:
           INVALID=$( {
             git diff --name-only
             git ls-files --others --exclude-standard
-          } | grep -v '^design/docs/' || true)
+          } | grep -v '^design/docs/' | grep -v '^\.claude/skills/' || true)
           if [ -n "$INVALID" ]; then
             echo "::error::Files modified outside design/docs/: $INVALID"
             exit 1
