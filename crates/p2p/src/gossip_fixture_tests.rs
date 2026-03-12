@@ -765,6 +765,25 @@ assert_fixture_coverage!(
 /// Verifies that every public struct/enum in `wire_types/` appears in the
 /// test sources, catching newly added wire types that lack test coverage.
 ///
+/// Check whether `word` appears in `haystack` as a whole identifier
+/// (not as a substring of a longer alphanumeric/underscore token).
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = haystack.as_bytes();
+    let wlen = word.len();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(word) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !is_ident(bytes[abs - 1]);
+        let after_ok = abs + wlen >= bytes.len() || !is_ident(bytes[abs + wlen]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 /// If this test fails, either:
 /// 1. Add a `fixture_tests!` entry and/or roundtrip test for the new type.
 /// 2. If the type is an inner struct tested via its wrapper enum, add it to
@@ -856,7 +875,7 @@ fn all_wire_types_have_fixture_coverage() {
                 continue;
             }
 
-            if !test_sources.contains(&name) {
+            if !contains_word(&test_sources, &name) {
                 missing.push(format!("  {name} (in wire_types/{filename})"));
             }
         }
