@@ -3,28 +3,88 @@ name: Claude PR Review
 on:
   pull_request_review:
     types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'PR number to extract design decisions from'
+        required: true
+        type: number
 
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: design-extraction-${{ github.event.pull_request.number }}
+  group: design-extraction-${{ github.event.pull_request.number || inputs.pr-number }}
   cancel-in-progress: true
 
 jobs:
   extract-design-decisions:
     if: >-
-      github.event.review.state == 'approved'
-      && !contains(github.event.pull_request.labels.*.name, 'design-extracted')
-      && github.event.pull_request.head.repo.full_name == github.repository
+      github.event_name == 'workflow_dispatch'
+      || (
+        github.event.review.state == 'approved'
+        && !contains(github.event.pull_request.labels.*.name, 'design-extracted')
+        && github.event.pull_request.head.repo.full_name == github.repository
+      )
     runs-on: [self-hosted, misc-runner]
 
     steps:
+      - name: Resolve PR details
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number || inputs.pr-number }}"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No PR number provided"
+            exit 1
+          fi
+          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}")
+          echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(echo "$PR_JSON" | jq -r '.head.sha')" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+          IS_FORK=$(echo "$PR_JSON" | jq -r '.head.repo.full_name != .base.repo.full_name')
+          echo "is_fork=${IS_FORK}" >> "$GITHUB_OUTPUT"
+          HAS_LABEL=$(echo "$PR_JSON" | jq -r '[.labels[].name] | any(. == "design-extracted")')
+          echo "has_label=${HAS_LABEL}" >> "$GITHUB_OUTPUT"
+
+          BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
+          DELIM="PR_BODY_$(date +%s%N)"
+          if printf '%s' "$BODY" | grep -qF "$DELIM"; then
+            echo "::error::Delimiter collision in PR body"
+            exit 1
+          fi
+          echo "body<<${DELIM}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$BODY" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      - name: Guard manual dispatch
+        if: >-
+          github.event_name == 'workflow_dispatch'
+          && (steps.pr.outputs.is_fork == 'true' || steps.pr.outputs.has_label == 'true')
+        run: |
+          if [ "${{ steps.pr.outputs.has_label }}" = "true" ]; then
+            echo "::error::PR already has design-extracted label"
+          fi
+          if [ "${{ steps.pr.outputs.is_fork }}" = "true" ]; then
+            echo "::error::Cannot run on fork PRs"
+          fi
+          exit 1
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ steps.pr.outputs.head_sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Checkout trusted prompt from base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.base_ref }}
+          path: trusted-base
+          sparse-checkout: .github/prompts
           fetch-depth: 1
 
       - name: Install Claude Code
@@ -36,7 +96,7 @@ jobs:
       - name: Extract design plan section
         id: design-plan
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BODY: ${{ steps.pr.outputs.body }}
         run: |
           PLAN=$(python3 -c "
           import os, re
@@ -60,10 +120,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           COMMENTS=$(gh api --paginate \
-            "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            "repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments" \
             --jq '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
           REVIEWS=$(gh api --paginate \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
+            "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews" \
             --jq '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
           COMBINED="${COMMENTS}"$'\n\n'"${REVIEWS}"
           DELIM="PR_COMMENTS_$(date +%s%N)"
@@ -81,11 +141,11 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DESIGN_PLAN: ${{ steps.design-plan.outputs.content }}
           PR_COMMENTS: ${{ steps.pr-comments.outputs.content }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
         run: |
           PROMPT=$(envsubst '$DESIGN_PLAN $PR_COMMENTS $PR_NUMBER $PR_TITLE' \
-            < .github/prompts/design-extraction.md)
+            < trusted-base/.github/prompts/design-extraction.md)
           claude -p "$PROMPT" \
             --model claude-sonnet-4-20250514 \
             --allowedTools "Read,Glob" \
@@ -125,15 +185,15 @@ jobs:
                       pass
 
           if data is None:
-              print("No valid JSON in Claude output. Skipping.")
-              sys.exit(0)
+              print("ERROR: No valid JSON in Claude output.")
+              sys.exit(1)
 
           decisions = data.get("decisions", [])
           if not decisions:
               print(data.get("summary", "No decisions to write."))
               sys.exit(0)
 
-          ALLOWED_DIR = os.path.abspath("design/docs")
+          ALLOWED_DIR = os.path.realpath("design/docs")
           FILENAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*\.md$')
 
           for d in decisions:
@@ -148,9 +208,12 @@ jobs:
                   print(f"SKIP: invalid filename '{filename}'")
                   continue
 
-              filepath = os.path.abspath(os.path.join("design/docs", filename))
+              filepath = os.path.realpath(os.path.join("design/docs", filename))
               if not filepath.startswith(ALLOWED_DIR + os.sep):
                   print(f"SKIP: path traversal in '{filename}'")
+                  continue
+              if os.path.islink(os.path.join("design/docs", filename)):
+                  print(f"SKIP: symlink detected for '{filename}'")
                   continue
 
               if action == "create":
@@ -187,7 +250,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add design/docs/
           if ! git diff --staged --quiet; then
-            git commit -m "ci: extract design decisions from PR #${{ github.event.pull_request.number }}"
+            git commit -m "ci: extract design decisions from PR #${{ steps.pr.outputs.number }}"
             git push
           fi
 
@@ -196,4 +259,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr edit "${{ github.event.pull_request.number }}" --add-label "design-extracted"
+          gh pr edit "${{ steps.pr.outputs.number }}" --add-label "design-extracted"

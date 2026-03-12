@@ -22,12 +22,12 @@ $PR_COMMENTS
 
 1. Read the design plan above carefully. This is the primary source of design decisions.
 
-2. If the design plan contains fewer than two concrete decisions, or is clearly a placeholder (e.g., "TBD", "TODO", "see Slack", "WIP"), output the following JSON and stop:
+2. If the design plan contains no concrete decisions, or is clearly a placeholder (e.g., "TBD", "TODO", "see Slack", "WIP"), output the following JSON and stop:
    ```json
    {"decisions": [], "summary": "No actionable design decisions found."}
    ```
 
-3. Read the PR comments above. These may contain amendments, clarifications, or decisions that refine or supersede parts of the plan. Where a comment contradicts the plan, the comment takes precedence.
+3. Read the PR comments above. These may contain amendments, clarifications, or explicit decisions that refine or supersede parts of the plan. Only treat a comment as overriding the plan when it contains a clear resolution, correction, or final decision — ignore questions, speculative remarks, and casual discussion.
 
 4. Use Glob to list all existing files in `design/docs/`. Read each one to understand what is already documented.
 
@@ -38,7 +38,7 @@ $PR_COMMENTS
    - Is it a new, distinct topic? If so, prepare a `"create"` action.
    - Does it relate to multiple existing docs? Prepare an update for the most closely related one and include a cross-reference in the content: `See also: [Related Topic](related-topic.md)`
 
-7. Format all design document content as ADRs with these sections:
+7. Format all design document content as **ADRs (Architecture Decision Records)** — short documents that capture a single design decision: the context that prompted it, what was decided, and the consequences. ADRs create a decision log so future contributors understand *why* the system is built the way it is. Each ADR must have these sections:
    - **Title** — descriptive name of the decision
    - **Status** — `Accepted`
    - **Context** — what problem or requirement prompted this decision
