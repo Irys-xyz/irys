@@ -344,7 +344,24 @@ impl PdService {
 
         if missing.is_empty() {
             self.block_tracker.insert(block_hash, chunk_keys);
-            let _ = response.send(Ok(()));
+            if response.send(Ok(())).is_err() {
+                // Receiver was dropped — the validation task was cancelled before
+                // it could create a PdBlockGuard. Clean up immediately to prevent
+                // chunks from being pinned forever.
+                warn!(
+                    block_hash = %block_hash,
+                    "Provision response receiver dropped (task cancelled), releasing chunks"
+                );
+                if let Some(keys) = self.block_tracker.remove(&block_hash) {
+                    for key in &keys {
+                        let unreferenced = self.cache.remove_reference(key, &block_hash);
+                        if unreferenced {
+                            self.cache.remove(key);
+                        }
+                    }
+                    self.cache.try_shrink_to_fit();
+                }
+            }
         } else {
             // Don't track a failed provisioning — the caller will bail and the
             // partially-loaded chunks will be cleaned up by their absence from
@@ -502,9 +519,10 @@ mod tests {
             chunk_count: 2,
         }];
 
-        // Provision
-        let (resp_tx, _) = oneshot::channel();
+        // Provision — hold the receiver alive so the send succeeds
+        let (resp_tx, resp_rx) = oneshot::channel();
         service.handle_provision_block_chunks(block_hash, specs, resp_tx);
+        let _ = resp_rx.blocking_recv();
 
         // Verify chunks are cached
         assert!(service.cache.contains(&ChunkKey {
@@ -602,5 +620,110 @@ mod tests {
         // Release — should remove from ready set
         service.handle_release_chunks(&tx_hash);
         assert!(!ready_set.contains(&tx_hash));
+    }
+
+    #[test]
+    fn test_provision_block_chunks_cleans_up_on_dropped_receiver() {
+        let mut service = test_service();
+        let block_hash = B256::with_last_byte(0xDD);
+        let specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+
+        // Create a oneshot and immediately drop the receiver to simulate
+        // a cancelled validation task.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        drop(resp_rx);
+
+        service.handle_provision_block_chunks(block_hash, specs, resp_tx);
+
+        // Block tracker should be empty — the failed send should have triggered cleanup
+        assert!(
+            !service.block_tracker.contains_key(&block_hash),
+            "block_tracker should not contain cancelled block"
+        );
+
+        // Cache should be empty — chunks should have been released
+        assert!(
+            !service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 0
+            }),
+            "cache should not contain chunks from cancelled provisioning"
+        );
+        assert!(
+            !service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 1
+            }),
+            "cache should not contain chunks from cancelled provisioning"
+        );
+    }
+
+    #[test]
+    fn test_provision_block_chunks_dropped_receiver_preserves_tx_refs() {
+        let mut service = test_service();
+        let tx_hash = B256::with_last_byte(0x01);
+        let block_hash = B256::with_last_byte(0xEE);
+
+        // First, provision via a tx (simulating mempool monitor)
+        let tx_specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+        service.handle_provision_chunks(tx_hash, tx_specs);
+
+        // Now provision same chunks for a block, but drop the receiver
+        let block_specs = vec![ChunkRangeSpecifier {
+            partition_index: Default::default(),
+            offset: 0,
+            chunk_count: 2,
+        }];
+        let (resp_tx, resp_rx) = oneshot::channel();
+        drop(resp_rx);
+
+        service.handle_provision_block_chunks(block_hash, block_specs, resp_tx);
+
+        // Block tracker should be empty — rollback cleaned it up
+        assert!(
+            !service.block_tracker.contains_key(&block_hash),
+            "block_tracker should not contain cancelled block"
+        );
+
+        // But chunks should STILL be in cache — tx still references them
+        assert!(
+            service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 0
+            }),
+            "cache should still contain chunks referenced by tx"
+        );
+        assert!(
+            service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 1
+            }),
+            "cache should still contain chunks referenced by tx"
+        );
+
+        // Releasing tx chunks should now fully clean up
+        service.handle_release_chunks(&tx_hash);
+        assert!(
+            !service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 0
+            }),
+            "cache should be empty after tx release"
+        );
+        assert!(
+            !service.cache.contains(&ChunkKey {
+                ledger: 0,
+                offset: 1
+            }),
+            "cache should be empty after tx release"
+        );
     }
 }
