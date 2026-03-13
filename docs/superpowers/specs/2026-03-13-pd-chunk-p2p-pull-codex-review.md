@@ -86,6 +86,155 @@ The spec says `on_fetch_done` will "sleep briefly" and then respawn on `AllPeers
 
 **Claude's take**: Valid. The fix is simple: instead of sleeping in `on_fetch_done`, spawn a `tokio::time::sleep` task into the JoinSet that returns a "retry" sentinel, or add a `tokio::time::interval` arm to the select loop for pending retries.
 
+#### Resolution: Actor-owned `DelayQueue` retry arm
+
+**Chosen fix**: Separate retry scheduling from fetch execution. Active fetches stay in the `JoinSet`; retry timers live in a `tokio_util::time::DelayQueue` owned by the actor. This gives PdService full ownership of retry state — retries are data in a queue, not detached tasks or sleeping sentinels mixed with fetch results.
+
+**How it works**:
+
+1. `on_fetch_done` receives `AllPeersFailed` from the `JoinSet`.
+2. It checks whether waiters still exist for the chunk key. If none remain, it cleans up and skips retry.
+3. If waiters remain, it computes the backoff delay (`min(1s * 2^attempt, 30s)`), inserts a `RetryEntry { key, attempt, generation, excluded_peers }` into the `DelayQueue`, and stores the returned `delay_queue::Key` in `PdChunkFetchState` for eager cancellation.
+4. It transitions the fetch state to `FetchPhase::Backoff`.
+5. When the `DelayQueue` fires (via a dedicated `select!` arm), the handler validates the `generation` matches, re-resolves peers, and spawns a new fetch task into the `JoinSet`, transitioning back to `FetchPhase::Fetching`.
+
+**Select loop with retry arm**:
+
+```rust
+loop {
+    tokio::select! {
+        biased;
+
+        _ = &mut self.shutdown => { break; }
+
+        msg = self.msg_rx.recv() => {
+            match msg {
+                Some(message) => self.handle_message(message),
+                None => { break; }
+            }
+        }
+
+        Some(result) = self.fetch_join_set.join_next() => {
+            self.on_fetch_done(result);
+        }
+
+        Some(expired) = self.retry_queue.next(), if !self.retry_queue.is_empty() => {
+            self.on_retry_ready(expired.into_inner());
+        }
+    }
+}
+```
+
+**`on_fetch_done` retry path (pseudocode)**:
+
+```rust
+fn on_fetch_done(&mut self, result: JoinResult<PdChunkFetchResult>) {
+    let PdChunkFetchResult { key, result } = /* unwrap join result */;
+    match result {
+        Ok(chunk) => { /* cache chunk, notify waiters */ }
+        Err(PdChunkFetchError::AllPeersFailed { excluded_peers }) => {
+            let Some(state) = self.pending_fetches.get_mut(&key) else { return };
+
+            // No waiters left — skip retry, clean up
+            if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+                self.pending_fetches.remove(&key);
+                return;
+            }
+
+            // Exceeded max retries — fail permanently
+            if state.attempt >= MAX_CHUNK_FETCH_RETRIES {
+                self.fail_chunk_permanently(key);
+                return;
+            }
+
+            // Schedule retry via DelayQueue
+            let delay = backoff_duration(state.attempt); // min(1s * 2^attempt, 30s)
+            let retry_entry = RetryEntry {
+                key,
+                attempt: state.attempt + 1,
+                generation: state.generation,
+                excluded_peers,
+            };
+            let queue_key = self.retry_queue.insert(retry_entry, delay);
+
+            state.attempt += 1;
+            state.status = FetchPhase::Backoff;
+            state.retry_queue_key = Some(queue_key);
+            state.excluded_peers = excluded_peers;
+        }
+    }
+}
+```
+
+**`on_retry_ready` handler (pseudocode)**:
+
+```rust
+fn on_retry_ready(&mut self, entry: RetryEntry) {
+    let Some(state) = self.pending_fetches.get_mut(&entry.key) else { return };
+
+    // Stale generation — this retry belongs to an old provisioning lifecycle
+    if state.generation != entry.generation { return; }
+
+    // Waiters vanished during backoff
+    if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+        self.pending_fetches.remove(&entry.key);
+        return;
+    }
+
+    // Re-resolve peers (picks up epoch changes, new peers coming online)
+    let peers = self.resolve_peers_for_chunk(&entry.key, &entry.excluded_peers);
+    let abort_handle = self.fetch_join_set.spawn(
+        fetch_chunk_from_peers(entry.key, peers, self.storage_provider.clone())
+    );
+
+    state.status = FetchPhase::Fetching;
+    state.abort_handle = Some(abort_handle);
+    state.retry_queue_key = None;
+}
+```
+
+**Changes to `PdChunkFetchState`**:
+
+```rust
+/// Phase of a single chunk key's fetch lifecycle.
+enum FetchPhase {
+    Fetching,
+    Backoff,
+}
+
+struct PdChunkFetchState {
+    waiting_txs: HashSet<B256>,
+    waiting_blocks: HashSet<B256>,
+    attempt: u32,
+    /// Distinguishes provisioning lifecycles. Incremented when a key
+    /// re-enters Fetching after being cleaned up and reprovisioned.
+    /// Prevents stale retry timers from acting on a new lifecycle.
+    generation: u64,
+    excluded_peers: HashSet<IrysAddress>,
+    status: FetchPhase,
+    /// Handle to cancel the in-flight fetch task (when Fetching).
+    abort_handle: Option<AbortHandle>,
+    /// Handle to cancel the pending retry timer (when Backoff).
+    retry_queue_key: Option<delay_queue::Key>,
+}
+```
+
+**Cancellation path**: When all waiters for a key are removed (tx removed + block released), PdService checks `status`:
+- `Fetching` → call `abort_handle.abort()` to cancel the in-flight fetch task
+- `Backoff` → call `self.retry_queue.remove(&queue_key)` to cancel the pending timer
+
+Both are eager cancellation — no dangling tasks or timers survive waiter cleanup.
+
+**Backpressure**: Pending retries are entries in a queue, not spawned tasks. Queue length is bounded by the number of tracked chunk keys, which is itself bounded by mempool + active validation limits. Under adversarial churn, the queue grows linearly with tracked keys, not with retry attempts.
+
+**Observability**: All retry state lives in actor-owned structs. Operators can log: current phase, attempt count, generation, next retry deadline, excluded peer count, and queue depth — all from the actor's synchronous state.
+
+#### Alternatives considered and rejected
+
+**Approach A — Sleep-in-JoinSet (spawn sleep task returning RetryReady sentinel)**: Spawn `async { sleep(delay).await; RetryReady { key, attempt, ... } }` into the same `JoinSet` used for fetches. The `join_next()` arm dispatches on the enum variant. This keeps everything under one supervised surface and provides cancellation via `AbortHandle`. However, it mixes two different semantics (IO completion vs. timer expiry) in one `JoinSet`, which hurts observability and creates a fairness concern: with `biased` select, expired retry sentinels and actual fetch completions compete within the same arm. More critically, sleeping tasks are still runtime tasks — under adversarial churn with many chunk keys in backoff, each consumes a tokio task slot, whereas `DelayQueue` entries are pure data. Viable if hardened with a `generation` field and explicit `FetchPhase`, but strictly dominated by the `DelayQueue` approach on backpressure and observability.
+
+**Approach B — Fire-and-forget spawn + send-message-back (matches `peer_network_service.rs:618`)**: Spawn a detached `tokio::spawn(async { sleep(delay).await; sender.send(RetryChunkFetch { ... }) })`. This matches an existing codebase pattern used for handshake retries. However, it breaks actor ownership of the retry lifecycle: detached sleepers are not cancellable (waiter checks are lazy, on message arrival only), and the unbounded channel becomes an amplification path under churn — sleeping tasks accumulate and later flood the message queue. Fine for fire-and-forget control-path nudges (handshakes), but chunk provisioning is a resource-tracked pipeline where retry state must be actor-owned. Both Codex (gpt-5.4) and Claude independently rejected this approach for L1 use.
+
 ### 3. `tokio::join!` doesn't cancel sibling tasks (Important)
 
 The cancellation model ignores the more common case where another validation branch already made the block invalid. `validate_block()` uses `tokio::join!` across six tasks, so a failing POA/recall/fees task does not cancel `shadow_transactions_are_valid`; it will keep waiting on PD chunk fetches until they finish or the block becomes "too old". With local-only provisioning that was cheap; with network pulls it becomes a bandwidth and runtime amplification path for invalid blocks.
