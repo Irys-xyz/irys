@@ -25,10 +25,13 @@ PRs often contain important architectural decisions buried in descriptions and c
 
 ### 1. Resolve PR Details
 
-Fetch the PR metadata, body, and all comments:
+Fetch the PR metadata, body, and all comments using curl and jq (the `gh` CLI is not available on the runner):
 
 ```bash
-gh api "repos/{owner}/{repo}/pulls/<pr-number>"
+curl -fsSL \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/{owner}/{repo}/pulls/<pr-number>"
 ```
 
 Extract:
@@ -36,10 +39,10 @@ Extract:
 - PR body (the description)
 - Head ref, base ref
 
-Then fetch all three comment sources:
-- **Issue comments**: `gh api "repos/{owner}/{repo}/issues/<pr-number>/comments" --paginate`
-- **Review comments** (inline on code): `gh api "repos/{owner}/{repo}/pulls/<pr-number>/comments" --paginate`
-- **Review bodies**: `gh api "repos/{owner}/{repo}/pulls/<pr-number>/reviews" --paginate`
+Then fetch all three comment sources (paginate by following `Link: <url>; rel="next"` headers):
+- **Issue comments**: `https://api.github.com/repos/{owner}/{repo}/issues/<pr-number>/comments?per_page=100`
+- **Review comments** (inline on code): `https://api.github.com/repos/{owner}/{repo}/pulls/<pr-number>/comments?per_page=100`
+- **Review bodies**: `https://api.github.com/repos/{owner}/{repo}/pulls/<pr-number>/reviews?per_page=100`
 
 Display the PR title and URL for context.
 
