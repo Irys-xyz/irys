@@ -94,6 +94,26 @@ pub mod v1 {
         IngressProof(IngressProof),
     }
 
+    /// Compare two [`GossipDataV1`] values for equality.
+    ///
+    /// Uses [`DataTransactionHeader::eq_tx`] for the `Transaction` variant
+    /// (which intentionally excludes metadata fields that don't survive serialization roundtrips).
+    /// This is a standalone function rather than a `PartialEq` impl to avoid silently applying
+    /// these custom comparison semantics wherever `==` is used.
+    pub fn cmp_gossip_data_v1(a: &GossipDataV1, b: &GossipDataV1) -> bool {
+        match (a, b) {
+            (GossipDataV1::Chunk(a), GossipDataV1::Chunk(b)) => a == b,
+            (GossipDataV1::Transaction(a), GossipDataV1::Transaction(b)) => a.eq_tx(b),
+            (GossipDataV1::CommitmentTransaction(a), GossipDataV1::CommitmentTransaction(b)) => {
+                a == b
+            }
+            (GossipDataV1::Block(a), GossipDataV1::Block(b)) => a == b,
+            (GossipDataV1::ExecutionPayload(a), GossipDataV1::ExecutionPayload(b)) => a == b,
+            (GossipDataV1::IngressProof(a), GossipDataV1::IngressProof(b)) => a == b,
+            _ => false,
+        }
+    }
+
     impl From<SealedBlock<Block>> for GossipDataV1 {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             Self::ExecutionPayload(sealed_block.into_block())
@@ -249,6 +269,27 @@ pub mod v2 {
         BlockBody(Arc<BlockBody>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+    }
+
+    /// Compare two [`GossipDataV2`] values for equality.
+    ///
+    /// Uses [`DataTransactionHeader::eq_tx`] for the `Transaction` variant and
+    /// [`cmp_block_body`](crate::cmp_block_body) for the `BlockBody` variant.
+    /// This is a standalone function rather than a `PartialEq` impl to avoid silently applying
+    /// these custom comparison semantics wherever `==` is used.
+    pub fn cmp_gossip_data_v2(a: &GossipDataV2, b: &GossipDataV2) -> bool {
+        match (a, b) {
+            (GossipDataV2::Chunk(a), GossipDataV2::Chunk(b)) => a == b,
+            (GossipDataV2::Transaction(a), GossipDataV2::Transaction(b)) => a.eq_tx(b),
+            (GossipDataV2::CommitmentTransaction(a), GossipDataV2::CommitmentTransaction(b)) => {
+                a == b
+            }
+            (GossipDataV2::BlockHeader(a), GossipDataV2::BlockHeader(b)) => a == b,
+            (GossipDataV2::BlockBody(a), GossipDataV2::BlockBody(b)) => crate::cmp_block_body(a, b),
+            (GossipDataV2::ExecutionPayload(a), GossipDataV2::ExecutionPayload(b)) => a == b,
+            (GossipDataV2::IngressProof(a), GossipDataV2::IngressProof(b)) => a == b,
+            _ => false,
+        }
     }
 
     impl From<SealedBlock<Block>> for GossipDataV2 {
