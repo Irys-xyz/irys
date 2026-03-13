@@ -13,9 +13,8 @@
 
 use std::{sync::Arc, time::SystemTime};
 
-use alloy_consensus::TxEip1559;
-use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{TxKind, U256};
+use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_primitives::TxKind;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -27,7 +26,6 @@ use reth::{
     payload::EthBuiltPayload,
     primitives::SealedBlock,
     providers::{EthStorage, StateProviderFactory, providers::ProviderFactoryBuilder},
-    rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
@@ -42,9 +40,7 @@ use reth_node_ethereum::{
     EthEngineTypes, EthEvmConfig,
     node::{EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder},
 };
-use reth_primitives_traits::{
-    BlockTy, constants::MINIMUM_GAS_LIMIT, transaction::error::InvalidTransactionError,
-};
+use reth_primitives_traits::{BlockTy, transaction::error::InvalidTransactionError};
 pub use reth_provider::{BlockReaderIdExt, providers::BlockchainProvider};
 use reth_tracing::tracing;
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
@@ -52,7 +48,6 @@ use reth_transaction_pool::{
     EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
     TransactionValidator, blobstore::DiskFileBlobStore,
 };
-use shadow_tx::ShadowTransaction;
 use tracing::{debug, info};
 
 use crate::{
@@ -72,31 +67,6 @@ pub use engine::{IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloa
 pub use irys_types::chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 pub use validator::{IrysEngineValidator, IrysEngineValidatorBuilder};
-
-#[must_use]
-pub fn compose_shadow_tx(
-    chain_id: u64,
-    shadow_tx: &ShadowTransaction,
-    max_priority_fee_per_gas: u128,
-) -> TxEip1559 {
-    let shadow_tx_buf = crate::shadow_tx::encode_prefixed_input(shadow_tx);
-    TxEip1559 {
-        access_list: AccessList::default(),
-        chain_id,
-        // TODO: now that we control the EVM (muhahaha), we can _probably_ bypass these gas validations
-        // large enough to not be rejected by the payload builder
-        gas_limit: MINIMUM_GAS_LIMIT,
-        input: shadow_tx_buf,
-        // large enough to not be rejected by the payload builder
-        max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
-        // Use the provided priority fee
-        max_priority_fee_per_gas,
-        // nonce is always 0 for shadow txs
-        nonce: 0_u64,
-        to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
-        value: U256::ZERO,
-    }
-}
 
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Clone, Default)]
@@ -431,7 +401,7 @@ mod tests {
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::Bytes;
     use alloy_primitives::Signature;
-    use alloy_primitives::{Address, B256};
+    use alloy_primitives::{Address, B256, U256};
     use alloy_rpc_types_engine::ForkchoiceState;
     use alloy_signer_local::PrivateKeySigner;
     use reth::api::EngineApiMessageVersion;
@@ -459,7 +429,7 @@ mod tests {
         let (node, ctx) = ctx.get_single_node()?;
 
         let shadow_tx = block_reward();
-        let mut shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, DEFAULT_PRIORITY_FEE);
+        let mut shadow_tx_raw = shadow_tx.compose(1, DEFAULT_PRIORITY_FEE);
         let signed_tx = ctx
             .target_account
             .sign_transaction(&mut shadow_tx_raw)
@@ -532,7 +502,8 @@ mod tests {
         let payload_node_a = advance_block(&mut node_a, vec![]).await?;
 
         // Submit shadow transaction to node b
-        let shadow_tx = create_shadow_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
+        let shadow_tx =
+            ShadowTransaction::from_type_id(BLOCK_REWARD_ID, ctx.block_producer_b.address());
         let shadow_tx = sign_shadow_tx(shadow_tx, &ctx.block_producer_b, 0).await?;
         let shadow_tx_hash = *shadow_tx.hash();
         let _payload_node_b = advance_block(&mut node_b, vec![shadow_tx]).await?;
@@ -589,14 +560,11 @@ mod tests {
         let initial_balance = get_balance(&node_a.inner, ctx.block_producer_a.address());
 
         let amount = U256::from(7000000000000000000_u64);
-        let shadow_tx = compose_shadow_tx(
-            1,
-            &ShadowTransaction::new_v1(
-                TransactionPacket::BlockReward(BlockRewardIncrement { amount }),
-                alloy_primitives::FixedBytes::ZERO,
-            ),
-            0, // Block rewards must have 0 priority fee
-        );
+        let shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement { amount }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+        .compose(1, 0); // Block rewards must have 0 priority fee
         let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
         let shadow_tx_hash = *shadow_tx.hash();
 
@@ -782,7 +750,7 @@ mod tests {
         .await?;
 
         // Create shadow transactions with lower effective priority
-        let shadow_tx = create_shadow_tx(UNSTAKE_ID, ctx.target_account.address());
+        let shadow_tx = ShadowTransaction::from_type_id(UNSTAKE_ID, ctx.target_account.address());
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_txs = vec![shadow_tx.clone(); 2];
@@ -1567,7 +1535,7 @@ mod tests {
         // Phase 5: Try to submit the future shadow transactions directly to the pool
         // They should be rejected and never enter the pool
         let future_shadow_tx_1 = block_reward();
-        let mut tx_1_raw = compose_shadow_tx(1, &future_shadow_tx_1, DEFAULT_PRIORITY_FEE);
+        let mut tx_1_raw = future_shadow_tx_1.compose(1, DEFAULT_PRIORITY_FEE);
         let signed_tx_1 = ctx
             .block_producer_a
             .sign_transaction(&mut tx_1_raw)
@@ -2164,7 +2132,7 @@ mod tests {
         let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
         // Use unstake instead of block_reward so there's a target for priority fee
         let shadow_tx = unstake(target_address);
-        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let shadow_tx_raw = shadow_tx.compose(1, priority_fee_per_gas);
         let expected_priority_fee = U256::from(priority_fee_per_gas);
 
         // Sign and prepare the transaction using the helper (signed by block producer)
@@ -2229,7 +2197,7 @@ mod tests {
         // Transaction 1: Unstake (has target, so priority fee is distributed)
         let priority_fee_1 = 1_000_000_000_u128; // 1 Gwei
         let shadow_tx_1 = unstake(target_address);
-        let shadow_tx_raw_1 = compose_shadow_tx(1, &shadow_tx_1, priority_fee_1);
+        let shadow_tx_raw_1 = shadow_tx_1.compose(1, priority_fee_1);
         total_expected_fee += U256::from(priority_fee_1);
         let shadow_tx_pooled_1 = sign_tx(shadow_tx_raw_1, &ctx.block_producer_a).await;
         shadow_txs.push(shadow_tx_pooled_1);
@@ -2237,7 +2205,7 @@ mod tests {
         // Transaction 2: Block reward (must have 0 priority fee)
         let priority_fee_2 = 0; // Block rewards must have 0 priority fee
         let shadow_tx_2 = block_reward();
-        let shadow_tx_raw_2 = compose_shadow_tx(1, &shadow_tx_2, priority_fee_2);
+        let shadow_tx_raw_2 = shadow_tx_2.compose(1, priority_fee_2);
         // Block rewards with non-zero priority fees are now rejected
         let shadow_tx_pooled_2 = sign_tx(shadow_tx_raw_2, &ctx.block_producer_a).await;
         shadow_txs.push(shadow_tx_pooled_2);
@@ -2245,7 +2213,7 @@ mod tests {
         // Transaction 3: Stake (has target, so priority fee is distributed)
         let priority_fee_3 = 3_000_000_000_u128; // 3 Gwei
         let shadow_tx_3 = stake(target_address);
-        let shadow_tx_raw_3 = compose_shadow_tx(1, &shadow_tx_3, priority_fee_3);
+        let shadow_tx_raw_3 = shadow_tx_3.compose(1, priority_fee_3);
         total_expected_fee += U256::from(priority_fee_3);
         let shadow_tx_pooled_3 = sign_tx(shadow_tx_raw_3, &ctx.block_producer_a).await;
         shadow_txs.push(shadow_tx_pooled_3);
@@ -2300,7 +2268,7 @@ mod tests {
         // Use stake transaction which has a target
         let target_address = ctx.block_producer_a.address(); // Producer A is the target
         let shadow_tx = stake(target_address);
-        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, priority_fee_per_gas);
+        let shadow_tx_raw = shadow_tx.compose(1, priority_fee_per_gas);
         let expected_priority_fee = U256::from(priority_fee_per_gas);
 
         // Sign with block producer A (the target, not the miner)
@@ -2344,7 +2312,7 @@ mod tests {
         // Create a block reward transaction with a non-zero priority fee
         let invalid_shadow_tx = block_reward();
         let priority_fee_per_gas = 1_000_000_000_u128; // 1 Gwei (should be rejected)
-        let invalid_shadow_tx_raw = compose_shadow_tx(1, &invalid_shadow_tx, priority_fee_per_gas);
+        let invalid_shadow_tx_raw = invalid_shadow_tx.compose(1, priority_fee_per_gas);
 
         // Sign the invalid transaction
         let invalid_shadow_tx_pooled = sign_tx(invalid_shadow_tx_raw, &ctx.block_producer_a).await;
@@ -2352,7 +2320,7 @@ mod tests {
         // Also create a valid transaction so the block can be produced
         // Using unstake which increments balance (so we don't need to fund the account first)
         let valid_tx = unstake(ctx.target_account.address());
-        let valid_tx_raw = compose_shadow_tx(1, &valid_tx, 0); // 0 priority fee
+        let valid_tx_raw = valid_tx.compose(1, 0); // 0 priority fee
         let valid_tx_pooled = sign_tx(valid_tx_raw, &ctx.block_producer_a).await;
 
         // Record initial balances
@@ -2406,7 +2374,7 @@ mod tests {
 
         // Now test that a block reward with 0 priority fee works correctly
         let valid_shadow_tx = block_reward();
-        let valid_shadow_tx_raw = compose_shadow_tx(1, &valid_shadow_tx, 0); // 0 priority fee, chain ID 1
+        let valid_shadow_tx_raw = valid_shadow_tx.compose(1, 0); // 0 priority fee, chain ID 1
         let valid_shadow_tx_pooled = sign_tx(valid_shadow_tx_raw, &ctx.block_producer_a).await;
 
         // Mine block with valid block reward transaction
@@ -2453,35 +2421,35 @@ mod tests {
         // 1. Stake (decrements balance, has target)
         let priority_fee_stake = 1_000_000_000_u128; // 1 Gwei
         let stake_tx = stake(target_address);
-        let stake_tx_raw = compose_shadow_tx(1, &stake_tx, priority_fee_stake);
+        let stake_tx_raw = stake_tx.compose(1, priority_fee_stake);
         total_expected_fee += U256::from(priority_fee_stake);
         shadow_txs.push(sign_tx(stake_tx_raw, &ctx.block_producer_a).await);
 
         // 2. Unstake (increments balance, has target)
         let priority_fee_unstake = 2_000_000_000_u128; // 2 Gwei
         let unstake_tx = unstake(target_address);
-        let unstake_tx_raw = compose_shadow_tx(1, &unstake_tx, priority_fee_unstake);
+        let unstake_tx_raw = unstake_tx.compose(1, priority_fee_unstake);
         total_expected_fee += U256::from(priority_fee_unstake);
         shadow_txs.push(sign_tx(unstake_tx_raw, &ctx.block_producer_a).await);
 
         // 3. Pledge (decrements balance, has target)
         let priority_fee_pledge = 3_000_000_000_u128; // 3 Gwei
         let pledge_tx = pledge(target_address);
-        let pledge_tx_raw = compose_shadow_tx(1, &pledge_tx, priority_fee_pledge);
+        let pledge_tx_raw = pledge_tx.compose(1, priority_fee_pledge);
         total_expected_fee += U256::from(priority_fee_pledge);
         shadow_txs.push(sign_tx(pledge_tx_raw, &ctx.block_producer_a).await);
 
         // 4. Unpledge (increments balance, has target)
         let priority_fee_unpledge = 4_000_000_000_u128; // 4 Gwei
         let unpledge_tx = unpledge(target_address);
-        let unpledge_tx_raw = compose_shadow_tx(1, &unpledge_tx, priority_fee_unpledge);
+        let unpledge_tx_raw = unpledge_tx.compose(1, priority_fee_unpledge);
         total_expected_fee += U256::from(priority_fee_unpledge);
         shadow_txs.push(sign_tx(unpledge_tx_raw, &ctx.block_producer_a).await);
 
         // 5. Storage fees (decrements balance, has target)
         let priority_fee_storage = 5_000_000_000_u128; // 5 Gwei
         let storage_tx = storage_fees(target_address);
-        let storage_tx_raw = compose_shadow_tx(1, &storage_tx, priority_fee_storage);
+        let storage_tx_raw = storage_tx.compose(1, priority_fee_storage);
         total_expected_fee += U256::from(priority_fee_storage);
         shadow_txs.push(sign_tx(storage_tx_raw, &ctx.block_producer_a).await);
 
@@ -2691,7 +2659,7 @@ pub mod test_utils {
         signer: &Arc<dyn TxSigner<Signature> + Send + Sync>,
         max_priority_fee_per_gas: u128,
     ) -> eyre::Result<EthPooledTransaction> {
-        let shadow_tx_raw = compose_shadow_tx(1, &shadow_tx, max_priority_fee_per_gas);
+        let shadow_tx_raw = shadow_tx.compose(1, max_priority_fee_per_gas);
         let shadow_pooled_tx = sign_tx(shadow_tx_raw, signer).await;
         Ok(shadow_pooled_tx)
     }
@@ -2903,20 +2871,6 @@ pub mod test_utils {
         }
 
         Ok(block_payload)
-    }
-
-    /// Helper to create shadow transaction based on type
-    pub fn create_shadow_tx(tx_type: u8, address: Address) -> ShadowTransaction {
-        use crate::shadow_tx::*;
-        match tx_type {
-            BLOCK_REWARD_ID => block_reward(),
-            UNSTAKE_ID => unstake(address),
-            STAKE_ID => stake(address),
-            STORAGE_FEES_ID => storage_fees(address),
-            PLEDGE_ID => pledge(address),
-            UNPLEDGE_ID => unpledge(address),
-            _ => panic!("Unknown shadow transaction type: {tx_type}"),
-        }
     }
 
     /// - prepare a new payload with shadow txs via attributes

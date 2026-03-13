@@ -25,7 +25,7 @@ use irys_domain::{
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
     IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
-    compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
+    reth_node_ethereum::EthEngineTypes,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::NodeProvider;
@@ -833,9 +833,8 @@ pub trait BlockProdStrategy {
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
             let metadata = tx_result?;
-            let mut tx_raw = compose_shadow_tx(
+            let mut tx_raw = metadata.shadow_tx.compose(
                 self.inner().config.consensus.chain_id,
-                &metadata.shadow_tx,
                 metadata.transaction_fee,
             );
             let signature = local_signer

@@ -9,10 +9,13 @@
 //! - **Balance increments** correspond to rewards
 //! - **Balance decrements** correspond to storage transaction fees
 
-use alloy_consensus::Transaction as AlloyTransaction;
+use alloy_consensus::{Transaction as AlloyTransaction, TxEip1559};
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::keccak256;
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, TxKind, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
+use reth::rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI;
+use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 use std::io::{Read, Write};
 use std::sync::LazyLock;
 use thiserror::Error;
@@ -186,6 +189,23 @@ impl ShadowTransaction {
         Self::V1 {
             packet,
             solution_hash,
+        }
+    }
+
+    /// Compose this shadow transaction into an EIP-1559 transaction for inclusion in a block.
+    #[must_use]
+    pub fn compose(&self, chain_id: u64, max_priority_fee_per_gas: u128) -> TxEip1559 {
+        let shadow_tx_buf = encode_prefixed_input(self);
+        TxEip1559 {
+            access_list: AccessList::default(),
+            chain_id,
+            gas_limit: MINIMUM_GAS_LIMIT,
+            input: shadow_tx_buf,
+            max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
+            max_priority_fee_per_gas,
+            nonce: 0_u64,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: U256::ZERO,
         }
     }
 
@@ -761,6 +781,58 @@ pub fn detect_and_decode<T: ShadowTxSource>(
     src: &T,
 ) -> Result<Option<ShadowTransaction>, ShadowTxError> {
     detect_and_decode_from_parts(src.to_addr(), src.input())
+}
+
+#[cfg(test)]
+impl ShadowTransaction {
+    pub fn from_type_id(tx_type: u8, address: Address) -> Self {
+        match tx_type {
+            BLOCK_REWARD_ID => Self::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement { amount: U256::ONE }),
+                FixedBytes::ZERO,
+            ),
+            UNSTAKE_ID => Self::new_v1(
+                TransactionPacket::UnstakeRefund(BalanceIncrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
+            STAKE_ID => Self::new_v1(
+                TransactionPacket::Stake(BalanceDecrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
+            STORAGE_FEES_ID => Self::new_v1(
+                TransactionPacket::StorageFees(BalanceDecrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
+            PLEDGE_ID => Self::new_v1(
+                TransactionPacket::Pledge(BalanceDecrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
+            UNPLEDGE_ID => Self::new_v1(
+                TransactionPacket::Unpledge(UnpledgeDebit {
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
+            _ => panic!("Unknown shadow transaction type: {tx_type}"),
+        }
+    }
 }
 
 #[cfg(test)]
