@@ -447,6 +447,7 @@ impl BlockValidationTask {
                 parent_commitment_snapshot,
                 block_index,
                 sealed_block_for_shadow.transactions(),
+                &self.service_inner.pd_chunk_sender,
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",
@@ -565,10 +566,12 @@ impl BlockValidationTask {
         );
 
         // Check shadow_tx_result first to extract ExecutionData
-        let execution_data = match shadow_tx_result {
+        let (execution_data, _pd_guard) = match shadow_tx_result {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
+                // pd_guard was never created (it's inside the Err variant of eyre::Result)
+                // — no manual release needed
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
@@ -619,6 +622,9 @@ impl BlockValidationTask {
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
+
+                // _pd_guard drops here automatically, sending ReleaseBlockChunks
+
                 // At least one validation failed, return the first Invalid result
                 let first_invalid = [
                     &recall_result,

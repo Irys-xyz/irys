@@ -227,21 +227,6 @@ impl IrysBlockExecutorFactory {
     pub const fn evm_factory(&self) -> &IrysEvmFactory {
         self.inner.evm_factory()
     }
-
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
-    ///
-    /// Reconstructs this factory with the `pd_chunk_sender` set on the inner
-    /// [`IrysEvmFactory`], leaving the receipt builder and spec unchanged.
-    pub fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        let receipt_builder = *self.inner.receipt_builder();
-        let spec = Arc::clone(self.inner.spec());
-        let evm_factory = self
-            .inner
-            .evm_factory()
-            .clone()
-            .with_pd_chunk_sender(sender);
-        Self::new(receipt_builder, spec, evm_factory)
-    }
 }
 
 impl BlockExecutorFactory for IrysBlockExecutorFactory
@@ -347,72 +332,25 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-impl IrysEvmConfig {
-    /// Configure for payload building mode — PD chunks fetched from manager cache.
-    ///
-    /// Sets a [`PdChunkSender`] on the inner [`IrysEvmFactory`] so that all EVMs
-    /// created by the payload builder use `PdContext::new_with_manager()` instead
-    /// of the storage-backed path used during block validation.
-    pub fn with_pd_chunk_sender(
-        mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
-    ) -> Self {
-        self.executor_factory = self.executor_factory.with_pd_chunk_sender(sender);
-        self
-    }
-}
-
-/// Marker trait for EVM configurations that can be switched to manager-mode PD chunk fetching.
-///
-/// Implement this for your EVM config type to allow the payload builder builder to wire
-/// the [`PdChunkSender`] after receiving the (cloned) EVM config from reth's component system.
-pub trait ConfigurePdChunkSender: Sized {
-    /// Configure `self` to use the given sender for PD chunk fetching.
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self;
-}
-
-impl ConfigurePdChunkSender for IrysEvmConfig {
-    fn with_pd_chunk_sender(self, sender: irys_types::chunk_provider::PdChunkSender) -> Self {
-        Self::with_pd_chunk_sender(self, sender)
-    }
-}
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IrysEvmFactory {
-    context: PdContext,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
     hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
-    /// When set, creates `PdContext` in Manager mode for payload building.
-    /// When `None`, uses the Storage-backed `PdContext` (block validation).
-    pd_chunk_sender: Option<irys_types::chunk_provider::PdChunkSender>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 }
 
 impl IrysEvmFactory {
     pub fn new(
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+        chunk_config: irys_types::chunk_provider::ChunkConfig,
         hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
     ) -> Self {
-        let context = PdContext::new(chunk_provider);
         Self {
-            context,
+            chunk_config,
             hardfork_config,
-            pd_chunk_sender: None,
+            chunk_data_index,
         }
-    }
-
-    /// Configure for payload building mode — chunks fetched from `PdChunkManager` cache.
-    pub fn with_pd_chunk_sender(
-        mut self,
-        sender: irys_types::chunk_provider::PdChunkSender,
-    ) -> Self {
-        self.pd_chunk_sender = Some(sender);
-        self
-    }
-
-    /// Provides access to the PdContext for test setup.
-    #[cfg(test)]
-    pub fn context(&self) -> &PdContext {
-        &self.context
     }
 
     /// Provides access to the hardfork config.
@@ -421,12 +359,12 @@ impl IrysEvmFactory {
     }
 
     /// Creates a new factory for testing with Sprite hardfork enabled from genesis.
-    #[cfg(test)]
-    pub fn new_for_testing(
-        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> Self {
-        let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
-        Self::new(chunk_provider, hardfork_config)
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_testing(chunk_data_index: irys_types::chunk_provider::ChunkDataIndex) -> Self {
+        let consensus = irys_types::config::ConsensusConfig::testing();
+        let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&consensus);
+        let hardfork_config = Arc::new(consensus.hardforks);
+        Self::new(chunk_config, hardfork_config, chunk_data_index)
     }
 }
 
@@ -453,13 +391,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
-            }
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = PdContext::new(self.chunk_config, self.chunk_data_index.clone());
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -503,13 +435,7 @@ impl EvmFactory for IrysEvmFactory {
             .min_pd_transaction_cost_at(block_timestamp)
             .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
 
-        // Use manager-backed context for payload building, storage-backed for validation.
-        let pd_context = match &self.pd_chunk_sender {
-            Some(sender) => {
-                PdContext::new_with_manager(sender.clone(), self.context.chunk_config())
-            }
-            None => self.context.clone_for_new_evm(),
-        };
+        let pd_context = PdContext::new(self.chunk_config, self.chunk_data_index.clone());
 
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
@@ -1902,8 +1828,9 @@ mod tests {
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::new());
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1940,8 +1867,9 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::new());
+        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();
@@ -2065,6 +1993,9 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder includes it
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
         let _add_result = node
             .inner
             .pool
@@ -2362,6 +2293,9 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder includes it
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
 
         // Submit transaction to mempool
         let _add_result = node
@@ -2536,6 +2470,10 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder considers it
+        // (rejection in block 1 is due to fee mismatch, not readiness)
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
         node.inner
             .pool
             .add_transaction(TransactionOrigin::Local, pooled)
@@ -2695,6 +2633,10 @@ mod tests {
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
         let tx_hash = *pooled.hash();
+        // Mark the PD transaction as ready so the payload builder considers it
+        // (rejection in block 1 is due to insufficient balance, not readiness)
+        ctx.ready_pd_txs()
+            .insert(revm_primitives::B256::from_slice(tx_hash.as_slice()));
 
         // Submit to mempool - should be accepted (mempool doesn't check PD fee balance)
         node.inner

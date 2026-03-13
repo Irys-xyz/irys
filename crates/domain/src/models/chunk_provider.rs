@@ -126,7 +126,7 @@ impl ChunkProvider {
     }
 }
 
-impl irys_types::chunk_provider::RethChunkProvider for ChunkProvider {
+impl irys_types::chunk_provider::ChunkStorageProvider for ChunkProvider {
     fn get_unpacked_chunk_by_ledger_offset(
         &self,
         ledger: u32,

@@ -1,16 +1,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_consensus::Transaction as _;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
+use futures::StreamExt as _;
 use irys_types::UnixTimestamp;
 use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
 use irys_types::hardfork_config::IrysHardforkConfig;
-use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArg};
 use reth::{
     api::FullNodeTypes,
     builder::{BuilderContext, components::PoolBuilder},
@@ -33,7 +32,7 @@ use reth_transaction_pool::{
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
 use std::marker::PhantomData;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::IrysEthereumNode;
 
@@ -65,12 +64,6 @@ impl IrysPoolBuilder {
             hardfork_config,
             pd_chunk_sender,
         }
-    }
-
-    /// Sets the PD chunk sender for mempool monitoring.
-    pub fn with_pd_chunk_sender(mut self, sender: PdChunkSender) -> Self {
-        self.pd_chunk_sender = sender;
-        self
     }
 }
 
@@ -448,37 +441,14 @@ where
 // PD Transaction Monitoring
 // ============================================================================
 
-/// Extracts PD chunk range specifiers from a transaction's access list.
-///
-/// Returns all `ChunkRangeSpecifier` entries found under the PD precompile address.
-/// Invalid encodings are logged as warnings and skipped.
-fn extract_pd_chunk_specs(
-    access_list: &alloy_eips::eip2930::AccessList,
-) -> Vec<ChunkRangeSpecifier> {
-    access_list
-        .0
-        .iter()
-        .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
-        .flat_map(|item| item.storage_keys.iter())
-        .filter_map(|key| match PdAccessListArg::decode(&key.0) {
-            Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec),
-            Ok(PdAccessListArg::ByteRead(_)) => None, // ByteRead doesn't need provisioning
-            Err(e) => {
-                warn!("Invalid PD access list key encoding, skipping: {}", e);
-                None
-            }
-        })
-        .collect()
-}
-
 /// Monitors the transaction pool for PD transactions and sends messages to the PdChunkManager.
 ///
-/// This task:
-/// - Polls pending transactions every 100ms
-/// - Detects new PD transactions and extracts chunk specs from access lists
+/// This task is event-driven, using reth's pool listener APIs:
+/// - Listens for new transactions entering the pool
+/// - Detects PD transactions and extracts chunk specs from access lists
 /// - Sends NewTransaction messages to start chunk fetching
-/// - Detects removed PD transactions and sends TransactionRemoved messages
-/// - Performs cleanup of stale tracking data every 60s
+/// - Listens for transaction lifecycle events (removals)
+/// - Sends TransactionRemoved messages when PD transactions leave the pool
 async fn pd_transaction_monitor<P>(
     pool: P,
     chunk_sender: PdChunkSender,
@@ -488,14 +458,13 @@ async fn pd_transaction_monitor<P>(
     P: TransactionPool,
     P::Transaction: EthPoolTransaction,
 {
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+    use reth_transaction_pool::TransactionListenerKind;
 
     let mut known_pd_txs: HashSet<B256> = HashSet::new();
-    let mut poll_interval = tokio::time::interval(POLL_INTERVAL);
-    let mut cleanup_interval = tokio::time::interval(CLEANUP_INTERVAL);
+    let mut new_tx_listener = pool.new_transactions_listener_for(TransactionListenerKind::All);
+    let mut all_events = pool.all_transactions_event_listener();
 
-    debug!(target: "reth::pd", "PD transaction monitor started");
+    debug!(target: "reth::pd", "PD transaction monitor started (event-driven)");
 
     loop {
         tokio::select! {
@@ -506,87 +475,57 @@ async fn pd_transaction_monitor<P>(
                 break;
             }
 
-            _ = poll_interval.tick() => {
-                // Check if Sprite hardfork is active
-                let current_time = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-
-                if !hardfork_config.is_sprite_active(UnixTimestamp::from_secs(current_time)) {
-                    // Sprite not active, skip PD monitoring
+            // New transaction entered the pool
+            Some(event) = new_tx_listener.recv() => {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let timestamp = irys_types::UnixTimestamp::from_secs(now_secs);
+                if !hardfork_config.is_sprite_active(timestamp) {
                     continue;
                 }
 
-                // Get all pending transactions from the pool
-                let all_txs = pool.all_transactions();
-                let mut current_pd_txs: HashSet<B256> = HashSet::new();
+                let tx = &event.transaction;
+                let tx_hash = *tx.hash();
 
-                // Check pending transactions
-                for tx in all_txs.pending.iter() {
-                    let tx_hash = *tx.hash();
-                    let input = tx.transaction.input();
-
-                    // Check if this is a PD transaction
-                    if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
-                        current_pd_txs.insert(tx_hash);
-
-                        // If this is a new PD transaction, send NewTransaction message
-                        if !known_pd_txs.contains(&tx_hash)
-                            && let Some(access_list) = tx.transaction.access_list()
-                        {
-                            let chunk_specs = extract_pd_chunk_specs(access_list);
-                            if !chunk_specs.is_empty() {
-                                trace!(
-                                    target: "reth::pd",
-                                    tx_hash = %tx_hash,
-                                    chunk_specs_count = chunk_specs.len(),
-                                    "New PD transaction detected, sending to chunk manager"
-                                );
-                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                    tx_hash,
-                                    chunk_specs,
-                                });
-                            }
-                        }
+                if let Ok(Some(_)) =
+                    crate::pd_tx::detect_and_decode_pd_header(tx.transaction.input())
+                    && known_pd_txs.insert(tx_hash)
+                    && let Some(access_list) = tx.transaction.access_list()
+                {
+                    let chunk_specs = crate::pd_tx::extract_pd_chunk_specs(access_list);
+                    if !chunk_specs.is_empty() {
+                        trace!(
+                            target: "reth::pd",
+                            tx_hash = %tx_hash,
+                            chunk_specs_count = chunk_specs.len(),
+                            "Detected new PD transaction, sending for provisioning"
+                        );
+                        let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
+                            tx_hash,
+                            chunk_specs,
+                        });
                     }
                 }
+            }
 
-                // Also check queued transactions (transactions waiting for nonce gap to fill)
-                for tx in all_txs.queued.iter() {
-                    let tx_hash = *tx.hash();
-                    let input = tx.transaction.input();
-
-                    if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
-                        current_pd_txs.insert(tx_hash);
-
-                        if !known_pd_txs.contains(&tx_hash)
-                            && let Some(access_list) = tx.transaction.access_list()
-                        {
-                            let chunk_specs = extract_pd_chunk_specs(access_list);
-                            if !chunk_specs.is_empty() {
-                                trace!(
-                                    target: "reth::pd",
-                                    tx_hash = %tx_hash,
-                                    chunk_specs_count = chunk_specs.len(),
-                                    "New queued PD transaction detected, sending to chunk manager"
-                                );
-                                let _ = chunk_sender.send(PdChunkMessage::NewTransaction {
-                                    tx_hash,
-                                    chunk_specs,
-                                });
-                            }
-                        }
+            // Transaction lifecycle events (removals)
+            Some(event) = all_events.next() => {
+                use reth_transaction_pool::FullTransactionEvent;
+                let removed_hash = match event {
+                    FullTransactionEvent::Discarded(h)
+                    | FullTransactionEvent::Invalid(h)
+                    | FullTransactionEvent::Mined { tx_hash: h, .. } => Some(h),
+                    FullTransactionEvent::Replaced { transaction, .. } => {
+                        // `transaction` is the OLD tx being evicted (not the replacement)
+                        Some(*transaction.hash())
                     }
-                }
-
-                // Detect removed transactions
-                let removed_txs: Vec<B256> = known_pd_txs
-                    .difference(&current_pd_txs)
-                    .copied()
-                    .collect();
-
-                for tx_hash in removed_txs {
+                    _ => None,
+                };
+                if let Some(tx_hash) = removed_hash
+                    && known_pd_txs.remove(&tx_hash)
+                {
                     trace!(
                         target: "reth::pd",
                         tx_hash = %tx_hash,
@@ -594,19 +533,6 @@ async fn pd_transaction_monitor<P>(
                     );
                     let _ = chunk_sender.send(PdChunkMessage::TransactionRemoved { tx_hash });
                 }
-
-                // Update known transactions
-                known_pd_txs = current_pd_txs;
-            }
-
-            _ = cleanup_interval.tick() => {
-                // Periodic cleanup - the chunk manager handles its own stale state cleanup
-                // This interval just ensures we log status periodically
-                debug!(
-                    target: "reth::pd",
-                    known_pd_txs_count = known_pd_txs.len(),
-                    "PD transaction monitor status"
-                );
             }
         }
     }

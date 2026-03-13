@@ -18,7 +18,9 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
+use irys_reth::pd_tx::{
+    detect_and_decode_pd_header, extract_pd_chunk_specs, sum_pd_chunks_in_access_list,
+};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -1315,7 +1317,7 @@ pub fn poa_is_valid(
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
-pub async fn shadow_transactions_are_valid(
+pub(crate) async fn shadow_transactions_are_valid(
     config: &Config,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -1329,7 +1331,12 @@ pub async fn shadow_transactions_are_valid(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<ExecutionData> {
+    pd_chunk_sender: &irys_types::chunk_provider::PdChunkSender,
+) -> eyre::Result<(
+    ExecutionData,
+    Option<crate::validation_service::pd_block_guard::PdBlockGuard>,
+)> {
+    let mut pd_guard: Option<crate::validation_service::pd_block_guard::PdBlockGuard> = None;
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
@@ -1428,8 +1435,9 @@ pub async fn shadow_transactions_are_valid(
         }
     }
 
-    // 2.5. Validate PD chunk budget (only if Sprite hardfork is active)
+    // 2.5. Validate PD chunk budget and collect chunk specs (only if Sprite hardfork is active)
     let block_timestamp = irys_types::UnixTimestamp::from_secs(block_timestamp_sec as u64);
+    let mut pd_chunk_specs: Vec<irys_types::range_specifier::ChunkRangeSpecifier> = Vec::new();
     if let Some(max_pd_chunks) = config
         .consensus
         .hardforks
@@ -1438,14 +1446,13 @@ pub async fn shadow_transactions_are_valid(
         let mut total_pd_chunks: u64 = 0;
 
         for tx in evm_block.body.transactions.iter() {
-            // Try to detect PD header in transaction input
             let input = tx.input();
-            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-                // This is a PD transaction, sum chunks from access list if present
-                if let Some(access_list) = tx.access_list() {
-                    let chunks = sum_pd_chunks_in_access_list(access_list);
-                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-                }
+            if let Ok(Some(_header)) = detect_and_decode_pd_header(input)
+                && let Some(access_list) = tx.access_list()
+            {
+                let chunks = sum_pd_chunks_in_access_list(access_list);
+                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+                pd_chunk_specs.extend(extract_pd_chunk_specs(access_list));
             }
         }
 
@@ -1462,6 +1469,52 @@ pub async fn shadow_transactions_are_valid(
                 total_pd_chunks,
                 max_pd_chunks
             );
+        }
+    }
+
+    // 2.6. Provision PD chunks into PD service cache for block execution
+    if !pd_chunk_specs.is_empty() {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        pd_chunk_sender
+            .send(
+                irys_types::chunk_provider::PdChunkMessage::ProvisionBlockChunks {
+                    block_hash: block.block_hash.into(),
+                    chunk_specs: pd_chunk_specs,
+                    response: resp_tx,
+                },
+            )
+            .map_err(|_| eyre::eyre!("PD service channel closed"))?;
+
+        match resp_rx
+            .await
+            .map_err(|_| eyre::eyre!("PD service response channel dropped"))?
+        {
+            Ok(()) => {
+                tracing::debug!(
+                    block_hash = %block.block_hash,
+                    "PD chunks provisioned for block validation"
+                );
+                // Create RAII guard — will send ReleaseBlockChunks on drop
+                pd_guard = Some(
+                    crate::validation_service::pd_block_guard::PdBlockGuard::new(
+                        pd_chunk_sender.clone(),
+                        block.block_hash.into(),
+                    ),
+                );
+            }
+            Err(missing) => {
+                tracing::warn!(
+                    block_hash = %block.block_hash,
+                    missing_count = missing.len(),
+                    first_missing = ?missing.iter().take(5).collect::<Vec<_>>(),
+                    "PD chunks not available locally for block validation"
+                );
+                eyre::bail!(
+                    "Block {} references {} PD chunks not available locally",
+                    block.block_hash,
+                    missing.len()
+                );
+            }
         }
     }
 
@@ -1513,7 +1566,7 @@ pub async fn shadow_transactions_are_valid(
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
     // 5. Return the execution data for reuse
-    Ok(execution_data)
+    Ok((execution_data, pd_guard))
 }
 
 /// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
