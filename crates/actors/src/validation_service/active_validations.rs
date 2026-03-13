@@ -16,7 +16,7 @@ use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::{
@@ -280,6 +280,10 @@ pub(super) struct ValidationCoordinator {
     /// Maps task IDs to block hashes for panic diagnostics
     pub concurrent_task_blocks: HashMap<tokio::task::Id, BlockHash>,
 
+    /// Block hashes currently running in the concurrent JoinSet.
+    /// Defense-in-depth against duplicate provisioning of the same block_hash.
+    pub active_concurrent_hashes: HashSet<BlockHash>,
+
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
 }
@@ -294,6 +298,7 @@ impl ValidationCoordinator {
             vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify), runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            active_concurrent_hashes: HashSet::new(),
             block_tree_guard,
         }
     }
@@ -355,23 +360,31 @@ impl ValidationCoordinator {
                 VdfValidationResult::Valid => {
                     let block_hash = task.sealed_block.header().block_hash;
 
-                    let abort_handle = self.concurrent_tasks.spawn(
-                        async move {
-                            let validation_result = task.execute_concurrent().await;
+                    // Dedup: skip if this block is already in the concurrent phase
+                    if !self.active_concurrent_hashes.insert(block_hash) {
+                        warn!(
+                            block.hash = %block_hash,
+                            "Block already in concurrent validation, skipping duplicate"
+                        );
+                    } else {
+                        let abort_handle = self.concurrent_tasks.spawn(
+                            async move {
+                                let validation_result = task.execute_concurrent().await;
 
-                            ConcurrentValidationResult {
-                                block_hash,
-                                validation_result,
+                                ConcurrentValidationResult {
+                                    block_hash,
+                                    validation_result,
+                                }
                             }
-                        }
-                        .instrument(tracing::error_span!(
-                            "concurrent_validation",
-                            block.hash = %block_hash
-                        ))
-                        .in_current_span(),
-                    );
-                    self.concurrent_task_blocks
-                        .insert(abort_handle.id(), block_hash);
+                            .instrument(tracing::error_span!(
+                                "concurrent_validation",
+                                block.hash = %block_hash
+                            ))
+                            .in_current_span(),
+                        );
+                        self.concurrent_task_blocks
+                            .insert(abort_handle.id(), block_hash);
+                    }
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority

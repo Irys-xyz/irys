@@ -128,6 +128,7 @@ pub struct IrysNodeCtx {
         Arc<GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
@@ -153,6 +154,7 @@ impl IrysNodeCtx {
             supply_state: self.supply_state_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
+            pd_pricing: self.pd_pricing.clone(),
             chunk_ingress_state: self.chunk_ingress_state.clone(),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
@@ -343,6 +345,10 @@ async fn start_reth_node(
     chainspec: Arc<ChainSpec>,
     config: Config,
     latest_block: u64,
+    chunk_config: irys_types::chunk_provider::ChunkConfig,
+    pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+    ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
+    chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -351,6 +357,10 @@ async fn start_reth_node(
         config.node_config.clone(),
         latest_block,
         random_ports,
+        chunk_config,
+        pd_chunk_sender,
+        ready_pd_txs,
+        chunk_data_index,
     )
     .in_current_span()
     .await?;
@@ -1130,24 +1140,43 @@ impl IrysNode {
         runtime_handle: Handle,
         shutdown_token: CancellationToken,
     ) -> ShutdownReason {
+        // Create PD chunk manager channel
+        // The manager handles chunk provisioning for PD transactions
+        let (pd_chunk_tx, pd_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Shared indexes for lock-free PD chunk reads during EVM execution
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex =
+            Arc::new(dashmap::DashMap::with_capacity(16_384));
+        let ready_pd_txs = std::sync::Arc::new(dashmap::DashSet::new());
+
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
-        let (node_handle, reth_node) =
-            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height)
-                .in_current_span()
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(
-                        "Failed to start reth node at block height {}: {:?}",
-                        latest_block_height, e
-                    );
-                    return ShutdownReason::FatalError(format!(
-                        "start_reth_node failed at block height {latest_block_height}: {e}"
-                    ));
-                }
-            };
+        let chunk_config =
+            irys_types::chunk_provider::ChunkConfig::from_consensus(&config.consensus);
+        let (node_handle, reth_node) = match start_reth_node(
+            exec,
+            reth_chainspec,
+            config.clone(),
+            latest_block_height,
+            chunk_config,
+            pd_chunk_tx.clone(),
+            ready_pd_txs.clone(),
+            chunk_data_index.clone(),
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(
+                    "Failed to start reth node at block height {}: {:?}",
+                    latest_block_height, e
+                );
+                return ShutdownReason::FatalError(format!(
+                    "start_reth_node failed at block height {latest_block_height}: {e}"
+                ));
+            }
+        };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
@@ -1164,6 +1193,10 @@ impl IrysNode {
                 gossip_listener,
                 runtime_handle.clone(),
                 shutdown_token.clone(),
+                pd_chunk_rx,
+                pd_chunk_tx,
+                chunk_data_index,
+                ready_pd_txs,
             )
             .in_current_span()
             .await
@@ -1354,6 +1387,10 @@ impl IrysNode {
         gossip_listener: TcpListener,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
+        pd_chunk_rx: irys_types::chunk_provider::PdChunkReceiver,
+        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
+        chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+        ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -1367,20 +1404,34 @@ impl IrysNode {
         let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
 
         // initialize packing service early
-        let packing_service =
+        let mut packing_service =
             irys_actors::packing_service::PackingService::new(Arc::new(config.clone()));
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) = ServiceSenders::new();
+        // channel-first: create sender/receiver before attaching the service loop
+        let (packing_tx, packing_rx) =
+            irys_actors::packing_service::services::packing::InternalPackingService::channel(5_000);
+        let (unpacking_tx, unpacking_rx) =
+            irys_actors::packing_service::services::unpacking::InternalUnpackingService::channel(
+                5_000,
+            );
+        // start service senders/receivers with packing and unpacking senders
+        let (service_senders, receivers) =
+            ServiceSenders::new_with_packing_sender(packing_tx.clone(), unpacking_tx.clone());
         // attach the receiver loop and obtain a handle for waiters/tests
-        let packing_handle = packing_service.attach_receiver_loop(
-            runtime_handle.clone(),
-            receivers.packing,
-            service_senders.packing_sender.clone(),
-        );
+        let packing_handle = packing_service
+            .internal_packing_service
+            .attach_receiver_loop(runtime_handle.clone(), packing_rx, packing_tx);
+
+        let _unpacking_handle = packing_service
+            .internal_unpacking_service
+            .attach_receiver_loop(runtime_handle.clone(), unpacking_rx, unpacking_tx);
 
         // Initialize supply state for tracking cumulative emissions
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
+
+        // NOTE: reth service is started later, after block_tree_cache is created,
+        // so it can use a BlockTreeReadGuard instead of going through the mempool.
 
         let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
 
@@ -1657,6 +1708,7 @@ impl IrysNode {
             receivers.validation_service,
             runtime_handle.clone(),
             sync_state.clone(),
+            pd_chunk_sender.clone(),
         );
 
         // create the block reward curve
@@ -1747,8 +1799,12 @@ impl IrysNode {
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let packing_controller_handles =
-            packing_service.spawn_packing_controllers(runtime_handle.clone());
+        let packing_controller_handles = packing_service
+            .internal_packing_service
+            .spawn_packing_controllers(runtime_handle.clone());
+        let unpacking_controller_handles = packing_service
+            .internal_unpacking_service
+            .spawn_unpacking_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1779,6 +1835,16 @@ impl IrysNode {
 
         // set up chunk provider
         let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+
+        // Spawn PD service with real ChunkProvider (replaces the old MockChunkProvider-based PdChunkManager)
+        let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
+            pd_chunk_rx,
+            chunk_provider.clone(),
+            runtime_handle.clone(),
+            chunk_data_index.clone(),
+            ready_pd_txs.clone(),
+        );
+        debug!("PD service initialized");
 
         // set up sync service
         let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
@@ -1829,6 +1895,13 @@ impl IrysNode {
         );
         irys_actors::record_reth_fcu_head_height(fcu_markers.head.height);
 
+        // set up PD pricing
+        let pd_pricing = Arc::new(irys_actors::pd_pricing::PdPricing::new(
+            block_tree_guard.clone(),
+            reth_node.clone(),
+            Arc::new(config.clone()),
+        ));
+
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
             reward_curve,
@@ -1858,6 +1931,7 @@ impl IrysNode {
             validation_enabled,
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
+            pd_pricing: pd_pricing.clone(),
             sync_service_facade,
             is_vdf_mining_enabled,
             started_at: Instant::now(),
@@ -1906,6 +1980,8 @@ impl IrysNode {
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
             services.extend(packing_controller_handles.into_iter());
+            // Add unpacking controllers to services
+            services.extend(unpacking_controller_handles.into_iter());
 
             // 2. Block production flow
             services.push(block_producer_handle);
@@ -1919,6 +1995,7 @@ impl IrysNode {
             services.push(storage_module_handle);
             services.push(data_sync_handle);
             services.push(chunk_migration_handle);
+            services.push(pd_service_handle);
 
             // 5. Sync operations
             services.push(sync_service_handle);
@@ -1954,6 +2031,7 @@ impl IrysNode {
                     .expect("Missing reth rpc url!"),
                 sync_state,
                 mempool_pledge_provider,
+                pd_pricing,
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
@@ -2150,8 +2228,6 @@ impl IrysNode {
         chunk_ingress_state: irys_actors::ChunkIngressState,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
-        let reth_payload_builder = reth_node_adapter.inner.payload_builder_handle.clone();
-        let consensus_engine_handle = reth_node_adapter.inner.beacon_engine_handle.clone();
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),
@@ -2163,9 +2239,9 @@ impl IrysNode {
             mempool_guard: mempool_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
-            reth_payload_builder,
+            reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
-            consensus_engine_handle,
+            consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
             reth_node_adapter,
             chunk_ingress_state,

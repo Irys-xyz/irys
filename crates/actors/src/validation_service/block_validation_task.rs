@@ -393,6 +393,20 @@ impl BlockValidationTask {
             }
         };
 
+        // Get parent EMA snapshot for PD base fee calculation
+        let parent_ema_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&block.previous_block_hash)
+            .expect("parent block should have an EMA snapshot in the block_tree");
+
+        // Get current block's EMA snapshot (already exists in block tree at validation time)
+        let current_ema_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&block.block_hash)
+            .expect("current block should have an EMA snapshot in the block_tree");
+
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
@@ -408,17 +422,32 @@ impl BlockValidationTask {
                         block.previous_block_hash
                     )
                 })?;
+            let parent_block = self
+                .block_tree_guard
+                .read()
+                .get_block(&block.previous_block_hash)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "parent block {} should exist in the block_tree",
+                        block.previous_block_hash
+                    )
+                })?
+                .clone();
             shadow_transactions_are_valid(
                 config,
                 &self.block_tree_guard,
                 &self.service_inner.mempool_guard,
+                &parent_block,
                 block,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
                 parent_epoch_snapshot,
+                parent_ema_snapshot,
+                current_ema_snapshot,
                 parent_commitment_snapshot,
                 block_index,
                 sealed_block_for_shadow.transactions(),
+                &self.service_inner.pd_chunk_sender,
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",
@@ -537,10 +566,12 @@ impl BlockValidationTask {
         );
 
         // Check shadow_tx_result first to extract ExecutionData
-        let execution_data = match shadow_tx_result {
+        let (execution_data, _pd_guard) = match shadow_tx_result {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
+                // pd_guard was never created (it's inside the Err variant of eyre::Result)
+                // — no manual release needed
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
@@ -591,6 +622,9 @@ impl BlockValidationTask {
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
+
+                // _pd_guard drops here automatically, sending ReleaseBlockChunks
+
                 // At least one validation failed, return the first Invalid result
                 let first_invalid = [
                     &recall_result,
