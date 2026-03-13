@@ -33,9 +33,8 @@ const SHA256_64B_PADDING: [u8; 64] = {
 };
 
 #[inline]
-fn state_to_h256(state: &[u32; 8], out: &mut H256) {
-    let bytes = out.as_mut();
-    for (chunk, word) in bytes.chunks_exact_mut(4).zip(state.iter()) {
+fn state_to_bytes(state: &[u32; 8], out: &mut [u8]) {
+    for (chunk, word) in out.chunks_exact_mut(4).zip(state.iter()) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
 }
@@ -74,18 +73,19 @@ pub fn vdf_sha(
     let mut blocks = [[0_u8; 64]; 2];
     start_salt.to_little_endian(&mut blocks[0][..32]);
     blocks[1] = SHA256_64B_PADDING;
+    blocks[0][32..64].copy_from_slice(seed.as_bytes());
 
     for checkpoint_idx in 0..num_checkpoints {
         if checkpoint_idx > 0 {
             increment_le_salt(&mut blocks[0][..32]);
         }
         for _ in 0..num_iterations_per_checkpoint {
-            blocks[0][32..64].copy_from_slice(seed.as_bytes());
             let ga_blocks = as_generic_array_slice(&blocks);
             let mut state = SHA256_IV;
             compress256(&mut state, ga_blocks);
-            state_to_h256(&state, seed);
+            state_to_bytes(&state, &mut blocks[0][32..64]);
         }
+        seed.as_mut().copy_from_slice(&blocks[0][32..64]);
         checkpoints[checkpoint_idx] = *seed;
     }
 }
@@ -112,23 +112,14 @@ pub fn vdf_sha_verification(
 
         local_salt.to_little_endian(salt_bytes.as_mut());
 
-        // Hash salt+seed
-        let mut hasher = sha::Sha256::new();
-        hasher.update(salt_bytes.as_bytes());
-        hasher.update(local_seed.as_bytes());
-        let mut hash_bytes = H256::from(hasher.finish());
-
-        // subsequent hash iterations (if needed)
-        // -----------------------------------------------------------------
-        for _ in 1..num_iterations_per_checkpoint {
+        for _ in 0..num_iterations_per_checkpoint {
             let mut hasher = sha::Sha256::new();
             hasher.update(salt_bytes.as_bytes());
-            hasher.update(hash_bytes.as_bytes());
-            hash_bytes = H256::from(hasher.finish());
+            hasher.update(local_seed.as_bytes());
+            local_seed = H256::from(hasher.finish());
         }
 
-        // Store the result at the correct checkpoint index
-        checkpoints[checkpoint_idx] = hash_bytes;
+        checkpoints[checkpoint_idx] = local_seed;
 
         // Increment the salt for the next checkpoint calculation
         local_salt = local_salt + 1;
@@ -269,16 +260,17 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut blocks = [[0_u8; 64]; 2];
                     (start_salt + i).to_little_endian(&mut blocks[0][..32]);
                     blocks[1] = SHA256_64B_PADDING;
-                    let mut seed = cp[i];
+                    blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
 
                     for _ in 0..num_iterations {
-                        blocks[0][32..64].copy_from_slice(seed.as_bytes());
                         let ga_blocks = as_generic_array_slice(&blocks);
                         let mut state = SHA256_IV;
                         compress256(&mut state, ga_blocks);
-                        state_to_h256(&state, &mut seed);
+                        state_to_bytes(&state, &mut blocks[0][32..64]);
                     }
-                    seed
+                    let mut result = H256::zero();
+                    result.as_mut().copy_from_slice(&blocks[0][32..64]);
+                    result
                 })
                 .collect::<Vec<H256>>()
         });
