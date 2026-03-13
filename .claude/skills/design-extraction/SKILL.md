@@ -39,7 +39,7 @@ Extract:
 - PR body (the description)
 - Head ref, base ref
 
-Then fetch all three comment sources (paginate by following `Link: <url>; rel="next"` headers):
+Then fetch all three comment sources (paginate by capturing response headers with `curl -D`, extracting the `Link: <url>; rel="next"` URL, and repeating until no `rel="next"` link is present):
 - **Issue comments**: `https://api.github.com/repos/{owner}/{repo}/issues/<pr-number>/comments?per_page=100`
 - **Review comments** (inline on code): `https://api.github.com/repos/{owner}/{repo}/pulls/<pr-number>/comments?per_page=100`
 - **Review bodies**: `https://api.github.com/repos/{owner}/{repo}/pulls/<pr-number>/reviews?per_page=100`
@@ -96,6 +96,7 @@ mkdir -p design/docs
 
 PR comments may contain amendments, clarifications, or explicit decisions that refine or supersede the design plan. When processing comments:
 
+- **Redact sensitive data** before writing to ADR files — strip API keys, tokens, secrets, credentials, and PII. Never persist sensitive values to `design/docs/`.
 - **Override the plan** only when a comment contains a clear resolution, correction, or final decision (e.g., "We decided to go with X instead", "After discussion, the approach is Y")
 - **Ignore** questions, speculative remarks, and casual discussion
 
@@ -174,6 +175,8 @@ PR #<number> — <title>
 
 **Content limits:**
 - 500 lines maximum per file. If a topic needs more, split into multiple files with cross-references.
+
+Before any write or append, verify the resulting file will not exceed 500 lines. If it would, split the content into a new related ADR file with cross-references instead.
 
 **For `create` actions:** Write the full ADR to a new file in `design/docs/`.
 
