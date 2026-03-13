@@ -108,7 +108,7 @@ Comments from `@coderabbitai` (CodeRabbit) have a specific structure. Only the *
 
 For example, given a CodeRabbit comment like:
 
-```
+```text
 ⚠️ Potential issue | 🟡 Minor
 
 Improve handling of large integers in JSON-to-TOML conversion.

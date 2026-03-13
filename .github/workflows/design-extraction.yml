@@ -139,19 +139,42 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMENTS=$(curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
+          paginate_curl() {
+            local url="$1"
+            local tmpfile
+            tmpfile=$(mktemp)
+            echo '[' > "$tmpfile"
+            local first=true
+            while [ -n "$url" ]; do
+              local headers
+              headers=$(mktemp)
+              local body
+              body=$(curl -fsSL \
+                -D "$headers" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$url")
+              if [ "$first" = true ]; then
+                first=false
+              else
+                echo ',' >> "$tmpfile"
+              fi
+              echo "$body" | jq -c '.[]' >> "$tmpfile"
+              url=$(grep -i '^link:' "$headers" | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p')
+              rm -f "$headers"
+            done
+            echo ']' >> "$tmpfile"
+            jq -s 'flatten' "$tmpfile"
+            rm -f "$tmpfile"
+          }
+
+          COMMENTS=$(paginate_curl \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments?per_page=100" \
             | jq -r '[.[] | "**@\(.user.login):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
-          REVIEW_COMMENTS=$(curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
+          REVIEW_COMMENTS=$(paginate_curl \
             "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments?per_page=100" \
             | jq -r '[.[] | "**@\(.user.login) (review on \(.path)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
-          REVIEWS=$(curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
+          REVIEWS=$(paginate_curl \
             "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews?per_page=100" \
             | jq -r '[.[] | select(.body != "") | "**@\(.user.login) (\(.state)):** \(.body | .[0:2000])"] | join("\n\n---\n\n")')
           COMBINED=$(printf '%s\n\n%s\n\n%s' "$COMMENTS" "$REVIEW_COMMENTS" "$REVIEWS")
@@ -202,7 +225,7 @@ jobs:
           INVALID=$( {
             git diff --name-only
             git ls-files --others --exclude-standard
-          } | grep -v '^design/docs/' | grep -v '^\.claude/skills/' || true)
+          } | grep -v '^design/docs/' || true)
           if [ -n "$INVALID" ]; then
             echo "::error::Files modified outside design/docs/: $INVALID"
             exit 1
