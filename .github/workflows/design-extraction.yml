@@ -105,6 +105,10 @@ jobs:
 
       - name: Install trusted skill
         run: |
+          if [ -L .claude ] || [ -L .claude/skills ]; then
+            echo "::error::Symlink detected at .claude/ or .claude/skills/ — aborting"
+            exit 1
+          fi
           if [ -d trusted-base/.claude/skills/design-extraction ]; then
             rm -rf .claude/skills/design-extraction
             mkdir -p .claude/skills
@@ -112,6 +116,7 @@ jobs:
           else
             echo "::warning::Skill not found on base branch — using PR version (bootstrap)"
           fi
+          rm -rf trusted-base
 
       - name: Extract design plan section
         id: design-plan
@@ -143,8 +148,6 @@ jobs:
             local url="$1"
             local tmpfile
             tmpfile=$(mktemp)
-            echo '[' > "$tmpfile"
-            local first=true
             while [ -n "$url" ]; do
               local headers
               headers=$(mktemp)
@@ -154,17 +157,11 @@ jobs:
                 -H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 "$url")
-              if [ "$first" = true ]; then
-                first=false
-              else
-                echo ',' >> "$tmpfile"
-              fi
-              echo "$body" | jq -c '.[]' >> "$tmpfile"
+              printf '%s\n' "$body" >> "$tmpfile"
               url=$(grep -i '^link:' "$headers" | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p')
               rm -f "$headers"
             done
-            echo ']' >> "$tmpfile"
-            jq -s 'flatten' "$tmpfile"
+            jq -s 'add // []' "$tmpfile"
             rm -f "$tmpfile"
           }
 
@@ -232,6 +229,7 @@ jobs:
           fi
 
       - name: Commit and push
+        id: commit
         if: steps.design-plan.outputs.content != ''
         run: |
           git config user.name "github-actions[bot]"
@@ -240,10 +238,11 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "ci: extract design decisions from PR #${{ steps.pr.outputs.number }}"
             git push origin HEAD:${{ steps.pr.outputs.head_ref }}
+            echo "did_write=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Add design-extracted label
-        if: steps.design-plan.outputs.content != ''
+        if: steps.commit.outputs.did_write == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
