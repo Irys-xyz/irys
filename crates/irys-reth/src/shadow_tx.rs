@@ -830,6 +830,14 @@ impl ShadowTransaction {
                 }),
                 FixedBytes::ZERO,
             ),
+            UPDATE_REWARD_ADDRESS_ID => Self::new_v1(
+                TransactionPacket::UpdateRewardAddress(UpdateRewardAddressDebit {
+                    target: address,
+                    irys_ref: FixedBytes::ZERO,
+                    new_reward_address: Address::ZERO,
+                }),
+                FixedBytes::ZERO,
+            ),
             _ => panic!("Unknown shadow transaction type: {tx_type}"),
         }
     }
