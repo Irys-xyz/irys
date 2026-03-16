@@ -846,6 +846,8 @@ This is the same proof chain that PoA validation already uses (`block_validation
 | `crates/actors/src/pd_service/provisioning.rs` | Add `PartiallyReady -> Ready` transition method callable from `on_fetch_done`. Extend `TxProvisioningState` or add helper for checking/clearing `missing_chunks`. |
 | `crates/actors/src/pd_service/cache.rs` | No structural changes (insert/remove/reference tracking already work) |
 | `crates/chain/src/chain.rs` | Pass `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`, `own_miner_address` to `PdService::spawn_service` |
+| `crates/chain-tests/src/programmable_data/pd_chunk_p2p_pull.rs` | **New file.** Integration tests for PD chunk P2P pull: happy path, multiple PD txs, chunk deduplication, mempool path. Shared `setup_pd_p2p_test()` helper. |
+| `crates/chain-tests/src/programmable_data/mod.rs` | Add `mod pd_chunk_p2p_pull;` |
 
 ## Edge Cases
 
@@ -908,3 +910,160 @@ The PD chunk fetch path is latency-sensitive (blocks validation) and should be i
 - **`pd_block_provision_wait_ms`** — histogram of time a block validation waits on the oneshot (from `ProvisionBlockChunks` send to `Ok(())` response)
 
 These follow the existing metrics patterns in the codebase (e.g., `record_gossip_chunk_processing_duration`, `record_gossip_chunk_received`).
+
+## Integration Tests
+
+### Test File
+
+`crates/chain-tests/src/programmable_data/pd_chunk_p2p_pull.rs` — added to the existing PD test module (`mod.rs`).
+
+### Shared Setup Helper
+
+A reusable setup function that establishes the two-node topology used by all test cases:
+
+```rust
+struct PdP2pTestContext {
+    node_a: IrysNodeTest<Started>,       // genesis, mining, has chunks
+    node_b: IrysNodeTest<Started>,       // peer, validator-only, no local chunks
+    data_start_offset: u64,              // global ledger offset of first uploaded chunk
+    partition_index: u64,                // data_start_offset / num_chunks_in_partition
+    local_offset: u32,                   // data_start_offset % num_chunks_in_partition
+    num_chunks_uploaded: u16,            // total chunks available for tests
+    chunk_size: u64,                     // bytes per chunk (32 in tests)
+    num_chunks_in_partition: u64,        // partition size config
+    pd_signer: PrivateKeySigner,         // funded account for PD tx submission
+    data_signer: PrivateKeySigner,       // account used for data upload
+}
+
+/// Establishes the two-node topology and uploads real data on Node A.
+async fn setup_pd_p2p_test() -> PdP2pTestContext { ... }
+```
+
+**Node A (genesis, miner, data holder)**:
+- `IrysNodeTest::new_genesis(config)` with `NodeConfig::testing()` (Sprite hardfork active from genesis)
+- Staked, pledged, mining-capable, with storage modules
+- Small chunk size (32 bytes) for manageable test data
+- `block_migration_depth` set low (e.g., 2) to speed up chunk migration
+- `num_chunks_in_partition` set small (e.g., 10) for tractable partition layout — this controls how `resolve_peers_for_chunk` computes `slot_index = offset / num_chunks_in_partition`
+
+**Data upload on Node A**:
+- Post a publish data transaction with enough chunks to cover all test scenarios (e.g., 16 chunks × 32 bytes = 512 bytes)
+- Upload unpacked chunks via HTTP `/v1/chunk` API
+- Mine blocks until chunks migrate to storage modules (wait for `block_migration_depth` blocks past the data tx)
+- Wait for `ChunkMigrationService` to write chunks to storage modules using the `wait_for_migrated_txs()` pattern followed by a brief sleep (e.g., 2 seconds) to account for async chunk migration writes — this follows the established pattern in `pd_content_verification.rs`
+- Record `data_start_offset` from BlockIndex for constructing PD access lists
+- Decompose into partition-relative coordinates for `ChunkRangeSpecifier` construction:
+  ```rust
+  let partition_index = data_start_offset / num_chunks_in_partition;
+  let local_offset = (data_start_offset % num_chunks_in_partition) as u32;
+  ```
+
+**Node B (peer, validator-only, no local chunks)**:
+- `IrysNodeTest::new(genesis.testing_peer_with_signer(&peer_signer))` — NOT staked, NOT pledged, NO storage modules, NOT mining
+- Connected to Node A via trusted peers (gossip + API)
+- P2P chunk fetch enabled (new PdService configuration)
+- No data is uploaded to or packed on Node B — its `ChunkStorageProvider` naturally returns `Ok(None)` for all ledger offsets since no storage modules contain the relevant data
+
+**Implementation constraint: gossip authentication for unstaked peers.** The gossip pull mechanism requires peers to pass the gossip handshake (signature + staking verification). If Node B is not staked, it may be unable to initiate pull requests to Node A. The test setup must ensure Node B can authenticate with Node A's gossip endpoint. Options: (a) give Node B a minimal genesis-allocated stake sufficient for gossip authentication but no partition assignments, or (b) if the gossip handshake only requires a valid node identity (not active staking), no special setup is needed. This must be validated during implementation by checking the handshake verification path in `gossip_service.rs`.
+
+**Sync gate**: Wait for Node B to sync to Node A's current tip using `wait_until_height_confirmed` (or equivalent migration-aware gate) — not just block tree tip sync. This ensures Node B's BlockIndex has the data-carrying block's entries, which is required for `get_block_bounds()` during tx_path verification in `on_fetch_done`.
+
+**Pre-test invariant**: Before each test's PD-specific logic, assert that Node B's `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns `Ok(None)` for the test's target offsets. This proves the P2P fetch path is actually exercised — without this check, tests could pass vacuously if chunks were found locally.
+
+### Test 1: Happy Path — Single PD Transaction Block Validation
+
+**Topology**: Node A (genesis, mining, has chunks) → Node B (peer, validator-only, no chunks locally)
+
+**Setup**: Call `setup_pd_p2p_test()`. Node A has migrated chunks at known ledger offsets.
+
+**Test case**:
+1. Assert pre-test invariant: Node B has no local chunks at target offsets
+2. Construct a PD transaction referencing 2 chunks at known offsets (using `ChunkRangeSpecifier` with `partition_index` and `local_offset` from `PdP2pTestContext`)
+3. Submit the PD tx to Node A's mempool
+4. Node A mines a block including the PD tx (use `future_or_mine_on_timeout()` pattern)
+5. Node B receives the block via gossip
+6. Node B's PdService detects missing chunks during `handle_provision_block_chunks`
+7. Node B fetches chunks from Node A via `GossipDataRequestV2::PdChunk`
+8. Node B validates the block successfully (full proof chain: tx_path + data_path + leaf hash)
+
+**Assertions**:
+- Node B's canonical tip matches Node A's block hash (block validated and accepted)
+- The PD tx is included in the validated block on Node B (check block body)
+- Nodes remain in sync — no fork, no rejection
+- Fetched chunks are present in Node B's `ChunkDataIndex` DashMap (the shared mirror the EVM precompile reads from)
+
+### Test 2: Multiple PD Transactions in One Block
+
+**Topology**: Node A (genesis, mining, has chunks) → Node B (peer, validator-only, no chunks locally)
+
+**Setup**: Call `setup_pd_p2p_test()`. The uploaded data provides enough chunks for multiple non-overlapping ranges.
+
+**Test case**:
+1. Assert pre-test invariant: Node B has no local chunks at target offsets
+2. Construct 3 PD transactions, each referencing different chunk ranges (partition-relative offsets from `local_offset`):
+   - TX1: offsets 0-1 (2 chunks)
+   - TX2: offsets 2-3 (2 chunks)
+   - TX3: offsets 4-5 (2 chunks)
+3. Submit all 3 PD txs to Node A's mempool
+4. Node A mines a block including all 3 PD txs
+5. Node B receives and validates the block, fetching all 6 chunks from Node A via parallel fetch tasks
+
+**Assertions**:
+- Node B's canonical tip matches Node A's
+- All 3 PD txs are in the validated block on Node B
+- All 6 chunks are present in Node B's `ChunkDataIndex` DashMap
+- Nodes remain in sync
+
+### Test 3: Chunk Deduplication — Mempool TX and Block Validation Share a Fetch
+
+**Topology**: Node A (genesis, mining, has chunks) → Node B (peer, validator-only, no chunks locally)
+
+**Setup**: Call `setup_pd_p2p_test()`.
+
+**Test case**:
+1. Assert pre-test invariant: Node B has no local chunks at target offset X
+2. Construct PD transaction T1 referencing chunk at offset X
+3. Submit T1 directly to Node B's mempool (via Node B's RPC, not Node A)
+4. T1 triggers `NewTransaction` in Node B → PdService detects missing chunks and starts fetching chunk X from Node A
+5. Construct PD transaction T2 (different tx, same chunk at offset X) and submit to Node A's mempool
+6. Node A mines a block containing T2
+7. Node B receives the block → `ProvisionBlockChunks` for T2 either hits the cache (if fetch already completed) or joins the existing pending fetch as a second waiter
+8. Both T1 (mempool waiter) and T2 (block waiter) are served
+
+**Assertions**:
+- Node B validates the block successfully (block waiter for T2 satisfied)
+- T1 transitions to `Ready` in Node B's provisioning state (tx waiter for T1 satisfied)
+- `ready_pd_txs` contains T1's tx hash
+- Chunk X is present in Node B's `ChunkDataIndex` DashMap
+
+**Timing note**: The relative timing of the fetch completion vs. block arrival matters. If the fetch completes before the block arrives, `ProvisionBlockChunks` hits the cache directly (cache hit path). If the block arrives while the fetch is still in-flight, the block's chunk key is added to `pending_fetches[X].waiting_blocks` (dedup path). Both outcomes are correct — the test asserts the end state regardless of which path executes.
+
+### Test 4: Mempool Path — Fetch Chunks for Pending Transaction
+
+**Topology**: Node A (genesis, mining, has chunks) → Node B (peer, validator-only, no chunks locally)
+
+**Setup**: Call `setup_pd_p2p_test()`.
+
+**Test case**:
+1. Assert pre-test invariant: Node B has no local chunks at target offsets
+2. Construct a PD transaction referencing 2-3 chunks at known offsets
+3. Submit the PD tx directly to Node B's mempool (via Node B's RPC)
+4. Node B's PdService detects missing chunks via `handle_provision_chunks`, marks the tx as `PartiallyReady`
+5. PdService spawns fetch tasks into the JoinSet for each missing chunk
+6. Fetch tasks pull chunks from Node A via `GossipDataRequestV2::PdChunk`
+7. As each chunk arrives: proof chain verified, chunk inserted into cache, `missing_chunks` decremented
+8. When last chunk arrives: tx transitions from `PartiallyReady` → `Ready`, tx_hash inserted into `ready_pd_txs`
+
+**Assertions**:
+- `ready_pd_txs` contains the tx hash (tx is available for block building)
+- Fetched chunks are present in Node B's `ChunkDataIndex` DashMap
+- The chunk bytes in `ChunkDataIndex` match the original data uploaded to Node A (byte-level verification)
+
+### Future Test Scenarios
+
+The following scenarios are valuable but out of scope for the initial implementation. They should be added as the implementation matures:
+
+- **Retry after peer failure**: Node A's gossip temporarily disabled → Node B's fetch fails, retries with backoff via `DelayQueue`, eventually succeeds when gossip re-enabled. Exercises the `AllPeersFailed` → `on_retry_ready` path.
+- **Block cancellation during fetch**: While Node B is fetching PD chunks, the tip advances past the block being validated → `exit_if_block_is_too_old` fires → fetch cancelled via `abort_handle.abort()`.
+- **Sibling validation cancellation (CancellationToken)**: Another validation task fails (e.g., invalid PoA) while PD fetch is in-flight → `cancel.cancel()` fires → shadow_tx_task dropped → oneshot dropped → PdService cleanup.
+- **Proof verification failure**: Serving peer returns a valid chunk from the wrong ledger position → tx_path verification fails → peer marked invalid, retry with different peer.
