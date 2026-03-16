@@ -436,8 +436,36 @@ impl PdService {
     }
 
     fn on_retry_ready(&mut self, entry: fetch::RetryEntry) {
-        // TODO: implement in Task 16
-        tracing::warn!(key = ?entry.key, "on_retry_ready: not yet implemented");
+        let Some(state) = self.pending_fetches.get_mut(&entry.key) else {
+            return;
+        };
+
+        // Stale generation — this retry belongs to an old provisioning lifecycle
+        if state.generation != entry.generation {
+            return;
+        }
+
+        // Waiters vanished during backoff
+        if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+            self.pending_fetches.remove(&entry.key);
+            return;
+        }
+
+        // Re-resolve peers (picks up epoch changes, new peers coming online)
+        let peers = self.resolve_peers_for_chunk(&entry.key);
+        let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
+            entry.key,
+            peers,
+            self.http_client.clone(),
+        ));
+
+        let state = self
+            .pending_fetches
+            .get_mut(&entry.key)
+            .expect("entry confirmed present above");
+        state.status = fetch::FetchPhase::Fetching;
+        state.abort_handle = Some(abort_handle);
+        state.retry_queue_key = None;
     }
 
     /// Resolves which peers store the chunk at the given key's (ledger, offset).
