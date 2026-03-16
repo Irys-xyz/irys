@@ -154,6 +154,20 @@ impl irys_types::chunk_provider::ChunkStorageProvider for ChunkProvider {
         Ok(unpacked)
     }
 
+    fn get_chunk_for_pd(
+        &self,
+        ledger: u32,
+        ledger_offset: u64,
+    ) -> eyre::Result<Option<ChunkFormat>> {
+        // TODO: Check MDBX CachedChunks table for unpacked version first.
+        // For now, fall back to packed from storage module.
+        let ledger = DataLedger::try_from(ledger)?;
+        match self.get_chunk_by_ledger_offset(ledger, LedgerChunkOffset::from(ledger_offset))? {
+            Some(packed) => Ok(Some(ChunkFormat::Packed(packed))),
+            None => Ok(None),
+        }
+    }
+
     fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
         irys_types::chunk_provider::ChunkConfig {
             num_chunks_in_partition: self.config.consensus.num_chunks_in_partition,

@@ -440,6 +440,7 @@ impl GossipServiceTestFixture {
                         self.config.consensus.clone(),
                     )))),
                     std::time::Instant::now(),
+                    None,
                 )
                 .expect("failed to run the gossip service");
 

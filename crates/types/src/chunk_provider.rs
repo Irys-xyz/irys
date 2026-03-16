@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::range_specifier::ChunkRangeSpecifier;
+use crate::ChunkFormat;
 
 /// Configuration values needed for chunk operations.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,15 @@ pub trait ChunkStorageProvider: Send + Sync + std::fmt::Debug {
         ledger: u32,
         ledger_offset: u64,
     ) -> eyre::Result<Option<Bytes>>;
+
+    /// Returns a chunk in the best available format for PD serving:
+    /// unpacked from MDBX CachedChunks if available, packed from storage module otherwise.
+    /// No on-the-fly unpacking — only returns unpacked if already cached.
+    fn get_chunk_for_pd(
+        &self,
+        ledger: u32,
+        ledger_offset: u64,
+    ) -> eyre::Result<Option<ChunkFormat>>;
 
     #[must_use]
     fn config(&self) -> ChunkConfig;

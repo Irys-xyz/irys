@@ -293,7 +293,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataV1::IngressProof(ingress_proof.clone()))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
-                Self::PdChunk(_) => None,  // PdChunk does not exist in v1
+                Self::PdChunk(_) => None,   // PdChunk does not exist in v1
             }
         }
 
@@ -358,7 +358,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataRequestV1::Transaction(*tx_id))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
-                Self::PdChunk(..) => None, // V1 peers cannot serve PD chunks
+                Self::PdChunk(..) => None,  // V1 peers cannot serve PD chunks
             }
         }
     }

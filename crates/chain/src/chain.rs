@@ -1738,6 +1738,9 @@ impl IrysNode {
         let block_status_provider =
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
 
+        // set up chunk provider (before P2PService so it can be wired into GossipDataHandler)
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
         // create a circular dependency, since BlockPool also depends on actors. This can be
@@ -1766,6 +1769,9 @@ impl IrysNode {
             block_index_guard.clone(),
             block_tree_guard.clone(),
             std::time::Instant::now(),
+            Some(
+                chunk_provider.clone() as Arc<dyn irys_types::chunk_provider::ChunkStorageProvider>
+            ),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
@@ -1832,9 +1838,6 @@ impl IrysNode {
             sync_state.clone(),
             shutdown_token.clone(),
         );
-
-        // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
 
         // Spawn PD service with real ChunkProvider (replaces the old MockChunkProvider-based PdChunkManager)
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
