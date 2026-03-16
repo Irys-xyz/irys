@@ -960,7 +960,7 @@ async fn fetch_chunk_from_peers(
 ) -> fetch::PdChunkFetchResult {
     for peer in &peers {
         let api_url = format!(
-            "http://{}/chunk/ledger/{}/{}",
+            "http://{}/v1/chunk/ledger/{}/{}",
             peer.api, key.ledger, key.offset
         );
         match http_client
