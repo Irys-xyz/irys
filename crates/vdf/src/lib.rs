@@ -75,7 +75,7 @@ pub fn vdf_sha(
     blocks[1] = SHA256_64B_PADDING;
     blocks[0][32..64].copy_from_slice(seed.as_bytes());
 
-    for checkpoint_idx in 0..num_checkpoints {
+    for (checkpoint_idx, slot) in checkpoints[..num_checkpoints].iter_mut().enumerate() {
         if checkpoint_idx > 0 {
             increment_le_salt(&mut blocks[0][..32]);
         }
@@ -86,7 +86,7 @@ pub fn vdf_sha(
             state_to_bytes(&state, &mut blocks[0][32..64]);
         }
         seed.as_mut().copy_from_slice(&blocks[0][32..64]);
-        checkpoints[checkpoint_idx] = *seed;
+        *slot = *seed;
     }
 }
 
@@ -675,7 +675,7 @@ mod tests {
             salt_u64 in any::<u64>(),
             seed_bytes in any::<[u8; 32]>(),
             num_checkpoints in 1..=4_usize,
-            num_iterations in 1..=8_u64,
+            num_iterations in 0..=8_u64,
         ) {
             let salt = U256::from(salt_u64);
             let original_seed = H256::from(seed_bytes);
@@ -692,6 +692,7 @@ mod tests {
             );
 
             prop_assert_eq!(checkpoints, verification);
+            prop_assert_eq!(seed, *verification.last().unwrap());
         }
     }
 }
