@@ -1,4 +1,5 @@
 pub mod cache;
+pub(crate) mod fetch;
 pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
@@ -444,6 +445,14 @@ mod tests {
             _ledger_offset: u64,
         ) -> eyre::Result<Option<reth::revm::primitives::bytes::Bytes>> {
             Ok(Some(self.cached_chunk.clone()))
+        }
+
+        fn get_chunk_for_pd(
+            &self,
+            _ledger: u32,
+            _ledger_offset: u64,
+        ) -> eyre::Result<Option<irys_types::ChunkFormat>> {
+            Ok(None)
         }
 
         fn config(&self) -> irys_types::chunk_provider::ChunkConfig {

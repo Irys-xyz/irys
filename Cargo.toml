@@ -69,7 +69,7 @@ actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["time"] }
 rand = { version = "0.8", features = ["small_rng"] }
 hex = "0.4"
 base64-url = "2"
