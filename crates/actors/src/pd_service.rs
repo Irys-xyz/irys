@@ -12,7 +12,9 @@ use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::{DataLedger, IrysAddress, PeerAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
+use reth::revm::primitives::bytes::Bytes;
 use reth::tasks::shutdown::Shutdown;
+use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -146,18 +148,291 @@ impl PdService {
     }
 
     fn on_fetch_done(&mut self, result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>) {
-        // TODO: implement in Task 15
-        match result {
-            Ok(fetch_result) => {
-                tracing::warn!(key = ?fetch_result.key, "on_fetch_done: not yet implemented");
-            }
+        let fetch_result = match result {
+            Ok(r) => r,
             Err(join_error) => {
-                tracing::warn!(
+                warn!(
                     "PD chunk fetch task panicked or was cancelled: {}",
                     join_error
                 );
+                return;
+            }
+        };
+
+        let key = fetch_result.key;
+
+        match fetch_result.result {
+            Ok(chunk_format) => self.on_fetch_success(key, chunk_format),
+            Err(fetch::PdChunkFetchError::AllPeersFailed { excluded_peers }) => {
+                self.on_fetch_all_peers_failed(key, excluded_peers);
+            }
+            Err(fetch::PdChunkFetchError::VerificationFailed) => {
+                // Treat verification failure like a permanent failure — the data from
+                // peers is untrustworthy. Remove the fetch state and fail any waiting
+                // blocks.
+                warn!(
+                    ?key,
+                    "Fetched chunk failed verification — failing permanently"
+                );
+                self.fail_pending_fetch(&key);
             }
         }
+    }
+
+    /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
+    fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat) {
+        // 1. Extract unpacked bytes and data_root from the fetched chunk.
+        let config = self.storage_provider.config();
+        let (unpacked_bytes, chunk_data_root) = match chunk_format {
+            irys_types::ChunkFormat::Unpacked(unpacked) => {
+                let data_root = unpacked.data_root;
+                (unpacked.bytes.0, data_root)
+            }
+            irys_types::ChunkFormat::Packed(packed) => {
+                let unpacked = irys_packing::unpack(
+                    &packed,
+                    config.entropy_packing_iterations as u32,
+                    config.chunk_size as usize,
+                    config.chain_id as u64,
+                );
+                let data_root = unpacked.data_root;
+                (unpacked.bytes.0, data_root)
+            }
+        };
+
+        // 2. Verify data_root against local MDBX state.
+        match self.derive_expected_data_root(&key) {
+            Ok(expected_data_root) => {
+                if chunk_data_root != expected_data_root {
+                    warn!(
+                        ?key,
+                        ?chunk_data_root,
+                        ?expected_data_root,
+                        "Fetched chunk data_root mismatch — discarding"
+                    );
+                    // TODO: mark the peer as suspicious and retry from another peer
+                    self.fail_pending_fetch(&key);
+                    return;
+                }
+                trace!(?key, "Fetched chunk data_root verified");
+            }
+            Err(e) => {
+                // If we cannot derive the expected data_root (e.g., block not yet migrated),
+                // log a warning and proceed — the chunk may still be valid.
+                warn!(
+                    ?key,
+                    error = %e,
+                    "Could not derive expected data_root for verification — accepting chunk on trust"
+                );
+                // TODO: Full merkle path + leaf hash verification as fallback
+            }
+        }
+
+        // 3. Remove the fetch state and collect all waiters.
+        let Some(state) = self.pending_fetches.remove(&key) else {
+            // Stale fetch result — the key was already cleaned up.
+            debug!(?key, "Fetch completed but no pending state found (stale)");
+            return;
+        };
+
+        // Cancel any pending retry timer if one exists.
+        if let Some(retry_key) = state.retry_queue_key {
+            self.retry_queue.remove(&retry_key);
+        }
+
+        let waiting_blocks: Vec<B256> = state.waiting_blocks.into_iter().collect();
+        let waiting_txs: Vec<B256> = state.waiting_txs.into_iter().collect();
+
+        // 4. Insert into cache with per-waiter references.
+        let data = Arc::new(Bytes::from(unpacked_bytes));
+        let all_waiters: Vec<B256> = waiting_blocks
+            .iter()
+            .chain(waiting_txs.iter())
+            .copied()
+            .collect();
+
+        if let Some((&first, rest)) = all_waiters.split_first() {
+            self.cache.insert(key, data, first);
+            for &waiter in rest {
+                self.cache.add_reference(&key, waiter);
+            }
+        }
+
+        // 5. Notify waiting blocks.
+        for block_hash in &waiting_blocks {
+            if let Some(pending) = self.pending_blocks.get_mut(block_hash) {
+                pending.remaining_keys.remove(&key);
+                if pending.remaining_keys.is_empty() {
+                    let pending = self.pending_blocks.remove(block_hash).unwrap();
+                    let _ = pending.response.send(Ok(()));
+                    // Track the block's chunk keys for later release.
+                    self.block_tracker.insert(*block_hash, pending.all_keys);
+                }
+            }
+        }
+
+        // 6. Notify waiting transactions.
+        for tx_hash in &waiting_txs {
+            if let Some(tx_state) = self.tracker.get_mut(tx_hash) {
+                tx_state.missing_chunks.remove(&key);
+                if tx_state.missing_chunks.is_empty() {
+                    tx_state.state = provisioning::ProvisioningState::Ready;
+                    self.ready_pd_txs.insert(*tx_hash);
+                    debug!(tx_hash = %tx_hash, "PD transaction fully provisioned via P2P fetch");
+                } else {
+                    let found = tx_state.required_chunks.len() - tx_state.missing_chunks.len();
+                    let total = tx_state.required_chunks.len();
+                    tx_state.state =
+                        provisioning::ProvisioningState::PartiallyReady { found, total };
+                }
+            }
+        }
+
+        trace!(
+            ?key,
+            waiting_blocks = waiting_blocks.len(),
+            waiting_txs = waiting_txs.len(),
+            "Fetch completed and waiters notified"
+        );
+    }
+
+    /// Handle fetch failure when all peers failed — schedule retry or fail permanently.
+    fn on_fetch_all_peers_failed(
+        &mut self,
+        key: ChunkKey,
+        excluded_peers: HashSet<irys_types::IrysAddress>,
+    ) {
+        let Some(state) = self.pending_fetches.get_mut(&key) else {
+            return;
+        };
+
+        // If no one is waiting anymore, just clean up.
+        if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+            self.pending_fetches.remove(&key);
+            return;
+        }
+
+        // Clear the abort handle since the task has completed.
+        state.abort_handle = None;
+
+        if state.attempt >= fetch::MAX_CHUNK_FETCH_RETRIES {
+            warn!(
+                ?key,
+                attempts = state.attempt,
+                "PD chunk fetch exhausted all retries — failing permanently"
+            );
+            self.fail_pending_fetch(&key);
+            return;
+        }
+
+        let next_attempt = state.attempt + 1;
+        let delay = fetch::backoff_duration(state.attempt);
+        let retry_entry = fetch::RetryEntry {
+            key,
+            attempt: next_attempt,
+            generation: state.generation,
+            excluded_peers: excluded_peers.clone(),
+        };
+        let queue_key = self.retry_queue.insert(retry_entry, delay);
+
+        state.attempt = next_attempt;
+        state.status = fetch::FetchPhase::Backoff;
+        state.retry_queue_key = Some(queue_key);
+        state.excluded_peers = excluded_peers;
+
+        debug!(
+            ?key,
+            attempt = next_attempt,
+            delay_ms = delay.as_millis(),
+            "Scheduling PD chunk fetch retry"
+        );
+    }
+
+    /// Permanently fail a pending fetch: remove state, error-respond to waiting blocks,
+    /// and update waiting tx provisioning states.
+    fn fail_pending_fetch(&mut self, key: &ChunkKey) {
+        let Some(state) = self.pending_fetches.remove(key) else {
+            return;
+        };
+
+        // Cancel any pending retry timer.
+        if let Some(retry_key) = state.retry_queue_key {
+            self.retry_queue.remove(&retry_key);
+        }
+
+        // Fail waiting blocks.
+        for block_hash in &state.waiting_blocks {
+            if let Some(pending) = self.pending_blocks.remove(block_hash) {
+                // Respond with the missing chunk as an error.
+                let _ = pending.response.send(Err(vec![(key.ledger, key.offset)]));
+                // Clean up any cache references that were already added for this block.
+                for k in &pending.all_keys {
+                    let unreferenced = self.cache.remove_reference(k, block_hash);
+                    if unreferenced {
+                        self.cache.remove(k);
+                    }
+                }
+            }
+        }
+
+        // Update waiting transactions — the chunk remains missing permanently.
+        // The tx stays in PartiallyReady state; it won't become Ready.
+        for tx_hash in &state.waiting_txs {
+            if let Some(tx_state) = self.tracker.get_mut(tx_hash) {
+                let found = tx_state.required_chunks.len() - tx_state.missing_chunks.len();
+                let total = tx_state.required_chunks.len();
+                tx_state.state = provisioning::ProvisioningState::PartiallyReady { found, total };
+            }
+        }
+
+        self.cache.try_shrink_to_fit();
+    }
+
+    /// Derive the expected `data_root` for a chunk at the given ledger offset
+    /// by walking the block index and transaction headers in MDBX.
+    fn derive_expected_data_root(&self, key: &ChunkKey) -> eyre::Result<irys_types::H256> {
+        let block_index = self.block_index.read();
+        let bounds = block_index.get_block_bounds(
+            DataLedger::Publish,
+            irys_types::LedgerChunkOffset::from(key.offset),
+        )?;
+
+        // Get the block hash from the block index item at this height.
+        let block_index_item = block_index
+            .get_item(bounds.height)
+            .ok_or_else(|| eyre::eyre!("Block index item not found at height {}", bounds.height))?;
+
+        let db_tx = self.db.tx()?;
+        let block_header =
+            irys_database::block_header_by_hash(&db_tx, &block_index_item.block_hash, false)?
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Block header not found for hash {}",
+                        block_index_item.block_hash
+                    )
+                })?;
+
+        let tx_ids = block_header
+            .get_data_ledger_tx_ids_ordered(DataLedger::Publish)
+            .unwrap_or(&[]);
+
+        let chunk_size = self.storage_provider.config().chunk_size;
+        let mut running_offset = bounds.start_chunk_offset;
+        for tx_id in tx_ids {
+            let tx_header = irys_database::tx_header_by_txid(&db_tx, tx_id)?
+                .ok_or_else(|| eyre::eyre!("Tx header not found: {}", tx_id))?;
+            let num_chunks = tx_header.data_size.div_ceil(chunk_size);
+            if key.offset < running_offset + num_chunks {
+                return Ok(tx_header.data_root);
+            }
+            running_offset += num_chunks;
+        }
+
+        Err(eyre::eyre!(
+            "Chunk offset {} not found in block txs at height {}",
+            key.offset,
+            bounds.height
+        ))
     }
 
     fn on_retry_ready(&mut self, entry: fetch::RetryEntry) {
