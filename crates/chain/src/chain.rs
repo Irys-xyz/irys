@@ -1846,6 +1846,12 @@ impl IrysNode {
             runtime_handle.clone(),
             chunk_data_index.clone(),
             ready_pd_txs.clone(),
+            peer_list_guard.clone(),
+            block_tree_guard.clone(),
+            block_index_guard.clone(),
+            irys_db.clone(),
+            config.consensus.num_chunks_in_partition,
+            config.node_config.miner_address(),
         );
         debug!("PD service initialized");
 
