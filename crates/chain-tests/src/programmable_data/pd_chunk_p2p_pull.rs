@@ -16,9 +16,9 @@ use std::time::Duration;
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{Address, U256, aliases::U200};
+use alloy_primitives::{aliases::U200, Address, U256};
 use alloy_signer_local::LocalSigner;
-use irys_reth::pd_tx::{PdHeaderV1, build_pd_access_list, prepend_pd_header_v1_to_calldata};
+use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
@@ -54,6 +54,8 @@ pub(crate) struct PdP2pTestContext {
     pub peer_signer: IrysSigner,
     /// Signer/account dedicated to submitting PD transactions.
     pub pd_signer: IrysSigner,
+    /// Second PD signer for tests that need two independent PD accounts (e.g., deduplication).
+    pub pd_signer_2: IrysSigner,
 }
 
 /// Start two nodes for PD chunk P2P pull testing.
@@ -82,7 +84,8 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
     let data_signer = config.new_random_signer();
     let peer_signer = config.new_random_signer();
     let pd_signer = config.new_random_signer();
-    config.fund_genesis_accounts(vec![&data_signer, &peer_signer, &pd_signer]);
+    let pd_signer_2 = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&data_signer, &peer_signer, &pd_signer, &pd_signer_2]);
 
     let node_a = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
@@ -202,6 +205,7 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         data_signer,
         peer_signer,
         pd_signer,
+        pd_signer_2,
     })
 }
 
@@ -545,13 +549,16 @@ async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
     );
 
     // T2: inject a PD tx into Node A's mempool, referencing the SAME chunk.
+    // Use a DIFFERENT signer (pd_signer_2) so that when T2 is validated on Node B,
+    // T1 is not evicted from Node B's mempool (same-signer nonce conflict would
+    // invalidate T1 otherwise, removing its chunk reference from the PD cache).
     let t2_hash = build_and_inject_real_pd_tx(
         &ctx.node_a,
-        &ctx.pd_signer,
+        &ctx.pd_signer_2,
         ctx.partition_index,
         ctx.local_offset,
         1, // chunk_count — same chunk as T1
-        1, // nonce (different from T1 since same signer)
+        0, // nonce
     )
     .await?;
     info!(
