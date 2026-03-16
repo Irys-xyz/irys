@@ -969,6 +969,10 @@ where
                 Ok(None)
             }
             GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(None),
+            GossipDataRequestV2::PdChunk(..) => {
+                // TODO: PD chunk serving will be implemented in a later task
+                Ok(None)
+            }
         }
     }
 

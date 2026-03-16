@@ -780,6 +780,12 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))
             }
+            GossipDataRequestV2::PdChunk(ledger_id, offset) => {
+                warn!("PD chunk request for ledger={}, offset={}", ledger_id, offset);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(GossipResponse::Accepted(false))
+            }
         },
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);

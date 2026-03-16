@@ -864,6 +864,10 @@ impl GossipClient {
                 GossipRoutes::IngressProof,
                 serde_json::to_vec(&self.create_request_v2(proof.clone())),
             ),
+            GossipDataV2::PdChunk(_) => {
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P
+                return None;
+            }
         };
         match json_result {
             Ok(b) => Some((route, bytes::Bytes::from(b))),
@@ -1077,6 +1081,12 @@ impl GossipClient {
                     ProtocolVersion::V2,
                 )
                 .await
+            }
+            GossipDataV2::PdChunk(_) => {
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P
+                Ok(GossipResponse::Rejected(
+                    RejectionReason::UnsupportedFeature,
+                ))
             }
         }
     }

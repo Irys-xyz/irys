@@ -160,8 +160,8 @@ pub mod v1 {
 
 pub mod v2 {
     use crate::{
-        BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
-        GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+        BlockBody, BlockHash, ChunkFormat, ChunkPathHash, CommitmentTransaction,
+        DataTransactionHeader, GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
     };
     use alloy_primitives::B256;
     use reth_ethereum_primitives::Block;
@@ -249,6 +249,7 @@ pub mod v2 {
         BlockBody(Arc<BlockBody>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+        PdChunk(ChunkFormat),
     }
 
     impl From<SealedBlock<Block>> for GossipDataV2 {
@@ -292,6 +293,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataV1::IngressProof(ingress_proof.clone()))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
+                Self::PdChunk(_) => None,  // PdChunk does not exist in v1
             }
         }
 
@@ -325,6 +327,7 @@ pub mod v2 {
                         ingress_proof.recover_signer()
                     )
                 }
+                Self::PdChunk(_) => "pd chunk".to_string(),
             }
         }
     }
@@ -336,6 +339,7 @@ pub mod v2 {
         BlockBody(BlockHash),
         Chunk(ChunkPathHash),
         Transaction(H256),
+        PdChunk(u32, u64), // (ledger_id, ledger_offset)
     }
 
     impl GossipDataRequestV2 {
@@ -354,6 +358,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataRequestV1::Transaction(*tx_id))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
+                Self::PdChunk(..) => None, // V1 peers cannot serve PD chunks
             }
         }
     }
@@ -386,6 +391,9 @@ pub mod v2 {
                 }
                 Self::Transaction(tx_id) => {
                     write!(f, "transaction {tx_id:?}")
+                }
+                Self::PdChunk(ledger_id, ledger_offset) => {
+                    write!(f, "pd chunk (ledger={ledger_id}, offset={ledger_offset})")
                 }
             }
         }
