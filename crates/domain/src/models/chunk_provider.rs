@@ -172,8 +172,8 @@ impl irys_types::chunk_provider::ChunkStorageProvider for ChunkProvider {
         irys_types::chunk_provider::ChunkConfig {
             num_chunks_in_partition: self.config.consensus.num_chunks_in_partition,
             chunk_size: self.config.consensus.chunk_size,
-            entropy_packing_iterations: self.config.consensus.entropy_packing_iterations as u8,
-            chain_id: self.config.consensus.chain_id as u16,
+            entropy_packing_iterations: self.config.consensus.entropy_packing_iterations,
+            chain_id: self.config.consensus.chain_id,
         }
     }
 }

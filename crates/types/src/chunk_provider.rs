@@ -14,8 +14,8 @@ use crate::ChunkFormat;
 pub struct ChunkConfig {
     pub num_chunks_in_partition: u64,
     pub chunk_size: u64,
-    pub entropy_packing_iterations: u8,
-    pub chain_id: u16,
+    pub entropy_packing_iterations: u32,
+    pub chain_id: u64,
 }
 
 impl ChunkConfig {
@@ -23,8 +23,8 @@ impl ChunkConfig {
         Self {
             num_chunks_in_partition: consensus.num_chunks_in_partition,
             chunk_size: consensus.chunk_size,
-            entropy_packing_iterations: consensus.entropy_packing_iterations as u8,
-            chain_id: consensus.chain_id as u16,
+            entropy_packing_iterations: consensus.entropy_packing_iterations,
+            chain_id: consensus.chain_id,
         }
     }
 }

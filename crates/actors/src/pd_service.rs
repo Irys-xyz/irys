@@ -149,8 +149,12 @@ impl PdService {
     }
 
     fn on_fetch_done(&mut self, result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>) {
+        info!("[PD_DEBUG] on_fetch_done called");
         let fetch_result = match result {
-            Ok(r) => r,
+            Ok(r) => {
+                info!("[PD_DEBUG] on_fetch_done: key=({}, {}), success={}", r.key.ledger, r.key.offset, r.result.is_ok());
+                r
+            }
             Err(join_error) => {
                 warn!(
                     "PD chunk fetch task panicked or was cancelled: {}",
@@ -182,6 +186,8 @@ impl PdService {
 
     /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
     fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat) {
+        info!("[PD_DEBUG] on_fetch_success: key=({}, {}), format={}", key.ledger, key.offset,
+            match &chunk_format { irys_types::ChunkFormat::Packed(_) => "Packed", irys_types::ChunkFormat::Unpacked(_) => "Unpacked" });
         // 1. Extract unpacked bytes and data_root from the fetched chunk.
         let config = self.storage_provider.config();
         let (unpacked_bytes, chunk_data_root) = match chunk_format {
@@ -192,9 +198,9 @@ impl PdService {
             irys_types::ChunkFormat::Packed(packed) => {
                 let unpacked = irys_packing::unpack(
                     &packed,
-                    config.entropy_packing_iterations as u32,
+                    config.entropy_packing_iterations,
                     config.chunk_size as usize,
-                    config.chain_id as u64,
+                    config.chain_id,
                 );
                 let data_root = unpacked.data_root;
                 (unpacked.bytes.0, data_root)
@@ -215,7 +221,7 @@ impl PdService {
                     self.fail_pending_fetch(&key);
                     return;
                 }
-                trace!(?key, "Fetched chunk data_root verified");
+                info!("[PD_DEBUG] data_root verified for ({}, {})", key.ledger, key.offset);
             }
             Err(e) => {
                 // If we cannot derive the expected data_root (e.g., block not yet migrated),
@@ -252,6 +258,8 @@ impl PdService {
             .copied()
             .collect();
 
+        info!("[PD_DEBUG] on_fetch_success: inserting into cache, {} waiters (blocks={}, txs={})",
+            all_waiters.len(), waiting_blocks.len(), waiting_txs.len());
         if let Some((&first, rest)) = all_waiters.split_first() {
             self.cache.insert(key, data, first);
             for &waiter in rest {
@@ -501,8 +509,17 @@ impl PdService {
         let epoch_snapshot = tree.canonical_epoch_snapshot();
         let assignments = &epoch_snapshot.partition_assignments.data_partitions;
 
+        info!(
+            "[PD_DEBUG] resolve_peers_for_chunk: key=({}, {}), slot_index={}, num_assignments={}, own_miner={:?}",
+            key.ledger, key.offset, slot_index, assignments.len(), self.own_miner_address,
+        );
+
         let mut peers = Vec::new();
-        for (_hash, assignment) in assignments.iter() {
+        for (hash, assignment) in assignments.iter() {
+            info!(
+                "[PD_DEBUG]   assignment: hash={}, ledger_id={:?}, slot_index={:?}, miner={:?}",
+                hash, assignment.ledger_id, assignment.slot_index, assignment.miner_address,
+            );
             if assignment.ledger_id == Some(publish_ledger_id)
                 && assignment.slot_index == Some(slot_index as usize)
                 && assignment.miner_address != self.own_miner_address
@@ -510,9 +527,14 @@ impl PdService {
                     .peer_list
                     .peer_by_mining_address(&assignment.miner_address)
             {
+                info!("[PD_DEBUG]   -> matched! peer api={}", peer.address.api);
                 peers.push(peer.address);
             }
         }
+        info!(
+            "[PD_DEBUG] resolve_peers_for_chunk: found {} peers for ({}, {})",
+            peers.len(), key.ledger, key.offset,
+        );
         peers
     }
 
@@ -593,6 +615,7 @@ impl PdService {
 
     /// Provision chunks for a new PD transaction.
     fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
+        info!("[PD_DEBUG] handle_provision_chunks: tx_hash={}, specs={:?}", tx_hash, chunk_specs.len());
         // Guard against duplicate NewTransaction messages — don't regress an already-tracked tx.
         if self.tracker.get(&tx_hash).is_some() {
             debug!(tx_hash = %tx_hash, "PD transaction already registered, skipping");
@@ -995,11 +1018,16 @@ async fn fetch_chunk_from_peers(
     peers: Vec<PeerAddress>,
     http_client: reqwest::Client,
 ) -> fetch::PdChunkFetchResult {
+    tracing::info!(
+        "[PD_DEBUG] fetch_chunk_from_peers: key=({}, {}), num_peers={}",
+        key.ledger, key.offset, peers.len(),
+    );
     for peer in &peers {
         let api_url = format!(
             "http://{}/v1/chunk/ledger/{}/{}",
             peer.api, key.ledger, key.offset
         );
+        tracing::info!("[PD_DEBUG] fetch_chunk_from_peers: trying {}", api_url);
         match http_client
             .get(&api_url)
             .timeout(std::time::Duration::from_secs(10))
