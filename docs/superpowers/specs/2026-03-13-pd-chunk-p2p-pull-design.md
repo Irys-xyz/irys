@@ -98,22 +98,31 @@ PdService is currently a single-threaded actor — its `select!` loop processes 
 
 ### Decision 6: Transport mechanism for pulling chunks
 
-**Chosen: Gossip pull via `/gossip/v2/pull_data` with new `PdChunk` request variant**
+**Chosen: Public HTTP API (primary) with gossip pull fallback**
 
-Three options were considered:
+Four options were considered:
 
-**(A) Fetch packed via existing API endpoint**: Reuse `GET /v1/chunk/ledger/{id}/{offset}`. No API changes, but returns packed (XOR-encrypted) data. PdService would need to send unpacking requests to the packing service, adding latency and CPU load on the requesting node.
+**(A) Fetch packed via existing API endpoint**: Reuse `GET /v1/chunk/ledger/{id}/{offset}`. No API changes, but returns packed (XOR-encrypted) data without `tx_path`. PdService would need to send unpacking requests to the packing service, adding latency and CPU load on the requesting node. No way to verify chunk is bound to the correct ledger position.
 
-**(B) New unpacked chunk API endpoint**: Add `GET /v1/chunk/ledger/{id}/{offset}/unpacked`. The serving node unpacks before sending. Shifts CPU cost to the data holder. Requires a new API route and doesn't benefit from gossip infrastructure (peer auth, handshake, scoring).
+**(B) New unpacked-only API endpoint**: Add `GET /v1/chunk/ledger/{id}/{offset}/unpacked`. The serving node always unpacks before sending. Shifts CPU cost to the data holder on every request — unpacking is expensive (entropy recomputation via C/CUDA). Does not benefit from gossip infrastructure.
 
-**(C) Gossip pull mechanism** (chosen): Add `PdChunk(u32, u64)` to `GossipDataRequestV2`. The serving peer handles it in `resolve_data_request` by calling a new `get_full_unpacked_chunk_with_tx_path` method on `ChunkStorageProvider` that returns the full `UnpackedChunk` plus the `tx_path` (merkle proof from `tx_root` → `data_root`). The existing `get_unpacked_chunk_by_ledger_offset` only returns raw `Bytes` (discards the proof), so a new method is needed. Returns the chunk in a new `GossipDataV2::PdChunk(Arc<UnpackedChunk>, TxPath)` response variant (not the existing `Chunk` variant, which lacks `tx_path`). The `tx_path` is essential for the requester to verify that the returned chunk is bound to the correct ledger position — see Decision 8.
+**(C) Gossip pull only**: Add `PdChunk(u32, u64)` to `GossipDataRequestV2`. Leverages gossip infrastructure (peer auth, scoring, circuit breakers). However, requires gossip handshake authentication — unstaked peers (validator-only nodes) may be unable to initiate pull requests.
 
-**Why gossip pull**:
-- Leverages existing peer authentication (handshake + staking verification)
-- Leverages existing peer score tracking (health scores, circuit breakers)
-- No new HTTP routes — reuses `/gossip/v2/pull_data`
-- The serving peer unpacks using its own locally-available entropy — no extra round trips
-- V1 peers gracefully excluded (`PdChunk.to_v1()` returns `None`)
+**(D) Public HTTP API with gossip fallback** (chosen): Add a new public API endpoint `GET /v1/chunk/ledger/{id}/{offset}/pd` that returns `(ChunkFormat, TxPath)`. The serving node checks the MDBX `CachedChunks` table for an unpacked version (populated by `ChunkIngressService` during normal block processing); if available, returns `ChunkFormat::Unpacked`. If not cached, returns `ChunkFormat::Packed` directly from the storage module — **no on-the-fly unpacking**. The `tx_path` is always included for position binding verification (see Decision 8). If the public API fails (peer offline, network error), PdService falls back to gossip pull via `GossipDataRequestV2::PdChunk`.
+
+**Why public API primary**:
+- **No on-the-fly unpacking on the server**: Serving nodes return unpacked chunks only if already cached in MDBX (from prior `ChunkIngressService` processing). Otherwise they return packed data, avoiding expensive entropy recomputation per request. The receiver unpacks locally when needed.
+- **No authentication barrier**: Public API requires no gossip handshake or staking verification. Unstaked validator-only nodes can fetch chunks without special configuration.
+- **HTTP caching friendly**: The public API path can benefit from future caching infrastructure (reverse proxy, CDN) — multiple validators fetching the same chunk get served from cache.
+- **Follows DataSyncService precedent**: `DataSyncService` already fetches chunks via the public HTTP API (`GET /v1/chunk/ledger/{id}/{offset}`), not gossip. This is the established pattern for chunk retrieval.
+- **`tx_path` as a public API**: Exposing `tx_path` via a public endpoint makes it available for other use cases beyond PD chunk fetching.
+
+**Why gossip fallback**:
+- Gossip pull provides an authenticated fallback with peer scoring and circuit breakers
+- Useful when the public API is unreachable but the gossip connection is established
+- Reuses existing `/gossip/v2/pull_data` infrastructure
+
+**Receiver-side handling of packed chunks**: When PdService receives a `ChunkFormat::Packed` response, it must unpack locally using `irys_packing::unpack()` with entropy derived from `(packing_address, partition_hash, chunk_offset, chain_id)`. The `PackedChunk` struct carries `packing_address` and `partition_hash`, so the receiver has all necessary inputs. The existing `block_validation.rs` already handles both packed and unpacked formats in its chunk fetch path — this is an established pattern.
 
 ### Decision 7: Peer selection strategy
 
@@ -142,7 +151,7 @@ ledger_offset → BlockIndex::get_block_bounds() → tx_root (known, trusted)
       → SHA256(bytes) == leaf_hash → binds raw data to proof
 ```
 
-This is the same proof chain that PoA validation already uses (`block_validation.rs:1194`), reapplied to the PD pull context. The `tx_path` is returned alongside the `UnpackedChunk` in the `GossipDataV2::PdChunk` response variant.
+This is the same proof chain that PoA validation already uses (`block_validation.rs:1194`), reapplied to the PD pull context. The `tx_path` is returned alongside the chunk (packed or unpacked) from both the public API endpoint and the gossip fallback. If the chunk arrives packed, the receiver must unpack it before step 4 (leaf hash check) can be performed.
 
 **BlockIndex availability guarantee**: The BlockIndex always has the committing block when a PD tx references that offset. `persist_block()` atomically writes the block header, tx headers, and BlockIndex entry (`block_migration_service.rs:242-296`). Only afterward does `ChunkMigrationService::BlockMigrated` fire to write chunk data into storage modules (`chunk_migration_service.rs:224`, `storage_module.rs:984`). Since PD txs can only reference chunks that exist in storage, and chunks only exist in storage after migration, the committing block is guaranteed to be in the BlockIndex. (`PD-readable ⟹ BlockIndex present` is always true.)
 
@@ -170,6 +179,7 @@ This is the same proof chain that PoA validation already uses (`block_validation
                          │    join_set: JoinSet<PdChunkFetchResult>    │
                          │                                             │
                          │  New deps:                                  │
+                         │    http_client: reqwest::Client             │
                          │    gossip_client: GossipClient              │
                          │    peer_list: PeerList                      │
                          │    block_tree: BlockTreeReadGuard           │
@@ -182,23 +192,31 @@ This is the same proof chain that PoA validation already uses (`block_validation
                          │                                             │
                          │  1. Compute partition from (ledger, offset) │
                          │  2. Look up assigned miners (epoch snapshot)│
-                         │  3. Resolve to gossip addresses (PeerList)  │
-                         │  4. Pull via /gossip/v2/pull_data           │
-                         │     (GossipDataRequestV2::PdChunk)          │
-                         │  5. Validate merkle proof on response       │
-                         │  6. Retry with next peer on failure         │
-                         │  7. Return PdChunkFetchResult               │
+                         │  3. Resolve to peer addresses (PeerList)    │
+                         │  4. Try public API first:                   │
+                         │     GET /v1/chunk/ledger/{id}/{off}/pd      │
+                         │     → returns (ChunkFormat, TxPath)         │
+                         │  5. If API fails, fall back to gossip pull: │
+                         │     /gossip/v2/pull_data (PdChunk variant)  │
+                         │  6. If packed: unpack locally               │
+                         │  7. Validate full proof chain               │
+                         │  8. Return PdChunkFetchResult               │
                          └──────────────────┬──────────────────────────┘
                                             │
                                             ▼
                          ┌─────────────────────────────────────────────┐
-                         │  Serving Peer (gossip_data_handler)         │
+                         │  Serving Peer                               │
                          │                                             │
-                         │  resolve_data_request:                      │
-                         │    PdChunk(ledger, offset) =>               │
-                         │      storage_provider                       │
-                         │        .get_full_unpacked_chunk_with_tx_path│
-                         │      => GossipDataV2::PdChunk(chunk,tx_path)│
+                         │  Public API: GET /v1/chunk/ledger/.../pd    │
+                         │    1. Check MDBX CachedChunks (unpacked)   │
+                         │    2. If hit → ChunkFormat::Unpacked        │
+                         │    3. If miss → read packed from SM         │
+                         │       → ChunkFormat::Packed                 │
+                         │    4. Read tx_path from SM submodule DB     │
+                         │    5. Return (ChunkFormat, TxPath)          │
+                         │                                             │
+                         │  Gossip fallback: resolve_data_request      │
+                         │    PdChunk(ledger, offset) => same logic    │
                          └─────────────────────────────────────────────┘
 ```
 
@@ -260,22 +278,28 @@ PdService::handle_provision_block_chunks:
 Fetch tasks execute:
   1. Compute partition_index = offset / num_chunks_in_partition
   2. Look up assigned miners from epoch snapshot
-  3. For each assigned peer (in order):
-     a. gossip_client.pull_data(peer, PdChunk(ledger, offset))
-     b. If Ok(Some(chunk)): validate merkle proof, return Ok(chunk)
-     c. If Ok(None) or Err: try next peer
-  4. If all peers exhausted: sleep briefly, retry from the beginning
+  3. Resolve to peer addresses (PeerList) — both API and gossip addresses
+  4. For each assigned peer (in order):
+     a. Try public API first: GET http://{peer.api}/v1/chunk/ledger/{id}/{off}/pd
+     b. If API fails (timeout, 404, network error): try gossip fallback
+        gossip_client.pull_data(peer, PdChunk(ledger, offset))
+     c. If Ok(Some((chunk_format, tx_path))): return Ok(result)
+     d. If both fail: try next peer
+  5. If all peers exhausted: return Err(AllPeersFailed)
   │
   ▼
 PdService::on_fetch_done (select! arm 3):
-  On Ok((chunk, tx_path)):
-    1. Verify full tx_path + data_path proof chain:
+  On Ok((chunk_format, tx_path)):
+    1. If packed, unpack locally:
+       ChunkFormat::Packed → irys_packing::unpack() using (packing_address,
+       partition_hash, chunk_offset, chain_id) from PackedChunk metadata
+    2. Verify full tx_path + data_path proof chain:
        a. bounds = block_index.get_block_bounds(DataLedger::Publish, key.offset)
        b. validate_path(bounds.tx_root, &tx_path, chunk_byte_offset_in_block)
           → confirms data_root is at correct position in the block
        c. validate_path(chunk.data_root, &chunk.data_path, chunk_byte_offset_in_tx)
           → confirms chunk membership under data_root
-       d. SHA256(chunk.bytes) == leaf_hash → binds raw data to proof
+       d. SHA256(unpacked_bytes) == leaf_hash → binds raw data to proof
        e. On verification failure: mark peer as invalid, retry with different peer
     2. Insert chunk bytes into cache with explicit reference per waiter:
        a. Pick first waiter (tx or block) as the initial reference:
@@ -471,7 +495,7 @@ PdService select! loop exits on shutdown signal
 /// Result returned by a chunk fetch task in the JoinSet.
 struct PdChunkFetchResult {
     key: ChunkKey,
-    result: Result<(UnpackedChunk, TxPath), PdChunkFetchError>,
+    result: Result<(ChunkFormat, TxPath), PdChunkFetchError>,
 }
 
 /// Phase of a single chunk key's fetch lifecycle.
@@ -545,7 +569,8 @@ pub struct PdService {
     retry_queue: DelayQueue<RetryEntry>,
     pending_fetches: HashMap<ChunkKey, PdChunkFetchState>,
     pending_blocks: HashMap<B256, PendingBlockProvision>,
-    gossip_client: GossipClient,
+    http_client: reqwest::Client,      // for public API fetch (primary)
+    gossip_client: GossipClient,       // for gossip pull (fallback)
     peer_list: PeerList,
     block_tree: BlockTreeReadGuard,
     block_index: BlockIndexReadGuard,  // for tx_path verification (get_block_bounds)
@@ -590,7 +615,7 @@ async fn start(mut self) {
 fn on_fetch_done(&mut self, result: JoinResult<PdChunkFetchResult>) {
     let PdChunkFetchResult { key, result } = /* unwrap join result */;
     match result {
-        Ok((chunk, tx_path)) => { /* verify proof chain, cache chunk, notify waiters */ }
+        Ok((chunk_format, tx_path)) => { /* unpack if packed, verify proof chain, cache chunk, notify waiters */ }
         Err(PdChunkFetchError::AllPeersFailed { excluded_peers }) => {
             let Some(state) = self.pending_fetches.get_mut(&key) else { return };
 
@@ -712,9 +737,68 @@ When C2 fetch completes:
   → Update block_X: remove C2 from remaining_keys (1 remaining: C4)
 ```
 
-## Gossip Protocol Changes
+## Public API Endpoint
+
+### New Route: `GET /v1/chunk/ledger/{ledger_id}/{offset}/pd`
+
+A new public HTTP endpoint that returns a chunk (packed or unpacked) with its `tx_path` for PD chunk fetching. This is the primary transport for PD chunk requests.
+
+**Route registration**: Added to `crates/api-server/src/routes/` alongside the existing `get_chunk.rs` handlers.
+
+**Serving logic**:
+
+```rust
+async fn get_pd_chunk(path: Path<(u32, u64)>, state: Data<AppState>) -> impl Responder {
+    let (ledger, offset) = path.into_inner();
+    match state.chunk_provider.get_chunk_with_tx_path(ledger, offset) {
+        Ok(Some((chunk_format, tx_path))) => {
+            HttpResponse::Ok().json(PdChunkResponse { chunk: chunk_format, tx_path })
+        }
+        Ok(None) => HttpResponse::NotFound().finish(),
+        Err(e) => {
+            warn!(ledger, offset, "Error serving PD chunk: {}", e);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+```
+
+**Serving side behavior — no on-the-fly unpacking**:
+
+The serving node does NOT unpack chunks on demand. Instead:
+
+1. **Check MDBX `CachedChunks` table** for an unpacked version (populated by `ChunkIngressService` during normal block processing). Lookup by `(data_root, tx_chunk_offset)` via `CachedChunksIndex`. If found → return `ChunkFormat::Unpacked(chunk)`.
+2. **If not in MDBX cache** → read the packed chunk directly from the storage module via `generate_full_chunk_ledger_offset`. Return `ChunkFormat::Packed(chunk)`.
+3. **Always include `tx_path`** — read from the storage module's submodule DB (`offset → tx_path_hash → tx_path`, two MDBX gets, `submodule/db.rs:54-62`). This is returning already-indexed bytes, not computing a proof on demand.
+
+This avoids expensive entropy recomputation on the serving side. Unpacked chunks are only served when they were already cached by prior `ChunkIngressService` processing.
+
+**Implementation constraint: Rate limiting.** The PD chunk endpoint should be rate-limited to prevent abuse. Options: (a) add a semaphore similar to `chunk_semaphore` used for inbound chunk gossip, (b) leverage Actix middleware for per-peer rate limiting. Storage module reads should be offloaded to a blocking task pool (`tokio::task::spawn_blocking`) to avoid starving the Actix async runtime.
+
+### New Trait Method: `get_chunk_with_tx_path`
+
+```rust
+// New method on ChunkStorageProvider trait:
+fn get_chunk_with_tx_path(
+    &self,
+    ledger: u32,
+    ledger_offset: u64,
+) -> eyre::Result<Option<(ChunkFormat, TxPath)>>;
+```
+
+The concrete implementation in `ChunkProvider` (`crates/domain/src/models/chunk_provider.rs`):
+
+1. Look up the chunk offset in MDBX `CachedChunks` table (via `CachedChunksIndex`). If an unpacked version exists, assemble `ChunkFormat::Unpacked(UnpackedChunk)` from the cached data.
+2. If not in MDBX cache, call `generate_full_chunk_ledger_offset` on the storage module (returns packed chunk with all metadata including `data_path`, `data_root`, `data_size`). Assemble `ChunkFormat::Packed(PackedChunk)`.
+3. In both cases, read `tx_path` from the storage module's submodule DB. The storage module already reads `tx_path` internally during `generate_full_chunk` (`storage_module.rs:1262`). The `tx_path` bytes are preserved and returned instead of discarded.
+
+This requires wiring `ChunkProvider` (specifically `Arc<ChunkProvider>`) into the API server's `AppState`. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through. The `ChunkProvider` also needs access to the MDBX database for `CachedChunks` lookups.
+
+## Gossip Protocol Changes (Fallback Path)
 
 ### Wire Type Additions (`crates/types/src/gossip.rs`)
+
+The gossip pull path serves as a fallback when the public API is unreachable.
 
 ```rust
 // Add to GossipDataRequestV2:
@@ -740,21 +824,21 @@ impl GossipDataRequestV2 {
 // Add to GossipDataV2 (response enum):
 pub enum GossipDataV2 {
     // ... existing variants (ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction) ...
-    PdChunk(Arc<UnpackedChunk>, TxPath),  // NEW: chunk + tx_path proof for position binding
+    PdChunk(ChunkFormat, TxPath),  // NEW: packed-or-unpacked chunk + tx_path
 }
 ```
 
-### Serving Handler (`crates/p2p/src/gossip_data_handler.rs`)
+### Gossip Serving Handler (`crates/p2p/src/gossip_data_handler.rs`)
 
-`resolve_data_request` gains a new match arm:
+`resolve_data_request` gains a new match arm using the same `get_chunk_with_tx_path` trait method:
 
 ```rust
 GossipDataRequestV2::PdChunk(ledger, offset) => {
-    match self.storage_provider.get_full_unpacked_chunk_with_tx_path(ledger, offset) {
-        Ok(Some((unpacked_chunk, tx_path))) => {
-            Some(GossipDataV2::PdChunk(Arc::new(unpacked_chunk), tx_path))
+    match self.storage_provider.get_chunk_with_tx_path(ledger, offset) {
+        Ok(Some((chunk_format, tx_path))) => {
+            Some(GossipDataV2::PdChunk(chunk_format, tx_path))
         }
-        Ok(None) => None,  // We don't have this chunk
+        Ok(None) => None,
         Err(e) => {
             warn!(ledger, offset, "Error serving PD chunk: {}", e);
             None
@@ -763,36 +847,27 @@ GossipDataRequestV2::PdChunk(ledger, offset) => {
 }
 ```
 
-**Implementation constraint: PdChunk requests must be rate-limited.** The synchronous pull path (`handle_get_data_sync`) bypasses the `DataRequestTracker` checks used by `handle_get_data`. Without throttling, frequent `PdChunk` requests can turn into an expensive unthrottled endpoint (storage lookup + unpacking per request). Options: (a) extend `DataRequestTracker` to cover `pull_data` requests, or (b) add a dedicated semaphore similar to `chunk_semaphore` used for inbound chunk gossip. The unpacking work should be offloaded to a blocking task pool (`tokio::task::spawn_blocking`) to avoid starving the Actix server's async runtime.
+This requires wiring `Arc<ChunkProvider>` into `GossipDataHandler`. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through `P2PService::run` into `GossipDataHandler::new`. `GossipDataHandler` is in `crates/p2p` and only needs the `ChunkStorageProvider` trait (from `irys-types`, which `p2p` already depends on).
 
-**New trait method required**: The existing `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns only raw `Bytes` — it discards the merkle proof (`data_path`), `data_root`, `data_size`, and `tx_path` during unpacking (`chunk_provider.rs:130-155`). A new method `get_full_unpacked_chunk_with_tx_path` is needed that returns the full `UnpackedChunk` plus the `tx_path` (merkle proof from `tx_root` → `data_root`). The serving peer's storage module already reads `tx_path` when constructing a chunk by offset (to extract `data_root` in `generate_full_chunk`, `storage_module.rs:1262`). The submodule DB has a direct `offset → tx_path_hash → tx_path` index (two MDBX gets, `submodule/db.rs:54-62`). This is returning already-indexed bytes, not computing a proof on demand.
+## Cache Insertion: ChunkFormat to Bytes Conversion
 
-```rust
-// New method on ChunkStorageProvider trait:
-fn get_full_unpacked_chunk_with_tx_path(
-    &self,
-    ledger: u32,
-    ledger_offset: u64,
-) -> eyre::Result<Option<(UnpackedChunk, TxPath)>>;
-```
-
-The concrete implementation in `ChunkProvider` (`crates/domain/src/models/chunk_provider.rs`) would call `generate_full_chunk_ledger_offset` on the storage module (which already reads `tx_path` internally), then unpack the chunk bytes via `irys_packing::unpack()`, and assemble the full `UnpackedChunk` with the preserved merkle proof. The `tx_path` bytes are preserved and returned instead of discarded.
-
-This requires wiring a `ChunkStorageProvider` (specifically `Arc<ChunkProvider>`) into `GossipDataHandler`. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through `P2PService::run` into `GossipDataHandler::new`. Note that `GossipDataHandler` is in `crates/p2p` and `ChunkProvider` is in `crates/domain`, but `GossipDataHandler` only needs the `ChunkStorageProvider` trait (from `irys-types`, which `p2p` already depends on). The concrete `ChunkProvider` is injected from `chain.rs`.
-
-### No New Route Needed
-
-The existing `/gossip/v2/pull_data` endpoint handles all `GossipDataRequestV2` variants. Adding `PdChunk` to the enum is sufficient. The `handle_get_data_sync` handler calls `resolve_data_request` and returns the result — no route registration changes.
-
-## Cache Insertion: UnpackedChunk to Bytes Conversion
-
-The gossip pull returns a full `(UnpackedChunk, TxPath)` (data bytes + merkle proofs + metadata). The `ChunkCache` stores `Arc<Bytes>` (just the raw chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
+The fetch returns `(ChunkFormat, TxPath)`. The chunk may be packed or unpacked depending on the serving node's cache state. The `ChunkCache` stores `Arc<Bytes>` (just the raw unpacked chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
 
 When a pulled chunk passes the full proof chain verification (tx_path + data_path + leaf hash), PdService extracts the raw bytes for cache insertion:
 
 ```rust
-let data: Arc<Bytes> = Arc::new(Bytes::from(unpacked_chunk.bytes));
-// Insert with explicit reference per waiter (see Issue #7 in on_fetch_done):
+// If packed, unpack locally first
+let unpacked_bytes = match chunk_format {
+    ChunkFormat::Unpacked(chunk) => chunk.bytes,
+    ChunkFormat::Packed(packed) => {
+        // Unpack using entropy from (packing_address, partition_hash, chunk_offset, chain_id)
+        // PackedChunk carries packing_address and partition_hash
+        irys_packing::unpack(&packed, &packing_config)?.bytes
+    }
+};
+
+let data: Arc<Bytes> = Arc::new(Bytes::from(unpacked_bytes));
+// Insert with explicit reference per waiter (see on_fetch_done):
 self.cache.insert(key, data.clone(), first_waiter_id);
 for other_waiter in remaining_waiters {
     self.cache.add_reference(key, other_waiter);
@@ -804,11 +879,23 @@ The `tx_path`, `data_path`, `data_root`, and `data_size` are used only for verif
 
 ## Validation of Pulled Chunks
 
-When PdService receives an `(UnpackedChunk, TxPath)` from a peer via the pull mechanism, it performs full proof chain verification before inserting into the cache. This binds the chunk data to the requested `(ledger, offset)` — not just to its own `data_root`.
+When PdService receives a `(ChunkFormat, TxPath)` from a peer (via public API or gossip fallback), it performs full proof chain verification before inserting into the cache. This binds the chunk data to the requested `(ledger, offset)` — not just to its own `data_root`.
 
 **Verification pseudocode in `on_fetch_done`**:
 
 ```rust
+// 0. If packed, unpack locally first (needed for leaf hash check in step 4)
+let (chunk, unpacked_bytes) = match chunk_format {
+    ChunkFormat::Unpacked(chunk) => {
+        let bytes = chunk.bytes.clone();
+        (chunk, bytes)
+    }
+    ChunkFormat::Packed(packed) => {
+        let unpacked = irys_packing::unpack(&packed, &packing_config)?;
+        (unpacked.into_unpacked_chunk(), unpacked.bytes)
+    }
+};
+
 // 1. Get the trusted tx_root from BlockIndex
 let bounds = block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(key.offset))?;
 
@@ -822,9 +909,9 @@ let target_byte_offset = (offset_in_block + 1) * chunk_size; // end-byte convent
 let tx_path_result = validate_path(bounds.tx_root.0, &tx_path, target_byte_offset as u128)?;
 // tx_path_result.leaf_hash should equal SHA256(data_root || data_size_note)
 
-// 4. Verify data_path: data_root → chunk bytes
+// 4. Verify data_path: data_root → chunk bytes (uses unpacked bytes)
 let data_path_result = validate_path(chunk.data_root.0, &chunk.data_path, chunk_end_byte)?;
-ensure!(SHA256(chunk.bytes) == data_path_result.leaf_hash);
+ensure!(SHA256(unpacked_bytes) == data_path_result.leaf_hash);
 ```
 
 This is the same proof chain that PoA validation already uses (`block_validation.rs:1194`), reapplied to the PD pull context. If any verification step fails, the chunk is rejected, the peer is marked as having returned invalid data, and the fetch retries with a different peer.
@@ -835,17 +922,19 @@ This is the same proof chain that PoA validation already uses (`block_validation
 
 | File | Change |
 |---|---|
-| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` request variant, `GossipDataV2::PdChunk(Arc<UnpackedChunk>, TxPath)` response variant, `to_v1()` returns `None` |
-| `crates/types/src/chunk_provider.rs` | Add `get_full_unpacked_chunk_with_tx_path` method to `ChunkStorageProvider` trait, returning `eyre::Result<Option<(UnpackedChunk, TxPath)>>` |
-| `crates/domain/src/models/chunk_provider.rs` | Implement `get_full_unpacked_chunk_with_tx_path` on `ChunkProvider`: call `generate_full_chunk_ledger_offset` on the SM, unpack the bytes, assemble full `UnpackedChunk` preserving `data_path`/`data_root`/`data_size`, return with `tx_path` |
-| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field; add rate-limiting for PdChunk requests |
+| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` request variant, `GossipDataV2::PdChunk(ChunkFormat, TxPath)` response variant, `to_v1()` returns `None` |
+| `crates/types/src/chunk_provider.rs` | Add `get_chunk_with_tx_path` method to `ChunkStorageProvider` trait, returning `eyre::Result<Option<(ChunkFormat, TxPath)>>` |
+| `crates/domain/src/models/chunk_provider.rs` | Implement `get_chunk_with_tx_path` on `ChunkProvider`: check MDBX `CachedChunks` for unpacked version first, fall back to packed from storage module. Read `tx_path` from SM submodule DB. No on-the-fly unpacking. |
+| `crates/api-server/src/routes/get_pd_chunk.rs` | **New file.** Public API endpoint `GET /v1/chunk/ledger/{id}/{offset}/pd` returning `(ChunkFormat, TxPath)`. Rate-limited. |
+| `crates/api-server/src/lib.rs` | Register new `/v1/chunk/ledger/{id}/{offset}/pd` route |
+| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request` using `get_chunk_with_tx_path`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field |
 | `crates/p2p/src/gossip_client.rs` | Add `pull_data_from_peers` method that accepts a pre-selected list of peer addresses (instead of using `top_active_peers`). Follows the same retry/handshake pattern as `pull_data_from_network` but with caller-supplied peers. |
 | `crates/p2p/src/gossip_service.rs` | Pass `ChunkProvider` through to `GossipDataHandler` construction |
-| `crates/actors/src/pd_service.rs` | Add `JoinSet`, `DelayQueue<RetryEntry>`, `pending_fetches`, `pending_blocks`, `own_miner_address`, new deps (`GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`). Refactor `handle_provision_chunks` and `handle_provision_block_chunks` to spawn fetch tasks on miss. Add `on_fetch_done` handler with `DelayQueue`-based retry logic. Add `on_retry_ready` handler. Add third and fourth `select!` arms for `join_set.join_next()` and `retry_queue.next()`. |
+| `crates/actors/src/pd_service.rs` | Add `JoinSet`, `DelayQueue<RetryEntry>`, `pending_fetches`, `pending_blocks`, `own_miner_address`, new deps (`reqwest::Client`, `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`). Refactor `handle_provision_chunks` and `handle_provision_block_chunks` to spawn fetch tasks on miss. Add `on_fetch_done` handler with `DelayQueue`-based retry logic (handles both packed and unpacked responses). Add `on_retry_ready` handler. Add third and fourth `select!` arms for `join_set.join_next()` and `retry_queue.next()`. |
 | `crates/actors/src/validation_service/block_validation_task.rs` | Add `CancellationToken` + `with_cancel` wrapper in `validate_block()` to cancel sibling tasks (including PD fetches) when any task fails definitively. No signature changes to individual validation functions. |
 | `crates/actors/src/pd_service/provisioning.rs` | Add `PartiallyReady -> Ready` transition method callable from `on_fetch_done`. Extend `TxProvisioningState` or add helper for checking/clearing `missing_chunks`. |
 | `crates/actors/src/pd_service/cache.rs` | No structural changes (insert/remove/reference tracking already work) |
-| `crates/chain/src/chain.rs` | Pass `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`, `own_miner_address` to `PdService::spawn_service` |
+| `crates/chain/src/chain.rs` | Pass `reqwest::Client`, `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`, `own_miner_address` to `PdService::spawn_service`. Pass `ChunkProvider` to API server `AppState`. |
 | `crates/chain-tests/src/programmable_data/pd_chunk_p2p_pull.rs` | **New file.** Integration tests for PD chunk P2P pull: happy path, multiple PD txs, chunk deduplication, mempool path. Shared `setup_pd_p2p_test()` helper. |
 | `crates/chain-tests/src/programmable_data/mod.rs` | Add `mod pd_chunk_p2p_pull;` |
 
@@ -964,7 +1053,7 @@ async fn setup_pd_p2p_test() -> PdP2pTestContext { ... }
 - P2P chunk fetch enabled (new PdService configuration)
 - No data is uploaded to or packed on Node B — its `ChunkStorageProvider` naturally returns `Ok(None)` for all ledger offsets since no storage modules contain the relevant data
 
-**Implementation constraint: gossip authentication for unstaked peers.** The gossip pull mechanism requires peers to pass the gossip handshake (signature + staking verification). If Node B is not staked, it may be unable to initiate pull requests to Node A. The test setup must ensure Node B can authenticate with Node A's gossip endpoint. Options: (a) give Node B a minimal genesis-allocated stake sufficient for gossip authentication but no partition assignments, or (b) if the gossip handshake only requires a valid node identity (not active staking), no special setup is needed. This must be validated during implementation by checking the handshake verification path in `gossip_service.rs`.
+**No gossip authentication concern**: The primary fetch path uses the public HTTP API (`GET /v1/chunk/ledger/{id}/{offset}/pd`), which requires no authentication or staking. Node B (unstaked, validator-only) can fetch PD chunks from Node A's public API without any special gossip configuration. The gossip fallback path is not required for the integration tests.
 
 **Sync gate**: Wait for Node B to sync to Node A's current tip using `wait_until_height_confirmed` (or equivalent migration-aware gate) — not just block tree tip sync. This ensures Node B's BlockIndex has the data-carrying block's entries, which is required for `get_block_bounds()` during tx_path verification in `on_fetch_done`.
 
