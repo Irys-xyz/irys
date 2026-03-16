@@ -36,7 +36,9 @@ The validation pipeline already has `exit_if_block_is_too_old`, which races agai
 
 Adding an explicit timeout would be redundant and would require choosing an arbitrary duration. The auto-cancellation mechanism is adaptive — it fires based on chain progress, not wall-clock time.
 
-PdService implements a retry loop for failed fetches: on failure, it retries with a different assigned peer. The loop continues until either all chunks arrive or the request is cancelled (block validation cancelled or tx removed from mempool).
+**Implementation constraint: `exit_if_block_is_too_old` is progress-based and only fires when the tip advances.** If the network is stalled (no new blocks) and peers do not serve the chunk, validation can hang indefinitely while fetch rounds keep retrying. As defense-in-depth, PdService enforces a `MAX_CHUNK_FETCH_RETRIES` per chunk key. When exceeded, the chunk is failed permanently and the block validation completes with an error. This bounds retry behavior even when the progress-based cancellation cannot fire. See the `on_fetch_done` retry path for the implementation.
+
+PdService implements a retry loop for failed fetches: on failure, it retries with a different assigned peer via a `DelayQueue`-based backoff mechanism. The loop continues until either all chunks arrive, the request is cancelled (block validation cancelled or tx removed from mempool), or `MAX_CHUNK_FETCH_RETRIES` is exceeded.
 
 ### Decision 3: Push vs. Pull for missing PD chunks
 
@@ -104,7 +106,7 @@ Three options were considered:
 
 **(B) New unpacked chunk API endpoint**: Add `GET /v1/chunk/ledger/{id}/{offset}/unpacked`. The serving node unpacks before sending. Shifts CPU cost to the data holder. Requires a new API route and doesn't benefit from gossip infrastructure (peer auth, handshake, scoring).
 
-**(C) Gossip pull mechanism** (chosen): Add `PdChunk(u32, u64)` to `GossipDataRequestV2`. The serving peer handles it in `resolve_data_request` by calling a new `get_full_unpacked_chunk_by_ledger_offset` method on `ChunkStorageProvider` that returns the full `UnpackedChunk` (including data bytes, merkle proof/data_path, data_root, and data_size). The existing `get_unpacked_chunk_by_ledger_offset` only returns raw `Bytes` (discards the proof), so a new method is needed. Returns the chunk in the existing `GossipDataV2::Chunk` envelope.
+**(C) Gossip pull mechanism** (chosen): Add `PdChunk(u32, u64)` to `GossipDataRequestV2`. The serving peer handles it in `resolve_data_request` by calling a new `get_full_unpacked_chunk_with_tx_path` method on `ChunkStorageProvider` that returns the full `UnpackedChunk` plus the `tx_path` (merkle proof from `tx_root` → `data_root`). The existing `get_unpacked_chunk_by_ledger_offset` only returns raw `Bytes` (discards the proof), so a new method is needed. Returns the chunk in a new `GossipDataV2::PdChunk(Arc<UnpackedChunk>, TxPath)` response variant (not the existing `Chunk` variant, which lacks `tx_path`). The `tx_path` is essential for the requester to verify that the returned chunk is bound to the correct ledger position — see Decision 8.
 
 **Why gossip pull**:
 - Leverages existing peer authentication (handshake + staking verification)
@@ -129,11 +131,22 @@ Three strategies were considered:
 
 ### Decision 8: Validation of pulled chunks
 
-**Chosen: Validate merkle proofs on pulled chunks**
+**Chosen: Full tx_path + data_path proof chain verification**
 
-The serving peer is authenticated via the gossip handshake (signature + staking check), but we add merkle proof validation as a defense-in-depth measure. The pulled `UnpackedChunk` includes `data_path` (merkle inclusion proof) which can be validated against the expected `data_root` to confirm the chunk data is authentic.
+Gossip handshake authentication (signature + staking check) provides admission control but not consensus-critical correctness. A Byzantine or compromised staker can return a valid chunk from a different ledger position — it would pass `data_path` validation against its own `data_root` but deliver wrong data for the requested offset. Since PD execution feeds directly into EVM state transitions, the requesting node must verify the full proof chain binding the chunk to the requested `(ledger, offset)`:
 
-This follows the same principle used in `ChunkIngressService::handle_chunk_ingress_message`, which validates merkle proofs on all incoming chunks regardless of source.
+```
+ledger_offset → BlockIndex::get_block_bounds() → tx_root (known, trusted)
+  → validate_path(tx_root, tx_path, chunk_byte_offset_in_block) → proves data_root is at correct position
+    → validate_path(data_root, data_path, chunk_byte_offset_in_tx) → proves chunk membership
+      → SHA256(bytes) == leaf_hash → binds raw data to proof
+```
+
+This is the same proof chain that PoA validation already uses (`block_validation.rs:1194`), reapplied to the PD pull context. The `tx_path` is returned alongside the `UnpackedChunk` in the `GossipDataV2::PdChunk` response variant.
+
+**BlockIndex availability guarantee**: The BlockIndex always has the committing block when a PD tx references that offset. `persist_block()` atomically writes the block header, tx headers, and BlockIndex entry (`block_migration_service.rs:242-296`). Only afterward does `ChunkMigrationService::BlockMigrated` fire to write chunk data into storage modules (`chunk_migration_service.rs:224`, `storage_module.rs:984`). Since PD txs can only reference chunks that exist in storage, and chunks only exist in storage after migration, the committing block is guaranteed to be in the BlockIndex. (`PD-readable ⟹ BlockIndex present` is always true.)
+
+**Batch optimization**: `tx_path` is identical for all chunks belonging to the same `DataTransaction`. When fetching a range of chunks from the same tx, the proof only needs to be transmitted and verified once per tx boundary.
 
 ## Architecture
 
@@ -184,8 +197,8 @@ This follows the same principle used in `ChunkIngressService::handle_chunk_ingre
                          │  resolve_data_request:                      │
                          │    PdChunk(ledger, offset) =>               │
                          │      storage_provider                       │
-                         │        .get_unpacked_chunk_by_ledger_offset │
-                         │      => GossipDataV2::Chunk(unpacked)       │
+                         │        .get_full_unpacked_chunk_with_tx_path│
+                         │      => GossipDataV2::PdChunk(chunk,tx_path)│
                          └─────────────────────────────────────────────┘
 ```
 
@@ -209,14 +222,19 @@ BlockValidationTask::execute_concurrent
   ├── futures::select(validate_block(), exit_if_block_is_too_old())
   │
   ▼
-validate_block() → tokio::join!(
-    recall_task,
-    poa_task,
-    shadow_tx_task,    ◄── PD chunk provisioning happens here
-    seeds_task,
-    commitment_task,
-    data_txs_task
-)
+validate_block():
+  let cancel = CancellationToken::new();
+  All 6 tasks wrapped with with_cancel(task, cancel.clone()):
+    - Each task signals cancel.cancel() on definitive failure
+    - Each task listens for cancel.cancelled() from siblings
+  tokio::join!(
+    with_cancel(recall_task, cancel),
+    with_cancel(poa_task, cancel),
+    shadow_tx_task (cancel-aware),  ◄── PD chunk provisioning happens here
+    with_cancel(seeds_task, cancel),
+    with_cancel(commitment_task, cancel),
+    with_cancel(data_txs_task, cancel)
+  )
   │
   ▼
 shadow_transactions_are_valid:
@@ -250,9 +268,25 @@ Fetch tasks execute:
   │
   ▼
 PdService::on_fetch_done (select! arm 3):
-  On Ok(chunk):
-    1. Validate merkle proof on the received UnpackedChunk
-    2. Insert chunk bytes into cache (cache.insert → DashMap mirror updated)
+  On Ok((chunk, tx_path)):
+    1. Verify full tx_path + data_path proof chain:
+       a. bounds = block_index.get_block_bounds(DataLedger::Publish, key.offset)
+       b. validate_path(bounds.tx_root, &tx_path, chunk_byte_offset_in_block)
+          → confirms data_root is at correct position in the block
+       c. validate_path(chunk.data_root, &chunk.data_path, chunk_byte_offset_in_tx)
+          → confirms chunk membership under data_root
+       d. SHA256(chunk.bytes) == leaf_hash → binds raw data to proof
+       e. On verification failure: mark peer as invalid, retry with different peer
+    2. Insert chunk bytes into cache with explicit reference per waiter:
+       a. Pick first waiter (tx or block) as the initial reference:
+          cache.insert(key, data, first_waiter_id)
+       b. For each additional waiting block:
+          cache.add_reference(key, block_hash)
+       c. For each additional waiting tx:
+          cache.add_reference(key, tx_hash)
+       (This ensures every consumer holds a reference — a later
+        TransactionRemoved or ReleaseBlockChunks cannot drop the only
+        reference while other consumers still depend on the chunk.)
     3. Remove key from pending_fetches, consuming the PdChunkFetchState
     4. For each waiting block in the consumed state's waiting_blocks:
        a. Remove key from pending_blocks[block_hash].remaining_keys
@@ -264,10 +298,23 @@ PdService::on_fetch_done (select! arm 3):
        b. If missing_chunks is empty:
           - Transition state to Ready
           - Insert tx_hash into ready_pd_txs
-  On Err(AllPeersFailed):
+  On Err(AllPeersFailed { excluded_peers }):
     1. Check if any waiters remain (block oneshots not closed, txs not removed)
-    2. If waiters remain: update status, sleep, respawn fetch task
-    3. If no waiters remain: remove from pending_fetches, skip respawn
+    2. If no waiters remain: remove from pending_fetches, skip retry
+    3. If MAX_CHUNK_FETCH_RETRIES exceeded: fail_chunk_permanently(key)
+    4. If waiters remain and retries not exceeded:
+       a. Compute backoff delay: min(1s * 2^attempt, 30s)
+       b. Insert RetryEntry into retry_queue (DelayQueue)
+       c. Store delay_queue::Key in PdChunkFetchState
+       d. Transition status to FetchPhase::Backoff
+
+PdService::on_retry_ready (select! arm 4, fires when DelayQueue timer expires):
+    1. Validate generation matches (skip if stale)
+    2. Check waiters still exist (skip if all removed during backoff)
+    3. Re-resolve peers via resolve_peers_for_chunk (picks up epoch changes)
+    4. Spawn new fetch task into JoinSet
+    5. Store AbortHandle in PdChunkFetchState
+    6. Transition status to FetchPhase::Fetching
   │
   ▼
 shadow_transactions_are_valid receives Ok(()) on the oneshot
@@ -337,7 +384,9 @@ PdService tries to send Ok(()) on stored oneshot → SendError
   → Remove pending_blocks[block_hash] entry
   → Decrement cache references for any already-fetched chunks
   → Remove block_hash from pending_fetches[key].waiting_blocks
-  → If no other waiters for those keys → abort fetch tasks in JoinSet
+  → If no other waiters for those keys:
+      Fetching → abort_handle.abort() (cancels in-flight fetch task)
+      Backoff  → retry_queue.remove(&queue_key) (cancels pending timer)
   → cache.try_shrink_to_fit()
 
 Case 2: Mempool transaction removed
@@ -345,14 +394,72 @@ Case 2: Mempool transaction removed
 pd_transaction_monitor fires TransactionRemoved
   → PdService::handle_release_chunks (existing logic)
   → Additionally: remove tx_hash from pending_fetches[key].waiting_txs
-  → If no other waiters for those keys → abort fetch tasks in JoinSet
+  → If no other waiters for those keys:
+      Fetching → abort_handle.abort()
+      Backoff  → retry_queue.remove(&queue_key)
   → Decrement cache references, evict unreferenced chunks
   → cache.try_shrink_to_fit()
 
-Case 3: PdService shutdown
+Case 3: Sibling validation task fails (CancellationToken)
+──────────────────────────────────────────────────────────
+A sibling task (e.g., PoA) completes with Invalid
+  → with_cancel wrapper calls cancel.cancel()
+  → CancellationToken wakes all sibling cancelled() futures
+  → shadow_tx_task's select! picks cancelled() → drops inner future
+  → oneshot receiver dropped (was awaiting ProvisionBlockChunks response)
+  │
+  ▼
+Same cascade as Case 1:
+  PdService detects dropped oneshot → abort_handle.abort() or
+  retry_queue.remove() → eager cleanup of in-flight work
+
+with_cancel helper (used to wrap each validation task uniformly):
+
+    async fn with_cancel(
+        fut: impl Future<Output = ValidationResult>,
+        cancel: CancellationToken,
+    ) -> ValidationResult {
+        tokio::select! {
+            result = fut => {
+                if matches!(&result, ValidationResult::Invalid(_)) {
+                    cancel.cancel();
+                }
+                result
+            }
+            _ = cancel.cancelled() => {
+                ValidationResult::Invalid(ValidationError::ValidationCancelled {
+                    reason: "sibling validation failed".into(),
+                })
+            }
+        }
+    }
+
+shadow_tx_task uses a similar pattern but with eyre::Result return type:
+
+    let shadow_tx_task = {
+        let cancel = cancel.clone();
+        async move {
+            tokio::select! {
+                result = shadow_tx_task => {
+                    if result.is_err() { cancel.cancel(); }
+                    result
+                }
+                _ = cancel.cancelled() => {
+                    Err(eyre::eyre!("cancelled: sibling validation task failed"))
+                }
+            }
+        }
+    };
+
+No signature changes: the token is created and consumed entirely within
+validate_block(). No changes to shadow_transactions_are_valid, poa_is_valid,
+or any other validation function signature.
+
+Case 4: PdService shutdown
 ──────────────────────────
 PdService select! loop exits on shutdown signal
   → JoinSet drops → all in-flight fetch tasks cancelled automatically
+  → DelayQueue drops → all pending retry timers cancelled
   → No cleanup needed (structured concurrency)
 ```
 
@@ -364,18 +471,48 @@ PdService select! loop exits on shutdown signal
 /// Result returned by a chunk fetch task in the JoinSet.
 struct PdChunkFetchResult {
     key: ChunkKey,
-    result: Result<UnpackedChunk, PdChunkFetchError>,
+    result: Result<(UnpackedChunk, TxPath), PdChunkFetchError>,
 }
 
-/// Tracks an in-flight fetch for a single ChunkKey.
+/// Phase of a single chunk key's fetch lifecycle.
+enum FetchPhase {
+    /// An HTTP fetch task is running in the JoinSet.
+    Fetching,
+    /// Waiting for the backoff timer to expire in the DelayQueue.
+    Backoff,
+}
+
+/// Tracks an in-flight or retrying fetch for a single ChunkKey.
 struct PdChunkFetchState {
     /// Mempool transactions waiting on this chunk.
     waiting_txs: HashSet<B256>,
     /// Block validations waiting on this chunk.
     waiting_blocks: HashSet<B256>,
-    /// Number of fetch attempts so far (incremented on each respawn).
+    /// Number of fetch attempts so far (incremented on each retry).
     attempt: u32,
+    /// Distinguishes provisioning lifecycles. Incremented when a key
+    /// re-enters Fetching after being cleaned up and reprovisioned.
+    /// Prevents stale retry timers from acting on a new lifecycle.
+    generation: u64,
     /// Peers that have been tried and failed (passed to the next fetch task).
+    excluded_peers: HashSet<IrysAddress>,
+    /// Current phase of the fetch lifecycle.
+    status: FetchPhase,
+    /// Handle to cancel the in-flight fetch task (when status == Fetching).
+    /// Stored from JoinSet::spawn's return value. Used for eager cancellation
+    /// when all waiters are removed — call abort_handle.abort() to cancel
+    /// the in-flight HTTP request immediately.
+    abort_handle: Option<AbortHandle>,
+    /// Handle to cancel the pending retry timer (when status == Backoff).
+    /// Used for eager cancellation via retry_queue.remove(&queue_key).
+    retry_queue_key: Option<delay_queue::Key>,
+}
+
+/// Entry stored in the DelayQueue for scheduled retries.
+struct RetryEntry {
+    key: ChunkKey,
+    attempt: u32,
+    generation: u64,
     excluded_peers: HashSet<IrysAddress>,
 }
 
@@ -405,16 +542,20 @@ pub struct PdService {
 
     // New fields
     join_set: JoinSet<PdChunkFetchResult>,
+    retry_queue: DelayQueue<RetryEntry>,
     pending_fetches: HashMap<ChunkKey, PdChunkFetchState>,
     pending_blocks: HashMap<B256, PendingBlockProvision>,
     gossip_client: GossipClient,
     peer_list: PeerList,
     block_tree: BlockTreeReadGuard,
+    block_index: BlockIndexReadGuard,  // for tx_path verification (get_block_bounds)
     num_chunks_in_partition: u64,
 }
 ```
 
 ### Modified Event Loop
+
+Active fetches live in a `JoinSet`; retry timers live in a `tokio_util::time::DelayQueue` owned by the actor. This separates retry scheduling from fetch execution — retries are data in a queue, not detached tasks or sleeping sentinels mixed with fetch results.
 
 ```rust
 async fn start(mut self) {
@@ -427,23 +568,96 @@ async fn start(mut self) {
             msg = self.msg_rx.recv() => {
                 match msg {
                     Some(message) => self.handle_message(message),
-                    None => break,
+                    None => { break; }
                 }
             }
 
             Some(result) = self.join_set.join_next() => {
-                match result {
-                    Ok(fetch_result) => self.on_fetch_done(fetch_result),
-                    Err(join_error) => {
-                        // Task panicked or was cancelled
-                        warn!("PD chunk fetch task failed: {}", join_error);
-                    }
-                }
+                self.on_fetch_done(result);
+            }
+
+            Some(expired) = self.retry_queue.next(), if !self.retry_queue.is_empty() => {
+                self.on_retry_ready(expired.into_inner());
             }
         }
     }
 }
 ```
+
+**`on_fetch_done` retry path** (pseudocode):
+
+```rust
+fn on_fetch_done(&mut self, result: JoinResult<PdChunkFetchResult>) {
+    let PdChunkFetchResult { key, result } = /* unwrap join result */;
+    match result {
+        Ok((chunk, tx_path)) => { /* verify proof chain, cache chunk, notify waiters */ }
+        Err(PdChunkFetchError::AllPeersFailed { excluded_peers }) => {
+            let Some(state) = self.pending_fetches.get_mut(&key) else { return };
+
+            // No waiters left — skip retry, clean up
+            if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+                self.pending_fetches.remove(&key);
+                return;
+            }
+
+            // Exceeded max retries — fail permanently
+            if state.attempt >= MAX_CHUNK_FETCH_RETRIES {
+                self.fail_chunk_permanently(key);
+                return;
+            }
+
+            // Schedule retry via DelayQueue
+            let delay = backoff_duration(state.attempt); // min(1s * 2^attempt, 30s)
+            let retry_entry = RetryEntry {
+                key,
+                attempt: state.attempt + 1,
+                generation: state.generation,
+                excluded_peers,
+            };
+            let queue_key = self.retry_queue.insert(retry_entry, delay);
+
+            state.attempt += 1;
+            state.status = FetchPhase::Backoff;
+            state.retry_queue_key = Some(queue_key);
+            state.abort_handle = None; // no in-flight task during backoff
+            state.excluded_peers = excluded_peers;
+        }
+    }
+}
+```
+
+**`on_retry_ready` handler** (pseudocode):
+
+```rust
+fn on_retry_ready(&mut self, entry: RetryEntry) {
+    let Some(state) = self.pending_fetches.get_mut(&entry.key) else { return };
+
+    // Stale generation — this retry belongs to an old provisioning lifecycle
+    if state.generation != entry.generation { return; }
+
+    // Waiters vanished during backoff
+    if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
+        self.pending_fetches.remove(&entry.key);
+        return;
+    }
+
+    // Re-resolve peers (picks up epoch changes, new peers coming online)
+    let peers = self.resolve_peers_for_chunk(&entry.key, &entry.excluded_peers);
+    let abort_handle = self.join_set.spawn(
+        fetch_chunk_from_peers(entry.key, peers, self.gossip_client.clone())
+    );
+
+    state.status = FetchPhase::Fetching;
+    state.abort_handle = Some(abort_handle);
+    state.retry_queue_key = None;
+}
+```
+
+**Cancellation path**: When all waiters for a key are removed (tx removed + block released), PdService checks `status`:
+- `Fetching` → call `abort_handle.abort()` to cancel the in-flight fetch task
+- `Backoff` → call `self.retry_queue.remove(&queue_key)` to cancel the pending timer
+
+Both are eager cancellation — no dangling tasks or timers survive waiter cleanup. Pending retries are entries in a queue, not spawned tasks. Queue length is bounded by the number of tracked chunk keys.
 
 ### Partition-to-Peer Resolution
 
@@ -522,6 +736,12 @@ impl GossipDataRequestV2 {
         }
     }
 }
+
+// Add to GossipDataV2 (response enum):
+pub enum GossipDataV2 {
+    // ... existing variants (ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction) ...
+    PdChunk(Arc<UnpackedChunk>, TxPath),  // NEW: chunk + tx_path proof for position binding
+}
 ```
 
 ### Serving Handler (`crates/p2p/src/gossip_data_handler.rs`)
@@ -530,9 +750,9 @@ impl GossipDataRequestV2 {
 
 ```rust
 GossipDataRequestV2::PdChunk(ledger, offset) => {
-    match self.storage_provider.get_full_unpacked_chunk_by_ledger_offset(ledger, offset) {
-        Ok(Some(unpacked_chunk)) => {
-            Some(GossipDataV2::Chunk(Arc::new(unpacked_chunk)))
+    match self.storage_provider.get_full_unpacked_chunk_with_tx_path(ledger, offset) {
+        Ok(Some((unpacked_chunk, tx_path))) => {
+            Some(GossipDataV2::PdChunk(Arc::new(unpacked_chunk), tx_path))
         }
         Ok(None) => None,  // We don't have this chunk
         Err(e) => {
@@ -543,18 +763,20 @@ GossipDataRequestV2::PdChunk(ledger, offset) => {
 }
 ```
 
-**New trait method required**: The existing `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns only raw `Bytes` — it discards the merkle proof (`data_path`), `data_root`, and `data_size` during unpacking (`chunk_provider.rs:130-155`). A new method `get_full_unpacked_chunk_by_ledger_offset` is needed that returns the full `UnpackedChunk` including the merkle proof. The implementation follows the same path as the existing method but preserves the `data_path` from the storage module's index and includes `data_root` and `data_size` from `DataRootInfo`. This is essential for the requesting node to validate the merkle proof on the pulled chunk.
+**Implementation constraint: PdChunk requests must be rate-limited.** The synchronous pull path (`handle_get_data_sync`) bypasses the `DataRequestTracker` checks used by `handle_get_data`. Without throttling, frequent `PdChunk` requests can turn into an expensive unthrottled endpoint (storage lookup + unpacking per request). Options: (a) extend `DataRequestTracker` to cover `pull_data` requests, or (b) add a dedicated semaphore similar to `chunk_semaphore` used for inbound chunk gossip. The unpacking work should be offloaded to a blocking task pool (`tokio::task::spawn_blocking`) to avoid starving the Actix server's async runtime.
+
+**New trait method required**: The existing `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns only raw `Bytes` — it discards the merkle proof (`data_path`), `data_root`, `data_size`, and `tx_path` during unpacking (`chunk_provider.rs:130-155`). A new method `get_full_unpacked_chunk_with_tx_path` is needed that returns the full `UnpackedChunk` plus the `tx_path` (merkle proof from `tx_root` → `data_root`). The serving peer's storage module already reads `tx_path` when constructing a chunk by offset (to extract `data_root` in `generate_full_chunk`, `storage_module.rs:1262`). The submodule DB has a direct `offset → tx_path_hash → tx_path` index (two MDBX gets, `submodule/db.rs:54-62`). This is returning already-indexed bytes, not computing a proof on demand.
 
 ```rust
 // New method on ChunkStorageProvider trait:
-fn get_full_unpacked_chunk_by_ledger_offset(
+fn get_full_unpacked_chunk_with_tx_path(
     &self,
     ledger: u32,
     ledger_offset: u64,
-) -> eyre::Result<Option<UnpackedChunk>>;
+) -> eyre::Result<Option<(UnpackedChunk, TxPath)>>;
 ```
 
-The concrete implementation in `ChunkProvider` (`crates/domain/src/models/chunk_provider.rs`) would call `generate_full_chunk` on the storage module (which already returns all the metadata including `data_path`), then unpack the chunk bytes via `irys_packing::unpack()`, and assemble the full `UnpackedChunk` with the preserved merkle proof.
+The concrete implementation in `ChunkProvider` (`crates/domain/src/models/chunk_provider.rs`) would call `generate_full_chunk_ledger_offset` on the storage module (which already reads `tx_path` internally), then unpack the chunk bytes via `irys_packing::unpack()`, and assemble the full `UnpackedChunk` with the preserved merkle proof. The `tx_path` bytes are preserved and returned instead of discarded.
 
 This requires wiring a `ChunkStorageProvider` (specifically `Arc<ChunkProvider>`) into `GossipDataHandler`. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through `P2PService::run` into `GossipDataHandler::new`. Note that `GossipDataHandler` is in `crates/p2p` and `ChunkProvider` is in `crates/domain`, but `GossipDataHandler` only needs the `ChunkStorageProvider` trait (from `irys-types`, which `p2p` already depends on). The concrete `ChunkProvider` is injected from `chain.rs`.
 
@@ -564,42 +786,66 @@ The existing `/gossip/v2/pull_data` endpoint handles all `GossipDataRequestV2` v
 
 ## Cache Insertion: UnpackedChunk to Bytes Conversion
 
-The gossip pull returns a full `UnpackedChunk` (data bytes + merkle proof + metadata). The `ChunkCache` stores `Arc<Bytes>` (just the raw chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
+The gossip pull returns a full `(UnpackedChunk, TxPath)` (data bytes + merkle proofs + metadata). The `ChunkCache` stores `Arc<Bytes>` (just the raw chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
 
-When a pulled chunk passes validation, PdService extracts the raw bytes for cache insertion:
+When a pulled chunk passes the full proof chain verification (tx_path + data_path + leaf hash), PdService extracts the raw bytes for cache insertion:
 
 ```rust
 let data: Arc<Bytes> = Arc::new(Bytes::from(unpacked_chunk.bytes));
-self.cache.insert(key, data, reference_id);
+// Insert with explicit reference per waiter (see Issue #7 in on_fetch_done):
+self.cache.insert(key, data.clone(), first_waiter_id);
+for other_waiter in remaining_waiters {
+    self.cache.add_reference(key, other_waiter);
+}
 // cache.insert internally mirrors to the ChunkDataIndex DashMap
 ```
 
-The merkle proof (`data_path`), `data_root`, and `data_size` are used only for validation and then discarded. This matches how the existing local storage path works: `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns raw `Bytes`, and `cache.insert` stores `Arc::new(chunk_bytes)`.
+The `tx_path`, `data_path`, `data_root`, and `data_size` are used only for verification and then discarded. This matches how the existing local storage path works: `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns raw `Bytes`, and `cache.insert` stores `Arc::new(chunk_bytes)`.
 
 ## Validation of Pulled Chunks
 
-When PdService receives an `UnpackedChunk` from a peer via the pull mechanism, it performs merkle proof validation before inserting into the cache:
+When PdService receives an `(UnpackedChunk, TxPath)` from a peer via the pull mechanism, it performs full proof chain verification before inserting into the cache. This binds the chunk data to the requested `(ledger, offset)` — not just to its own `data_root`.
 
-1. **Merkle path validation**: Call `validate_path(data_root, &chunk.data_path, target_offset)` to verify the chunk's inclusion proof against the expected data root.
-2. **Leaf hash check**: Verify `SHA256(chunk.bytes) == leaf_hash` from the validated path.
-3. **Data size check**: If the chunk's `data_size` is known, verify it's consistent.
+**Verification pseudocode in `on_fetch_done`**:
 
-This follows the same validation pattern used in `ChunkIngressService::handle_chunk_ingress_message` (steps 5-6 of its pipeline). If validation fails, the chunk is rejected, the peer is marked as having returned invalid data, and the fetch retries with a different peer.
+```rust
+// 1. Get the trusted tx_root from BlockIndex
+let bounds = block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(key.offset))?;
+
+// 2. Compute the chunk's byte offset within the block's tx tree
+//    (offset relative to block start, converted to bytes)
+let offset_in_block = key.offset - bounds.start_chunk_offset;
+let target_byte_offset = (offset_in_block + 1) * chunk_size; // end-byte convention
+
+// 3. Verify tx_path: tx_root → data_root
+//    Confirms chunk.data_root is at the correct position in the block
+let tx_path_result = validate_path(bounds.tx_root.0, &tx_path, target_byte_offset as u128)?;
+// tx_path_result.leaf_hash should equal SHA256(data_root || data_size_note)
+
+// 4. Verify data_path: data_root → chunk bytes
+let data_path_result = validate_path(chunk.data_root.0, &chunk.data_path, chunk_end_byte)?;
+ensure!(SHA256(chunk.bytes) == data_path_result.leaf_hash);
+```
+
+This is the same proof chain that PoA validation already uses (`block_validation.rs:1194`), reapplied to the PD pull context. If any verification step fails, the chunk is rejected, the peer is marked as having returned invalid data, and the fetch retries with a different peer.
+
+**Batch optimization**: The `get_block_bounds` result can be cached when fetching multiple chunks from the same block. The `tx_path` is identical for all chunks belonging to the same `DataTransaction` — it only needs to be transmitted and verified once per tx boundary.
 
 ## File Change Summary
 
 | File | Change |
 |---|---|
-| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` variant, `to_v1()` returns `None` |
-| `crates/types/src/chunk_provider.rs` | Add `get_full_unpacked_chunk_by_ledger_offset` method to `ChunkStorageProvider` trait, returning `eyre::Result<Option<UnpackedChunk>>` |
-| `crates/domain/src/models/chunk_provider.rs` | Implement `get_full_unpacked_chunk_by_ledger_offset` on `ChunkProvider`: call `generate_full_chunk` on the SM, unpack the bytes, assemble full `UnpackedChunk` preserving `data_path`, `data_root`, `data_size` |
-| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field |
+| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` request variant, `GossipDataV2::PdChunk(Arc<UnpackedChunk>, TxPath)` response variant, `to_v1()` returns `None` |
+| `crates/types/src/chunk_provider.rs` | Add `get_full_unpacked_chunk_with_tx_path` method to `ChunkStorageProvider` trait, returning `eyre::Result<Option<(UnpackedChunk, TxPath)>>` |
+| `crates/domain/src/models/chunk_provider.rs` | Implement `get_full_unpacked_chunk_with_tx_path` on `ChunkProvider`: call `generate_full_chunk_ledger_offset` on the SM, unpack the bytes, assemble full `UnpackedChunk` preserving `data_path`/`data_root`/`data_size`, return with `tx_path` |
+| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field; add rate-limiting for PdChunk requests |
 | `crates/p2p/src/gossip_client.rs` | Add `pull_data_from_peers` method that accepts a pre-selected list of peer addresses (instead of using `top_active_peers`). Follows the same retry/handshake pattern as `pull_data_from_network` but with caller-supplied peers. |
 | `crates/p2p/src/gossip_service.rs` | Pass `ChunkProvider` through to `GossipDataHandler` construction |
-| `crates/actors/src/pd_service.rs` | Add `JoinSet`, `pending_fetches`, `pending_blocks`, `own_miner_address`, new deps (`GossipClient`, `PeerList`, `BlockTreeReadGuard`, `ConsensusConfig`). Refactor `handle_provision_chunks` and `handle_provision_block_chunks` to spawn fetch tasks on miss. Add `on_fetch_done` handler with return-and-respawn retry logic. Add third `select!` arm for `join_set.join_next()`. |
+| `crates/actors/src/pd_service.rs` | Add `JoinSet`, `DelayQueue<RetryEntry>`, `pending_fetches`, `pending_blocks`, `own_miner_address`, new deps (`GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`). Refactor `handle_provision_chunks` and `handle_provision_block_chunks` to spawn fetch tasks on miss. Add `on_fetch_done` handler with `DelayQueue`-based retry logic. Add `on_retry_ready` handler. Add third and fourth `select!` arms for `join_set.join_next()` and `retry_queue.next()`. |
+| `crates/actors/src/validation_service/block_validation_task.rs` | Add `CancellationToken` + `with_cancel` wrapper in `validate_block()` to cancel sibling tasks (including PD fetches) when any task fails definitively. No signature changes to individual validation functions. |
 | `crates/actors/src/pd_service/provisioning.rs` | Add `PartiallyReady -> Ready` transition method callable from `on_fetch_done`. Extend `TxProvisioningState` or add helper for checking/clearing `missing_chunks`. |
 | `crates/actors/src/pd_service/cache.rs` | No structural changes (insert/remove/reference tracking already work) |
-| `crates/chain/src/chain.rs` | Pass `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `ConsensusConfig`, `own_miner_address` to `PdService::spawn_service` |
+| `crates/chain/src/chain.rs` | Pass `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `ConsensusConfig`, `own_miner_address` to `PdService::spawn_service` |
 
 ## Edge Cases
 
@@ -613,14 +859,15 @@ When block validation is cancelled, the oneshot receiver in `shadow_transactions
 
 ### All assigned peers fail to serve a chunk
 
-The fetch task uses a **return-and-respawn** retry model. Each fetch task attempts all assigned peers once. If all fail, the task returns `Err(PdChunkFetchError::AllPeersFailed { excluded_peers })` to PdService via `join_set.join_next()`. The `on_fetch_done` handler then:
+The fetch task uses a **return-and-respawn** retry model with `DelayQueue`-based backoff. Each fetch task attempts all assigned peers once. If all fail, the task returns `Err(PdChunkFetchError::AllPeersFailed { excluded_peers })` to PdService via `join_set.join_next()`. The `on_fetch_done` handler then:
 
-1. Updates `pending_fetches[key].status` to `Retrying { attempt: n+1, excluded_peers }`
-2. Sleeps briefly (e.g., 1 second, scaling with attempt count up to a cap)
-3. Re-reads `resolve_peers_for_chunk` (picks up any epoch changes or peers coming online)
-4. Spawns a new fetch task into the JoinSet
+1. Checks whether waiters still exist for the chunk key — if not, cleans up and skips retry
+2. Checks whether `MAX_CHUNK_FETCH_RETRIES` has been exceeded — if so, fails permanently
+3. Computes backoff delay: `min(1s * 2^attempt, 30s)`
+4. Inserts a `RetryEntry` into the actor-owned `DelayQueue` and transitions the fetch state to `FetchPhase::Backoff`
+5. When the `DelayQueue` timer fires (via the `retry_queue.next()` select arm), `on_retry_ready` re-reads `resolve_peers_for_chunk` (picks up any epoch changes or peers coming online) and spawns a new fetch task into the JoinSet
 
-This return-and-respawn model (vs. internal infinite retry within the task) ensures PdService can observe intermediate failures, update `FetchStatus`, and decide whether to continue retrying based on whether waiters still exist. If all waiters for a key have been removed (block cancelled, tx removed) between retry rounds, PdService simply skips the respawn.
+This return-and-respawn model (vs. internal infinite retry within the task) ensures PdService can observe intermediate failures, update `FetchPhase`, and decide whether to continue retrying based on whether waiters still exist. If all waiters for a key have been removed (block cancelled, tx removed) between retry rounds, PdService simply skips the respawn. The `DelayQueue` approach avoids blocking the actor loop during backoff — retries are data in a queue, not sleeping tasks.
 
 **Mempool tx retry bound**: For mempool transactions, retries continue until either the chunk is fetched or the transaction is removed from the Reth pool (which fires `TransactionRemoved` via `pd_transaction_monitor`). Reth's pool maintenance evicts transactions based on `max_queued_lifetime`, providing a natural upper bound. PdService does not need its own timeout for this path.
 

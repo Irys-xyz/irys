@@ -1,5 +1,7 @@
 # Codex Second Opinion: PD Chunk P2P Pull Design Spec
 
+> **Note (2026-03-16):** Findings from this review have been integrated into the design spec. The design doc is the authoritative source for implementation.
+
 **Date**: 2026-03-13
 **Reviewer**: OpenAI Codex (gpt-5.4) via `codex exec`
 **Spec reviewed**: `docs/superpowers/specs/2026-03-13-pd-chunk-p2p-pull-design.md`
