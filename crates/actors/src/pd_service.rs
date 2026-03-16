@@ -590,10 +590,10 @@ impl PdService {
             "Starting PD chunk provisioning"
         );
 
-        // Register the transaction
-        let tx_state = self.tracker.register(tx_hash, required_chunks.clone());
+        // Register the transaction (borrows self.tracker mutably, so we drop it before the loop).
+        let _ = self.tracker.register(tx_hash, required_chunks.clone());
 
-        // Fetch missing chunks
+        // Fetch missing chunks — try cache first, then local storage.
         let mut fetched = 0;
         let mut missing = HashSet::new();
 
@@ -626,39 +626,58 @@ impl PdService {
                             "Fetched and cached chunk"
                         );
                     }
-                    Ok(None) => {
-                        warn!(
+                    Ok(None) | Err(_) => {
+                        debug!(
                             tx_hash = %tx_hash,
                             ledger = key.ledger,
                             offset = key.offset,
-                            "Chunk not found locally. P2P gossip not yet implemented — chunk will be unavailable."
+                            "Chunk not found locally — spawning P2P fetch"
                         );
-                        missing.insert(*key);
-                    }
-                    Err(e) => {
-                        warn!(
-                            tx_hash = %tx_hash,
-                            ledger = key.ledger,
-                            offset = key.offset,
-                            error = %e,
-                            "Failed to fetch chunk from storage"
-                        );
-                        missing.insert(*key);
+                        let key = *key;
+                        missing.insert(key);
+
+                        if let Some(state) = self.pending_fetches.get_mut(&key) {
+                            // Already being fetched — just register this tx as a waiter
+                            state.waiting_txs.insert(tx_hash);
+                        } else {
+                            // Spawn a new fetch task
+                            let peers = self.resolve_peers_for_chunk(&key);
+                            let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
+                                key,
+                                peers,
+                                self.http_client.clone(),
+                            ));
+                            self.pending_fetches.insert(
+                                key,
+                                fetch::PdChunkFetchState {
+                                    waiting_txs: HashSet::from([tx_hash]),
+                                    waiting_blocks: HashSet::new(),
+                                    attempt: 0,
+                                    generation: 0,
+                                    excluded_peers: HashSet::new(),
+                                    status: fetch::FetchPhase::Fetching,
+                                    abort_handle: Some(abort_handle),
+                                    retry_queue_key: None,
+                                },
+                            );
+                        }
                     }
                 }
             }
         }
 
-        // Update state based on what we found
-        tx_state.missing_chunks = missing;
-        if tx_state.missing_chunks.is_empty() {
-            tx_state.state = ProvisioningState::Ready;
-            self.ready_pd_txs.insert(tx_hash);
-        } else {
-            tx_state.state = ProvisioningState::PartiallyReady {
-                found: fetched,
-                total: total_chunks,
-            };
+        // Update state based on what we found — re-borrow the tracker now that the loop is done.
+        if let Some(tx_state) = self.tracker.get_mut(&tx_hash) {
+            tx_state.missing_chunks = missing;
+            if tx_state.missing_chunks.is_empty() {
+                tx_state.state = ProvisioningState::Ready;
+                self.ready_pd_txs.insert(tx_hash);
+            } else {
+                tx_state.state = ProvisioningState::PartiallyReady {
+                    found: fetched,
+                    total: total_chunks,
+                };
+            }
         }
 
         debug!(
@@ -730,6 +749,8 @@ impl PdService {
 
     /// Provision chunks needed for validating a peer block.
     /// Loads chunks from local storage into cache, pins them with block_hash as reference.
+    /// If chunks are missing locally, spawns P2P fetch tasks and holds the oneshot open
+    /// until all chunks arrive (or permanently fail).
     fn handle_provision_block_chunks(
         &mut self,
         block_hash: B256,
@@ -745,7 +766,7 @@ impl PdService {
             "Provisioning PD chunks for block validation"
         );
 
-        let mut missing = Vec::new();
+        let mut missing_keys = Vec::new();
 
         for key in &chunk_keys {
             if self.cache.contains(key) {
@@ -765,7 +786,7 @@ impl PdService {
                             offset = key.offset,
                             "Chunk not found locally for block validation"
                         );
-                        missing.push((key.ledger, key.offset));
+                        missing_keys.push(*key);
                     }
                     Err(e) => {
                         warn!(
@@ -775,13 +796,14 @@ impl PdService {
                             error = %e,
                             "Failed to fetch chunk from storage for block validation"
                         );
-                        missing.push((key.ledger, key.offset));
+                        missing_keys.push(*key);
                     }
                 }
             }
         }
 
-        if missing.is_empty() {
+        if missing_keys.is_empty() {
+            // All chunks found locally — respond immediately and track for later release.
             self.block_tracker.insert(block_hash, chunk_keys);
             if response.send(Ok(())).is_err() {
                 // Receiver was dropped — the validation task was cancelled before
@@ -802,23 +824,70 @@ impl PdService {
                 }
             }
         } else {
-            // Don't track a failed provisioning — the caller will bail and the
-            // partially-loaded chunks will be cleaned up by their absence from
-            // block_tracker (they still have the block_hash reference in the
-            // cache, but a subsequent ReleaseBlockChunks is a no-op, and the
-            // reference will be cleaned up when the cache entry is evicted via
-            // LRU or when we re-provision the same block later).
-            //
-            // Remove references for the chunks that WERE loaded, since we won't
-            // track them for later release.
-            for key in &chunk_keys {
-                let unreferenced = self.cache.remove_reference(key, &block_hash);
-                if unreferenced {
-                    self.cache.remove(key);
+            // Some chunks missing — hold the oneshot and spawn P2P fetch tasks.
+
+            // Guard against duplicate block_hash — don't overwrite an existing oneshot.
+            if self.pending_blocks.contains_key(&block_hash) {
+                let _ = response.send(Err(missing_keys
+                    .iter()
+                    .map(|k| (k.ledger, k.offset))
+                    .collect()));
+                // Clean up references for chunks that were loaded in this attempt.
+                for key in &chunk_keys {
+                    let unreferenced = self.cache.remove_reference(key, &block_hash);
+                    if unreferenced {
+                        self.cache.remove(key);
+                    }
+                }
+                self.cache.try_shrink_to_fit();
+                return;
+            }
+
+            let all_keys = chunk_keys;
+            let remaining_keys: HashSet<_> = missing_keys.iter().copied().collect();
+
+            self.pending_blocks.insert(
+                block_hash,
+                fetch::PendingBlockProvision {
+                    remaining_keys,
+                    all_keys,
+                    response,
+                },
+            );
+
+            // For each missing key, register in pending_fetches and spawn fetch task.
+            for key in &missing_keys {
+                if let Some(state) = self.pending_fetches.get_mut(key) {
+                    // Already being fetched — just add this block as a waiter.
+                    state.waiting_blocks.insert(block_hash);
+                } else {
+                    let peers = self.resolve_peers_for_chunk(key);
+                    let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
+                        *key,
+                        peers,
+                        self.http_client.clone(),
+                    ));
+                    self.pending_fetches.insert(
+                        *key,
+                        fetch::PdChunkFetchState {
+                            waiting_txs: HashSet::new(),
+                            waiting_blocks: HashSet::from([block_hash]),
+                            attempt: 0,
+                            generation: 0,
+                            excluded_peers: HashSet::new(),
+                            status: fetch::FetchPhase::Fetching,
+                            abort_handle: Some(abort_handle),
+                            retry_queue_key: None,
+                        },
+                    );
                 }
             }
-            let _ = response.send(Err(missing));
-            self.cache.try_shrink_to_fit();
+
+            debug!(
+                block_hash = %block_hash,
+                missing_chunks = missing_keys.len(),
+                "Spawned P2P fetch tasks for missing block validation chunks"
+            );
         }
 
         debug!(
