@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
+use futures::StreamExt as _;
 use tracing::{Instrument as _, debug, info, trace, warn};
 
 /// The PD (Programmable Data) Service manages chunk provisioning for PD transactions.
@@ -127,16 +128,44 @@ impl PdService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(message) => self.handle_message(message),
-                        None => {
-                            info!("PdService message channel closed");
-                            break;
-                        }
+                        None => { break; }
                     }
+                }
+
+                Some(result) = self.join_set.join_next() => {
+                    self.on_fetch_done(result);
+                }
+
+                Some(expired) = self.retry_queue.next(), if !self.retry_queue.is_empty() => {
+                    self.on_retry_ready(expired.into_inner());
                 }
             }
         }
 
         info!("PdService stopped");
+    }
+
+    fn on_fetch_done(
+        &mut self,
+        result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>,
+    ) {
+        // TODO: implement in Task 15
+        match result {
+            Ok(fetch_result) => {
+                tracing::warn!(key = ?fetch_result.key, "on_fetch_done: not yet implemented");
+            }
+            Err(join_error) => {
+                tracing::warn!(
+                    "PD chunk fetch task panicked or was cancelled: {}",
+                    join_error
+                );
+            }
+        }
+    }
+
+    fn on_retry_ready(&mut self, entry: fetch::RetryEntry) {
+        // TODO: implement in Task 16
+        tracing::warn!(key = ?entry.key, "on_retry_ready: not yet implemented");
     }
 
     fn handle_message(&mut self, msg: PdChunkMessage) {
