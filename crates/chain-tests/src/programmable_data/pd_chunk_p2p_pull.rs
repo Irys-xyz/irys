@@ -16,9 +16,9 @@ use std::time::Duration;
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{aliases::U200, Address, U256};
+use alloy_primitives::{Address, U256, aliases::U200};
 use alloy_signer_local::LocalSigner;
-use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::pd_tx::{PdHeaderV1, build_pd_access_list, prepend_pd_header_v1_to_calldata};
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
@@ -295,7 +295,7 @@ async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
     let ctx = setup_pd_p2p_test().await?;
 
     // Pre-test invariant: Node B should NOT have chunks at the target offset.
-    // get_chunk_by_ledger_offset returns Ok(None) when chunks are not in local storage.
+    // Storage modules: Ok(None) or Err (no storage module) — but NOT Ok(Some(_)).
     let probe_result = ctx
         .node_b
         .node_ctx
@@ -309,6 +309,22 @@ async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
         "Node B should NOT have chunk data at ledger offset {} before P2P fetch",
         ctx.data_start_offset,
     );
+
+    // PD cache (ChunkDataIndex DashMap): must be empty for these offsets before P2P fetch.
+    let publish_ledger = DataLedger::Publish as u32;
+    for i in 0..2_u64 {
+        let offset = ctx.data_start_offset + i;
+        assert!(
+            ctx.node_b
+                .node_ctx
+                .chunk_data_index
+                .get(&(publish_ledger, offset))
+                .is_none(),
+            "Node B ChunkDataIndex should NOT have chunk at ({}, {}) before P2P fetch",
+            publish_ledger,
+            offset,
+        );
+    }
 
     // Inject a PD tx on Node A referencing 2 real chunks.
     let tx_hash = build_and_inject_real_pd_tx(
@@ -359,6 +375,21 @@ async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
         node_b_height, block_height,
         "Node B canonical tip should match Node A after validation",
     );
+
+    // Assert chunks are in Node B's ChunkDataIndex (PD cache) after P2P fetch.
+    let publish_ledger = DataLedger::Publish as u32;
+    for i in 0..2_u64 {
+        let offset = ctx.data_start_offset + i;
+        assert!(
+            ctx.node_b
+                .node_ctx
+                .chunk_data_index
+                .contains_key(&(publish_ledger, offset)),
+            "Chunk at ({}, {}) should be in Node B's ChunkDataIndex after P2P fetch",
+            publish_ledger,
+            offset,
+        );
+    }
 
     info!(
         "Node B validated PD block at height {} (both nodes at same tip)",
@@ -465,6 +496,22 @@ async fn test_pd_chunk_p2p_multiple_txs() -> eyre::Result<()> {
         "Node B should have validated the block with 3 PD txs",
     );
 
+    // Assert all 6 chunks (3 txs x 2 chunks each) are in Node B's ChunkDataIndex.
+    let publish_ledger = DataLedger::Publish as u32;
+    for i in 0..6_u64 {
+        let offset = ctx.data_start_offset + i;
+        assert!(
+            ctx.node_b
+                .node_ctx
+                .chunk_data_index
+                .contains_key(&(publish_ledger, offset)),
+            "Chunk at ({}, {}) (+{}) should be in Node B's ChunkDataIndex after P2P fetch",
+            publish_ledger,
+            offset,
+            i,
+        );
+    }
+
     info!(
         "Node B validated block with 3 PD txs at height {}",
         block_height,
@@ -562,20 +609,24 @@ async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
         "Node B should have validated the block containing T2",
     );
 
-    // After P2P fetch, the chunk should be locally available on Node B.
+    // After P2P fetch, the chunk should be in Node B's ChunkDataIndex (PD cache).
     // This proves deduplication: one fetch served both T1 (mempool) and T2 (block).
-    let chunk_on_b = ctx
-        .node_b
-        .node_ctx
-        .chunk_provider
-        .get_chunk_by_ledger_offset(
-            DataLedger::Publish,
-            LedgerChunkOffset::from(ctx.data_start_offset),
-        );
+    let publish_ledger = DataLedger::Publish as u32;
     assert!(
-        matches!(chunk_on_b, Ok(Some(_))),
-        "Chunk at ledger offset {} should be available on Node B after P2P fetch (deduplication)",
+        ctx.node_b
+            .node_ctx
+            .chunk_data_index
+            .contains_key(&(publish_ledger, ctx.data_start_offset)),
+        "Chunk at ({}, {}) should be in Node B's ChunkDataIndex after P2P fetch (deduplication)",
+        publish_ledger,
         ctx.data_start_offset,
+    );
+
+    // Assert T1 (mempool tx) is in ready_pd_txs after chunk fetch completes.
+    assert!(
+        ctx.node_b.node_ctx.ready_pd_txs.contains(&t1_hash),
+        "T1 {:?} should be in Node B's ready_pd_txs after chunk was fetched via deduplication",
+        t1_hash,
     );
 
     info!("Deduplication verified: single fetch served both T1 and T2");
@@ -639,25 +690,47 @@ async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
         node_b_height,
     );
 
-    // Verify chunks are available on Node B after P2P fetch.
-    // Check both chunk offsets: data_start_offset and data_start_offset+1.
+    // Verify chunks are in Node B's ChunkDataIndex (PD cache) after P2P fetch.
+    // Also verify byte-level correctness: fetched chunks must match uploaded data.
+    let publish_ledger = DataLedger::Publish as u32;
+    let chunk_size = ctx.chunk_size as usize;
     for i in 0..2_u64 {
         let global_offset = ctx.data_start_offset + i;
-        let chunk_available = ctx
+        // Clone the Arc<Bytes> out of the DashMap ref to avoid holding the borrow.
+        let fetched_bytes = ctx
             .node_b
             .node_ctx
-            .chunk_provider
-            .get_chunk_by_ledger_offset(
-                DataLedger::Publish,
-                LedgerChunkOffset::from(global_offset),
-            );
+            .chunk_data_index
+            .get(&(publish_ledger, global_offset))
+            .map(|r| Arc::clone(&*r));
         assert!(
-            matches!(chunk_available, Ok(Some(_))),
-            "Chunk at ledger offset {} (+{}) should be available on Node B after P2P fetch",
+            fetched_bytes.is_some(),
+            "Chunk at ({}, {}) (+{}) should be in Node B's ChunkDataIndex after P2P fetch",
+            publish_ledger,
+            global_offset,
+            i,
+        );
+
+        // Byte-level verification: compare fetched chunk bytes against uploaded data.
+        let fetched = fetched_bytes.unwrap();
+        let chunk_byte_start = i as usize * chunk_size;
+        let chunk_byte_end = chunk_byte_start + chunk_size;
+        let expected = &ctx.data_bytes[chunk_byte_start..chunk_byte_end];
+        assert_eq!(
+            fetched.as_ref(),
+            expected,
+            "Chunk at offset {} (+{}) bytes should match uploaded data",
             global_offset,
             i,
         );
     }
+
+    // Assert the tx hash is in ready_pd_txs (PdService marks it ready after all chunks arrive).
+    assert!(
+        ctx.node_b.node_ctx.ready_pd_txs.contains(&tx_hash),
+        "PD tx {:?} should be in Node B's ready_pd_txs after chunks were fetched",
+        tx_hash,
+    );
 
     info!("Mempool path verified: PD tx ready and chunks cached on Node B");
 

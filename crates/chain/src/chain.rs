@@ -135,6 +135,12 @@ pub struct IrysNodeCtx {
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
     backfill_complete: Arc<tokio::sync::Notify>,
+    /// Shared chunk data index populated by PdService during provisioning.
+    /// Keys are `(ledger: u32, offset: u64)`.
+    pub chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+    /// Set of PD transaction hashes that have all chunks provisioned and are ready
+    /// for block inclusion.
+    pub ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
 
 impl IrysNodeCtx {
@@ -1947,6 +1953,8 @@ impl IrysNode {
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
             backfill_complete,
+            chunk_data_index,
+            ready_pd_txs,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
