@@ -4,7 +4,7 @@ pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
 use dashmap::DashSet;
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use irys_domain::{BlockTreeReadGuard, PeerList, block_index_guard::BlockIndexReadGuard};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkMessage, PdChunkReceiver};
@@ -16,6 +16,7 @@ use reth::revm::primitives::bytes::Bytes;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
@@ -264,9 +265,15 @@ impl PdService {
                 pending.remaining_keys.remove(&key);
                 if pending.remaining_keys.is_empty() {
                     let pending = self.pending_blocks.remove(block_hash).unwrap();
-                    let _ = pending.response.send(Ok(()));
-                    // Track the block's chunk keys for later release.
-                    self.block_tracker.insert(*block_hash, pending.all_keys);
+                    if pending.response.send(Ok(())).is_ok() {
+                        self.block_tracker.insert(*block_hash, pending.all_keys);
+                    } else {
+                        // Receiver dropped (validation cancelled) — roll back cache references
+                        for key in &pending.all_keys {
+                            self.cache.remove_reference(key, block_hash);
+                        }
+                        self.cache.try_shrink_to_fit();
+                    }
                 }
             }
         }
@@ -453,11 +460,22 @@ impl PdService {
 
         // Re-resolve peers (picks up epoch changes, new peers coming online)
         let peers = self.resolve_peers_for_chunk(&entry.key);
-        let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
-            entry.key,
-            peers,
-            self.http_client.clone(),
-        ));
+        let key = entry.key;
+        let client = self.http_client.clone();
+        let abort_handle = self.join_set.spawn(async move {
+            match AssertUnwindSafe(fetch_chunk_from_peers(key, peers, client))
+                .catch_unwind()
+                .await
+            {
+                Ok(result) => result,
+                Err(_panic) => fetch::PdChunkFetchResult {
+                    key,
+                    result: Err(fetch::PdChunkFetchError::AllPeersFailed {
+                        excluded_peers: HashSet::new(),
+                    }),
+                },
+            }
+        });
 
         let state = self
             .pending_fetches
@@ -642,11 +660,25 @@ impl PdService {
                         } else {
                             // Spawn a new fetch task
                             let peers = self.resolve_peers_for_chunk(&key);
-                            let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
-                                key,
-                                peers,
-                                self.http_client.clone(),
-                            ));
+                            let client = self.http_client.clone();
+                            let abort_handle = self.join_set.spawn(async move {
+                                match AssertUnwindSafe(fetch_chunk_from_peers(
+                                    key, peers, client,
+                                ))
+                                .catch_unwind()
+                                .await
+                                {
+                                    Ok(result) => result,
+                                    Err(_panic) => fetch::PdChunkFetchResult {
+                                        key,
+                                        result: Err(
+                                            fetch::PdChunkFetchError::AllPeersFailed {
+                                                excluded_peers: HashSet::new(),
+                                            },
+                                        ),
+                                    },
+                                }
+                            });
                             self.pending_fetches.insert(
                                 key,
                                 fetch::PdChunkFetchState {
@@ -828,18 +860,8 @@ impl PdService {
 
             // Guard against duplicate block_hash — don't overwrite an existing oneshot.
             if self.pending_blocks.contains_key(&block_hash) {
-                let _ = response.send(Err(missing_keys
-                    .iter()
-                    .map(|k| (k.ledger, k.offset))
-                    .collect()));
-                // Clean up references for chunks that were loaded in this attempt.
-                for key in &chunk_keys {
-                    let unreferenced = self.cache.remove_reference(key, &block_hash);
-                    if unreferenced {
-                        self.cache.remove(key);
-                    }
-                }
-                self.cache.try_shrink_to_fit();
+                // Duplicate — first request is still in-flight, don't touch its refs
+                let _ = response.send(Err(vec![]));
                 return;
             }
 
@@ -862,11 +884,26 @@ impl PdService {
                     state.waiting_blocks.insert(block_hash);
                 } else {
                     let peers = self.resolve_peers_for_chunk(key);
-                    let abort_handle = self.join_set.spawn(fetch_chunk_from_peers(
-                        *key,
-                        peers,
-                        self.http_client.clone(),
-                    ));
+                    let fetch_key = *key;
+                    let client = self.http_client.clone();
+                    let abort_handle = self.join_set.spawn(async move {
+                        match AssertUnwindSafe(fetch_chunk_from_peers(
+                            fetch_key, peers, client,
+                        ))
+                        .catch_unwind()
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_panic) => fetch::PdChunkFetchResult {
+                                key: fetch_key,
+                                result: Err(
+                                    fetch::PdChunkFetchError::AllPeersFailed {
+                                        excluded_peers: HashSet::new(),
+                                    },
+                                ),
+                            },
+                        }
+                    });
                     self.pending_fetches.insert(
                         *key,
                         fetch::PdChunkFetchState {
