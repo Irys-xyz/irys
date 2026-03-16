@@ -63,7 +63,7 @@ use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
 };
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
@@ -89,6 +89,7 @@ pub async fn capacity_chunk_solution(
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
+    reset_seed: H256,
 ) -> SolutionContext {
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
@@ -128,6 +129,10 @@ pub async fn capacity_chunk_solution(
             current_step.saturating_sub(1),
         ));
         let mut seed = steps[0];
+        if current_step > 1 && (current_step - 1).is_multiple_of(config.vdf.reset_frequency as u64)
+        {
+            seed = apply_reset_seed(seed, reset_seed);
+        }
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
@@ -247,6 +252,11 @@ pub async fn capacity_chunk_solution(
                     current_step.saturating_sub(1),
                 ));
                 let mut sd = steps[0];
+                if current_step > 1
+                    && (current_step - 1).is_multiple_of(config.vdf.reset_frequency as u64)
+                {
+                    sd = apply_reset_seed(sd, reset_seed);
+                }
                 let mut cps: Vec<H256> =
                     vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
@@ -3612,6 +3622,16 @@ pub async fn solution_context_with_poa_chunk(
         let salt =
             irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
         let mut seed = steps[0];
+        if step > 1 && (step - 1).is_multiple_of(node_ctx.config.vdf.reset_frequency as u64) {
+            let reset_seed = {
+                let read = node_ctx.block_tree_guard.read();
+                let parent_hash = read.get_max_cumulative_difficulty_block().1;
+                read.get_block(&parent_hash)
+                    .map(|b| b.vdf_limiter_info.next_seed)
+                    .unwrap_or_default()
+            };
+            seed = apply_reset_seed(seed, reset_seed);
+        }
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
         vdf_sha(
@@ -3678,6 +3698,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,
+        prev_block.vdf_limiter_info.next_seed,
     )
     .await;
     if !was_vdf_enabled {

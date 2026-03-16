@@ -213,6 +213,14 @@ pub async fn last_step_checkpoints_is_valid(
     };
     let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
 
+    if vdf_info.last_step_checkpoints.len() != config.num_checkpoints_in_vdf_step {
+        return Err(eyre::eyre!(
+            "Invalid checkpoint count: expected {}, got {}",
+            config.num_checkpoints_in_vdf_step,
+            vdf_info.last_step_checkpoints.len()
+        ));
+    }
+
     let global_step_number: usize = vdf_info
         .global_step_number
         .try_into()
@@ -382,6 +390,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 mod tests {
     use super::*;
     use base58::FromBase58 as _;
+    use proptest::prelude::*;
 
     use tracing::debug;
 
@@ -658,5 +667,31 @@ mod tests {
             vdf_info.prev_output
         );
         println!("x: {:?}", x);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_vdf_sha_matches_verification(
+            salt_u64 in any::<u64>(),
+            seed_bytes in any::<[u8; 32]>(),
+            num_checkpoints in 1..=4_usize,
+            num_iterations in 1..=8_u64,
+        ) {
+            let salt = U256::from(salt_u64);
+            let original_seed = H256::from(seed_bytes);
+            let mut seed = original_seed;
+            let mut checkpoints = vec![H256::default(); num_checkpoints];
+
+            vdf_sha(salt, &mut seed, num_checkpoints, num_iterations, &mut checkpoints);
+
+            let verification = vdf_sha_verification(
+                salt,
+                original_seed,
+                num_checkpoints,
+                num_iterations as usize,
+            );
+
+            prop_assert_eq!(checkpoints, verification);
+        }
     }
 }
