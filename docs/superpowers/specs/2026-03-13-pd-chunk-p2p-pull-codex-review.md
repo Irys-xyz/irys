@@ -243,6 +243,107 @@ The cancellation model ignores the more common case where another validation bra
 
 **Claude's take**: This is a legitimate concern but bounded — the fetch tasks themselves have finite per-peer timeouts (the gossip client has a 5-second reqwest timeout). So "bandwidth amplification" is real but bounded per-block to `num_missing_chunks * num_assigned_peers * 5s`. Still worth noting in the spec.
 
+#### Resolution: CancellationToken within `tokio::join!`
+
+**Chosen fix**: Introduce a shared `tokio_util::sync::CancellationToken` across all six validation tasks inside `validate_block()`. Every task wrapper both **signals** the token on definitive failure and **listens** for cancellation from siblings. The `tokio::join!` structure is unchanged — cancellation propagates through the token, not through structural restructuring.
+
+**How it works**:
+
+1. `validate_block()` creates a `CancellationToken` before the `tokio::join!`.
+2. Each of the 6 tasks is wrapped in a `tokio::select!` that races the original task against `cancel.cancelled()`.
+3. When any task completes with a definitive failure (`ValidationResult::Invalid` or `Err`), the wrapper calls `cancel.cancel()`.
+4. The token wakes all sibling wrappers' `cancelled()` futures. On the next `tokio::join!` poll, each wrapper's `select!` sees `cancelled()` ready and resolves immediately, **dropping the inner future**.
+5. When `shadow_tx_task`'s inner future is dropped, the `ProvisionBlockChunks` oneshot receiver is dropped. PdService detects this and eagerly cancels the in-flight fetch via `abort_handle.abort()` or removes the pending retry via `retry_queue.remove()` (Issue #2's cascade).
+6. `tokio::join!` resolves within one poll cycle. Cancelled tasks return `ValidationCancelled` sentinels; the real failure is surfaced by the existing "find first invalid" logic.
+
+**Uniform wrapper for `ValidationResult` tasks**:
+
+```rust
+async fn with_cancel(
+    fut: impl Future<Output = ValidationResult>,
+    cancel: CancellationToken,
+) -> ValidationResult {
+    tokio::select! {
+        result = fut => {
+            if matches!(&result, ValidationResult::Invalid(_)) {
+                cancel.cancel();
+            }
+            result
+        }
+        _ = cancel.cancelled() => {
+            ValidationResult::Invalid(ValidationError::ValidationCancelled {
+                reason: "sibling validation failed".into(),
+            })
+        }
+    }
+}
+```
+
+**Application in `validate_block()`**:
+
+```rust
+let cancel = CancellationToken::new();
+
+// Fast tasks — uniform wrapping (signal + listen)
+let recall_task     = with_cancel(recall_task,     cancel.clone());
+let poa_task        = with_cancel(poa_task,        cancel.clone());
+let seeds_task      = with_cancel(seeds_task,      cancel.clone());
+let commitment_task = with_cancel(commitment_task, cancel.clone());
+let data_txs_task   = with_cancel(data_txs_task,   cancel.clone());
+
+// Shadow_tx — same pattern, different return type (eyre::Result)
+let shadow_tx_task = {
+    let cancel = cancel.clone();
+    async move {
+        tokio::select! {
+            result = shadow_tx_task => {
+                if result.is_err() { cancel.cancel(); }
+                result
+            }
+            _ = cancel.cancelled() => {
+                Err(eyre::eyre!("cancelled: sibling validation task failed"))
+            }
+        }
+    }
+};
+
+// tokio::join! unchanged
+let (recall, poa, shadow, seeds, commitment, data_txs) = tokio::join!(
+    recall_task, poa_task, shadow_tx_task,
+    seeds_task, commitment_task, data_txs_task
+);
+```
+
+**Cancellation cascade for an invalid block** (e.g., PoA fails at t=50ms, PD fetch in progress):
+
+```
+t=50ms  PoA completes → Invalid → wrapper calls cancel.cancel()
+t=50ms  Token wakes all sibling cancelled() futures
+t=50ms  tokio::join! polls each wrapper:
+          - shadow_tx: select! picks cancelled() → drops inner future
+              → oneshot receiver dropped
+              → PdService: abort_handle.abort() (Issue #2 cascade)
+          - recall/seeds/commitment/data_txs: already completed (Valid)
+              or: select! picks cancelled() → ValidationCancelled
+t=50ms  tokio::join! resolves
+        Result tuple: PoA=Invalid(real error), shadow=Err(cancelled), others=Valid/Cancelled
+        Existing logic at line 629 surfaces the PoA error
+```
+
+**Phantom invalids**: When the token fires, still-running fast tasks return `ValidationCancelled` instead of their real result. This is harmless — the block is already definitively invalid, and the "find first invalid" logic surfaces the real error (the task that triggered cancellation completed with the actual error before calling `cancel.cancel()`). The `ValidationCancelled` sentinels are never reported as the primary failure reason.
+
+**Dependency**: `tokio_util::sync::CancellationToken` — already on the dependency path via Issue #2's `tokio_util::time::DelayQueue`.
+
+**No signature changes**: The token is created and consumed entirely within `validate_block()`. The `with_cancel` helper is a local async function (or closure). No changes to `shadow_transactions_are_valid`, `poa_is_valid`, or any other validation function signature.
+
+#### Alternatives considered and rejected
+
+**Approach A — `tokio::select!` racing fast-task group vs shadow_tx (structural split)**: Group the 5 fast tasks into one `tokio::join!` future, race it against `shadow_tx_task` via `tokio::select!`. If the fast group resolves first with any `Invalid`, `shadow_tx_task` is dropped. This achieves the same cancellation cascade and preserves parallelism for valid blocks. However, it introduces a "fast track / slow track" mental model that bifurcates the validation structure. The `tokio::join!` must be restructured into nested `select!` + `join!`, and the two branches have different control flow (one returns early, the other awaits the remaining future). The CancellationToken approach avoids this structural change — every task participates uniformly in the same protocol, and the `tokio::join!` is unchanged.
+
+**Approach B — `tokio::spawn` + explicit `AbortHandle`**: Spawn `shadow_tx_task` as a detached tokio task to obtain an `AbortHandle`. Run fast tasks via `tokio::join!`, then abort the handle if any fails. This gives explicit cancellation control but requires `'static` bounds on the spawned future. `shadow_tx_task` captures `&self` (borrows from `BlockValidationTask`), so all referenced data would need to be cloned or Arc-wrapped. It also breaks structured concurrency — the spawned task is detached from the validation task's lifetime, creating cleanup concerns on panic paths.
+
+**Approach C — Two-phase sequential (fast checks first, then shadow_tx)**: Run all 5 fast tasks to completion, check results, then only start `shadow_tx_task` if all passed. Simplest approach and eliminates wasted PD fetches entirely. However, it serializes validation — for valid blocks, total wall-clock time becomes `fast_tasks_time + shadow_tx_time` instead of `max(fast_tasks_time, shadow_tx_time)`. The shadow_tx path includes computation beyond PD fetches (expected shadow tx generation, execution data building) that currently overlaps with PoA and other fast tasks. This latency penalty on the happy path is unacceptable for block validation throughput.
+
 ### 4. Missing AbortHandles for fetch task cancellation (Important)
 
 The spec says PdService will abort per-key fetch tasks when waiters disappear, but the proposed state does not actually retain anything abortable. `PdChunkFetchState` tracks waiters, attempts, and excluded peers, but not a `JoinSet` task ID or `AbortHandle`, so "abort fetch tasks in JoinSet" is not implementable as written. Related: receiver-drop cleanup is only observed on send or before respawn, so a cancelled block can remain attached to in-flight work for a full request timeout or longer.
