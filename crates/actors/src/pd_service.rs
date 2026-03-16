@@ -670,6 +670,31 @@ impl PdService {
         );
     }
 
+    /// Checks if a chunk key has no remaining waiters and cancels the fetch if so.
+    /// Called after removing a tx or block from a fetch state's waiter sets.
+    fn cancel_fetch_if_no_waiters(&mut self, key: &ChunkKey) {
+        let Some(state) = self.pending_fetches.get(key) else {
+            return;
+        };
+        if !state.waiting_txs.is_empty() || !state.waiting_blocks.is_empty() {
+            return;
+        }
+
+        let state = self.pending_fetches.remove(key).unwrap();
+        match state.status {
+            fetch::FetchPhase::Fetching => {
+                if let Some(handle) = state.abort_handle {
+                    handle.abort();
+                }
+            }
+            fetch::FetchPhase::Backoff => {
+                if let Some(queue_key) = state.retry_queue_key {
+                    self.retry_queue.remove(&queue_key);
+                }
+            }
+        }
+    }
+
     /// Release chunks when a transaction is removed from the mempool.
     fn handle_release_chunks(&mut self, tx_hash: &B256) {
         self.ready_pd_txs.remove(tx_hash);
@@ -682,6 +707,15 @@ impl PdService {
                     self.cache.remove(key);
                     evicted += 1;
                 }
+            }
+
+            // Cancel pending fetches that were only waiting on this tx.
+            let keys: Vec<ChunkKey> = tx_state.required_chunks.into_iter().collect();
+            for key in &keys {
+                if let Some(state) = self.pending_fetches.get_mut(key) {
+                    state.waiting_txs.remove(tx_hash);
+                }
+                self.cancel_fetch_if_no_waiters(key);
             }
 
             trace!(
@@ -803,11 +837,40 @@ impl PdService {
                     self.cache.remove(key);
                 }
             }
+
+            // Cancel pending fetches that were only waiting on this block.
+            // (Handles the case where the oneshot is dropped due to validation cancellation.)
+            for key in &chunk_keys {
+                if let Some(state) = self.pending_fetches.get_mut(key) {
+                    state.waiting_blocks.remove(block_hash);
+                }
+                self.cancel_fetch_if_no_waiters(key);
+            }
+
             trace!(
                 block_hash = %block_hash,
                 released_keys = chunk_keys.len(),
                 "Released block validation chunks"
             );
+            self.cache.try_shrink_to_fit();
+        }
+
+        // Also cancel pending fetches tracked via pending_blocks (chunks that haven't
+        // arrived yet won't be in block_tracker, only in pending_blocks).
+        if let Some(pending) = self.pending_blocks.remove(block_hash) {
+            let keys = pending.all_keys;
+            for key in &keys {
+                // Remove cache references that were already added for this block.
+                let unreferenced = self.cache.remove_reference(key, block_hash);
+                if unreferenced {
+                    self.cache.remove(key);
+                }
+                // Remove this block from the fetch's waiter set and cancel if empty.
+                if let Some(state) = self.pending_fetches.get_mut(key) {
+                    state.waiting_blocks.remove(block_hash);
+                }
+                self.cancel_fetch_if_no_waiters(key);
+            }
             self.cache.try_shrink_to_fit();
         }
     }
