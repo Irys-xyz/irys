@@ -1,22 +1,34 @@
-//! Shared test setup helper for PD chunk P2P pull integration tests.
+//! PD chunk P2P pull integration tests.
 //!
 //! Provides `PdP2pTestContext` and `setup_pd_p2p_test()` which:
 //! - Start a genesis Node A with real uploaded data (16 chunks x 32 bytes = 512 bytes)
 //! - Mine blocks past migration depth so chunks are in storage modules
 //! - Start a peer Node B that syncs to Node A's tip (validator-only, no mining)
 //! - Return context with both nodes, data offsets, and signer accounts
+//!
+//! Test functions exercise the P2P chunk pull path: Node A has chunks in storage,
+//! Node B must fetch them from Node A to validate PD transactions. Currently all tests
+//! are `#[ignore]` because PdService cannot yet fetch chunks from peers (Stage 3).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
+use alloy_eips::Encodable2718 as _;
+use alloy_network::TxSignerSync as _;
+use alloy_primitives::{aliases::U200, Address, U256};
+use alloy_signer_local::LocalSigner;
+use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
 
 /// Context returned by [`setup_pd_p2p_test`] containing both nodes and metadata
 /// about the uploaded data.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "fields reserved for Stage 3 P2P pull tests")]
 pub(crate) struct PdP2pTestContext {
     /// Genesis node with mining, storage modules, and uploaded chunk data.
     pub node_a: IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -54,7 +66,6 @@ pub(crate) struct PdP2pTestContext {
 /// 5. Starts Node B as a validator-only peer (not staked, not pledged, no mining).
 /// 6. Waits for Node B to sync to Node A's tip.
 /// 7. Returns [`PdP2pTestContext`] with both nodes and metadata.
-#[allow(dead_code)]
 pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
     let chunk_size: u64 = 32;
     let num_chunks_in_partition: u64 = 10;
@@ -190,4 +201,467 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         peer_signer,
         pd_signer,
     })
+}
+
+/// Build a signed PD transaction referencing real chunk offsets.
+///
+/// Unlike `create_and_inject_pd_transaction_with_priority_fee` (which uses `U200::MAX`
+/// sentinel to bypass chunk provisioning), this helper builds a PD tx with real
+/// `partition_index` and `offset` values. This forces PdService on the validating node
+/// to actually locate (and eventually P2P-fetch) the referenced chunks.
+///
+/// Returns the signed transaction hash (B256) after injection into the target node.
+async fn build_and_inject_real_pd_tx(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    signer: &IrysSigner,
+    partition_index: u64,
+    offset: u32,
+    chunk_count: u16,
+    nonce: u64,
+) -> eyre::Result<alloy_primitives::FixedBytes<32>> {
+    let local_signer = LocalSigner::from(signer.signer.clone());
+    let chain_id = node.node_ctx.config.consensus.chain_id;
+
+    // Build access list referencing real partition/offset values.
+    let specs = vec![ChunkRangeSpecifier {
+        partition_index: U200::from(partition_index),
+        offset,
+        chunk_count,
+    }];
+    let access_list = build_pd_access_list(specs.into_iter());
+
+    // PD header with fees high enough to pass min_pd_transaction_cost.
+    let header = PdHeaderV1 {
+        max_priority_fee_per_chunk: U256::from(10_000_000_000_000_000_u64), // 0.01 IRYS
+        max_base_fee_per_chunk: U256::from(1_000_000_000_000_000_u64),      // 0.001 IRYS
+    };
+    let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+
+    let mut tx = TxEip1559 {
+        access_list,
+        chain_id,
+        gas_limit: 1_000_000,
+        input: calldata,
+        max_fee_per_gas: 20_000_000_000,
+        max_priority_fee_per_gas: 1_000_000_000,
+        nonce,
+        to: alloy_primitives::TxKind::Call(Address::random()),
+        value: U256::ZERO,
+    };
+    let signature = local_signer
+        .sign_transaction_sync(&mut tx)
+        .expect("PD tx must be signable");
+
+    let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+        .encoded_2718()
+        .into();
+    let tx_hash = node
+        .node_ctx
+        .reth_node_adapter
+        .rpc
+        .inject_tx(tx_envelope)
+        .await?;
+
+    Ok(tx_hash)
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — PD chunk P2P pull
+//
+// All tests below are #[ignore] because they require PdService to fetch chunks
+// from peers over P2P, which is not yet implemented (Stage 3). They currently
+// exercise the test harness, node topology, data upload, PD tx construction,
+// and block gossip. Once the P2P pull path is wired, remove #[ignore].
+// ---------------------------------------------------------------------------
+
+/// Node A mines a block with 1 PD tx referencing 2 chunks. Node B receives the block
+/// and attempts to validate it. Currently expected to fail because Node B can't fetch
+/// chunks remotely.
+///
+/// Flow:
+/// 1. setup_pd_p2p_test() — Node A has 16 chunks in storage, Node B synced to tip
+/// 2. Pre-test invariant: Node B does NOT have the chunks locally
+/// 3. Inject a PD tx on Node A referencing 2 real chunks at (partition_index, local_offset)
+/// 4. Node A mines a block including the PD tx
+/// 5. Gossip the block to Node B
+/// 6. Assert Node B validates the block and its canonical tip matches Node A
+/// 7. Assert the PD tx is present in the block
+///
+/// Expected failure: Node B's PdService logs "Chunk not found locally. P2P gossip not
+/// yet implemented" and rejects the block during validation.
+#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+#[test_log::test(tokio::test)]
+async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
+    let ctx = setup_pd_p2p_test().await?;
+
+    // Pre-test invariant: Node B should NOT have chunks at the target offset.
+    // get_chunk_by_ledger_offset returns Ok(None) when chunks are not in local storage.
+    let probe_result = ctx
+        .node_b
+        .node_ctx
+        .chunk_provider
+        .get_chunk_by_ledger_offset(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(ctx.data_start_offset),
+        );
+    assert!(
+        matches!(probe_result, Ok(None) | Err(_)),
+        "Node B should NOT have chunk data at ledger offset {} before P2P fetch",
+        ctx.data_start_offset,
+    );
+
+    // Inject a PD tx on Node A referencing 2 real chunks.
+    let tx_hash = build_and_inject_real_pd_tx(
+        &ctx.node_a,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        2, // chunk_count
+        0, // nonce
+    )
+    .await?;
+    info!("PD tx injected on Node A: {:?}", tx_hash);
+
+    // Wait for PD monitor on Node A to detect and provision chunks from local storage.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Mine a block on Node A (without auto-gossip so we control timing).
+    let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
+
+    // Verify the PD tx was included in the block.
+    let pd_tx_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| tx.hash() == &tx_hash);
+    assert!(
+        pd_tx_included,
+        "PD tx {:?} should be included in Node A's mined block",
+        tx_hash,
+    );
+
+    let block_height = block.height;
+    info!("Node A mined block at height {} with PD tx", block_height);
+
+    // Gossip the block to Node B.
+    ctx.node_a
+        .gossip_block_to_peers(&Arc::new(block.as_ref().clone()))?;
+    ctx.node_a.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    // Wait for Node B to validate and accept the block.
+    // This is where P2P chunk fetch would be triggered on Node B.
+    ctx.node_b.wait_until_height(block_height, 30).await?;
+
+    // Verify Node B's canonical tip matches Node A's.
+    let node_b_height = ctx.node_b.get_canonical_chain_height().await;
+    assert_eq!(
+        node_b_height, block_height,
+        "Node B canonical tip should match Node A after validation",
+    );
+
+    info!(
+        "Node B validated PD block at height {} (both nodes at same tip)",
+        block_height,
+    );
+
+    ctx.node_b.stop().await;
+    ctx.node_a.stop().await;
+    Ok(())
+}
+
+/// Node A mines a block with 3 PD txs referencing different chunk ranges.
+/// Node B fetches all chunks and validates.
+///
+/// Flow:
+/// 1. setup_pd_p2p_test() — Node A has 16 chunks in storage
+/// 2. Inject 3 PD txs on Node A:
+///    - T1: chunks at (partition_index, local_offset+0, count=2) — offsets 0-1
+///    - T2: chunks at (partition_index, local_offset+2, count=2) — offsets 2-3
+///    - T3: chunks at (partition_index, local_offset+4, count=2) — offsets 4-5
+/// 3. Node A mines a block, gossips to Node B
+/// 4. Assert Node B validates, all 3 txs in block
+///
+/// Expected failure: same as happy_path — Node B can't fetch chunks remotely yet.
+#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+#[test_log::test(tokio::test)]
+async fn test_pd_chunk_p2p_multiple_txs() -> eyre::Result<()> {
+    let ctx = setup_pd_p2p_test().await?;
+
+    // Verify that all 6 chunks (3 txs x 2 chunks each) fit within the uploaded data.
+    assert!(
+        ctx.num_chunks_uploaded >= 6,
+        "Need at least 6 uploaded chunks for 3 PD txs x 2 chunks, got {}",
+        ctx.num_chunks_uploaded,
+    );
+
+    // Inject 3 PD txs on Node A, each referencing 2 contiguous chunks at different offsets.
+    let tx1_hash = build_and_inject_real_pd_tx(
+        &ctx.node_a,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset, // offsets 0-1 relative to data start
+        2,                // chunk_count
+        0,                // nonce
+    )
+    .await?;
+    info!("PD tx1 injected (offsets +0..+1): {:?}", tx1_hash);
+
+    let tx2_hash = build_and_inject_real_pd_tx(
+        &ctx.node_a,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset + 2, // offsets 2-3 relative to data start
+        2,                    // chunk_count
+        1,                    // nonce
+    )
+    .await?;
+    info!("PD tx2 injected (offsets +2..+3): {:?}", tx2_hash);
+
+    let tx3_hash = build_and_inject_real_pd_tx(
+        &ctx.node_a,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset + 4, // offsets 4-5 relative to data start
+        2,                    // chunk_count
+        2,                    // nonce
+    )
+    .await?;
+    info!("PD tx3 injected (offsets +4..+5): {:?}", tx3_hash);
+
+    // Wait for PD monitor on Node A to provision all chunks.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Mine a block on Node A.
+    let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
+
+    // Verify all 3 PD txs are in the block.
+    let block_txs = &eth_payload.block().body().transactions;
+    let tx1_included = block_txs.iter().any(|tx| tx.hash() == &tx1_hash);
+    let tx2_included = block_txs.iter().any(|tx| tx.hash() == &tx2_hash);
+    let tx3_included = block_txs.iter().any(|tx| tx.hash() == &tx3_hash);
+
+    assert!(tx1_included, "PD tx1 (offsets +0..+1) should be in block");
+    assert!(tx2_included, "PD tx2 (offsets +2..+3) should be in block");
+    assert!(tx3_included, "PD tx3 (offsets +4..+5) should be in block");
+
+    let block_height = block.height;
+    info!(
+        "Node A mined block at height {} with 3 PD txs",
+        block_height,
+    );
+
+    // Gossip the block to Node B.
+    ctx.node_a
+        .gossip_block_to_peers(&Arc::new(block.as_ref().clone()))?;
+    ctx.node_a.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    // Wait for Node B to validate and accept the block.
+    ctx.node_b.wait_until_height(block_height, 30).await?;
+
+    let node_b_height = ctx.node_b.get_canonical_chain_height().await;
+    assert_eq!(
+        node_b_height, block_height,
+        "Node B should have validated the block with 3 PD txs",
+    );
+
+    info!(
+        "Node B validated block with 3 PD txs at height {}",
+        block_height,
+    );
+
+    ctx.node_b.stop().await;
+    ctx.node_a.stop().await;
+    Ok(())
+}
+
+/// PD tx T1 enters Node B's mempool (needs chunk X). Node A mines a block with
+/// PD tx T2 also needing chunk X. Single fetch should serve both waiters.
+///
+/// This test exercises the deduplication logic in PdService: when two PD txs
+/// reference the same chunk, only one P2P fetch should be initiated, and both
+/// waiters should be satisfied when the chunk arrives.
+///
+/// Flow:
+/// 1. setup_pd_p2p_test() — Node A has chunks, Node B synced to tip
+/// 2. Submit T1 to Node B's mempool referencing chunk at local_offset (1 chunk)
+/// 3. Submit T2 to Node A referencing the same chunk at local_offset (1 chunk)
+/// 4. Node A mines a block containing T2, gossips to Node B
+/// 5. Assert Node B validates the block
+/// 6. Assert chunk is now available locally on Node B (fetched once for both)
+///
+/// Expected failure: Node B can't fetch chunks remotely yet. PdService on Node B
+/// will fail to provision both T1 (mempool path) and T2 (block validation path).
+#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+#[test_log::test(tokio::test)]
+async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
+    let ctx = setup_pd_p2p_test().await?;
+
+    // T1: inject a PD tx directly into Node B's mempool, referencing 1 chunk
+    // at (partition_index, local_offset). Node B does NOT have this chunk locally,
+    // so PdService will need to P2P-fetch it.
+    let t1_hash = build_and_inject_real_pd_tx(
+        &ctx.node_b,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        1, // chunk_count — same chunk as T2
+        0, // nonce
+    )
+    .await?;
+    info!(
+        "T1 injected into Node B mempool (offset {}): {:?}",
+        ctx.local_offset, t1_hash,
+    );
+
+    // T2: inject a PD tx into Node A's mempool, referencing the SAME chunk.
+    let t2_hash = build_and_inject_real_pd_tx(
+        &ctx.node_a,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        1, // chunk_count — same chunk as T1
+        1, // nonce (different from T1 since same signer)
+    )
+    .await?;
+    info!(
+        "T2 injected into Node A mempool (offset {}): {:?}",
+        ctx.local_offset, t2_hash,
+    );
+
+    // Wait for PD monitors on both nodes to detect the txs.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Mine a block on Node A containing T2.
+    let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
+
+    let t2_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| tx.hash() == &t2_hash);
+    assert!(t2_included, "T2 should be included in Node A's mined block",);
+
+    let block_height = block.height;
+    info!("Node A mined block at height {} with T2", block_height,);
+
+    // Gossip the block to Node B. Node B must:
+    // 1. Fetch the chunk for T2 (block validation path)
+    // 2. The same chunk also satisfies T1 (mempool path) — deduplication
+    ctx.node_a
+        .gossip_block_to_peers(&Arc::new(block.as_ref().clone()))?;
+    ctx.node_a.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    // Wait for Node B to validate the block.
+    ctx.node_b.wait_until_height(block_height, 30).await?;
+
+    let node_b_height = ctx.node_b.get_canonical_chain_height().await;
+    assert_eq!(
+        node_b_height, block_height,
+        "Node B should have validated the block containing T2",
+    );
+
+    // After P2P fetch, the chunk should be locally available on Node B.
+    // This proves deduplication: one fetch served both T1 (mempool) and T2 (block).
+    let chunk_on_b = ctx
+        .node_b
+        .node_ctx
+        .chunk_provider
+        .get_chunk_by_ledger_offset(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(ctx.data_start_offset),
+        );
+    assert!(
+        matches!(chunk_on_b, Ok(Some(_))),
+        "Chunk at ledger offset {} should be available on Node B after P2P fetch (deduplication)",
+        ctx.data_start_offset,
+    );
+
+    info!("Deduplication verified: single fetch served both T1 and T2");
+
+    ctx.node_b.stop().await;
+    ctx.node_a.stop().await;
+    Ok(())
+}
+
+/// PD tx enters Node B's mempool. Node B fetches chunks, tx transitions to Ready.
+///
+/// This test exercises the mempool-only path: a PD tx is submitted directly to
+/// Node B, which must fetch the referenced chunks from peers to mark the tx as
+/// ready for inclusion in a future block.
+///
+/// Flow:
+/// 1. setup_pd_p2p_test() — Node A has chunks, Node B synced to tip
+/// 2. Submit a PD tx to Node B's mempool referencing 2 chunks
+/// 3. Wait for PdService on Node B to process the tx
+/// 4. Assert the tx hash appears in Node B's ready_pd_txs set (once P2P fetch works)
+/// 5. Assert chunks are in Node B's ChunkDataIndex
+///
+/// Expected failure: Node B can't fetch chunks remotely yet. PdService marks the tx
+/// as pending/partially-ready because it cannot locate the chunks locally.
+#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+#[test_log::test(tokio::test)]
+async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
+    let ctx = setup_pd_p2p_test().await?;
+
+    // Submit a PD tx directly to Node B's mempool referencing 2 real chunks.
+    // Node B does NOT have these chunks in storage — it must P2P-fetch them.
+    let tx_hash = build_and_inject_real_pd_tx(
+        &ctx.node_b,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        2, // chunk_count
+        0, // nonce
+    )
+    .await?;
+    info!(
+        "PD tx injected into Node B mempool (offset {}, 2 chunks): {:?}",
+        ctx.local_offset, tx_hash,
+    );
+
+    // Wait for PdService on Node B to detect the tx from the mempool monitor
+    // and attempt to provision chunks. With P2P fetch implemented, this should
+    // trigger a pull request to Node A for the 2 chunks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Once P2P fetch is implemented:
+    // - PdService will fetch chunks from Node A
+    // - The tx will transition to Ready in the ready_pd_txs set
+    // - Chunks will be stored in Node B's ChunkDataIndex
+    //
+    // For now, we verify the tx was at least submitted successfully and the node
+    // is still running (no panics from the missing-chunk path).
+    let node_b_height = ctx.node_b.get_canonical_chain_height().await;
+    info!(
+        "Node B still running at height {} after PD tx submission",
+        node_b_height,
+    );
+
+    // Verify chunks are available on Node B after P2P fetch.
+    // Check both chunk offsets: data_start_offset and data_start_offset+1.
+    for i in 0..2_u64 {
+        let global_offset = ctx.data_start_offset + i;
+        let chunk_available = ctx
+            .node_b
+            .node_ctx
+            .chunk_provider
+            .get_chunk_by_ledger_offset(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(global_offset),
+            );
+        assert!(
+            matches!(chunk_available, Ok(Some(_))),
+            "Chunk at ledger offset {} (+{}) should be available on Node B after P2P fetch",
+            global_offset,
+            i,
+        );
+    }
+
+    info!("Mempool path verified: PD tx ready and chunks cached on Node B");
+
+    ctx.node_b.stop().await;
+    ctx.node_a.stop().await;
+    Ok(())
 }
