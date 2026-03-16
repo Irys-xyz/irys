@@ -162,9 +162,11 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         num_chunks_uploaded, data_start_offset
     );
 
-    // Record the current canonical chain height so we can wait for Node B to sync.
-    let node_a_height = node_a.get_canonical_chain_height().await;
-    info!("Node A canonical chain height: {}", node_a_height);
+    // Record Node A's block index height (migrated/confirmed blocks only).
+    // Chain sync can only pull blocks that are in the source's block index —
+    // NOT the canonical tip, which may be block_migration_depth ahead.
+    let node_a_index_height = node_a.get_block_index_height();
+    info!("Node A block index height: {}", node_a_index_height);
 
     // --- Start Node B (peer, validator-only, no staking/pledging/mining) ---
     let peer_config = node_a.testing_peer_with_signer(&peer_signer);
@@ -172,15 +174,15 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         .start_with_name("NODE_B")
         .await;
 
-    // Wait for Node B to sync and confirm to Node A's tip.
-    // Uses wait_until_height_confirmed so that blocks are migrated to MDBX (BlockIndex populated).
-    // Node B needs BlockIndex + DataTransactionHeaders for local data_root derivation.
+    // Wait for Node B's block index to catch up to Node A's indexed height.
+    // This ensures Node B has BlockIndex + DataTransactionHeaders in MDBX,
+    // required for local data_root derivation during chunk verification.
     node_b
-        .wait_until_height_confirmed(node_a_height, seconds_to_wait)
+        .wait_until_block_index_height(node_a_index_height, seconds_to_wait)
         .await?;
     info!(
-        "Node B synced and confirmed to Node A height {}",
-        node_a_height
+        "Node B block index synced to height {}",
+        node_a_index_height
     );
 
     // Compute partition_index and local_offset from data_start_offset.
