@@ -30,8 +30,10 @@ use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger};
+use std::future::Future;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, debug, error, warn};
 
 /// Result of waiting for parent validation to complete
@@ -81,6 +83,29 @@ impl Ord for BlockValidationTask {
             .header()
             .block_hash
             .cmp(&other.sealed_block.header().block_hash)
+    }
+}
+
+/// Wraps a validation task to participate in sibling cancellation.
+/// If the task completes with `Invalid`, it signals the token so sibling tasks
+/// can be cancelled early. If the token fires first, the task returns
+/// `ValidationCancelled`.
+async fn with_cancel(
+    fut: impl Future<Output = ValidationResult>,
+    cancel: CancellationToken,
+) -> ValidationResult {
+    tokio::select! {
+        result = fut => {
+            if matches!(&result, ValidationResult::Invalid(_)) {
+                cancel.cancel();
+            }
+            result
+        }
+        _ = cancel.cancelled() => {
+            ValidationResult::Invalid(ValidationError::ValidationCancelled {
+                reason: "sibling validation failed".into(),
+            })
+        }
     }
 }
 
@@ -546,6 +571,33 @@ impl BlockValidationTask {
                 );
                 ValidationResult::Invalid(ValidationError::PreValidation(e))
             })
+        };
+
+        // Create a cancellation token so that if any sibling task fails,
+        // the remaining tasks can be cancelled early.
+        let cancel = CancellationToken::new();
+
+        // Wrap the 5 tasks that return ValidationResult
+        let recall_task = with_cancel(recall_task, cancel.clone());
+        let poa_task = with_cancel(poa_task, cancel.clone());
+        let seeds_validation_task = with_cancel(seeds_validation_task, cancel.clone());
+        let commitment_ordering_task = with_cancel(commitment_ordering_task, cancel.clone());
+        let data_txs_validation_task = with_cancel(data_txs_validation_task, cancel.clone());
+
+        // Wrap the shadow_tx_task separately (returns eyre::Result, not ValidationResult)
+        let shadow_tx_task = {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    result = shadow_tx_task => {
+                        if result.is_err() { cancel.cancel(); }
+                        result
+                    }
+                    _ = cancel.cancelled() => {
+                        Err(eyre::eyre!("cancelled: sibling validation task failed"))
+                    }
+                }
+            }
         };
 
         // Wait for all validation tasks to complete
