@@ -209,11 +209,12 @@ This local derivation is cryptographically equivalent to the `tx_path` proof cha
                          │  3. Resolve to peer addresses (PeerList)    │
                          │  4. Try public API first (existing endpoint):│
                          │     GET /v1/chunk/ledger/{id}/{off}         │
-                         │     → returns ChunkFormat::Packed (always)  │
+                         │     → always returns Packed                 │
                          │  5. If API fails, fall back to gossip pull: │
                          │     /gossip/v2/pull_data (PdChunk variant)  │
-                         │  6. Unpack locally via irys_packing::unpack │
-                         │  7. Return PdChunkFetchResult               │
+                         │     → returns Unpacked (cache hit) or Packed│
+                         │  6. If packed: unpack locally               │
+                         │  7. Return PdChunkFetchResult (ChunkFormat) │
                          └──────────────────┬──────────────────────────┘
                                             │
                                             ▼
@@ -226,7 +227,7 @@ This local derivation is cryptographically equivalent to the `tx_path` proof cha
                          │                                             │
                          │  Gossip fallback: resolve_data_request      │
                          │    PdChunk(ledger, offset) =>               │
-                         │      get_chunk_by_ledger_offset (packed)    │
+                         │      get_chunk_for_pd (unpacked or packed)  │
                          └─────────────────────────────────────────────┘
 ```
 
@@ -299,9 +300,10 @@ Fetch tasks execute:
   │
   ▼
 PdService::on_fetch_done (select! arm 3):
-  On Ok(packed_chunk):
-    1. Unpack locally via irys_packing::unpack() using (packing_address,
-       partition_hash, chunk_offset, chain_id) from PackedChunk metadata
+  On Ok(chunk_format):
+    1. If packed, unpack locally; if already unpacked (gossip cache hit), use directly:
+       Packed  → irys_packing::unpack() using PackedChunk metadata
+       Unpacked → use bytes directly
     2. Derive expected data_root locally from MDBX:
        a. bounds = block_index.get_block_bounds(DataLedger::Publish, key.offset)
        b. block_header = block_header_by_hash(bounds.block_hash)
@@ -507,9 +509,10 @@ PdService select! loop exits on shutdown signal
 
 ```rust
 /// Result returned by a chunk fetch task in the JoinSet.
+/// ChunkFormat is Unpacked (from gossip MDBX cache hit) or Packed (from API / gossip SM fallback).
 struct PdChunkFetchResult {
     key: ChunkKey,
-    result: Result<PackedChunk, PdChunkFetchError>,
+    result: Result<ChunkFormat, PdChunkFetchError>,
 }
 
 /// Phase of a single chunk key's fetch lifecycle.
@@ -630,7 +633,7 @@ async fn start(mut self) {
 fn on_fetch_done(&mut self, result: JoinResult<PdChunkFetchResult>) {
     let PdChunkFetchResult { key, result } = /* unwrap join result */;
     match result {
-        Ok(packed_chunk) => { /* unpack locally, derive expected data_root from MDBX, verify, cache chunk, notify waiters */ }
+        Ok(chunk_format) => { /* unpack if packed, derive expected data_root from MDBX, verify, cache chunk, notify waiters */ }
         Err(PdChunkFetchError::AllPeersFailed { excluded_peers }) => {
             let Some(state) = self.pending_fetches.get_mut(&key) else { return };
 
@@ -796,7 +799,7 @@ impl GossipDataRequestV2 {
 // Add to GossipDataV2 (response enum):
 pub enum GossipDataV2 {
     // ... existing variants (ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction) ...
-    PdChunk(PackedChunk),  // NEW: packed chunk (requester unpacks and verifies locally)
+    PdChunk(ChunkFormat),  // NEW: unpacked from MDBX cache if available, packed otherwise
 }
 ```
 
@@ -806,9 +809,10 @@ pub enum GossipDataV2 {
 
 ```rust
 GossipDataRequestV2::PdChunk(ledger, offset) => {
-    match self.storage_provider.get_chunk_by_ledger_offset(ledger, offset.into()) {
-        Ok(Some(packed_chunk)) => {
-            Some(GossipDataV2::PdChunk(ChunkFormat::Packed(packed_chunk)))
+    // Try MDBX CachedChunks first for unpacked version, fall back to packed from SM
+    match self.storage_provider.get_chunk_for_pd(ledger, offset.into()) {
+        Ok(Some(chunk_format)) => {
+            Some(GossipDataV2::PdChunk(chunk_format))
         }
         Ok(None) => None,
         Err(e) => {
@@ -819,20 +823,24 @@ GossipDataRequestV2::PdChunk(ledger, offset) => {
 }
 ```
 
-This uses the existing `get_chunk_by_ledger_offset` method (no trait changes). Wiring `Arc<ChunkProvider>` into `GossipDataHandler` is still needed. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through `P2PService::run` into `GossipDataHandler::new`. `GossipDataHandler` is in `crates/p2p` and only needs the `ChunkStorageProvider` trait (from `irys-types`, which `p2p` already depends on).
+This requires a new method `get_chunk_for_pd` on `ChunkStorageProvider` that checks the MDBX `CachedChunks` table for an unpacked version (populated by `ChunkIngressService`), and falls back to the packed chunk from the storage module. No on-the-fly unpacking — the server only returns unpacked if it was already cached. Wiring `Arc<ChunkProvider>` into `GossipDataHandler` is still needed. The `ChunkProvider` is already constructed in `chain.rs` and can be passed through `P2PService::run` into `GossipDataHandler::new`. `GossipDataHandler` is in `crates/p2p` and only needs the `ChunkStorageProvider` trait (from `irys-types`, which `p2p` already depends on).
 
-## Cache Insertion: PackedChunk to Bytes Conversion
+## Cache Insertion: ChunkFormat to Bytes Conversion
 
-The fetch always returns a `PackedChunk` (from both the public API and gossip fallback). The `ChunkCache` stores `Arc<Bytes>` (raw unpacked chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
+The fetch returns a `ChunkFormat` — packed from the public API (always), or packed/unpacked from the gossip fallback (unpacked when the serving peer has it in MDBX cache). The `ChunkCache` stores `Arc<Bytes>` (raw unpacked chunk data), and the `ChunkDataIndex` DashMap maps `(u32, u64) → Arc<Bytes>`.
 
 When a pulled chunk passes verification (local `data_root` derivation + `data_path` + leaf hash), PdService extracts the raw bytes for cache insertion:
 
 ```rust
-// Unpack locally using entropy from PackedChunk metadata
-// PackedChunk carries packing_address and partition_hash
-let unpacked = irys_packing::unpack(&packed_chunk, &packing_config)?;
+// Unpack if packed; use directly if already unpacked (gossip cache hit)
+let unpacked_bytes = match chunk_format {
+    ChunkFormat::Packed(packed) => {
+        irys_packing::unpack(&packed, &packing_config)?.bytes
+    }
+    ChunkFormat::Unpacked(chunk) => chunk.bytes,
+};
 
-let data: Arc<Bytes> = Arc::new(Bytes::from(unpacked.bytes));
+let data: Arc<Bytes> = Arc::new(Bytes::from(unpacked_bytes));
 // Insert with explicit reference per waiter (see on_fetch_done):
 self.cache.insert(key, data.clone(), first_waiter_id);
 for other_waiter in remaining_waiters {
@@ -841,22 +849,27 @@ for other_waiter in remaining_waiters {
 // cache.insert internally mirrors to the ChunkDataIndex DashMap
 ```
 
-The `data_path`, `data_root`, and `data_size` from the `PackedChunk` are used only for verification and then discarded. This matches how the existing local storage path works: `ChunkStorageProvider::get_unpacked_chunk_by_ledger_offset` returns raw `Bytes`, and `cache.insert` stores `Arc::new(chunk_bytes)`.
+The `data_path`, `data_root`, and `data_size` are used only for verification and then discarded.
 
-**TODO: When the serving endpoint is updated to return unpacked chunks from MDBX cache (see Decision 6 TODO), the unpacking step can be skipped for `ChunkFormat::Unpacked` responses.**
+**TODO: When the public API endpoint is updated to also return unpacked chunks from MDBX cache (see Decision 6 TODO), the public API path will also benefit from skipping the unpack step.**
 
 ## Validation of Pulled Chunks
 
-When PdService receives a `PackedChunk` from a peer (via public API or gossip fallback), it unpacks locally, then verifies the chunk is authentic for the requested `(ledger, offset)` before inserting into the cache. Verification uses the requester's own canonical MDBX state — no server-supplied proof is needed.
+When PdService receives a `ChunkFormat` from a peer (packed from public API, packed or unpacked from gossip), it unpacks if needed, then verifies the chunk is authentic for the requested `(ledger, offset)` before inserting into the cache. Verification uses the requester's own canonical MDBX state — no server-supplied proof is needed.
 
 **Verification pseudocode in `on_fetch_done`**:
 
 ```rust
-// 0. Unpack locally (endpoint always returns packed)
-let unpacked = irys_packing::unpack(&packed_chunk, &packing_config)?;
-let unpacked_bytes = unpacked.bytes;
-let data_root = packed_chunk.data_root;
-let data_path = packed_chunk.data_path;
+// 0. Unpack if packed; use directly if already unpacked (gossip cache hit)
+let (data_root, data_path, unpacked_bytes) = match chunk_format {
+    ChunkFormat::Packed(packed) => {
+        let unpacked = irys_packing::unpack(&packed, &packing_config)?;
+        (packed.data_root, packed.data_path, unpacked.bytes)
+    }
+    ChunkFormat::Unpacked(chunk) => {
+        (chunk.data_root, chunk.data_path, chunk.bytes)
+    }
+};
 
 // 1. Derive expected data_root locally from MDBX
 let bounds = block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(key.offset))?;
@@ -893,10 +906,11 @@ If any verification step fails, the chunk is rejected, the peer is marked as hav
 
 | File | Change |
 |---|---|
-| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` request variant, `GossipDataV2::PdChunk(PackedChunk)` response variant, `to_v1()` returns `None` |
-| `crates/types/src/chunk_provider.rs` | No changes (existing `get_chunk_by_ledger_offset` returns `PackedChunk`, used as-is) |
-| `crates/api-server/src/routes/get_chunk.rs` | No changes (existing endpoint used as-is) |
-| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request` using existing `get_chunk_by_ledger_offset`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field |
+| `crates/types/src/gossip.rs` | Add `GossipDataRequestV2::PdChunk(u32, u64)` request variant, `GossipDataV2::PdChunk(ChunkFormat)` response variant, `to_v1()` returns `None` |
+| `crates/types/src/chunk_provider.rs` | Add `get_chunk_for_pd` method to `ChunkStorageProvider` trait, returning `eyre::Result<Option<ChunkFormat>>` (checks MDBX cache for unpacked, falls back to packed from SM) |
+| `crates/domain/src/models/chunk_provider.rs` | Implement `get_chunk_for_pd` on `ChunkProvider`: check MDBX `CachedChunks` for unpacked version first, fall back to packed from storage module. No on-the-fly unpacking. |
+| `crates/api-server/src/routes/get_chunk.rs` | No changes (existing endpoint used as-is, always returns packed) |
+| `crates/p2p/src/gossip_data_handler.rs` | Handle `PdChunk` in `resolve_data_request` using `get_chunk_for_pd`; add `storage_provider: Arc<dyn ChunkStorageProvider>` field |
 | `crates/p2p/src/gossip_client.rs` | Add `pull_data_from_peers` method that accepts a pre-selected list of peer addresses (instead of using `top_active_peers`). Follows the same retry/handshake pattern as `pull_data_from_network` but with caller-supplied peers. |
 | `crates/p2p/src/gossip_service.rs` | Pass `ChunkProvider` through to `GossipDataHandler` construction |
 | `crates/actors/src/pd_service.rs` | Add `JoinSet`, `DelayQueue<RetryEntry>`, `pending_fetches`, `pending_blocks`, `own_miner_address`, new deps (`reqwest::Client`, `GossipClient`, `PeerList`, `BlockTreeReadGuard`, `BlockIndexReadGuard`, `DatabaseProvider`, `ConsensusConfig`). Refactor `handle_provision_chunks` and `handle_provision_block_chunks` to spawn fetch tasks on miss. Add `on_fetch_done` handler with local `data_root` derivation from MDBX, `irys_packing::unpack()`, `DelayQueue`-based retry logic. Add `on_retry_ready` handler. Add third and fourth `select!` arms for `join_set.join_next()` and `retry_queue.next()`. |
