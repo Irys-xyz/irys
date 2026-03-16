@@ -617,18 +617,82 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
-        // Check shadow_tx_result first to extract ExecutionData
-        let (execution_data, _pd_guard) = match shadow_tx_result {
-            Ok(data) => data,
+        // Check shadow_tx_result to extract ExecutionData.
+        // If the error is a cancellation sentinel (from a sibling task failing),
+        // don't report it yet — fall through to find the real error below.
+        let shadow_tx_outcome = match shadow_tx_result {
+            Ok(data) => Ok(data),
+            Err(ref err)
+                if err
+                    .to_string()
+                    .contains("cancelled: sibling validation task failed") =>
+            {
+                // Shadow tx was cancelled because a sibling failed — the real
+                // error is in one of the other results. Don't return early.
+                tracing::debug!("Shadow tx cancelled by sibling failure, looking for real error");
+                Err(err.to_string())
+            }
             Err(err) => {
+                // Genuine shadow tx validation failure
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                // pd_guard was never created (it's inside the Err variant of eyre::Result)
-                // — no manual release needed
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
             }
         };
+
+        let all_validation_results = [
+            &recall_result,
+            &poa_result,
+            &seeds_validation_result,
+            &commitment_ordering_result,
+            &data_txs_result,
+        ];
+
+        // Helper: find the first real (non-cancellation) error among
+        // the ValidationResult tasks.
+        let find_real_error = || {
+            all_validation_results
+                .iter()
+                .find_map(|r| match r {
+                    ValidationResult::Invalid(e)
+                        if !matches!(e, ValidationError::ValidationCancelled { .. }) =>
+                    {
+                        Some(e.clone())
+                    }
+                    _ => None,
+                })
+        };
+
+        // Helper: find any error (including cancellation sentinels) as fallback.
+        let find_any_error = || {
+            all_validation_results
+                .iter()
+                .find_map(|r| match r {
+                    ValidationResult::Invalid(e) => Some(e.clone()),
+                    _ => None,
+                })
+        };
+
+        // If shadow tx was cancelled by a sibling, surface the real error.
+        if let Err(shadow_cancel_msg) = &shadow_tx_outcome {
+            // First pass: find the real (non-cancellation) error
+            if let Some(real_error) = find_real_error() {
+                return ValidationResult::Invalid(real_error);
+            }
+            // Fallback: report any cancellation error from the validation tasks
+            if let Some(any_error) = find_any_error() {
+                return ValidationResult::Invalid(any_error);
+            }
+            // Edge case: no validation task has an error but shadow was cancelled.
+            // This shouldn't happen, but report the shadow cancellation.
+            return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
+                shadow_cancel_msg.clone(),
+            ));
+        }
+
+        // shadow_tx_outcome is Ok — unwrap the execution data
+        let (execution_data, _pd_guard) = shadow_tx_outcome.unwrap();
 
         match (
             &recall_result,
@@ -677,20 +741,13 @@ impl BlockValidationTask {
 
                 // _pd_guard drops here automatically, sending ReleaseBlockChunks
 
-                // At least one validation failed, return the first Invalid result
-                let first_invalid = [
-                    &recall_result,
-                    &poa_result,
-                    &seeds_validation_result,
-                    &commitment_ordering_result,
-                    &data_txs_result,
-                ]
-                .into_iter()
-                .find_map(|r| match r {
-                    ValidationResult::Invalid(e) => Some(e.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
+                // First pass: find a real (non-cancellation) error
+                if let Some(real_error) = find_real_error() {
+                    return ValidationResult::Invalid(real_error);
+                }
+
+                // Fallback: report any error including cancellation sentinels
+                let first_invalid = find_any_error().unwrap_or_else(|| {
                     ValidationError::Other("consensus validation failed".to_string())
                 });
                 ValidationResult::Invalid(first_invalid)
