@@ -227,6 +227,7 @@ impl P2PService {
             started_at,
             consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            storage_provider: None,
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),

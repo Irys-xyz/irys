@@ -781,7 +781,10 @@ async fn handle_get_data_v2(
                     .json(GossipResponse::Accepted(false))
             }
             GossipDataRequestV2::PdChunk(ledger_id, offset) => {
-                warn!("PD chunk request for ledger={}, offset={}", ledger_id, offset);
+                warn!(
+                    "PD chunk request for ledger={}, offset={}",
+                    ledger_id, offset
+                );
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))
@@ -1040,6 +1043,7 @@ pub(crate) fn data_handler_stub(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        storage_provider: None,
     })
 }
 
@@ -1095,6 +1099,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        storage_provider: None,
     })
 }
 

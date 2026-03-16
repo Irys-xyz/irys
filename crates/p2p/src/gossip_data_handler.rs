@@ -22,6 +22,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
+use irys_types::chunk_provider::ChunkStorageProvider;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
 use irys_types::{
@@ -84,6 +85,7 @@ where
     /// Precomputed hash of the consensus config to avoid recomputing on every handshake
     pub consensus_config_hash: H256,
     pub runtime_handle: tokio::runtime::Handle,
+    pub storage_provider: Option<Arc<dyn ChunkStorageProvider>>,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -108,6 +110,7 @@ where
             started_at: self.started_at,
             consensus_config_hash: self.consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            storage_provider: self.storage_provider.clone(),
         }
     }
 }
@@ -969,9 +972,19 @@ where
                 Ok(None)
             }
             GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(None),
-            GossipDataRequestV2::PdChunk(..) => {
-                // TODO: PD chunk serving will be implemented in a later task
-                Ok(None)
+            GossipDataRequestV2::PdChunk(ledger, offset) => {
+                if let Some(ref provider) = self.storage_provider {
+                    match provider.get_chunk_for_pd(*ledger, *offset) {
+                        Ok(Some(chunk_format)) => Ok(Some(GossipDataV2::PdChunk(chunk_format))),
+                        Ok(None) => Ok(None),
+                        Err(e) => {
+                            warn!(ledger, offset, "Error serving PD chunk: {}", e);
+                            Ok(None)
+                        }
+                    }
+                } else {
+                    Ok(None)
+                }
             }
         }
     }
