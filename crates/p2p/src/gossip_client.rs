@@ -10,10 +10,10 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
-    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, ChunkFormat, GossipCacheKey,
+    HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress,
+    IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
@@ -2209,6 +2209,126 @@ impl GossipClient {
                 "Failed to fetch stake and pledge whitelist".to_string(),
             ),
         })
+    }
+
+    /// Pull a PD chunk from specific peers (by public HTTP API first, gossip fallback).
+    ///
+    /// For each peer in order:
+    /// 1. Try the public API: `GET http://{peer.api}/v1/chunk/ledger/{ledger}/{offset}`
+    /// 2. If that fails, try gossip pull via `GossipDataRequestV2::PdChunk`
+    /// 3. If both fail, move to the next peer
+    ///
+    /// Returns the first successful `ChunkFormat` response.
+    pub async fn pull_pd_chunk_from_peers(
+        &self,
+        peers: &[PeerAddress],
+        ledger: u32,
+        offset: u64,
+        peer_list: &PeerList,
+    ) -> Result<ChunkFormat, PeerNetworkError> {
+        if peers.is_empty() {
+            return Err(PeerNetworkError::NoPeersAvailable);
+        }
+
+        let gossip_request = GossipDataRequestV2::PdChunk(ledger, offset);
+
+        for peer in peers {
+            // --- Try public HTTP API first ---
+            let api_url = format!("http://{}/v1/chunk/ledger/{}/{}", peer.api, ledger, offset);
+
+            let headers = traced_headers();
+            match self.client.get(&api_url).headers(headers).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.json::<ChunkFormat>().await {
+                    Ok(chunk_format) => {
+                        debug!(
+                            "Successfully pulled PD chunk (ledger={}, offset={}) from API {}",
+                            ledger, offset, peer.api
+                        );
+                        return Ok(chunk_format);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to parse PD chunk response from API {}: {}",
+                            peer.api, e
+                        );
+                    }
+                },
+                Ok(resp) => {
+                    warn!(
+                        "PD chunk API request to {} returned status {}, trying gossip fallback",
+                        peer.api,
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "PD chunk API request to {} failed: {}, trying gossip fallback",
+                        peer.api, e
+                    );
+                }
+            }
+
+            // --- Gossip fallback ---
+            // Look up the peer in the peer list to get their PeerId and PeerListItem
+            if let Some(peer_list_item) = peer_list.peer_by_gossip_address(peer.gossip) {
+                let peer_id = peer_list_item.peer_id;
+                let peer_tuple = (peer_id, peer_list_item);
+
+                match self
+                    .pull_primitive_data_and_update_the_score(
+                        &peer_tuple,
+                        gossip_request.clone(),
+                        peer_list,
+                    )
+                    .await
+                {
+                    Ok(GossipResponse::Accepted(Some(GossipDataV2::PdChunk(chunk_format)))) => {
+                        debug!(
+                            "Successfully pulled PD chunk (ledger={}, offset={}) via gossip from peer {}",
+                            ledger, offset, peer_id
+                        );
+                        return Ok(chunk_format);
+                    }
+                    Ok(GossipResponse::Accepted(Some(other))) => {
+                        warn!(
+                            "Gossip pull from peer {} returned unexpected data type: {:?}",
+                            peer_id,
+                            other.data_type_and_id()
+                        );
+                    }
+                    Ok(GossipResponse::Accepted(None)) => {
+                        warn!(
+                            "Peer {} does not have PD chunk (ledger={}, offset={})",
+                            peer_id, ledger, offset
+                        );
+                    }
+                    Ok(GossipResponse::Rejected(reason)) => {
+                        warn!(
+                            "Peer {} rejected PD chunk gossip request: {:?}",
+                            peer_id, reason
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Gossip pull of PD chunk from peer {} failed: {}",
+                            peer_id, e
+                        );
+                    }
+                }
+            } else {
+                debug!(
+                    "Peer {} not found in peer list, skipping gossip fallback",
+                    peer.gossip
+                );
+            }
+        }
+
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to pull PD chunk (ledger={}, offset={}) after trying {} peers",
+            ledger,
+            offset,
+            peers.len()
+        )))
     }
 }
 
