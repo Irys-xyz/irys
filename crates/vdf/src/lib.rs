@@ -691,8 +691,8 @@ mod tests {
                 num_iterations as usize,
             );
 
-            prop_assert_eq!(checkpoints, verification);
             prop_assert_eq!(seed, *verification.last().unwrap());
+            prop_assert_eq!(checkpoints, verification);
         }
     }
 }
