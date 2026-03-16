@@ -4,11 +4,12 @@ pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
 use dashmap::DashSet;
+use futures::StreamExt as _;
 use irys_domain::{BlockTreeReadGuard, PeerList, block_index_guard::BlockIndexReadGuard};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkMessage, PdChunkReceiver};
 use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::{IrysAddress, TokioServiceHandle};
+use irys_types::{DataLedger, IrysAddress, PeerAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
 use reth::tasks::shutdown::Shutdown;
@@ -16,7 +17,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
-use futures::StreamExt as _;
 use tracing::{Instrument as _, debug, info, trace, warn};
 
 /// The PD (Programmable Data) Service manages chunk provisioning for PD transactions.
@@ -145,10 +145,7 @@ impl PdService {
         info!("PdService stopped");
     }
 
-    fn on_fetch_done(
-        &mut self,
-        result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>,
-    ) {
+    fn on_fetch_done(&mut self, result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>) {
         // TODO: implement in Task 15
         match result {
             Ok(fetch_result) => {
@@ -166,6 +163,36 @@ impl PdService {
     fn on_retry_ready(&mut self, entry: fetch::RetryEntry) {
         // TODO: implement in Task 16
         tracing::warn!(key = ?entry.key, "on_retry_ready: not yet implemented");
+    }
+
+    /// Resolves which peers store the chunk at the given key's (ledger, offset).
+    /// Uses partition assignments from the canonical epoch snapshot.
+    ///
+    /// The slot index is derived from `offset / num_chunks_in_partition`, which
+    /// identifies which partition slot in the ledger covers this chunk. We then
+    /// iterate over all assigned data partitions looking for matching (ledger_id,
+    /// slot_index) assignments that belong to other miners.
+    fn resolve_peers_for_chunk(&self, key: &ChunkKey) -> Vec<PeerAddress> {
+        let slot_index = key.offset / self.num_chunks_in_partition;
+        let publish_ledger_id: u32 = DataLedger::Publish.into();
+
+        let tree = self.block_tree.read();
+        let epoch_snapshot = tree.canonical_epoch_snapshot();
+        let assignments = &epoch_snapshot.partition_assignments.data_partitions;
+
+        let mut peers = Vec::new();
+        for (_hash, assignment) in assignments.iter() {
+            if assignment.ledger_id == Some(publish_ledger_id)
+                && assignment.slot_index == Some(slot_index as usize)
+                && assignment.miner_address != self.own_miner_address
+                && let Some(peer) = self
+                    .peer_list
+                    .peer_by_mining_address(&assignment.miner_address)
+            {
+                peers.push(peer.address);
+            }
+        }
+        peers
     }
 
     fn handle_message(&mut self, msg: PdChunkMessage) {
@@ -480,6 +507,73 @@ impl PdService {
             );
             self.cache.try_shrink_to_fit();
         }
+    }
+}
+
+/// Fetch a PD chunk from peers via the public HTTP API.
+///
+/// Tries each peer in order. Returns the first successful `ChunkFormat` response
+/// or an error if all peers fail. This function is `Send + 'static` so it can
+/// be spawned into a `JoinSet`.
+///
+/// Note: gossip-based fallback is not yet implemented due to the circular
+/// dependency between `irys-p2p` and `irys-actors`. This will be added later.
+async fn fetch_chunk_from_peers(
+    key: cache::ChunkKey,
+    peers: Vec<PeerAddress>,
+    http_client: reqwest::Client,
+) -> fetch::PdChunkFetchResult {
+    for peer in &peers {
+        let api_url = format!(
+            "http://{}/chunk/ledger/{}/{}",
+            peer.api, key.ledger, key.offset
+        );
+        match http_client
+            .get(&api_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<irys_types::ChunkFormat>().await {
+                    Ok(chunk_format) => {
+                        return fetch::PdChunkFetchResult {
+                            key,
+                            result: Ok(chunk_format),
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            peer = %peer.api,
+                            "Failed to deserialize PD chunk response: {}", e
+                        );
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    peer = %peer.api,
+                    status = %resp.status(),
+                    "Peer returned non-success for PD chunk"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    peer = %peer.api,
+                    "HTTP request for PD chunk failed: {}", e
+                );
+            }
+        }
+    }
+
+    // All peers failed — return error with empty excluded set.
+    // TODO: map PeerAddress back to IrysAddress for proper excluded_peers tracking
+    // once we have a reverse lookup available.
+    fetch::PdChunkFetchResult {
+        key,
+        result: Err(fetch::PdChunkFetchError::AllPeersFailed {
+            excluded_peers: HashSet::new(),
+        }),
     }
 }
 
