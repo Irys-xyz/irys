@@ -4,16 +4,19 @@ pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
 use dashmap::DashSet;
+use irys_domain::{BlockTreeReadGuard, PeerList, block_index_guard::BlockIndexReadGuard};
+use irys_types::app_state::DatabaseProvider;
 use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkMessage, PdChunkReceiver};
 use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::{IrysAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::task::JoinSet;
+use tokio_util::time::DelayQueue;
 use tracing::{Instrument as _, debug, info, trace, warn};
-
-use irys_types::TokioServiceHandle;
 
 /// The PD (Programmable Data) Service manages chunk provisioning for PD transactions.
 ///
@@ -30,16 +33,47 @@ pub struct PdService {
     block_tracker: HashMap<B256, Vec<ChunkKey>>,
     /// Shared set of ready PD tx hashes. Written on provision/release.
     ready_pd_txs: Arc<DashSet<B256>>,
+
+    // -- P2P chunk fetch infrastructure --
+    /// Active fetch tasks for chunks being retrieved from peers.
+    join_set: JoinSet<fetch::PdChunkFetchResult>,
+    /// Timer-based queue for scheduling fetch retries with exponential backoff.
+    retry_queue: DelayQueue<fetch::RetryEntry>,
+    /// Per-chunk-key fetch state tracking (in-flight, backoff, attempts, etc.).
+    pending_fetches: HashMap<ChunkKey, fetch::PdChunkFetchState>,
+    /// Blocks waiting for P2P-fetched chunks before validation can proceed.
+    pending_blocks: HashMap<B256, fetch::PendingBlockProvision>,
+    /// HTTP client for fetching chunks from peers.
+    http_client: reqwest::Client,
+    /// Shared peer list for discovering chunk sources.
+    peer_list: PeerList,
+    /// Read-only view of the block tree (fork-choice state).
+    block_tree: BlockTreeReadGuard,
+    /// Read-only view of the confirmed block index.
+    block_index: BlockIndexReadGuard,
+    /// Database handle for looking up data transaction headers / chunk metadata.
+    db: DatabaseProvider,
+    /// Number of chunks per partition (from consensus config).
+    num_chunks_in_partition: u64,
+    /// This node's miner address, used to identify self in peer lists.
+    own_miner_address: IrysAddress,
 }
 
 impl PdService {
     /// Spawn the PD service as a tokio task.
+    #[expect(clippy::too_many_arguments)]
     pub fn spawn_service(
         msg_rx: PdChunkReceiver,
         storage_provider: Arc<dyn ChunkStorageProvider>,
         runtime_handle: tokio::runtime::Handle,
         chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
         ready_pd_txs: Arc<DashSet<B256>>,
+        peer_list: PeerList,
+        block_tree: BlockTreeReadGuard,
+        block_index: BlockIndexReadGuard,
+        db: DatabaseProvider,
+        num_chunks_in_partition: u64,
+        own_miner_address: IrysAddress,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
@@ -51,6 +85,17 @@ impl PdService {
             storage_provider,
             block_tracker: HashMap::new(),
             ready_pd_txs,
+            join_set: JoinSet::new(),
+            retry_queue: DelayQueue::new(),
+            pending_fetches: HashMap::new(),
+            pending_blocks: HashMap::new(),
+            http_client: reqwest::Client::new(),
+            peer_list,
+            block_tree,
+            block_index,
+            db,
+            num_chunks_in_partition,
+            own_miner_address,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -413,7 +458,12 @@ impl PdService {
 mod tests {
     use super::*;
     use dashmap::DashMap;
+    use irys_database::{open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockIndex, BlockTree};
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::range_specifier::ChunkRangeSpecifier;
+    use irys_types::{ConsensusConfig, IrysBlockHeader};
+    use std::sync::RwLock;
     use tokio::sync::{mpsc, oneshot};
 
     #[derive(Debug, Clone)]
@@ -461,13 +511,31 @@ mod tests {
     }
 
     /// Create a PdService for testing with a mock provider.
-    fn test_service() -> PdService {
+    /// Returns the service and a TempDir that must be kept alive for the DB.
+    fn test_service() -> (PdService, tempfile::TempDir) {
         let (_tx, rx) = mpsc::unbounded_channel();
         let provider: Arc<dyn ChunkStorageProvider> = Arc::new(MockChunkProvider::new());
         let (_, shutdown) = reth::tasks::shutdown::signal();
         let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
         let ready_pd_txs = Arc::new(DashSet::new());
-        PdService {
+
+        // Create test DB and domain objects for the P2P fetch infrastructure
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let db_env = open_or_create_db(tmp_dir.path(), IrysTables::ALL, None).unwrap();
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.poa.chunk = Some(Default::default());
+        genesis.test_sign();
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+            &genesis,
+            ConsensusConfig::testing(),
+        ))));
+        let block_index = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
+        let peer_list = PeerList::test_mock().expect("failed to create test peer list");
+
+        let service = PdService {
             shutdown,
             msg_rx: rx,
             cache: ChunkCache::with_default_capacity(chunk_data_index),
@@ -475,12 +543,24 @@ mod tests {
             storage_provider: provider,
             block_tracker: HashMap::new(),
             ready_pd_txs,
-        }
+            join_set: JoinSet::new(),
+            retry_queue: DelayQueue::new(),
+            pending_fetches: HashMap::new(),
+            pending_blocks: HashMap::new(),
+            http_client: reqwest::Client::new(),
+            peer_list,
+            block_tree,
+            block_index,
+            db,
+            num_chunks_in_partition: 100,
+            own_miner_address: IrysAddress::default(),
+        };
+        (service, tmp_dir)
     }
 
     #[test]
     fn test_provision_block_chunks_loads_into_cache() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xAA);
         let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
@@ -520,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_release_block_chunks_removes_references() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xBB);
         let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
@@ -562,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_provision_block_chunks_shared_with_tx() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let tx_hash = B256::with_last_byte(0x01);
         let block_hash = B256::with_last_byte(0xCC);
 
@@ -611,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_provisioning_populates_ready_set_and_chunk_index() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let ready_set = service.ready_pd_txs.clone();
         let tx_hash = B256::with_last_byte(0x01);
 
@@ -633,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_provision_block_chunks_cleans_up_on_dropped_receiver() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xDD);
         let specs = vec![ChunkRangeSpecifier {
             partition_index: Default::default(),
@@ -673,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_provision_block_chunks_dropped_receiver_preserves_tx_refs() {
-        let mut service = test_service();
+        let (mut service, _tmp) = test_service();
         let tx_hash = B256::with_last_byte(0x01);
         let block_hash = B256::with_last_byte(0xEE);
 
