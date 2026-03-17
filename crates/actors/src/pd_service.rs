@@ -149,11 +149,11 @@ impl PdService {
     }
 
     fn on_fetch_done(&mut self, result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>) {
-        info!("[PD_DEBUG] on_fetch_done called");
+        debug!("on_fetch_done called");
         let fetch_result = match result {
             Ok(r) => {
-                info!(
-                    "[PD_DEBUG] on_fetch_done: key=({}, {}), success={}",
+                debug!(
+                    "on_fetch_done: key=({}, {}), success={}",
                     r.key.ledger,
                     r.key.offset,
                     r.result.is_ok()
@@ -191,8 +191,8 @@ impl PdService {
 
     /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
     fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat) {
-        info!(
-            "[PD_DEBUG] on_fetch_success: key=({}, {}), format={}",
+        debug!(
+            "on_fetch_success: key=({}, {}), format={}",
             key.ledger,
             key.offset,
             match &chunk_format {
@@ -233,8 +233,8 @@ impl PdService {
                     self.fail_pending_fetch(&key);
                     return;
                 }
-                info!(
-                    "[PD_DEBUG] data_root verified for ({}, {})",
+                debug!(
+                    "data_root verified for ({}, {})",
                     key.ledger, key.offset
                 );
             }
@@ -273,8 +273,8 @@ impl PdService {
             .copied()
             .collect();
 
-        info!(
-            "[PD_DEBUG] on_fetch_success: inserting into cache, {} waiters (blocks={}, txs={})",
+        debug!(
+            "on_fetch_success: inserting into cache, {} waiters (blocks={}, txs={})",
             all_waiters.len(),
             waiting_blocks.len(),
             waiting_txs.len()
@@ -528,8 +528,8 @@ impl PdService {
         let epoch_snapshot = tree.canonical_epoch_snapshot();
         let assignments = &epoch_snapshot.partition_assignments.data_partitions;
 
-        info!(
-            "[PD_DEBUG] resolve_peers_for_chunk: key=({}, {}), slot_index={}, num_assignments={}, own_miner={:?}",
+        debug!(
+            "resolve_peers_for_chunk: key=({}, {}), slot_index={}, num_assignments={}, own_miner={:?}",
             key.ledger,
             key.offset,
             slot_index,
@@ -539,8 +539,8 @@ impl PdService {
 
         let mut peers = Vec::new();
         for (hash, assignment) in assignments.iter() {
-            info!(
-                "[PD_DEBUG]   assignment: hash={}, ledger_id={:?}, slot_index={:?}, miner={:?}",
+            debug!(
+                "  assignment: hash={}, ledger_id={:?}, slot_index={:?}, miner={:?}",
                 hash, assignment.ledger_id, assignment.slot_index, assignment.miner_address,
             );
             if assignment.ledger_id == Some(publish_ledger_id)
@@ -550,12 +550,12 @@ impl PdService {
                     .peer_list
                     .peer_by_mining_address(&assignment.miner_address)
             {
-                info!("[PD_DEBUG]   -> matched! peer api={}", peer.address.api);
+                debug!("  -> matched! peer api={}", peer.address.api);
                 peers.push(peer.address);
             }
         }
-        info!(
-            "[PD_DEBUG] resolve_peers_for_chunk: found {} peers for ({}, {})",
+        debug!(
+            "resolve_peers_for_chunk: found {} peers for ({}, {})",
             peers.len(),
             key.ledger,
             key.offset,
@@ -640,8 +640,8 @@ impl PdService {
 
     /// Provision chunks for a new PD transaction.
     fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
-        info!(
-            "[PD_DEBUG] handle_provision_chunks: tx_hash={}, specs={:?}",
+        debug!(
+            "handle_provision_chunks: tx_hash={}, specs={:?}",
             tx_hash,
             chunk_specs.len()
         );
@@ -1039,8 +1039,8 @@ async fn fetch_chunk_from_peers(
     peers: Vec<PeerAddress>,
     http_client: reqwest::Client,
 ) -> fetch::PdChunkFetchResult {
-    tracing::info!(
-        "[PD_DEBUG] fetch_chunk_from_peers: key=({}, {}), num_peers={}",
+    tracing::debug!(
+        "fetch_chunk_from_peers: key=({}, {}), num_peers={}",
         key.ledger,
         key.offset,
         peers.len(),
@@ -1050,7 +1050,7 @@ async fn fetch_chunk_from_peers(
             "http://{}/v1/chunk/ledger/{}/{}",
             peer.api, key.ledger, key.offset
         );
-        tracing::info!("[PD_DEBUG] fetch_chunk_from_peers: trying {}", api_url);
+        tracing::debug!("fetch_chunk_from_peers: trying {}", api_url);
         match http_client
             .get(&api_url)
             .timeout(std::time::Duration::from_secs(10))
