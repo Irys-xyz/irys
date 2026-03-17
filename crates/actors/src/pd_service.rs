@@ -247,14 +247,14 @@ impl PdService {
                 );
             }
             Err(e) => {
-                // If we cannot derive the expected data_root (e.g., block not yet migrated),
-                // log a warning and proceed — the chunk may still be valid.
                 warn!(
                     ?key,
                     error = %e,
-                    "Could not derive expected data_root for verification — accepting chunk on trust"
+                    "Could not derive expected data_root — rejecting unverifiable chunk \
+                     (PD only accesses migrated blocks, so this indicates missing MDBX state)"
                 );
-                // TODO: Full merkle path + leaf hash verification as fallback
+                self.fail_pending_fetch(&key);
+                return;
             }
         }
 
