@@ -27,6 +27,7 @@ use crate::utils::IrysNodeTest;
 
 /// Context returned by [`setup_pd_p2p_test`] containing both nodes and metadata
 /// about the uploaded data.
+#[expect(dead_code, reason = "fields available for future test assertions")]
 pub(crate) struct PdP2pTestContext {
     /// Genesis node with mining, storage modules, and uploaded chunk data.
     pub node_a: IrysNodeTest<irys_chain::IrysNodeCtx>,
