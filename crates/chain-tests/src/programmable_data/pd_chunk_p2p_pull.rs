@@ -7,8 +7,7 @@
 //! - Return context with both nodes, data offsets, and signer accounts
 //!
 //! Test functions exercise the P2P chunk pull path: Node A has chunks in storage,
-//! Node B must fetch them from Node A to validate PD transactions. Currently all tests
-//! are `#[ignore]` because PdService cannot yet fetch chunks from peers (Stage 3).
+//! Node B must fetch them from Node A to validate PD transactions.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +27,6 @@ use crate::utils::IrysNodeTest;
 
 /// Context returned by [`setup_pd_p2p_test`] containing both nodes and metadata
 /// about the uploaded data.
-#[expect(dead_code, reason = "fields reserved for Stage 3 P2P pull tests")]
 pub(crate) struct PdP2pTestContext {
     /// Genesis node with mining, storage modules, and uploaded chunk data.
     pub node_a: IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -273,11 +271,6 @@ async fn build_and_inject_real_pd_tx(
 
 // ---------------------------------------------------------------------------
 // Integration tests — PD chunk P2P pull
-//
-// All tests below are #[ignore] because they require PdService to fetch chunks
-// from peers over P2P, which is not yet implemented (Stage 3). They currently
-// exercise the test harness, node topology, data upload, PD tx construction,
-// and block gossip. Once the P2P pull path is wired, remove #[ignore].
 // ---------------------------------------------------------------------------
 
 /// Node A mines a block with 1 PD tx referencing 2 chunks. Node B receives the block
@@ -293,9 +286,7 @@ async fn build_and_inject_real_pd_tx(
 /// 6. Assert Node B validates the block and its canonical tip matches Node A
 /// 7. Assert the PD tx is present in the block
 ///
-/// Expected failure: Node B's PdService logs "Chunk not found locally. P2P gossip not
-/// yet implemented" and rejects the block during validation.
-#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+/// Node B validates the block by P2P-fetching the referenced chunks from Node A.
 #[test_log::test(tokio::test)]
 async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
     let ctx = setup_pd_p2p_test().await?;
@@ -412,8 +403,7 @@ async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
 /// 3. Node A mines a block, gossips to Node B
 /// 4. Assert Node B validates, all 3 txs in block
 ///
-/// Expected failure: same as happy_path — Node B can't fetch chunks remotely yet.
-#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+/// Node B validates the block by P2P-fetching all 6 chunks from Node A.
 #[test_log::test(tokio::test)]
 async fn test_pd_chunk_p2p_multiple_txs() -> eyre::Result<()> {
     let ctx = setup_pd_p2p_test().await?;
@@ -524,9 +514,7 @@ async fn test_pd_chunk_p2p_multiple_txs() -> eyre::Result<()> {
 /// 5. Assert Node B validates the block
 /// 6. Assert chunk is now available locally on Node B (fetched once for both)
 ///
-/// Expected failure: Node B can't fetch chunks remotely yet. PdService on Node B
-/// will fail to provision both T1 (mempool path) and T2 (block validation path).
-#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+/// Node B fetches the chunk once and satisfies both waiters via deduplication.
 #[test_log::test(tokio::test)]
 async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
     let ctx = setup_pd_p2p_test().await?;
@@ -635,9 +623,7 @@ async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
 /// 4. Assert the tx hash appears in Node B's ready_pd_txs set (once P2P fetch works)
 /// 5. Assert chunks are in Node B's ChunkDataIndex
 ///
-/// Expected failure: Node B can't fetch chunks remotely yet. PdService marks the tx
-/// as pending/partially-ready because it cannot locate the chunks locally.
-#[ignore = "requires PD chunk P2P pull implementation (Stage 3)"]
+/// Node B fetches the chunks and the tx transitions to Ready in the PD cache.
 #[test_log::test(tokio::test)]
 async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
     let ctx = setup_pd_p2p_test().await?;
