@@ -1315,6 +1315,66 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Poll until a specific chunk key is present in the PD `ChunkDataIndex` cache.
+    ///
+    /// This is useful for tests that need to wait for a P2P fetch to complete
+    /// rather than using a fixed sleep.
+    pub async fn wait_for_pd_chunk_in_cache(
+        &self,
+        ledger: u32,
+        offset: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self
+                .node_ctx
+                .chunk_data_index
+                .contains_key(&(ledger, offset))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk ({}, {}) in ChunkDataIndex",
+            timeout_secs,
+            ledger,
+            offset,
+        ))
+    }
+
+    /// Poll until a PD transaction hash appears in the `ready_pd_txs` set.
+    ///
+    /// This is useful for tests that need to wait for PdService to finish
+    /// fetching all chunks for a mempool PD transaction.
+    pub async fn wait_for_ready_pd_tx(
+        &self,
+        tx_hash: &alloy_core::primitives::B256,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self.node_ctx.ready_pd_txs.contains(tx_hash) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for PD tx {:?} in ready_pd_txs",
+            timeout_secs,
+            tx_hash,
+        ))
+    }
+
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
