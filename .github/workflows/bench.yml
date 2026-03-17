@@ -166,15 +166,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    env:
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -182,11 +177,34 @@ jobs:
       - name: Run benchmarks
         run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-output.txt
 
+      - name: Convert benchmark output to milliseconds
+        run: |
+          python3 -c "
+          import re, json
+          results = []
+          with open('bench-output.txt') as f:
+              for line in f:
+                  m = re.match(r'test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter\s+\(\+/-\s+([\d,]+)\)', line)
+                  if m:
+                      name = m.group(1)
+                      value_ns = int(m.group(2).replace(',', ''))
+                      range_ns = int(m.group(3).replace(',', ''))
+                      results.append({
+                          'name': name,
+                          'unit': 'ms/iter',
+                          'value': round(value_ns / 1e6, 6),
+                          'range': '± ' + str(round(range_ns / 1e6, 6))
+                      })
+          with open('bench-output.json', 'w') as f:
+              json.dump(results, f, indent=2)
+          print(f'Converted {len(results)} benchmarks from ns to ms')
+          "
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          tool: 'cargo'
-          output-file-path: bench-output.txt
+          tool: 'customSmallerIsBetter'
+          output-file-path: bench-output.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           benchmark-data-dir-path: ${{ github.head_ref && format('dev/bench/{0}', github.head_ref) || '.' }}
