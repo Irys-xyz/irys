@@ -1,6 +1,7 @@
-use irys_types::{ChunkFormat, IrysAddress};
+use irys_types::ChunkFormat;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use tokio::task::AbortHandle;
 use tokio_util::time::delay_queue;
 
@@ -9,6 +10,8 @@ use super::cache::ChunkKey;
 /// Result returned by a chunk fetch task in the JoinSet.
 pub(crate) struct PdChunkFetchResult {
     pub key: ChunkKey,
+    /// Which peer served the chunk (for attribution on verification failure).
+    pub serving_peer: Option<SocketAddr>,
     pub result: Result<ChunkFormat, PdChunkFetchError>,
 }
 
@@ -17,7 +20,7 @@ pub(crate) struct PdChunkFetchResult {
 pub(crate) enum PdChunkFetchError {
     /// All assigned peers tried and failed.
     AllPeersFailed {
-        excluded_peers: HashSet<IrysAddress>,
+        failed_peers: Vec<SocketAddr>,
     },
     /// Chunk verification failed (data_root mismatch, proof invalid, etc.).
     VerificationFailed,
@@ -43,7 +46,7 @@ pub(crate) struct PdChunkFetchState {
     /// Distinguishes provisioning lifecycles. Prevents stale retry timers.
     pub generation: u64,
     /// Peers that have been tried and failed.
-    pub excluded_peers: HashSet<IrysAddress>,
+    pub excluded_peers: HashSet<SocketAddr>,
     /// Current phase of the fetch lifecycle.
     pub status: FetchPhase,
     /// Handle to cancel the in-flight fetch task (when Fetching).
@@ -57,7 +60,7 @@ pub(crate) struct RetryEntry {
     pub key: ChunkKey,
     pub attempt: u32,
     pub generation: u64,
-    pub excluded_peers: HashSet<IrysAddress>,
+    pub excluded_peers: HashSet<SocketAddr>,
 }
 
 /// Tracks a block validation waiting for chunks to be fetched.
