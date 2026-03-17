@@ -140,20 +140,20 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup repo
-        uses: ./.github/actions/setup-repo
-
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
       - name: Run benchmarks
-        env:
-          RUSTC_WRAPPER: sccache
         run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-output.txt
 
       - name: Store benchmark result
