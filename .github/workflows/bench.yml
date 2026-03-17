@@ -1,8 +1,7 @@
 name: Benchmarks
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -10,8 +9,11 @@ concurrency:
 
 on:
   pull_request:
-  merge_group:
+    types: [opened]
+  pull_request_review:
+    types: [submitted]
   push:
+    branches: [master]
   workflow_dispatch:
 
 env:
@@ -115,6 +117,21 @@ jobs:
             fi
           fi
 
+          # For pull_request_review events, only run on approvals; check PR description
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "$SHOULD_RUN" == "true" ]]; then
+            if [[ "${{ github.event.review.state }}" != "approved" ]]; then
+              echo "Review is not an approval, skipping..."
+              SHOULD_RUN=false
+            fi
+
+            if [[ "$SHOULD_RUN" == "true" ]]; then
+              PR_NUMBER="${{ github.event.pull_request.number }}"
+              if ! check_pr_description "$PR_NUMBER"; then
+                SHOULD_RUN=false
+              fi
+            fi
+          fi
+
           # always run on the default branch
           if [[ "${{ github.ref }}" == "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
             SHOULD_RUN=true
@@ -134,6 +151,9 @@ jobs:
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,7 +163,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: Run benchmarks
-        run: cargo bench -p irys-vdf --bench vdf_bench -- --output-format bencher | tee bench-output.txt
+        run: cargo bench --workspace -- --output-format bencher | tee bench-output.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
@@ -151,7 +171,8 @@ jobs:
           tool: 'cargo'
           output-file-path: bench-output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.ref == 'refs/heads/master' }}
+          auto-push: true
+          benchmark-data-dir-path: dev/bench/${{ github.head_ref || github.ref_name }}
           alert-threshold: '120%'
           comment-on-alert: true
           fail-on-alert: false
