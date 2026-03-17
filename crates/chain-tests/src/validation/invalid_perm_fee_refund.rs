@@ -74,12 +74,14 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a properly signed data transaction that appears promoted
+    // Use large fees to ensure pre-validation passes; this test is about shadow tx validation,
+    // not fee correctness.
     use irys_types::IrysTransactionCommon as _;
     let mut data_tx = DataTransactionHeader::new(&genesis_config.consensus_config());
     data_tx.data_root = H256::random();
     data_tx.data_size = 1024;
-    data_tx.term_fee = U256::from(1000).into();
-    data_tx.perm_fee = Some(U256::from(2000).into());
+    data_tx.term_fee = U256::from(1_000_000_000_000_000_000_u128).into();
+    data_tx.perm_fee = Some(U256::from(1_000_000_000_000_000_000_u128).into());
     data_tx.ledger_id = DataLedger::Submit as u32;
 
     // Sign the transaction
