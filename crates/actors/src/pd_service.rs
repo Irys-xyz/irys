@@ -271,7 +271,7 @@ impl PdService {
 
         // Cancel any pending retry timer if one exists.
         if let Some(retry_key) = state.retry_queue_key {
-            self.retry_queue.remove(&retry_key);
+            self.retry_queue.try_remove(&retry_key);
         }
 
         let waiting_blocks: Vec<B256> = state.waiting_blocks.into_iter().collect();
@@ -400,7 +400,7 @@ impl PdService {
 
         // Cancel any pending retry timer.
         if let Some(retry_key) = state.retry_queue_key {
-            self.retry_queue.remove(&retry_key);
+            self.retry_queue.try_remove(&retry_key);
         }
 
         // Fail waiting blocks.
@@ -487,6 +487,11 @@ impl PdService {
         if state.generation != entry.generation {
             return;
         }
+
+        // The retry timer entry was already consumed by the select! arm that
+        // called us. Clear the stale key immediately so that any downstream
+        // call to fail_pending_fetch doesn't try to double-remove it.
+        state.retry_queue_key = None;
 
         // Waiters vanished during backoff
         if state.waiting_txs.is_empty() && state.waiting_blocks.is_empty() {
@@ -848,7 +853,7 @@ impl PdService {
             }
             fetch::FetchPhase::Backoff => {
                 if let Some(queue_key) = state.retry_queue_key {
-                    self.retry_queue.remove(&queue_key);
+                    self.retry_queue.try_remove(&queue_key);
                 }
             }
         }
