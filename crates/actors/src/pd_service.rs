@@ -522,6 +522,7 @@ impl PdService {
     /// slot_index) assignments that belong to other miners.
     fn resolve_peers_for_chunk(&self, key: &ChunkKey) -> Vec<PeerAddress> {
         let slot_index = key.offset / self.num_chunks_in_partition;
+        // PD is Publish-ledger-only by design — see CLAUDE.md
         let publish_ledger_id: u32 = DataLedger::Publish.into();
 
         let tree = self.block_tree.read();
@@ -622,6 +623,7 @@ impl PdService {
 
                 match ledger_offset {
                     Some(offset) => {
+                        // PD is Publish-ledger-only by design — see CLAUDE.md
                         keys.insert(ChunkKey { ledger: 0, offset });
                     }
                     None => {
