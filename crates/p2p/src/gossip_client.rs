@@ -2225,7 +2225,7 @@ impl GossipClient {
         ledger: u32,
         offset: u64,
         peer_list: &PeerList,
-    ) -> Result<ChunkFormat, PeerNetworkError> {
+    ) -> Result<(ChunkFormat, std::net::SocketAddr), PeerNetworkError> {
         if peers.is_empty() {
             return Err(PeerNetworkError::NoPeersAvailable);
         }
@@ -2244,7 +2244,7 @@ impl GossipClient {
                             "Successfully pulled PD chunk (ledger={}, offset={}) from API {}",
                             ledger, offset, peer.api
                         );
-                        return Ok(chunk_format);
+                        return Ok((chunk_format, peer.api));
                     }
                     Err(e) => {
                         warn!(
@@ -2287,7 +2287,7 @@ impl GossipClient {
                             "Successfully pulled PD chunk (ledger={}, offset={}) via gossip from peer {}",
                             ledger, offset, peer_id
                         );
-                        return Ok(chunk_format);
+                        return Ok((chunk_format, peer.api));
                     }
                     Ok(GossipResponse::Accepted(Some(other))) => {
                         warn!(

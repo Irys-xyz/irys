@@ -1846,6 +1846,11 @@ impl IrysNode {
         );
 
         // Spawn PD service with real ChunkProvider (replaces the old MockChunkProvider-based PdChunkManager)
+        let pd_chunk_fetcher: std::sync::Arc<dyn irys_types::chunk_provider::PdChunkFetcher> =
+            std::sync::Arc::new(irys_p2p::pd_chunk_fetcher::GossipPdChunkFetcher::new(
+                gossip_data_handler.gossip_client.clone(),
+                peer_list_guard.clone(),
+            ));
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
             pd_chunk_rx,
             chunk_provider.clone(),
@@ -1853,6 +1858,7 @@ impl IrysNode {
             chunk_data_index.clone(),
             ready_pd_txs.clone(),
             peer_list_guard.clone(),
+            pd_chunk_fetcher,
             block_tree_guard.clone(),
             block_index_guard.clone(),
             irys_db.clone(),
