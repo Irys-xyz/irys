@@ -7,7 +7,9 @@ use dashmap::DashSet;
 use futures::{FutureExt as _, StreamExt as _};
 use irys_domain::{BlockTreeReadGuard, PeerList, block_index_guard::BlockIndexReadGuard};
 use irys_types::app_state::DatabaseProvider;
-use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkFetcher, PdChunkMessage, PdChunkReceiver};
+use irys_types::chunk_provider::{
+    ChunkStorageProvider, PdChunkFetcher, PdChunkMessage, PdChunkReceiver,
+};
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::{DataLedger, IrysAddress, PeerAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
@@ -197,7 +199,12 @@ impl PdService {
     }
 
     /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
-    fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat, serving_peer: Option<SocketAddr>) {
+    fn on_fetch_success(
+        &mut self,
+        key: ChunkKey,
+        chunk_format: irys_types::ChunkFormat,
+        serving_peer: Option<SocketAddr>,
+    ) {
         debug!(
             "on_fetch_success: key=({}, {}), format={}",
             key.ledger,
@@ -241,10 +248,7 @@ impl PdService {
                     self.on_fetch_all_peers_failed(key, failed);
                     return;
                 }
-                debug!(
-                    "data_root verified for ({}, {})",
-                    key.ledger, key.offset
-                );
+                debug!("data_root verified for ({}, {})", key.ledger, key.offset);
             }
             Err(e) => {
                 warn!(
@@ -339,11 +343,7 @@ impl PdService {
     }
 
     /// Handle fetch failure when all peers failed — schedule retry or fail permanently.
-    fn on_fetch_all_peers_failed(
-        &mut self,
-        key: ChunkKey,
-        failed_peers: Vec<SocketAddr>,
-    ) {
+    fn on_fetch_all_peers_failed(&mut self, key: ChunkKey, failed_peers: Vec<SocketAddr>) {
         let Some(state) = self.pending_fetches.get_mut(&key) else {
             return;
         };
@@ -374,7 +374,6 @@ impl PdService {
         let delay = fetch::backoff_duration(state.attempt);
         let retry_entry = fetch::RetryEntry {
             key,
-            attempt: next_attempt,
             generation: state.generation,
             excluded_peers: state.excluded_peers.clone(),
         };
@@ -555,7 +554,11 @@ impl PdService {
     /// identifies which partition slot in the ledger covers this chunk. We then
     /// iterate over all assigned data partitions looking for matching (ledger_id,
     /// slot_index) assignments that belong to other miners.
-    fn resolve_peers_for_chunk(&self, key: &ChunkKey, exclude: &HashSet<SocketAddr>) -> Vec<PeerAddress> {
+    fn resolve_peers_for_chunk(
+        &self,
+        key: &ChunkKey,
+        exclude: &HashSet<SocketAddr>,
+    ) -> Vec<PeerAddress> {
         let slot_index = key.offset / self.num_chunks_in_partition;
         // PD is Publish-ledger-only by design — see CLAUDE.md
         let publish_ledger_id: u32 = DataLedger::Publish.into();
@@ -754,7 +757,8 @@ impl PdService {
                             let fetcher = self.chunk_fetcher.clone();
                             let abort_handle = self.join_set.spawn(async move {
                                 match AssertUnwindSafe(async {
-                                    match fetcher.fetch_chunk(&peers, key.ledger, key.offset).await {
+                                    match fetcher.fetch_chunk(&peers, key.ledger, key.offset).await
+                                    {
                                         Ok(success) => fetch::PdChunkFetchResult {
                                             key,
                                             serving_peer: Some(success.serving_peer),
@@ -993,7 +997,10 @@ impl PdService {
                     let fetcher = self.chunk_fetcher.clone();
                     let abort_handle = self.join_set.spawn(async move {
                         match AssertUnwindSafe(async {
-                            match fetcher.fetch_chunk(&peers, fetch_key.ledger, fetch_key.offset).await {
+                            match fetcher
+                                .fetch_chunk(&peers, fetch_key.ledger, fetch_key.offset)
+                                .await
+                            {
                                 Ok(success) => fetch::PdChunkFetchResult {
                                     key: fetch_key,
                                     serving_peer: Some(success.serving_peer),
@@ -1145,7 +1152,10 @@ mod tests {
             _peers: &[PeerAddress],
             _ledger: u32,
             _offset: u64,
-        ) -> Result<irys_types::chunk_provider::PdChunkFetchSuccess, irys_types::chunk_provider::PdChunkFetchFailure> {
+        ) -> Result<
+            irys_types::chunk_provider::PdChunkFetchSuccess,
+            irys_types::chunk_provider::PdChunkFetchFailure,
+        > {
             Err(irys_types::chunk_provider::PdChunkFetchFailure {
                 message: "mock fetcher always fails".to_string(),
                 failed_peers: vec![],

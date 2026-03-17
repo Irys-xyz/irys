@@ -19,10 +19,11 @@ pub(crate) struct PdChunkFetchResult {
 #[derive(Debug)]
 pub(crate) enum PdChunkFetchError {
     /// All assigned peers tried and failed.
-    AllPeersFailed {
-        failed_peers: Vec<SocketAddr>,
-    },
+    AllPeersFailed { failed_peers: Vec<SocketAddr> },
     /// Chunk verification failed (data_root mismatch, proof invalid, etc.).
+    /// Currently matched in on_fetch_done but never constructed by fetch tasks
+    /// (verification happens post-fetch in on_fetch_success). Kept for exhaustive matching.
+    #[allow(dead_code)]
     VerificationFailed,
 }
 
@@ -58,7 +59,6 @@ pub(crate) struct PdChunkFetchState {
 /// Entry stored in the DelayQueue for scheduled retries.
 pub(crate) struct RetryEntry {
     pub key: ChunkKey,
-    pub attempt: u32,
     pub generation: u64,
     pub excluded_peers: HashSet<SocketAddr>,
 }
