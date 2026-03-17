@@ -1,0 +1,247 @@
+name: Benchmarks
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    types: [opened, synchronize, closed]
+  pull_request_review:
+    types: [submitted]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: gate
+    runs-on: [self-hosted, misc-runner]
+    outputs:
+      should-run: ${{ steps.set-output.outputs.should-run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if CI should run
+        id: set-output
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # default to running
+          SHOULD_RUN=true
+
+          # this string disables CI if a commit/branch description includes it
+          DISABLE_CI_STRING="#disable-ci"
+
+          # check if CI is disabled in the commit message (for any event type)
+          if [[ "${{ contains(github.event.head_commit.message, '#disable-ci') }}" == "true" ]]; then
+            echo "commit message contains '$DISABLE_CI_STRING', skipping CI..."
+            SHOULD_RUN=false
+          fi
+
+          # Function to check if PR description contains disable string
+          check_pr_description() {
+            local pr_number=$1
+            if [[ -n "$pr_number" ]]; then
+              PR_DESCRIPTION=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/pulls/$pr_number" | \
+                jq --raw-output .body)
+
+              if [[ "$PR_DESCRIPTION" == *"$DISABLE_CI_STRING"* ]]; then
+                echo "PR #$pr_number description contains '$DISABLE_CI_STRING'"
+                return 1
+              fi
+            fi
+            return 0
+          }
+
+          # For push events, check if this commit is part of an open PR
+          if [[ "${{ github.event_name }}" == "push" && "$SHOULD_RUN" == "true" ]]; then
+            COMMIT_SHA="${{ github.event.after }}"
+            ASSOCIATED_PRS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$COMMIT_SHA/pulls" | \
+              jq --raw-output '.[].number')
+
+            if [[ -n "$ASSOCIATED_PRS" ]]; then
+              echo "Found PRs associated with this commit: $ASSOCIATED_PRS"
+
+              ALL_PRS_DISABLED=true
+              PR_COUNT=0
+
+              for PR_NUMBER in $ASSOCIATED_PRS; do
+                PR_COUNT=$((PR_COUNT+1))
+                if check_pr_description "$PR_NUMBER"; then
+                  echo "PR #$PR_NUMBER doesn't have the disable string, will run CI"
+                  ALL_PRS_DISABLED=false
+                fi
+              done
+
+              if [[ "$ALL_PRS_DISABLED" == "true" && "$PR_COUNT" -gt 0 ]]; then
+                echo "All $PR_COUNT associated PRs have the disable string, skipping CI"
+                SHOULD_RUN=false
+              fi
+            else
+              echo "No open PRs found associated with this commit"
+            fi
+          fi
+
+          # For pull_request events, check PR description
+          if [[ "${{ github.event_name }}" == "pull_request" && "$SHOULD_RUN" == "true" ]]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            if ! check_pr_description "$PR_NUMBER"; then
+              SHOULD_RUN=false
+            fi
+          fi
+
+          # For pull_request_review events, only run on approvals; check PR description
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "$SHOULD_RUN" == "true" ]]; then
+            if [[ "${{ github.event.review.state }}" != "approved" ]]; then
+              echo "Review is not an approval, skipping..."
+              SHOULD_RUN=false
+            fi
+
+            if [[ "$SHOULD_RUN" == "true" ]]; then
+              PR_NUMBER="${{ github.event.pull_request.number }}"
+              if ! check_pr_description "$PR_NUMBER"; then
+                SHOULD_RUN=false
+              fi
+            fi
+          fi
+
+          # always run on the default branch
+          if [[ "${{ github.ref }}" == "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          # always run on workflow_dispatch
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          echo "Should run? ${SHOULD_RUN}"
+          echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+
+  cleanup-branch-data:
+    name: cleanup branch benchmark data
+    runs-on: [self-hosted, misc-runner]
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: Remove branch benchmark data
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+        run: |
+          if [ -d "dev/bench/$BRANCH_NAME" ]; then
+            git rm -rf "dev/bench/$BRANCH_NAME"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "cleanup: remove benchmark data for merged branch $BRANCH_NAME"
+            git push
+          else
+            echo "No benchmark data found for branch $BRANCH_NAME"
+          fi
+
+  cargo-bench:
+    name: cargo bench
+    runs-on: [self-hosted, misc-runner]
+    needs: gate
+    if: ${{ needs.gate.outputs.should-run == 'true' }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Run benchmarks
+        run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-output.txt
+
+      - name: Convert benchmark output to milliseconds
+        run: |
+          python3 -c "
+          import re, json
+          results = []
+          with open('bench-output.txt') as f:
+              for line in f:
+                  m = re.match(r'test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter\s+\(\+/-\s+([\d,]+)\)', line)
+                  if m:
+                      name = m.group(1)
+                      value_ns = int(m.group(2).replace(',', ''))
+                      range_ns = int(m.group(3).replace(',', ''))
+                      results.append({
+                          'name': name,
+                          'unit': 'ms/iter',
+                          'value': round(value_ns / 1e6, 6),
+                          'range': '± ' + str(round(range_ns / 1e6, 6))
+                      })
+          with open('bench-output.json', 'w') as f:
+              json.dump(results, f, indent=2)
+          print(f'Converted {len(results)} benchmarks from ns to ms')
+          "
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'customSmallerIsBetter'
+          output-file-path: bench-output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          benchmark-data-dir-path: ${{ github.head_ref && format('dev/bench/{0}', github.head_ref) || '.' }}
+          alert-threshold: '120%'
+          comment-on-alert: true
+          fail-on-alert: false
+
+      - name: Comment benchmark results URL on PR
+        if: github.head_ref != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request?.number
+              ?? context.payload.review?.pull_request?.number;
+            if (!prNumber) return;
+
+            const branch = '${{ github.head_ref }}';
+            const url = `https://irys-xyz.github.io/irys/dev/bench/${encodeURIComponent(branch)}/index.html`;
+            const marker = '<!-- benchmark-results-url -->';
+            const body = `${marker}\n**Benchmark results:** ${url}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
