@@ -652,26 +652,22 @@ impl BlockValidationTask {
         // Helper: find the first real (non-cancellation) error among
         // the ValidationResult tasks.
         let find_real_error = || {
-            all_validation_results
-                .iter()
-                .find_map(|r| match r {
-                    ValidationResult::Invalid(e)
-                        if !matches!(e, ValidationError::ValidationCancelled { .. }) =>
-                    {
-                        Some(e.clone())
-                    }
-                    _ => None,
-                })
+            all_validation_results.iter().find_map(|r| match r {
+                ValidationResult::Invalid(e)
+                    if !matches!(e, ValidationError::ValidationCancelled { .. }) =>
+                {
+                    Some(e.clone())
+                }
+                _ => None,
+            })
         };
 
         // Helper: find any error (including cancellation sentinels) as fallback.
         let find_any_error = || {
-            all_validation_results
-                .iter()
-                .find_map(|r| match r {
-                    ValidationResult::Invalid(e) => Some(e.clone()),
-                    _ => None,
-                })
+            all_validation_results.iter().find_map(|r| match r {
+                ValidationResult::Invalid(e) => Some(e.clone()),
+                _ => None,
+            })
         };
 
         // If shadow tx was cancelled by a sibling, surface the real error.

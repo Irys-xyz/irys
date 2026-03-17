@@ -152,7 +152,12 @@ impl PdService {
         info!("[PD_DEBUG] on_fetch_done called");
         let fetch_result = match result {
             Ok(r) => {
-                info!("[PD_DEBUG] on_fetch_done: key=({}, {}), success={}", r.key.ledger, r.key.offset, r.result.is_ok());
+                info!(
+                    "[PD_DEBUG] on_fetch_done: key=({}, {}), success={}",
+                    r.key.ledger,
+                    r.key.offset,
+                    r.result.is_ok()
+                );
                 r
             }
             Err(join_error) => {
@@ -186,8 +191,15 @@ impl PdService {
 
     /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
     fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat) {
-        info!("[PD_DEBUG] on_fetch_success: key=({}, {}), format={}", key.ledger, key.offset,
-            match &chunk_format { irys_types::ChunkFormat::Packed(_) => "Packed", irys_types::ChunkFormat::Unpacked(_) => "Unpacked" });
+        info!(
+            "[PD_DEBUG] on_fetch_success: key=({}, {}), format={}",
+            key.ledger,
+            key.offset,
+            match &chunk_format {
+                irys_types::ChunkFormat::Packed(_) => "Packed",
+                irys_types::ChunkFormat::Unpacked(_) => "Unpacked",
+            }
+        );
         // 1. Extract unpacked bytes and data_root from the fetched chunk.
         let config = self.storage_provider.config();
         let (unpacked_bytes, chunk_data_root) = match chunk_format {
@@ -221,7 +233,10 @@ impl PdService {
                     self.fail_pending_fetch(&key);
                     return;
                 }
-                info!("[PD_DEBUG] data_root verified for ({}, {})", key.ledger, key.offset);
+                info!(
+                    "[PD_DEBUG] data_root verified for ({}, {})",
+                    key.ledger, key.offset
+                );
             }
             Err(e) => {
                 // If we cannot derive the expected data_root (e.g., block not yet migrated),
@@ -258,8 +273,12 @@ impl PdService {
             .copied()
             .collect();
 
-        info!("[PD_DEBUG] on_fetch_success: inserting into cache, {} waiters (blocks={}, txs={})",
-            all_waiters.len(), waiting_blocks.len(), waiting_txs.len());
+        info!(
+            "[PD_DEBUG] on_fetch_success: inserting into cache, {} waiters (blocks={}, txs={})",
+            all_waiters.len(),
+            waiting_blocks.len(),
+            waiting_txs.len()
+        );
         if let Some((&first, rest)) = all_waiters.split_first() {
             self.cache.insert(key, data, first);
             for &waiter in rest {
@@ -511,7 +530,11 @@ impl PdService {
 
         info!(
             "[PD_DEBUG] resolve_peers_for_chunk: key=({}, {}), slot_index={}, num_assignments={}, own_miner={:?}",
-            key.ledger, key.offset, slot_index, assignments.len(), self.own_miner_address,
+            key.ledger,
+            key.offset,
+            slot_index,
+            assignments.len(),
+            self.own_miner_address,
         );
 
         let mut peers = Vec::new();
@@ -533,7 +556,9 @@ impl PdService {
         }
         info!(
             "[PD_DEBUG] resolve_peers_for_chunk: found {} peers for ({}, {})",
-            peers.len(), key.ledger, key.offset,
+            peers.len(),
+            key.ledger,
+            key.offset,
         );
         peers
     }
@@ -615,7 +640,11 @@ impl PdService {
 
     /// Provision chunks for a new PD transaction.
     fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
-        info!("[PD_DEBUG] handle_provision_chunks: tx_hash={}, specs={:?}", tx_hash, chunk_specs.len());
+        info!(
+            "[PD_DEBUG] handle_provision_chunks: tx_hash={}, specs={:?}",
+            tx_hash,
+            chunk_specs.len()
+        );
         // Guard against duplicate NewTransaction messages — don't regress an already-tracked tx.
         if self.tracker.get(&tx_hash).is_some() {
             debug!(tx_hash = %tx_hash, "PD transaction already registered, skipping");
@@ -685,20 +714,16 @@ impl PdService {
                             let peers = self.resolve_peers_for_chunk(&key);
                             let client = self.http_client.clone();
                             let abort_handle = self.join_set.spawn(async move {
-                                match AssertUnwindSafe(fetch_chunk_from_peers(
-                                    key, peers, client,
-                                ))
-                                .catch_unwind()
-                                .await
+                                match AssertUnwindSafe(fetch_chunk_from_peers(key, peers, client))
+                                    .catch_unwind()
+                                    .await
                                 {
                                     Ok(result) => result,
                                     Err(_panic) => fetch::PdChunkFetchResult {
                                         key,
-                                        result: Err(
-                                            fetch::PdChunkFetchError::AllPeersFailed {
-                                                excluded_peers: HashSet::new(),
-                                            },
-                                        ),
+                                        result: Err(fetch::PdChunkFetchError::AllPeersFailed {
+                                            excluded_peers: HashSet::new(),
+                                        }),
                                     },
                                 }
                             });
@@ -910,20 +935,16 @@ impl PdService {
                     let fetch_key = *key;
                     let client = self.http_client.clone();
                     let abort_handle = self.join_set.spawn(async move {
-                        match AssertUnwindSafe(fetch_chunk_from_peers(
-                            fetch_key, peers, client,
-                        ))
-                        .catch_unwind()
-                        .await
+                        match AssertUnwindSafe(fetch_chunk_from_peers(fetch_key, peers, client))
+                            .catch_unwind()
+                            .await
                         {
                             Ok(result) => result,
                             Err(_panic) => fetch::PdChunkFetchResult {
                                 key: fetch_key,
-                                result: Err(
-                                    fetch::PdChunkFetchError::AllPeersFailed {
-                                        excluded_peers: HashSet::new(),
-                                    },
-                                ),
+                                result: Err(fetch::PdChunkFetchError::AllPeersFailed {
+                                    excluded_peers: HashSet::new(),
+                                }),
                             },
                         }
                     });
@@ -1020,7 +1041,9 @@ async fn fetch_chunk_from_peers(
 ) -> fetch::PdChunkFetchResult {
     tracing::info!(
         "[PD_DEBUG] fetch_chunk_from_peers: key=({}, {}), num_peers={}",
-        key.ledger, key.offset, peers.len(),
+        key.ledger,
+        key.offset,
+        peers.len(),
     );
     for peer in &peers {
         let api_url = format!(
