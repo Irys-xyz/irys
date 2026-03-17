@@ -274,8 +274,7 @@ async fn build_and_inject_real_pd_tx(
 // ---------------------------------------------------------------------------
 
 /// Node A mines a block with 1 PD tx referencing 2 chunks. Node B receives the block
-/// and attempts to validate it. Currently expected to fail because Node B can't fetch
-/// chunks remotely.
+/// and validates it by fetching chunks from Node A via P2P.
 ///
 /// Flow:
 /// 1. setup_pd_p2p_test() — Node A has 16 chunks in storage, Node B synced to tip
@@ -649,13 +648,8 @@ async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
     // trigger a pull request to Node A for the 2 chunks.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Once P2P fetch is implemented:
-    // - PdService will fetch chunks from Node A
-    // - The tx will transition to Ready in the ready_pd_txs set
-    // - Chunks will be stored in Node B's ChunkDataIndex
-    //
-    // For now, we verify the tx was at least submitted successfully and the node
-    // is still running (no panics from the missing-chunk path).
+    // PdService fetches chunks from Node A via P2P, transitioning the tx to Ready.
+    // Verify the node is running and chunks are populated.
     let node_b_height = ctx.node_b.get_canonical_chain_height().await;
     info!(
         "Node B still running at height {} after PD tx submission",

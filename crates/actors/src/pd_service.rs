@@ -578,7 +578,7 @@ impl PdService {
 
         let mut peers = Vec::new();
         for (hash, assignment) in assignments.iter() {
-            debug!(
+            trace!(
                 "  assignment: hash={}, ledger_id={:?}, slot_index={:?}, miner={:?}",
                 hash, assignment.ledger_id, assignment.slot_index, assignment.miner_address,
             );
@@ -588,11 +588,10 @@ impl PdService {
                 && let Some(peer) = self
                     .peer_list
                     .peer_by_mining_address(&assignment.miner_address)
+                && !exclude.contains(&peer.address.api)
             {
-                if !exclude.contains(&peer.address.api) {
-                    debug!("  -> matched! peer api={}", peer.address.api);
-                    peers.push(peer.address);
-                }
+                debug!("  -> matched! peer api={}", peer.address.api);
+                peers.push(peer.address);
             }
         }
         debug!(

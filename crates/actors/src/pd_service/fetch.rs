@@ -23,7 +23,7 @@ pub(crate) enum PdChunkFetchError {
     /// Chunk verification failed (data_root mismatch, proof invalid, etc.).
     /// Currently matched in on_fetch_done but never constructed by fetch tasks
     /// (verification happens post-fetch in on_fetch_success). Kept for exhaustive matching.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "matched in on_fetch_done but never constructed; kept for exhaustive matching")]
     VerificationFailed,
 }
 
