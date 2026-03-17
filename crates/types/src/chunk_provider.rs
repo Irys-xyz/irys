@@ -3,6 +3,7 @@
 use alloy_primitives::B256;
 use bytes::Bytes;
 use dashmap::DashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -50,6 +51,38 @@ pub trait ChunkStorageProvider: Send + Sync + std::fmt::Debug {
 
     #[must_use]
     fn config(&self) -> ChunkConfig;
+}
+
+/// Error returned when a PD chunk fetch fails.
+#[derive(Debug)]
+pub struct PdChunkFetchFailure {
+    pub message: String,
+    /// API addresses of peers that were tried and failed.
+    pub failed_peers: Vec<SocketAddr>,
+}
+
+/// Success result from a PD chunk fetch, including which peer served it.
+#[derive(Debug)]
+pub struct PdChunkFetchSuccess {
+    pub chunk: ChunkFormat,
+    /// API address of the peer that served this chunk (for attribution on
+    /// verification failure).
+    pub serving_peer: SocketAddr,
+}
+
+/// Fetches PD chunks from remote peers (HTTP + gossip fallback).
+/// Defined in irys-types so irys-actors can use it without depending on irys-p2p.
+#[async_trait::async_trait]
+pub trait PdChunkFetcher: Send + Sync + 'static {
+    /// Fetch a chunk from the given peers. Tries each peer in order.
+    /// Returns the chunk and which peer served it, or an error with the list of
+    /// failed peer addresses.
+    async fn fetch_chunk(
+        &self,
+        peers: &[crate::PeerAddress],
+        ledger: u32,
+        offset: u64,
+    ) -> Result<PdChunkFetchSuccess, PdChunkFetchFailure>;
 }
 
 // ============================================================================
