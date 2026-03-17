@@ -61,6 +61,9 @@ pub struct PdService {
     num_chunks_in_partition: u64,
     /// This node's miner address, used to identify self in peer lists.
     own_miner_address: IrysAddress,
+    /// Monotonically increasing counter used to stamp each new fetch state.
+    /// Allows stale retry callbacks to be discarded when a key is re-fetched.
+    next_generation: u64,
 }
 
 impl PdService {
@@ -100,6 +103,7 @@ impl PdService {
             db,
             num_chunks_in_partition,
             own_miner_address,
+            next_generation: 0,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -729,13 +733,15 @@ impl PdService {
                                     },
                                 }
                             });
+                            let generation = self.next_generation;
+                            self.next_generation += 1;
                             self.pending_fetches.insert(
                                 key,
                                 fetch::PdChunkFetchState {
                                     waiting_txs: HashSet::from([tx_hash]),
                                     waiting_blocks: HashSet::new(),
                                     attempt: 0,
-                                    generation: 0,
+                                    generation,
                                     excluded_peers: HashSet::new(),
                                     status: fetch::FetchPhase::Fetching,
                                     abort_handle: Some(abort_handle),
@@ -950,13 +956,15 @@ impl PdService {
                             },
                         }
                     });
+                    let generation = self.next_generation;
+                    self.next_generation += 1;
                     self.pending_fetches.insert(
                         *key,
                         fetch::PdChunkFetchState {
                             waiting_txs: HashSet::new(),
                             waiting_blocks: HashSet::from([block_hash]),
                             attempt: 0,
-                            generation: 0,
+                            generation,
                             excluded_peers: HashSet::new(),
                             status: fetch::FetchPhase::Fetching,
                             abort_handle: Some(abort_handle),
@@ -1202,6 +1210,7 @@ mod tests {
             db,
             num_chunks_in_partition: 100,
             own_miner_address: IrysAddress::default(),
+            next_generation: 0,
         };
         (service, tmp_dir)
     }
