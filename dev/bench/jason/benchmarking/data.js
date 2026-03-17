@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773760904982,
+  "lastUpdate": 1773762101618,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -159,6 +159,86 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 113,
             "range": "± 1",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "8b7b465f784879ca1eadb5e4efd4fd95b9084ce6",
+          "message": "feat(bench): add criterion benchmarks and CI workflow",
+          "timestamp": "2026-03-17T10:06:48Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1221/commits/8b7b465f784879ca1eadb5e4efd4fd95b9084ce6"
+        },
+        "date": 1773762100610,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5939101,
+            "range": "± 19845",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 849852901,
+            "range": "± 489906",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1105446907,
+            "range": "± 895317",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8293142,
+            "range": "± 18651",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1182819098,
+            "range": "± 1198184",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1538703223,
+            "range": "± 1110094",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 3039923,
+            "range": "± 107309",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 255816328,
+            "range": "± 2629275",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 331489635,
+            "range": "± 3903253",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 111,
+            "range": "± 0",
             "unit": "ns/iter"
           }
         ]
