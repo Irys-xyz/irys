@@ -144,6 +144,7 @@ priority-queue = "2.5"
 moka = "0.12.10"
 socket2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 
 
 # Reth & Alloy deps
