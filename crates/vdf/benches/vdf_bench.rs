@@ -50,13 +50,13 @@ fn build_tiers() -> [Tier; 3] {
             name: "testnet",
             config: testnet_config,
             sample_size: 10,
-            measurement_time: Duration::from_secs(30),
+            measurement_time: Duration::from_secs(65),
         },
         Tier {
             name: "mainnet",
             config: mainnet_config,
             sample_size: 10,
-            measurement_time: Duration::from_secs(30),
+            measurement_time: Duration::from_secs(65),
         },
     ]
 }

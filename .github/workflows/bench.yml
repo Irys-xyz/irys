@@ -154,7 +154,7 @@ jobs:
       - name: Run benchmarks
         env:
           RUSTC_WRAPPER: sccache
-        run: cargo bench --workspace -- --output-format bencher | tee bench-output.txt
+        run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-output.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
