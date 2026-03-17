@@ -197,7 +197,7 @@ impl PdService {
     }
 
     /// Handle a successfully fetched chunk: unpack, verify, cache, and notify waiters.
-    fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat, _serving_peer: Option<SocketAddr>) {
+    fn on_fetch_success(&mut self, key: ChunkKey, chunk_format: irys_types::ChunkFormat, serving_peer: Option<SocketAddr>) {
         debug!(
             "on_fetch_success: key=({}, {}), format={}",
             key.ledger,
@@ -234,10 +234,11 @@ impl PdService {
                         ?key,
                         ?chunk_data_root,
                         ?expected_data_root,
-                        "Fetched chunk data_root mismatch — discarding"
+                        ?serving_peer,
+                        "Fetched chunk data_root mismatch — excluding peer and retrying"
                     );
-                    // TODO: mark the peer as suspicious and retry from another peer
-                    self.fail_pending_fetch(&key);
+                    let failed: Vec<SocketAddr> = serving_peer.into_iter().collect();
+                    self.on_fetch_all_peers_failed(key, failed);
                     return;
                 }
                 debug!(
