@@ -95,25 +95,11 @@ jobs:
             fi
           fi
 
-          # For pull_request events, check PR description and branch state
+          # For pull_request events, check PR description
           if [[ "${{ github.event_name }}" == "pull_request" && "$SHOULD_RUN" == "true" ]]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
             if ! check_pr_description "$PR_NUMBER"; then
               SHOULD_RUN=false
-            fi
-
-            if [[ "$SHOULD_RUN" == "true" ]]; then
-              git fetch origin ${{ github.event.pull_request.base.ref }}:base_branch
-              git fetch origin ${{ github.event.pull_request.head.ref }}:head_branch
-
-              AHEAD_COMMITS=$(git rev-list --count head_branch..base_branch)
-
-              if [[ $AHEAD_COMMITS -eq 0 ]]; then
-                echo "base branch is not ahead of head branch, skipping..."
-                SHOULD_RUN=false
-              else
-                echo "base branch is ahead of head branch by $AHEAD_COMMITS commits, running..."
-              fi
             fi
           fi
 
