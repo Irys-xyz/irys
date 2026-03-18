@@ -993,9 +993,13 @@ async fn get_pending_submit_ledger_txs(
     let anchor_expiry_depth = ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64;
     let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
 
-    // Start with all valid Submit ledger transactions - we'll filter out already-included ones
+    // Start with mempool-resident Submit candidates, but exclude anything that has already been
+    // confirmed or promoted. Those transactions stay in mempool state for reorg handling, but
+    // they must not be offered back to block production.
     let mut pending_valid_submit_ledger_tx =
         ctx.mempool_state.all_valid_submit_ledgers_cloned().await;
+    pending_valid_submit_ledger_tx
+        .retain(|_, tx| tx.metadata().included_height.is_none() && tx.promoted_height().is_none());
 
     // Walk backwards through the canonical chain, removing Submit transactions
     // that have already been included in recent blocks within the anchor expiry window
