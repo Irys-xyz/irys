@@ -26,9 +26,7 @@ const SHA256_IV: [u32; 8] = [
 const SHA256_64B_PADDING: [u8; 64] = {
     let mut block = [0_u8; 64];
     block[0] = 0x80;
-    // 512 bits = 0x0200 in big-endian at bytes 62-63
     block[62] = 0x02;
-    // block[63] = 0x00 already
     block
 };
 
@@ -58,7 +56,12 @@ fn increment_le_salt(salt: &mut [u8]) {
 /// so this cast is layout-compatible.
 #[inline]
 fn as_generic_array_slice(blocks: &[[u8; 64]]) -> &[GenericArray<u8, U64>] {
-    // SAFETY: GenericArray<u8, U64> is #[repr(transparent)] over [u8; 64]
+    const {
+        assert!(size_of::<GenericArray<u8, U64>>() == 64);
+        assert!(align_of::<GenericArray<u8, U64>>() == 1);
+    }
+    // SAFETY: GenericArray<u8, U64> is #[repr(transparent)] over [u8; 64],
+    // verified by the const assertions above.
     unsafe { core::slice::from_raw_parts(blocks.as_ptr().cast(), blocks.len()) }
 }
 
@@ -70,7 +73,7 @@ pub fn vdf_sha(
     num_iterations_per_checkpoint: u64,
     checkpoints: &mut [H256],
 ) {
-    debug_assert!(
+    assert!(
         num_checkpoints <= checkpoints.len(),
         "num_checkpoints ({num_checkpoints}) exceeds checkpoints length ({})",
         checkpoints.len(),
@@ -101,7 +104,7 @@ pub fn vdf_sha_verification(
     salt: U256,
     seed: H256,
     num_checkpoints: usize,
-    num_iterations_per_checkpoint: usize,
+    num_iterations_per_checkpoint: u64,
 ) -> Vec<H256> {
     let mut local_salt: U256 = salt;
     let mut local_seed: H256 = seed;
@@ -109,10 +112,7 @@ pub fn vdf_sha_verification(
     let mut checkpoints: Vec<H256> = vec![H256::default(); num_checkpoints];
 
     for checkpoint_idx in 0..num_checkpoints {
-        //  initial checkpoint hash
-        // -----------------------------------------------------------------
         if checkpoint_idx != 0 {
-            // If the index is > 0, use the previous checkpoint as the seed
             local_seed = checkpoints[checkpoint_idx - 1];
         }
 
@@ -126,8 +126,6 @@ pub fn vdf_sha_verification(
         }
 
         checkpoints[checkpoint_idx] = local_seed;
-
-        // Increment the salt for the next checkpoint calculation
         local_salt = local_salt + 1;
     }
     checkpoints
@@ -217,8 +215,6 @@ pub async fn last_step_checkpoints_is_valid(
     } else {
         vdf_info.prev_output
     };
-    let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
-
     if vdf_info.last_step_checkpoints.len() != config.num_checkpoints_in_vdf_step {
         return Err(eyre::eyre!(
             "Invalid checkpoint count: expected {}, got {}",
@@ -226,6 +222,8 @@ pub async fn last_step_checkpoints_is_valid(
             vdf_info.last_step_checkpoints.len()
         ));
     }
+
+    let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
 
     let global_step_number: usize = vdf_info
         .global_step_number
@@ -301,6 +299,31 @@ pub async fn last_step_checkpoints_is_valid(
     } else {
         Ok(())
     }
+}
+
+/// Computes VDF checkpoints for a given step, applying reset-seed entropy when at a reset boundary.
+///
+/// Returns `(final_seed, checkpoints)`.
+pub fn compute_step_checkpoints(
+    config: &VdfConfig,
+    step: u64,
+    input_seed: H256,
+    reset_seed: H256,
+) -> (H256, Vec<H256>) {
+    let salt = U256::from(step_number_to_salt_number(config, step.saturating_sub(1)));
+    let mut seed = input_seed;
+    if step > 1 && (step - 1).is_multiple_of(u64::try_from(config.reset_frequency).unwrap()) {
+        seed = apply_reset_seed(seed, reset_seed);
+    }
+    let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        salt,
+        &mut seed,
+        config.num_checkpoints_in_vdf_step,
+        config.num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+    (seed, checkpoints)
 }
 
 /// Derives a salt value from the `step_number` for checkpoint hashing
@@ -694,7 +717,7 @@ mod tests {
                 salt,
                 original_seed,
                 num_checkpoints,
-                num_iterations as usize,
+                num_iterations,
             );
 
             prop_assert_eq!(seed, *verification.last().unwrap());

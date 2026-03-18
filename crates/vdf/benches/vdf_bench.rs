@@ -95,14 +95,10 @@ fn bench_vdf_sha_verification(c: &mut Criterion) {
     for tier in &tiers {
         let num_checkpoints = tier.config.num_checkpoints_in_vdf_step;
         let iters = tier.config.num_iterations_per_checkpoint();
-        let iters_usize: usize = iters.try_into().unwrap();
-
         group.sample_size(tier.sample_size);
         group.measurement_time(tier.measurement_time);
         group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
-            b.iter(|| {
-                vdf_sha_verification(U256::from(0), fixed_seed(), num_checkpoints, iters_usize)
-            });
+            b.iter(|| vdf_sha_verification(U256::from(0), fixed_seed(), num_checkpoints, iters));
         });
     }
 

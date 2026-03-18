@@ -300,7 +300,7 @@ mod tests {
             salt,
             original_hash,
             config.vdf.num_checkpoints_in_vdf_step,
-            config.vdf.num_iterations_per_checkpoint() as usize,
+            config.vdf.num_iterations_per_checkpoint(),
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
