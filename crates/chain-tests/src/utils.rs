@@ -831,7 +831,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
@@ -1089,7 +1094,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Wait for a canonical block at `target_height` using a hybrid strategy:
     /// short-interval canonical polling plus BlockStateUpdated subscription.
     #[tracing::instrument(level = "trace", skip_all)]
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1233,7 +1243,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "ledger={:?} offset={} seconds={} {}",
+        ledger,
+        offset,
+        seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk<T, B>(
         &self,
         app: &T,
@@ -1282,7 +1298,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// check number of chunks in the CachedChunks table
     /// return Ok(()) once it matches the expected value
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "expected_value={} timeout_secs={} {}",
+        expected_value,
+        timeout_secs,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
@@ -1658,7 +1679,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.get_block_by_hash(&hash)
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "num_blocks={} {}",
+        num_blocks,
+        self.diag_wait_state().await
+    ))]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders

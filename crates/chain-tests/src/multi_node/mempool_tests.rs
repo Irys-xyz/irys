@@ -6,6 +6,7 @@ use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs;
+use irys_macros_diag_slow::diag_slow;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
@@ -25,7 +26,13 @@ use reth::rpc::{
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
 use reth_ethereum_primitives::{Receipt, Transaction};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::time::sleep;
 use tracing::{debug, info};
 
@@ -35,6 +42,40 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
+    let phase = AtomicU8::new(0);
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    let block_migration_depth = genesis_config.consensus_config().block_migration_depth;
+
+    heavy_pending_chunks_test_inner(&phase, block_migration_depth.into()).await
+}
+
+fn heavy_pending_chunks_test_phase_name(phase: u8) -> &'static str {
+    match phase {
+        0 => "setup",
+        1 => "start_node",
+        2 => "post_chunks",
+        3 => "post_tx",
+        4 => "wait_chunk_cache",
+        5 => "mine_blocks",
+        6 => "wait_block_index",
+        7 => "wait_chunk_0",
+        8 => "wait_chunk_1",
+        9 => "wait_chunk_2",
+        10 => "teardown",
+        _ => "unknown",
+    }
+}
+
+#[diag_slow(state = format!(
+    "phase={} block_migration_depth={}",
+    heavy_pending_chunks_test_phase_name(phase.load(Ordering::Relaxed)),
+    block_migration_depth
+))]
+async fn heavy_pending_chunks_test_inner(
+    phase: &AtomicU8,
+    block_migration_depth: u64,
+) -> eyre::Result<()> {
     // Configure a test network
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
@@ -44,14 +85,11 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     genesis_config.fund_genesis_accounts(vec![&signer]);
 
     // Start the genesis node
+    phase.store(1, Ordering::Relaxed);
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
     let app = genesis_node.start_public_api().await;
-
-    // retrieve block_migration_depth for use later
-    let mut consensus = genesis_node.cfg.consensus.clone();
-    let block_migration_depth = consensus.get_mut().block_migration_depth;
 
     // chunks
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
@@ -75,34 +113,43 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
+    phase.store(2, Ordering::Relaxed);
     post_chunk(&app, &tx, 0, &chunks).await;
     post_chunk(&app, &tx, 1, &chunks).await;
     post_chunk(&app, &tx, 2, &chunks).await;
 
     // Then post the tx (deliberately after the chunks)
+    phase.store(3, Ordering::Relaxed);
     post_data_tx(&app, &tx).await;
 
     // wait for chunks to be in CachedChunks table
+    phase.store(4, Ordering::Relaxed);
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
     // Mine some blocks to trigger block and chunk migration
+    phase.store(5, Ordering::Relaxed);
     genesis_node
         .mine_blocks((1 + block_migration_depth).try_into()?)
         .await?;
+    phase.store(6, Ordering::Relaxed);
     genesis_node.wait_until_block_index_height(1, 5).await?;
 
-    // Finally verify the chunks didn't get dropped
+    // Finally verify the chunks didn't get dropped when the tx is promoted directly to Publish
+    phase.store(7, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 0, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 0, 5)
         .await?;
+    phase.store(8, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 1, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 1, 5)
         .await?;
+    phase.store(9, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 2, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 2, 5)
         .await?;
 
     // teardown
+    phase.store(10, Ordering::Relaxed);
     genesis_node.stop().await;
 
     Ok(())
