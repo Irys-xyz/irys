@@ -110,8 +110,6 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::Result<()> {
-    initialize_tracing();
-
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
 
