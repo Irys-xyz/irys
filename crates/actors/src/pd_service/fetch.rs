@@ -20,11 +20,6 @@ pub(crate) struct PdChunkFetchResult {
 pub(crate) enum PdChunkFetchError {
     /// All assigned peers tried and failed.
     AllPeersFailed { failed_peers: Vec<SocketAddr> },
-    /// Chunk verification failed (data_root mismatch, proof invalid, etc.).
-    /// Currently matched in on_fetch_done but never constructed by fetch tasks
-    /// (verification happens post-fetch in on_fetch_success). Kept for exhaustive matching.
-    #[expect(dead_code, reason = "matched in on_fetch_done but never constructed; kept for exhaustive matching")]
-    VerificationFailed,
 }
 
 /// Phase of a single chunk key's fetch lifecycle.

@@ -185,16 +185,6 @@ impl PdService {
             Err(fetch::PdChunkFetchError::AllPeersFailed { failed_peers }) => {
                 self.on_fetch_all_peers_failed(key, failed_peers);
             }
-            Err(fetch::PdChunkFetchError::VerificationFailed) => {
-                // Treat verification failure like a permanent failure — the data from
-                // peers is untrustworthy. Remove the fetch state and fail any waiting
-                // blocks.
-                warn!(
-                    ?key,
-                    "Fetched chunk failed verification — failing permanently"
-                );
-                self.fail_pending_fetch(&key);
-            }
         }
     }
 
