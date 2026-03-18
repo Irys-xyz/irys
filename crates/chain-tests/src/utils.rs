@@ -62,8 +62,8 @@ use irys_types::{
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
 };
+use irys_vdf::compute_step_checkpoints;
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::{apply_reset_seed, compute_step_checkpoints, step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
