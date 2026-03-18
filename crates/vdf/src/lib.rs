@@ -70,6 +70,12 @@ pub fn vdf_sha(
     num_iterations_per_checkpoint: u64,
     checkpoints: &mut [H256],
 ) {
+    debug_assert!(
+        num_checkpoints <= checkpoints.len(),
+        "num_checkpoints ({num_checkpoints}) exceeds checkpoints length ({})",
+        checkpoints.len(),
+    );
+
     let mut blocks = [[0_u8; 64]; 2];
     start_salt.to_little_endian(&mut blocks[0][..32]);
     blocks[1] = SHA256_64B_PADDING;
