@@ -11,23 +11,23 @@ This redesign brings the PD precompile in line with the industry standard set by
 
 **For Solidity developers building on Irys:**
 
-- **Natural call syntax** — `IRYS_PD.readByteRange(0)` instead of `address(0x500).staticcall(bytes.concat(bytes1(0), bytes1(0)))`. Contracts read like business logic, not byte manipulation.
-- **Typed custom errors** — When a read fails, callers get structured errors like `ByteRangeNotFound(index, available)` instead of an opaque `success = false`. This enables precise error handling in Solidity (`try/catch` with specific error types) and clear diagnostics during development.
-- **Composability without inheritance** — Contracts use `IRYS_PD.readByteRange(0)` or `IrysPDLib.readBytes()` directly. No forced `is ProgrammableData` inheritance, no ABI pollution, no diamond-problem risks when combining with other base contracts.
+- **Natural call syntax** — `IRYS_PD.readData(0)` or `IRYS_PD.readBytes(0, offset, length)` instead of `address(0x500).staticcall(bytes.concat(bytes1(0), bytes1(0)))`. Contracts read like business logic, not byte manipulation.
+- **Typed custom errors** — When a read fails, callers get structured errors like `SpecifierNotFound(index, available)` instead of an opaque `success = false`. This enables precise error handling in Solidity (`try/catch` with specific error types) and clear diagnostics during development.
+- **Composability without inheritance** — Contracts use `IRYS_PD.readData(0)` or `IrysPDLib.readData()` directly. No forced `is ProgrammableData` inheritance, no ABI pollution, no diamond-problem risks when combining with other base contracts.
 - **Both strict and graceful error patterns** — Direct interface calls revert with custom errors (the common case). Library `try*` variants return `(bool, bytes)` for contracts that need to handle failure without reverting.
 
 **For off-chain tooling and integrators:**
 
 - **Standard ABI works everywhere** — Etherscan can display and verify the precompile's interface. Block explorers decode PD calls and errors automatically. No custom decoding plugins needed.
 - **SDK error decoding** — ethers.js, viem, and alloy can parse PD revert data into typed error objects using the interface ABI, enabling clear error messages in dapp UIs and debugging tools.
-- **`abi.encodeCall` support** — Transaction builders and testing frameworks can use Solidity's type-safe encoding (`abi.encodeCall(IIrysPD.readByteRange, (0))`) instead of manual byte packing.
+- **`abi.encodeCall` support** — Transaction builders and testing frameworks can use Solidity's type-safe encoding (`abi.encodeCall(IIrysPD.readData, (0))`) instead of manual byte packing.
 
 **For protocol evolution:**
 
 - **Extensibility via interface versioning** — New read operations are added as new functions on the interface (e.g., `readMultipleByteRanges`). Existing function selectors and their behavior never change. This follows the Arbitrum pattern of additive-only interface evolution.
 - **Standard toolchain integration** — Foundry/Hardhat test helpers, fuzzing tools, and static analyzers understand standard ABI calls out of the box. No special handling needed for PD reads.
 
-**What does NOT change:** The PD transaction envelope (on-chain `irys-pd-meta` header, EIP-2930 access list encoding, fee model) is entirely unaffected. This redesign only changes the internal EVM call from contract to precompile.
+**What does NOT change:** The PD transaction envelope (on-chain `irys-pd-meta` header, fee model) is unaffected. The fee deduction, payload builder chunk budgeting, and block validation logic retain their existing structure.
 
 ## 2. Problem Statement
 
@@ -39,7 +39,7 @@ The code is not live. We can make breaking changes to ship a best-in-class API b
 
 ### 3.1 Architecture Overview
 
-PD enables smart contracts to read large data stored in Irys partitions. The data flow has two completely separate layers:
+PD enables smart contracts to read large data stored in Irys partitions. The data flow has three layers:
 
 ```
 Layer 1: PD Transaction Envelope (on-chain, in EVM tx calldata)
@@ -48,14 +48,20 @@ Layer 1: PD Transaction Envelope (on-chain, in EVM tx calldata)
 │ + EIP-2930 access list with packed B256 keys        │    before EVM execution
 └─────────────────────────────────────────────────────┘
 
-Layer 2: Precompile Call (inside EVM, contract → 0x500)
+Layer 2: Access List Specifiers (chunk provisioning)
 ┌─────────────────────────────────────────────────────┐
-│ contract.staticcall(0x500, encoded_params)           │  ← THIS is what changes
-│ → returns chunk bytes                                │
+│ B256 storage keys under precompile address (0x500)  │  ← CHANGES: unified specifier
+│ Node reads these to prefetch chunks                  │
+└─────────────────────────────────────────────────────┘
+
+Layer 3: Precompile Call (inside EVM, contract → 0x500)
+┌─────────────────────────────────────────────────────┐
+│ contract.staticcall(0x500, encoded_params)           │  ← CHANGES: ABI selectors
+│ Byte-level reads specified in calldata               │
 └─────────────────────────────────────────────────────┘
 ```
 
-**This design only changes Layer 2.** Layer 1 (PD transaction envelope, access list encoding, PD header format, `pd_tx.rs`) is entirely unaffected.
+**This design changes Layers 2 and 3.** Layer 1 (PD transaction envelope, PD header format, fee model) is unaffected.
 
 ### 3.2 Current Solidity API
 
@@ -119,7 +125,7 @@ contract ProgrammableDataBasic is ProgrammableData {
 
 **Calldata format** — Custom packed binary:
 ```
-ReadFullByteRange:    [0x00:1][index:1]           = 2 bytes
+ReadFullByteRange:    [0x01:1][index:1]           = 2 bytes
 ReadPartialByteRange: [0x01:1][index:1][offset:4][length:4] = 10 bytes
 ```
 
@@ -270,52 +276,120 @@ contract L1Block is ISemver {
 
 ### 6.1 Design Principles
 
-1. **Standard ABI dispatch** — 4-byte selectors so the precompile can be called through a Solidity `interface`
-2. **Interface + Library layering** — interface is the protocol, library is ergonomics. No inheritance required.
-3. **Strict by default, try-variants opt-in** — direct calls revert with custom errors; library provides `try*` functions
-4. **Only Layer 2 changes** — PD transaction envelope, access list encoding, and PD header format are untouched
+1. **Clean layer separation** — Access list specifiers handle chunk provisioning (Irys layer). Byte-level reads are specified in precompile calldata (Solidity layer). Each layer does one thing.
+2. **Unified access list specifier** — One specifier type replaces the current ChunkRangeSpecifier + ByteRangeSpecifier pair. No cross-references, no ordering dependencies.
+3. **Standard ABI dispatch** — 4-byte selectors so the precompile can be called through a Solidity `interface`.
+4. **Interface + Library layering** — interface is the protocol, library is ergonomics. No inheritance required.
+5. **Strict by default, try-variants opt-in** — direct calls revert with custom errors; library provides `try*` functions.
+6. **Right-sized fields** — partition_index matches runtime capability (u64, not U200). Length matches practical limits (u32, not U34).
 
-### 6.2 Solidity: `IIrysPD.sol` — The Interface
+### 6.2 Access List Specifier: `PdDataRead`
+
+A single specifier replaces the current ChunkRangeSpecifier + ByteRangeSpecifier pair. Since the code is not live, there is no backward compatibility concern — the old types are simply replaced.
+
+**Binary layout:**
+
+```
+┌──────┬───────────────────────┬──────────────┬────────────┬──────────────┬─────────────┐
+│ 0x01 │ partition_index (u64) │  start (u32) │  len (u32) │ byte_off(u24)│ reserved(0) │
+│  1B  │       8B (BE)         │   4B (BE)    │  4B (BE)   │   3B (BE)    │    12B      │
+└──────┴───────────────────────┴──────────────┴────────────┴──────────────┴─────────────┘
+  byte:  0         1-8                9-12          13-16         17-19         20-31
+```
+
+Fields ordered by requirement: required fields first (`type`, `partition_index`, `start`, `len`), optional field last (`byte_off` defaults to 0), reserved bytes at end (must be zero, validated).
+
+**Field definitions:**
+
+| Field | Type | Bytes | Max value | Purpose |
+|---|---|---|---|---|
+| type | u8 | 1 | — | `0x01` — PD data read specifier. Nonzero so that `B256::ZERO` always fails validation. Other values reserved for future specifier types. |
+| partition_index | u64 | 8 (BE) | 2^64 - 1 | Partition in the publish ledger. Matches runtime u64 capability. |
+| start | u32 | 4 (BE) | 4,294,967,295 | First chunk offset within partition. Covers 51.8M chunks/partition with 82× headroom. |
+| len | u32 | 4 (BE) | 4,294,967,295 | Number of bytes to read. Required — node derives chunk count from this. Max ~4 GB, 2× block max. |
+| byte_off | u24 | 3 (BE) | 16,777,215 | Byte offset within the first chunk. 0 = start of chunk. Forward-compatible with chunks up to 16 MB. |
+| reserved | — | 12 | 0 | Must be zero. Validated on decode — nonzero values are rejected. |
+
+**How the node derives chunk count for prefetching:**
+
+```
+chunks_needed = ceil((byte_off + len) / chunk_size)
+prefetch range: [start, start + chunks_needed)
+```
+
+If `len = 0`, the specifier is invalid and rejected.
+
+**Addressing capacity:**
+
+Any byte at position P in a ~12.37 TB partition (51,872,000 chunks × 256 KB):
+- `start = P / chunk_size` → u32, max 4.29B, partition needs 51.8M. Sufficient.
+- `byte_off = P % chunk_size` → u24, max 16.7M, chunk is 262,144. Sufficient.
+- `len` → u32, max ~4 GB, block max ~1.83 GB. Sufficient.
+
+**Validity rules (enforced on decode, consensus-critical):**
+
+All rules are checked by a single canonical `PdDataRead::decode()` function used everywhere — mempool admission, payload building, block validation, chunk provisioning, and precompile execution. Malformed keys are rejected (not skipped).
+
+| Rule | Rationale |
+|---|---|
+| `type == 0x01` | Type discriminant. `B256::ZERO` (all-zero key) always fails because type byte is 0, not 1. |
+| `len > 0` | Zero-length reads are meaningless. Node cannot derive chunk count. |
+| `byte_off < chunk_size` | Ensures canonical encoding — each logical position has exactly one representation. Without this, `(start=5, byte_off=262144)` and `(start=6, byte_off=0)` encode the same location. |
+| `start + chunks_needed <= num_chunks_in_partition` | Prevents partition boundary overflow. |
+| `reserved == [0u8; 12]` | Reserved bytes must be zero. Nonzero values are rejected to preserve canonicality and forward compatibility. |
+| All arithmetic is checked | `byte_off + len`, `start + chunks_needed`, and ledger offset calculations use checked ops. Overflow = reject. |
+
+**Encoding (big-endian throughout):**
+
+All fields use big-endian (network byte order), matching EVM convention and eliminating the endianness mismatch between the current little-endian access list keys and big-endian precompile calldata.
+
+**Access list indexing rule:**
+
+The `index` parameter in precompile calls (`readData(index)`, `readBytes(index, ...)`) refers to the Nth `PdDataRead` storage key within the `AccessListItem` whose `address == PD_PRECOMPILE_ADDRESS`. If multiple `AccessListItem` entries target `0x500`, their storage keys are concatenated in encounter order. Non-PD keys (those failing `PdDataRead::decode()`) are rejected — the transaction is invalid if any key under the PD precompile address fails validation.
+
+### 6.3 Solidity: `IIrysPD.sol` — The Interface
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 /// @title IIrysPD — Irys Programmable Data Precompile Interface
-/// @notice Read byte ranges from Irys partition storage via EIP-2930 access lists
-/// @dev Precompile at address 0x500. Data ranges are specified in the transaction's
-///      access list as encoded ChunkRangeSpecifier + ByteRangeSpecifier storage keys.
+/// @notice Read data from Irys partition storage via EIP-2930 access lists.
+/// @dev Precompile at address 0x500. Chunk ranges are declared in the transaction's
+///      access list as PdDataRead specifiers. Byte-level reads are specified via
+///      function parameters at execution time.
 interface IIrysPD {
-    /// @notice Read all bytes from a byte range specified in the access list
-    /// @param index The byte range index in the access list (0-255)
+    /// @notice Read bytes as specified by a PdDataRead access list entry
+    /// @dev Uses the specifier's byte_off and len fields to determine the byte range.
+    ///      Returns bytes [byte_off, byte_off + len) from the specifier's chunk range.
+    /// @param index Index of the PdDataRead entry in the PD-bound access list storage keys (0-255)
     /// @return data The raw bytes from the specified range
-    function readByteRange(uint8 index) external view returns (bytes memory data);
+    function readData(uint8 index) external view returns (bytes memory data);
 
-    /// @notice Read a subset of bytes from a byte range
-    /// @param index The byte range index in the access list (0-255)
-    /// @param offset Starting byte offset within the range
-    /// @param length Number of bytes to read
+    /// @notice Read a byte slice from a PdDataRead entry's chunk range
+    /// @dev Ignores the specifier's byte_off and len — uses the provided offset and length
+    ///      instead. The offset is relative to byte 0 of the first chunk in the specifier's
+    ///      chunk range. Bounded by the total prefetched chunk data (chunks_needed × chunk_size).
+    ///      Use this when byte ranges need to be determined dynamically at execution time.
+    /// @param index Index of the PdDataRead entry in the PD-bound access list storage keys (0-255)
+    /// @param offset Starting byte offset within the concatenated chunk data (0 = first byte of first chunk)
+    /// @param length Number of bytes to read. Must be > 0.
     /// @return data The requested byte slice
-    function readPartialByteRange(uint8 index, uint32 offset, uint32 length)
+    function readBytes(uint8 index, uint32 offset, uint32 length)
         external view returns (bytes memory data);
 
-    /// @notice Transaction has no access list entries for the PD precompile
+    /// @notice Transaction has no PdDataRead entries in its access list
     error MissingAccessList();
 
-    /// @notice Requested byte range index exceeds available byte ranges
+    /// @notice Requested specifier index exceeds available PdDataRead entries
     /// @param index The requested index
-    /// @param available Number of byte ranges in the access list
-    error ByteRangeNotFound(uint8 index, uint256 available);
+    /// @param available Number of PdDataRead entries found in the access list
+    error SpecifierNotFound(uint8 index, uint256 available);
 
-    /// @notice Byte range references a chunk range index that doesn't exist
-    /// @param index The referenced chunk range index
-    /// @param available Number of chunk ranges in the access list
-    error ChunkRangeNotFound(uint8 index, uint256 available);
-
-    /// @notice Requested byte slice exceeds the available data
+    /// @notice Requested byte slice exceeds the available chunk data
     /// @param start Start offset of the requested range
     /// @param end End offset of the requested range (exclusive)
-    /// @param available Total bytes available
+    /// @param available Total bytes available (chunks_needed × chunk_size)
     error ByteRangeOutOfBounds(uint256 start, uint256 end, uint256 available);
 
     /// @notice Chunk not found at the given ledger offset
@@ -330,13 +404,13 @@ interface IIrysPD {
 /// @dev Precompile address for Irys Programmable Data
 address constant IRYS_PD_ADDRESS = address(0x500);
 
-/// @dev Typed constant for direct interface calls: IRYS_PD.readByteRange(0)
+/// @dev Typed constant for direct interface calls: IRYS_PD.readData(0)
 IIrysPD constant IRYS_PD = IIrysPD(IRYS_PD_ADDRESS);
 ```
 
 **Replaces**: `Precompiles.sol` and `ProgrammableData.sol`.
 
-### 6.3 Solidity: `IrysPDLib.sol` — The Convenience Library
+### 6.4 Solidity: `IrysPDLib.sol` — The Convenience Library
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -347,47 +421,55 @@ import {IIrysPD, IRYS_PD, IRYS_PD_ADDRESS} from "./IIrysPD.sol";
 /// @title IrysPDLib — Convenience library for Irys Programmable Data reads
 /// @notice Provides shorthand functions and try-variants for PD precompile access
 library IrysPDLib {
-    /// @notice Read all bytes from the first byte range (index 0)
+    /// @notice Read all data from the first access list entry (index 0)
     /// @dev Reverts with IIrysPD custom errors on failure
-    function readBytes() internal view returns (bytes memory) {
-        return IRYS_PD.readByteRange(0);
+    function readData() internal view returns (bytes memory) {
+        return IRYS_PD.readData(0);
     }
 
-    /// @notice Read a slice from the first byte range (index 0)
+    /// @notice Read a byte slice from the first access list entry (index 0)
     /// @dev Reverts with IIrysPD custom errors on failure
     function readBytes(uint32 offset, uint32 length) internal view returns (bytes memory) {
-        return IRYS_PD.readPartialByteRange(0, offset, length);
+        return IRYS_PD.readBytes(0, offset, length);
     }
 
-    /// @notice Try to read a full byte range, returning success flag instead of reverting
-    /// @param index The byte range index in the access list
+    /// @notice Try to read data, returning success flag instead of reverting
+    /// @param index Index of the PdDataRead entry in the access list
     /// @return success Whether the read succeeded
-    /// @return data The raw bytes (empty if success is false)
-    function tryReadByteRange(uint8 index)
+    /// @return data The raw bytes on success; empty on failure
+    function tryReadData(uint8 index)
         internal view returns (bool success, bytes memory data)
     {
-        (success, data) = IRYS_PD_ADDRESS.staticcall(
-            abi.encodeCall(IIrysPD.readByteRange, (index))
+        bytes memory returndata;
+        (success, returndata) = IRYS_PD_ADDRESS.staticcall(
+            abi.encodeCall(IIrysPD.readData, (index))
         );
+        if (success) {
+            data = abi.decode(returndata, (bytes));
+        }
     }
 
-    /// @notice Try to read a partial byte range, returning success flag instead of reverting
-    /// @param index The byte range index in the access list
-    /// @param offset Starting byte offset within the range
+    /// @notice Try to read a byte slice, returning success flag instead of reverting
+    /// @param index Index of the PdDataRead entry in the access list
+    /// @param offset Starting byte offset within the concatenated chunk data
     /// @param length Number of bytes to read
     /// @return success Whether the read succeeded
-    /// @return data The raw bytes (empty if success is false)
-    function tryReadPartialByteRange(uint8 index, uint32 offset, uint32 length)
+    /// @return data The raw bytes on success; empty on failure
+    function tryReadBytes(uint8 index, uint32 offset, uint32 length)
         internal view returns (bool success, bytes memory data)
     {
-        (success, data) = IRYS_PD_ADDRESS.staticcall(
-            abi.encodeCall(IIrysPD.readPartialByteRange, (index, offset, length))
+        bytes memory returndata;
+        (success, returndata) = IRYS_PD_ADDRESS.staticcall(
+            abi.encodeCall(IIrysPD.readBytes, (index, offset, length))
         );
+        if (success) {
+            data = abi.decode(returndata, (bytes));
+        }
     }
 }
 ```
 
-### 6.4 Solidity: Updated Example Consumer
+### 6.5 Solidity: Updated Example Consumer
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -399,19 +481,24 @@ import {IrysPDLib} from "./IrysPDLib.sol";
 contract ProgrammableDataBasic {
     bytes public storedData;
 
-    /// @notice Read PD data using direct interface call (reverts on error)
+    /// @notice Read PD data as specified in the access list (reverts on error)
     function readPdChunkIntoStorage() public {
-        storedData = IRYS_PD.readByteRange(0);
+        storedData = IRYS_PD.readData(0);
+    }
+
+    /// @notice Read a specific byte slice at execution time
+    function readSlice(uint32 offset, uint32 length) public {
+        storedData = IRYS_PD.readBytes(0, offset, length);
     }
 
     /// @notice Read PD data using library convenience
     function readPdChunkIntoStorageAlt() public {
-        storedData = IrysPDLib.readBytes();
+        storedData = IrysPDLib.readData();
     }
 
     /// @notice Read PD data with graceful error handling
     function tryReadPdChunk() public returns (bool) {
-        (bool success, bytes memory data) = IrysPDLib.tryReadByteRange(0);
+        (bool success, bytes memory data) = IrysPDLib.tryReadData(0);
         if (success) {
             storedData = data;
         }
@@ -424,7 +511,7 @@ contract ProgrammableDataBasic {
 }
 ```
 
-### 6.5 Rust: Precompile Dispatch Redesign
+### 6.6 Rust: Precompile Dispatch Redesign
 
 **Use `alloy::sol!` to generate selectors, decoders, and error encoders:**
 
@@ -432,13 +519,12 @@ contract ProgrammableDataBasic {
 use alloy_sol_types::sol;
 
 sol! {
-    function readByteRange(uint8 index) external view returns (bytes memory data);
-    function readPartialByteRange(uint8 index, uint32 offset, uint32 length)
+    function readData(uint8 index) external view returns (bytes memory data);
+    function readBytes(uint8 index, uint32 offset, uint32 length)
         external view returns (bytes memory data);
 
     error MissingAccessList();
-    error ByteRangeNotFound(uint8 index, uint256 available);
-    error ChunkRangeNotFound(uint8 index, uint256 available);
+    error SpecifierNotFound(uint8 index, uint256 available);
     error ByteRangeOutOfBounds(uint256 start, uint256 end, uint256 available);
     error ChunkNotFound(uint64 offset);
     error ChunkFetchFailed(uint64 offset);
@@ -446,9 +532,9 @@ sol! {
 ```
 
 This generates at compile time:
-- `readByteRangeCall::SELECTOR` — the 4-byte selector
-- `readByteRangeCall::abi_decode(data)` — parameter decoder
-- `readByteRangeCall::abi_encode_returns(&(result,))` — return encoder
+- `readDataCall::SELECTOR` / `readBytesCall::SELECTOR` — 4-byte selectors
+- `readDataCall::abi_decode(data)` — parameter decoder
+- `readDataCall::abi_encode_returns(&(result,))` — return encoder
 - `MissingAccessList {}` — error struct with `abi_encode()` for revert data
 
 **New dispatch logic** (replaces `PdFunctionId` enum):
@@ -461,23 +547,28 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             return Err(PrecompileError::Other("calldata too short".into()));
         }
 
-        // ... gas check, access list parsing (unchanged) ...
+        // ... gas check ...
+
+        let access_list = pd_context.read_access_list();
+        let specifiers = parse_pd_specifiers(&access_list)?;
 
         let selector: [u8; 4] = data[..4].try_into().unwrap();
         match selector {
-            readByteRangeCall::SELECTOR => {
-                let decoded = readByteRangeCall::abi_decode(&data[4..])
-                    .map_err(|_| PrecompileError::Other("ABI decode failed".into()))?;
-                let result = read_bytes_range_by_index(decoded.index, ...)?;
-                let encoded = readByteRangeCall::abi_encode_returns(&(result.into(),));
-                Ok(PrecompileOutput { bytes: encoded.into(), .. })
+            readDataCall::SELECTOR => {
+                let decoded = readDataCall::abi_decode(&data[4..])?;
+                let spec = specifiers.get(decoded.index as usize)?;
+                // Use byte_off and len from the access list specifier
+                let result = read_chunk_data(spec, spec.byte_off, spec.len, &pd_context)?;
+                let encoded = readDataCall::abi_encode_returns(&(result.into(),));
+                Ok(PrecompileOutput::new(gas_used, encoded.into()))
             }
-            readPartialByteRangeCall::SELECTOR => {
-                let decoded = readPartialByteRangeCall::abi_decode(&data[4..])
-                    .map_err(|_| PrecompileError::Other("ABI decode failed".into()))?;
-                let result = read_partial_byte_range(decoded.index, decoded.offset, decoded.length, ...)?;
-                let encoded = readPartialByteRangeCall::abi_encode_returns(&(result.into(),));
-                Ok(PrecompileOutput { bytes: encoded.into(), .. })
+            readBytesCall::SELECTOR => {
+                let decoded = readBytesCall::abi_decode(&data[4..])?;
+                let spec = specifiers.get(decoded.index as usize)?;
+                // Override byte range from calldata — chunk range still from specifier
+                let result = read_chunk_data(spec, decoded.offset, decoded.length, &pd_context)?;
+                let encoded = readBytesCall::abi_encode_returns(&(result.into(),));
+                Ok(PrecompileOutput::new(gas_used, encoded.into()))
             }
             _ => Err(PrecompileError::Other("unknown selector".into()))
         }
@@ -485,11 +576,13 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
 }
 ```
 
+**`readData(index)`** reads the byte range exactly as declared in the access list entry — uses the specifier's `byte_off` and `len` to return `bytes[byte_off .. byte_off + len]` from the chunk data.
+
+**`readBytes(index, offset, length)`** ignores the specifier's `byte_off` and `len` entirely. It uses the access list entry only to identify which chunks were prefetched. The `offset` and `length` from calldata are applied against the full concatenated chunk data (`chunks_needed × chunk_size` bytes). This enables dynamic byte-level reads at execution time — the contract can decide what slice to read based on runtime logic. Bounded by the total prefetched chunk data; requests outside it revert with `ByteRangeOutOfBounds`.
+
 **Error encoding** — User-facing errors are returned as `PrecompileOutput::new_reverted()` with ABI-encoded revert data. Internal errors remain as `PrecompileError::Other`.
 
 revm's `PrecompileOutput` struct has a `reverted: bool` field and a `new_reverted(gas_used, bytes)` constructor (defined in `revm-precompile/src/interface.rs`). When `reverted` is `true`, the `bytes` field carries ABI-encoded revert data — including the 4-byte error selector. This is the correct mechanism for returning custom errors that Solidity can decode.
-
-The dispatch logic must therefore distinguish user-facing errors (returned as `Ok(PrecompileOutput::new_reverted(...))`) from internal errors (returned as `Err(PrecompileError::...)`):
 
 ```rust
 /// Convert a user-facing PdPrecompileError into a reverted PrecompileOutput
@@ -498,10 +591,8 @@ fn try_encode_as_revert(e: &PdPrecompileError, gas_used: u64) -> Option<Precompi
     let revert_data: Vec<u8> = match e {
         PdPrecompileError::MissingAccessList =>
             MissingAccessList {}.abi_encode(),
-        PdPrecompileError::ByteRangeNotFound { index, available } =>
-            ByteRangeNotFound { index: *index, available: U256::from(*available) }.abi_encode(),
-        PdPrecompileError::ChunkRangeNotFound { index, available } =>
-            ChunkRangeNotFound { index: *index, available: U256::from(*available) }.abi_encode(),
+        PdPrecompileError::SpecifierNotFound { index, available } =>
+            SpecifierNotFound { index: *index, available: U256::from(*available) }.abi_encode(),
         PdPrecompileError::ByteRangeOutOfBounds { start, end, available } =>
             ByteRangeOutOfBounds {
                 start: U256::from(*start), end: U256::from(*end), available: U256::from(*available)
@@ -510,51 +601,106 @@ fn try_encode_as_revert(e: &PdPrecompileError, gas_used: u64) -> Option<Precompi
             ChunkNotFound { offset: *offset }.abi_encode(),
         PdPrecompileError::ChunkFetchFailed { offset, .. } =>
             ChunkFetchFailed { offset: *offset }.abi_encode(),
-        // Internal errors: not user-facing, return None
         _ => return None,
     };
     Some(PrecompileOutput::new_reverted(gas_used, revert_data.into()))
 }
 ```
 
-In the dispatch, errors are handled as:
+### 6.7 Rust: Access List Parsing Changes
+
+`parse_pd_specifiers()` replaces `parse_access_list()`. It is the **single canonical parser** used by all system components — mempool admission, payload building, block validation, chunk provisioning, and precompile execution. This eliminates the current inconsistency where some paths skip invalid keys while others reject.
+
+It produces a single `Vec<PdDataRead>` instead of separate `chunk_reads[]` and `byte_reads[]`:
+
 ```rust
-Err(e) => {
-    // Try to encode as a user-facing ABI revert
-    if let Some(reverted_output) = try_encode_as_revert(&e, gas_used) {
-        Ok(reverted_output)
-    } else {
-        // Internal error — propagate as PrecompileError
-        Err(PrecompileError::Other(Cow::Owned(format!("PD: {}", e))))
+pub struct PdDataRead {
+    pub partition_index: u64,
+    pub start: u32,
+    pub len: u32,
+    pub byte_off: u32,  // u24 stored as u32, top byte always 0
+}
+
+impl PdDataRead {
+    /// Derive the number of chunks the node must prefetch.
+    pub fn chunks_needed(&self, chunk_size: u64) -> u64 {
+        let total_bytes = self.byte_off as u64 + self.len as u64;
+        total_bytes.div_ceil(chunk_size)
+    }
+
+    /// Decode and validate from a 32-byte access list storage key.
+    /// This is the single canonical decoder — all system components use this function.
+    pub fn decode(bytes: &[u8; 32], chunk_config: &ChunkConfig) -> eyre::Result<Self> {
+        // Type byte
+        eyre::ensure!(bytes[0] == 0x01, "expected PdDataRead type byte 0x01, got {:#04x}", bytes[0]);
+
+        // Reserved bytes
+        eyre::ensure!(bytes[20..32] == [0u8; 12], "reserved bytes must be zero");
+
+        let partition_index = u64::from_be_bytes(bytes[1..9].try_into()?);
+        let start = u32::from_be_bytes(bytes[9..13].try_into()?);
+        let len = u32::from_be_bytes(bytes[13..17].try_into()?);
+        let byte_off = u32::from_be_bytes([0, bytes[17], bytes[18], bytes[19]]);
+
+        // Validity rules (consensus-critical)
+        eyre::ensure!(len > 0, "len must be > 0");
+        eyre::ensure!(
+            (byte_off as u64) < chunk_config.chunk_size,
+            "byte_off ({}) must be < chunk_size ({})", byte_off, chunk_config.chunk_size
+        );
+
+        let spec = Self { partition_index, start, len, byte_off };
+
+        let chunks_needed = spec.chunks_needed(chunk_config.chunk_size);
+        eyre::ensure!(
+            (start as u64).checked_add(chunks_needed)
+                .map_or(false, |end| end <= chunk_config.num_chunks_in_partition),
+            "start + chunks_needed exceeds partition boundary"
+        );
+
+        Ok(spec)
+    }
+
+    /// Encode to a 32-byte access list storage key.
+    pub fn encode(&self) -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        buf[0] = 0x01;
+        buf[1..9].copy_from_slice(&self.partition_index.to_be_bytes());
+        buf[9..13].copy_from_slice(&self.start.to_be_bytes());
+        buf[13..17].copy_from_slice(&self.len.to_be_bytes());
+        let bo = self.byte_off.to_be_bytes();
+        buf[17..20].copy_from_slice(&bo[1..4]); // u24: skip top byte
+        // bytes 20..32 remain zero (reserved)
+        buf
     }
 }
 ```
 
-This means user-facing errors produce a **successful** `PrecompileResult` (`Ok(...)`) with `reverted: true`, which the EVM treats as a REVERT with data. Solidity callers see the custom error selector and can decode it. Internal errors produce an `Err(PrecompileError)` which the EVM treats as an exceptional halt.
-
-### 6.6 Rust: File-Level Changes
+### 6.8 Rust: File-Level Changes
 
 | File | Change |
 |------|--------|
-| `precompiles/pd/precompile.rs` | Replace 1-byte dispatch with 4-byte selector matching. ABI-encode return data. |
+| `crates/types/src/range_specifier.rs` | Replace `ChunkRangeSpecifier`, `ByteRangeSpecifier`, `PdAccessListArg` with `PdDataRead`. |
+| `precompiles/pd/precompile.rs` | Replace 1-byte dispatch with 4-byte ABI selector matching. ABI-encode return data. |
 | `precompiles/pd/functions.rs` | Replace `PdFunctionId` enum with `sol!` macro block generating selectors + types. |
-| `precompiles/pd/read_bytes.rs` | Remove manual `ReadBytesRangeByIndexArgs` / `ReadPartialByteRangeArgs` decoders (ABI decoding handles this). Core read logic (`read_bytes_range`) unchanged. |
-| `precompiles/pd/constants.rs` | Remove raw encoding offset constants (`FUNCTION_ID_SIZE`, `INDEX_SIZE`, `INDEX_OFFSET`, etc.). Keep `PD_BASE_GAS_COST`. |
-| `precompiles/pd/error.rs` | Add `try_encode_as_revert()` function mapping user-facing variants to `PrecompileOutput::new_reverted()`. Keep `PdPrecompileError` enum. |
+| `precompiles/pd/read_bytes.rs` | Rewrite to work with `PdDataRead`. Remove `ReadBytesRangeByIndexArgs` / `ReadPartialByteRangeArgs`. Remove cross-reference logic. Core chunk-fetch logic reused. |
+| `precompiles/pd/constants.rs` | Remove raw encoding offset constants. Keep `PD_BASE_GAS_COST`. |
+| `precompiles/pd/error.rs` | Update error variants: remove `ByteRangeNotFound`/`ChunkRangeNotFound`, add `SpecifierNotFound`. Add `try_encode_as_revert()`. |
+| `precompiles/pd/utils.rs` | Replace `parse_access_list()` → `parse_pd_specifiers()`. Single vector output. |
 | `precompiles/pd/context.rs` | No changes. |
-| `precompiles/pd/utils.rs` | No changes. |
-| `crates/irys-reth/Cargo.toml` | Add `alloy-sol-types.workspace = true` dependency (provides the `sol!` macro). Already available in workspace `Cargo.toml` but not listed for `irys-reth`. |
+| `crates/irys-reth/src/pd_tx.rs` | Update `build_pd_access_list()` and `sum_pd_chunks_in_access_list()` to use `PdDataRead`. |
+| `crates/irys-reth/src/mempool.rs` | Update `extract_pd_chunk_specs()` to decode `PdDataRead` and derive chunk counts. |
+| `crates/irys-reth/src/payload.rs` | Update chunk budget to use `PdDataRead::chunks_needed()`. |
+| `crates/irys-reth/Cargo.toml` | Add `alloy-sol-types.workspace = true`. |
 
-### 6.7 What Does NOT Change
+### 6.9 What Does NOT Change
 
 | Component | Why unchanged |
 |-----------|--------------|
-| `crates/irys-reth/src/pd_tx.rs` | PD transaction envelope (header, access list building) is Layer 1 — orthogonal to precompile encoding |
-| `crates/types/src/range_specifier.rs` | Access list key encoding (ChunkRangeSpecifier, ByteRangeSpecifier) is Layer 1 |
+| `crates/irys-reth/src/pd_tx.rs` (PD header) | `PdHeaderV1`, `prepend_pd_header_v1_to_calldata`, `detect_and_decode_pd_header` — fee envelope is orthogonal |
 | `crates/types/src/precompile.rs` | Address constant `PD_PRECOMPILE_ADDRESS` stays the same |
-| `crates/irys-reth/src/mempool.rs` | PD header detection, fee validation — all Layer 1 |
-| `crates/irys-reth/src/evm.rs` | PD fee deduction, min cost validation — all Layer 1 |
-| `crates/irys-reth/src/payload.rs` | PD chunk budgeting — all Layer 1 |
+| `crates/irys-reth/src/evm.rs` | PD fee deduction, min cost validation — reads chunk count from access list (updated to use `PdDataRead::chunks_needed()` but logic unchanged) |
+| `crates/actors/src/pd_service.rs` | Chunk provisioning — consumes chunk specs, updated to accept `PdDataRead` but prefetch logic unchanged |
 | Gas model | Base cost + per-operation cost structure unchanged |
 
 ## 7. Return Data Overhead Analysis
@@ -574,35 +720,32 @@ The fixed 64-byte header (offset + length) plus up-to-31-byte padding is negligi
 
 ### 8.1 User-Facing Errors (ABI-encoded custom errors)
 
-These are errors a Solidity developer can act on. They are returned as ABI-encoded revert data matching the error selectors in `IIrysPD`:
+Returned as ABI-encoded revert data via `PrecompileOutput::new_reverted()`:
 
-| Solidity Error | Rust Source Variant | Trigger |
-|----------------|-------------------|---------|
-| `MissingAccessList()` | `MissingAccessList` | Transaction has no PD access list entries |
-| `ByteRangeNotFound(index, available)` | `ByteRangeNotFound` | Requested byte range index exceeds count |
-| `ChunkRangeNotFound(index, available)` | `ChunkRangeNotFound` | Byte range references nonexistent chunk range |
-| `ByteRangeOutOfBounds(start, end, available)` | `ByteRangeOutOfBounds` | Requested slice exceeds fetched data |
-| `ChunkNotFound(offset)` | `ChunkNotFound` | Chunk missing from storage at ledger offset |
-| `ChunkFetchFailed(offset)` | `ChunkFetchFailed` | Storage I/O error fetching chunk |
+| Solidity Error | Trigger |
+|----------------|---------|
+| `MissingAccessList()` | Transaction has no PD access list entries |
+| `SpecifierNotFound(index, available)` | Requested specifier index exceeds count |
+| `ByteRangeOutOfBounds(start, end, available)` | Requested slice exceeds available chunk data |
+| `ChunkNotFound(offset)` | Chunk missing from storage at ledger offset |
+| `ChunkFetchFailed(offset)` | Storage I/O error fetching chunk |
 
 ### 8.2 Internal Errors (EVM-level failures)
 
-These are not user-actionable and stay as opaque reverts or standard EVM errors:
+Not user-actionable — stay as opaque reverts or standard EVM errors:
 
-| Rust Variant | Handling | Reason |
-|-------------|----------|--------|
-| `GasOverflow`, `OutOfGas` | `PrecompileError::OutOfGas` | Standard EVM gas error |
-| `InvalidAccessList` | `PrecompileError::Other` | Malformed access list encoding — node concern |
-| `OffsetOutOfRange`, `LengthOutOfRange`, `PartitionIndexTooLarge` | `PrecompileError::Other` | Arithmetic overflow — internal invariant violation |
-| `InvalidCalldataLength` | Removed | Replaced by ABI decoding (alloy handles this) |
-| `InsufficientInput` | Removed | Replaced by selector length check (< 4 bytes) |
-| `OffsetTranslationFailed`, `InvalidLength` | `PrecompileError::Other` | Internal computation errors |
+| Condition | Handling |
+|-----------|----------|
+| Gas exceeded | `PrecompileError::OutOfGas` |
+| Malformed access list encoding | `PrecompileError::Other` |
+| Arithmetic overflow (offset, partition index) | `PrecompileError::Other` |
+| ABI decode failure (malformed calldata) | `PrecompileError::Other` |
 
-## 9. Migration
+## 9. Affected Files
 
-### 9.1 Solidity File Changes
+### 9.1 Solidity
 
-| Current File | Action |
+| File | Action |
 |-------------|--------|
 | `fixtures/contracts/src/Precompiles.sol` | **Delete** — constants moved into `IIrysPD.sol` |
 | `fixtures/contracts/src/ProgrammableData.sol` | **Delete** — replaced by `IIrysPD.sol` + `IrysPDLib.sol` |
@@ -610,42 +753,50 @@ These are not user-actionable and stay as opaque reverts or standard EVM errors:
 | `fixtures/contracts/src/IIrysPD.sol` | **New** — interface + address constants |
 | `fixtures/contracts/src/IrysPDLib.sol` | **New** — convenience library |
 
-### 9.2 Test Updates
+### 9.2 Rust — Access List & Specifiers
 
-All tests that construct precompile calldata must switch from packed encoding to ABI encoding:
+| File | Change |
+|------|--------|
+| `crates/types/src/range_specifier.rs` | Replace `ChunkRangeSpecifier`, `ByteRangeSpecifier`, `PdAccessListArg` with `PdDataRead`. Remove `U18`, `U34`, `PdAccessListArgSerde` trait. |
+| `crates/irys-reth/src/pd_tx.rs` | Update `build_pd_access_list()` and `sum_pd_chunks_in_access_list()` to use `PdDataRead`. |
+| `crates/irys-reth/src/mempool.rs` | Update chunk extraction to decode `PdDataRead` and derive chunk counts. |
+| `crates/irys-reth/src/payload.rs` | Update chunk budget to use `PdDataRead::chunks_needed()`. |
+| `crates/actors/src/block_validation.rs` | Update block PD chunk validation. |
+| `crates/irys-reth/src/evm.rs` | Update PD fee calculation chunk counting. |
 
-```rust
-// Before:
-let input = Bytes::from(vec![0, 0]); // function_id=0, index=0
+### 9.3 Rust — Precompile
 
-// After:
-let input = readByteRangeCall { index: 0 }.abi_encode();
-```
+| File | Change |
+|------|--------|
+| `precompiles/pd/precompile.rs` | Replace 1-byte dispatch with 4-byte ABI selector matching. ABI-encode return data. |
+| `precompiles/pd/functions.rs` | Replace `PdFunctionId` enum with `sol!` macro block. |
+| `precompiles/pd/read_bytes.rs` | Rewrite to work with `PdDataRead`. Remove cross-reference logic. Core chunk-fetch reused. |
+| `precompiles/pd/constants.rs` | Remove raw encoding offset constants. Keep `PD_BASE_GAS_COST`. |
+| `precompiles/pd/error.rs` | Simplify error variants. Add `try_encode_as_revert()`. |
+| `precompiles/pd/utils.rs` | Replace `parse_access_list()` with `parse_pd_specifiers()`. Single canonical parser shared by all system components. Rejects (not skips) malformed keys. |
+| `precompiles/pd/context.rs` | No changes. |
+| `crates/irys-reth/Cargo.toml` | Add `alloy-sol-types.workspace = true`. |
 
-Tests that assert on return data must account for ABI encoding:
+### 9.4 Tests
 
-```rust
-// Before:
-let raw_bytes = result.into_output().unwrap();
-
-// After:
-let abi_encoded = result.into_output().unwrap();
-let (decoded_bytes,) = readByteRangeCall::abi_decode_returns(&abi_encoded).unwrap();
-```
-
-Affected test files:
+All tests that construct access lists or precompile calldata need updating:
 - `crates/irys-reth/src/precompiles/pd/precompile.rs` (module tests)
 - `crates/irys-reth/src/precompiles/pd/read_bytes.rs` (module tests)
 - `crates/irys-reth/tests/pd_context_isolation.rs`
 - `crates/chain-tests/src/programmable_data/basic.rs`
+- `crates/chain-tests/src/programmable_data/pd_chunk_limit.rs`
+- `crates/chain-tests/src/programmable_data/hardfork_guard.rs`
+- `crates/chain-tests/src/programmable_data/min_transaction_cost.rs`
 - `crates/chain-tests/src/external/programmable_data_basic.rs`
+- `crates/chain-tests/src/utils.rs`
 - Solidity contract artifact recompilation (foundry/forge)
 
-## 10. Cons and Risks
+## 10. Risks
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| ABI return encoding overhead for small reads | Low | 64-byte fixed overhead + up to 31-byte padding, negligible for typical chunk-sized reads (see Section 7) |
-| Solidity contract recompilation required | Low | Rebuild with forge, update artifact JSON files. One-time cost. |
-| All existing PD integration tests break | Medium | Expected — every test touching the precompile needs calldata/return encoding updates. Scope is bounded to the files listed in Section 9.2. |
-| `alloy-sol-types` must be added to `irys-reth` | Low | Already in workspace `Cargo.toml`, just needs adding to crate-level dependencies |
+| ABI return encoding overhead for small reads | Low | 64-byte fixed overhead, negligible for typical chunk-sized reads (see Section 7) |
+| Broad scope — access list + precompile ABI change together | Medium | One clean break instead of two separate migrations. All changes are pre-launch. |
+| `alloy-sol-types` must be added to `irys-reth` | Low | Already in workspace `Cargo.toml`, just needs crate-level dependency. |
+| Chunk derivation formula couples to `chunk_size` | Low | `chunk_size = 262,144` is a protocol constant. If it ever changes, specifier format gets a new type byte. |
+| `readBytes(index, offset, length)` can request bytes outside the specifier's provisioned range | Low | Precompile validates bounds. Requests outside available data revert with `ByteRangeOutOfBounds`. |
