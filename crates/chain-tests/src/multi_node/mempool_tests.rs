@@ -175,9 +175,7 @@ async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::
         Some(inclusion_block.height)
     );
 
-    let best_txs = genesis_node
-        .get_best_mempool_tx(stale_parent_hash)
-        .await?;
+    let best_txs = genesis_node.get_best_mempool_tx(stale_parent_hash).await?;
 
     assert!(
         !best_txs
