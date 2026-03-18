@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773843122845,
+  "lastUpdate": 1773844841257,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -478,6 +478,86 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "d65cd5ee98265a5277bbc6f0596142f64acf01c2",
+          "message": "feat(multiversion-tests): add cross-version integration test harness",
+          "timestamp": "2026-03-17T16:33:12Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1207/commits/d65cd5ee98265a5277bbc6f0596142f64acf01c2"
+        },
+        "date": 1773844840371,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 6.060488,
+            "range": "± 0.01204",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 867.58843,
+            "range": "± 0.489772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1127.940399,
+            "range": "± 1.762266",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.446665,
+            "range": "± 0.014106",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1204.67518,
+            "range": "± 3.362922",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1574.559365,
+            "range": "± 61.365023",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 3.652402,
+            "range": "± 1.994026",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 270.566533,
+            "range": "± 42.051897",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 345.320313,
+            "range": "± 18.264228",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000001",
             "unit": "ms/iter"
           }
