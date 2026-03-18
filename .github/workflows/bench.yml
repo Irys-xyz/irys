@@ -130,6 +130,32 @@ jobs:
           print(f'Converted {len(results)} benchmarks from ns to ms')
           "
 
+      - name: Seed branch with master baseline
+        if: (github.head_ref || github.ref_name) != github.event.repository.default_branch
+        env:
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+        run: |
+          git fetch origin gh-pages:gh-pages
+          git worktree add /tmp/gh-pages gh-pages
+
+          BRANCH_DIR="/tmp/gh-pages/dev/bench/$BRANCH_NAME"
+          MASTER_DATA="/tmp/gh-pages/data.js"
+
+          if [ ! -f "$BRANCH_DIR/data.js" ] && [ -f "$MASTER_DATA" ]; then
+            mkdir -p "$BRANCH_DIR"
+            cp "$MASTER_DATA" "$BRANCH_DIR/data.js"
+            cd /tmp/gh-pages
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "dev/bench/$BRANCH_NAME/data.js"
+            git commit -m "seed: copy master baseline to branch $BRANCH_NAME"
+            git push origin gh-pages
+          else
+            echo "Branch data already exists or no master baseline found, skipping seed"
+          fi
+
+          git worktree remove /tmp/gh-pages
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
