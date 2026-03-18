@@ -20,9 +20,6 @@ const SHA256_IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// Pre-computed SHA256 padding block for a 64-byte message.
-/// SHA256 padding: 0x80 byte, zeros, then 64-bit big-endian bit length.
-/// For 64 bytes input: bit length = 512 = 0x200.
 const SHA256_64B_PADDING: [u8; 64] = {
     let mut block = [0_u8; 64];
     block[0] = 0x80;
@@ -37,7 +34,6 @@ fn state_to_bytes(state: &[u32; 8], out: &mut [u8]) {
     }
 }
 
-/// Increments a little-endian 256-bit integer stored in a 32-byte slice.
 #[inline]
 fn increment_le_salt(salt: &mut [u8]) {
     for byte in salt.iter_mut() {
@@ -66,6 +62,16 @@ fn as_generic_array_slice(blocks: &[[u8; 64]]) -> &[GenericArray<u8, U64>] {
 }
 
 #[inline]
+fn compress_n_rounds(blocks: &mut [[u8; 64]; 2], iterations: u64) {
+    for _ in 0..iterations {
+        let ga_blocks = as_generic_array_slice(blocks);
+        let mut state = SHA256_IV;
+        compress256(&mut state, ga_blocks);
+        state_to_bytes(&state, &mut blocks[0][32..64]);
+    }
+}
+
+#[inline]
 pub fn vdf_sha(
     start_salt: U256,
     seed: &mut H256,
@@ -88,18 +94,12 @@ pub fn vdf_sha(
         if checkpoint_idx > 0 {
             increment_le_salt(&mut blocks[0][..32]);
         }
-        for _ in 0..num_iterations_per_checkpoint {
-            let ga_blocks = as_generic_array_slice(&blocks);
-            let mut state = SHA256_IV;
-            compress256(&mut state, ga_blocks);
-            state_to_bytes(&state, &mut blocks[0][32..64]);
-        }
+        compress_n_rounds(&mut blocks, num_iterations_per_checkpoint);
         seed.as_mut().copy_from_slice(&blocks[0][32..64]);
         *slot = *seed;
     }
 }
 
-/// Vdf verification code
 pub fn vdf_sha_verification(
     salt: U256,
     seed: H256,
@@ -274,12 +274,7 @@ pub async fn last_step_checkpoints_is_valid(
                     blocks[1] = SHA256_64B_PADDING;
                     blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
 
-                    for _ in 0..num_iterations {
-                        let ga_blocks = as_generic_array_slice(&blocks);
-                        let mut state = SHA256_IV;
-                        compress256(&mut state, ga_blocks);
-                        state_to_bytes(&state, &mut blocks[0][32..64]);
-                    }
+                    compress_n_rounds(&mut blocks, num_iterations);
                     let mut result = H256::zero();
                     result.as_mut().copy_from_slice(&blocks[0][32..64]);
                     result
@@ -312,7 +307,7 @@ pub fn compute_step_checkpoints(
 ) -> (H256, Vec<H256>) {
     let salt = U256::from(step_number_to_salt_number(config, step.saturating_sub(1)));
     let mut seed = input_seed;
-    if step > 1 && (step - 1).is_multiple_of(u64::try_from(config.reset_frequency).unwrap()) {
+    if step > 1 && (step - 1).is_multiple_of(config.reset_frequency as u64) {
         seed = apply_reset_seed(seed, reset_seed);
     }
     let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
