@@ -53,8 +53,8 @@ fn increment_le_salt(salt: &mut [u8]) {
 #[inline]
 fn as_generic_array_slice(blocks: &[[u8; 64]]) -> &[GenericArray<u8, U64>] {
     const {
-        assert!(size_of::<GenericArray<u8, U64>>() == 64);
-        assert!(align_of::<GenericArray<u8, U64>>() == 1);
+        assert!(core::mem::size_of::<GenericArray<u8, U64>>() == 64);
+        assert!(core::mem::align_of::<GenericArray<u8, U64>>() == 1);
     }
     // SAFETY: GenericArray<u8, U64> is #[repr(transparent)] over [u8; 64],
     // verified by the const assertions above.
