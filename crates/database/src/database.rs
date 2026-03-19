@@ -875,7 +875,7 @@ mod tests {
             });
 
         let db = open_or_create_db(
-            path,
+            path.path(),
             IrysTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
@@ -955,7 +955,7 @@ mod tests {
         fn returns_header_when_included_on_canonical_chain_within_height() {
             let path = tempdir().unwrap();
             let db = open_or_create_db(
-                path,
+                path.path(),
                 IrysTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
@@ -989,7 +989,7 @@ mod tests {
         fn rejects_header_when_included_height_exceeds_max() {
             let path = tempdir().unwrap();
             let db = open_or_create_db(
-                path,
+                path.path(),
                 IrysTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
@@ -1023,7 +1023,7 @@ mod tests {
         fn rejects_header_at_unmigrated_height() {
             let path = tempdir().unwrap();
             let db = open_or_create_db(
-                path,
+                path.path(),
                 IrysTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
