@@ -25,6 +25,15 @@ use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
 use tracing::{Instrument as _, debug, info, trace, warn};
 
+/// Information derived from MDBX state needed to fully verify a fetched chunk.
+#[derive(Debug)]
+struct ChunkVerificationInfo {
+    expected_data_root: irys_types::H256,
+    data_size: u64,
+    /// Zero-based chunk index within the transaction.
+    tx_chunk_offset: u64,
+}
+
 /// The PD (Programmable Data) Service manages chunk provisioning for PD transactions.
 ///
 /// It handles the full lifecycle:
@@ -204,14 +213,18 @@ impl PdService {
                 irys_types::ChunkFormat::Unpacked(_) => "Unpacked",
             }
         );
-        // 1. Extract unpacked bytes and data_root from the fetched chunk.
+        // 1. Extract unpacked bytes, data_root, data_path, and data_size from the fetched chunk.
         let config = self.storage_provider.config();
-        let (unpacked_bytes, chunk_data_root) = match chunk_format {
+        let (unpacked_bytes, chunk_data_root, data_path, chunk_data_size) = match chunk_format {
             irys_types::ChunkFormat::Unpacked(unpacked) => {
                 let data_root = unpacked.data_root;
-                (unpacked.bytes.0, data_root)
+                let data_path = unpacked.data_path.clone();
+                let data_size = unpacked.data_size;
+                (unpacked.bytes.0, data_root, data_path, data_size)
             }
             irys_types::ChunkFormat::Packed(packed) => {
+                let data_path = packed.data_path.clone();
+                let data_size = packed.data_size;
                 let unpacked = irys_packing::unpack(
                     &packed,
                     config.entropy_packing_iterations,
@@ -219,40 +232,86 @@ impl PdService {
                     config.chain_id,
                 );
                 let data_root = unpacked.data_root;
-                (unpacked.bytes.0, data_root)
+                (unpacked.bytes.0, data_root, data_path, data_size)
             }
         };
 
-        // 2. Verify data_root against local MDBX state.
-        match self.derive_expected_data_root(&key) {
-            Ok(expected_data_root) => {
-                if chunk_data_root != expected_data_root {
-                    warn!(
-                        ?key,
-                        ?chunk_data_root,
-                        ?expected_data_root,
-                        ?serving_peer,
-                        "Fetched chunk data_root mismatch — excluding peer and retrying"
-                    );
-                    let failed: Vec<SocketAddr> = serving_peer.into_iter().collect();
-                    self.on_fetch_all_peers_failed(key, failed);
-                    return;
-                }
-                debug!("data_root verified for ({}, {})", key.ledger, key.offset);
-            }
+        // 2. Derive chunk verification info from trusted MDBX state.
+        let info = match self.derive_chunk_verification_info(&key) {
+            Ok(info) => info,
             Err(e) => {
                 warn!(
                     ?key,
                     error = %e,
-                    "Could not derive expected data_root — rejecting unverifiable chunk \
+                    "Could not derive chunk verification info — rejecting unverifiable chunk \
                      (PD only accesses migrated blocks, so this indicates missing MDBX state)"
                 );
                 self.fail_pending_fetch(&key);
                 return;
             }
+        };
+
+        if chunk_data_root != info.expected_data_root {
+            warn!(
+                ?key,
+                ?chunk_data_root,
+                expected_data_root = ?info.expected_data_root,
+                ?serving_peer,
+                "Fetched chunk data_root mismatch — excluding peer and retrying"
+            );
+            let failed: Vec<SocketAddr> = serving_peer.into_iter().collect();
+            self.on_fetch_all_peers_failed(key, failed);
+            return;
+        }
+        debug!("data_root verified for ({}, {})", key.ledger, key.offset);
+
+        // 3. Verify Merkle proof: data_path must be valid under data_root at the expected
+        //    byte position. We use `info.data_size` from MDBX (trusted state) for the byte
+        //    offset calculation — NOT `chunk_data_size` from the peer.
+        let _ = chunk_data_size; // consumed above, kept to silence unused-variable warnings
+        let chunk_size = config.chunk_size;
+        let num_chunks = info.data_size.div_ceil(chunk_size);
+        let last_chunk_offset = num_chunks.saturating_sub(1);
+        let target_byte_offset: u128 = if info.tx_chunk_offset == last_chunk_offset {
+            u128::from(info.data_size).saturating_sub(1)
+        } else {
+            u128::from(info.tx_chunk_offset + 1) * u128::from(chunk_size) - 1
+        };
+
+        match irys_types::validate_path(info.expected_data_root.0, &data_path, target_byte_offset) {
+            Ok(path_result) => {
+                // 4. Verify leaf hash: sha256(chunk_bytes) must match the Merkle leaf.
+                let computed_hash = irys_types::hash_sha256(&unpacked_bytes);
+                if path_result.leaf_hash != computed_hash {
+                    warn!(
+                        ?key,
+                        ?serving_peer,
+                        "Fetched chunk leaf hash mismatch — data_path valid but bytes \
+                         don't match leaf"
+                    );
+                    let failed: Vec<SocketAddr> = serving_peer.into_iter().collect();
+                    self.on_fetch_all_peers_failed(key, failed);
+                    return;
+                }
+                debug!(
+                    "Merkle proof and leaf hash verified for ({}, {})",
+                    key.ledger, key.offset
+                );
+            }
+            Err(e) => {
+                warn!(
+                    ?key,
+                    ?serving_peer,
+                    error = %e,
+                    "Fetched chunk has invalid Merkle proof (data_path)"
+                );
+                let failed: Vec<SocketAddr> = serving_peer.into_iter().collect();
+                self.on_fetch_all_peers_failed(key, failed);
+                return;
+            }
         }
 
-        // 3. Remove the fetch state and collect all waiters.
+        // 5. Remove the fetch state and collect all waiters.
         let Some(state) = self.pending_fetches.remove(&key) else {
             // Stale fetch result — the key was already cleaned up.
             debug!(?key, "Fetch completed but no pending state found (stale)");
@@ -267,7 +326,7 @@ impl PdService {
         let waiting_blocks: Vec<B256> = state.waiting_blocks.into_iter().collect();
         let waiting_txs: Vec<B256> = state.waiting_txs.into_iter().collect();
 
-        // 4. Insert into cache with per-waiter references.
+        // 6. Insert into cache with per-waiter references.
         let data = Arc::new(Bytes::from(unpacked_bytes));
         let all_waiters: Vec<B256> = waiting_blocks
             .iter()
@@ -288,7 +347,7 @@ impl PdService {
             }
         }
 
-        // 5. Notify waiting blocks.
+        // 7. Notify waiting blocks.
         for block_hash in &waiting_blocks {
             if let Some(pending) = self.pending_blocks.get_mut(block_hash) {
                 pending.remaining_keys.remove(&key);
@@ -307,7 +366,7 @@ impl PdService {
             }
         }
 
-        // 6. Notify waiting transactions.
+        // 8. Notify waiting transactions.
         for tx_hash in &waiting_txs {
             if let Some(tx_state) = self.tracker.get_mut(tx_hash) {
                 tx_state.missing_chunks.remove(&key);
@@ -421,9 +480,13 @@ impl PdService {
         self.cache.try_shrink_to_fit();
     }
 
-    /// Derive the expected `data_root` for a chunk at the given ledger offset
+    /// Derive chunk verification info (expected `data_root`, `data_size`, and
+    /// transaction-relative chunk offset) for a chunk at the given ledger offset
     /// by walking the block index and transaction headers in MDBX.
-    fn derive_expected_data_root(&self, key: &ChunkKey) -> eyre::Result<irys_types::H256> {
+    fn derive_chunk_verification_info(
+        &self,
+        key: &ChunkKey,
+    ) -> eyre::Result<ChunkVerificationInfo> {
         let block_index = self.block_index.read();
         let bounds = block_index.get_block_bounds(
             DataLedger::Publish,
@@ -456,7 +519,11 @@ impl PdService {
                 .ok_or_else(|| eyre::eyre!("Tx header not found: {}", tx_id))?;
             let num_chunks = tx_header.data_size.div_ceil(chunk_size);
             if key.offset < running_offset + num_chunks {
-                return Ok(tx_header.data_root);
+                return Ok(ChunkVerificationInfo {
+                    expected_data_root: tx_header.data_root,
+                    data_size: tx_header.data_size,
+                    tx_chunk_offset: key.offset - running_offset,
+                });
             }
             running_offset += num_chunks;
         }
