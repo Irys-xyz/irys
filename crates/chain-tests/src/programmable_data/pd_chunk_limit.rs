@@ -55,9 +55,9 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     let chain_id = genesis_node.node_ctx.config.consensus.chain_id;
 
     // Build access list with 80 chunks (4 keys * 20 chunks each)
-    let storage_keys = (0..4).map(|_i| ChunkRangeSpecifier {
+    let storage_keys = (0..4).map(|i| ChunkRangeSpecifier {
         partition_index: U200::MAX,
-        offset: 0,
+        offset: i * 20, // distinct offsets to avoid duplicate key rejection
         chunk_count: 20,
     });
     // Build access list with 80 chunks AND fee parameters.
