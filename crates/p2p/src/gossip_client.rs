@@ -232,9 +232,10 @@ impl GossipClient {
                 )
                 .await
             } else {
-                Ok(GossipResponse::Rejected(
+                // No V1 translation — return early to skip scoring (no network call was made)
+                return Ok(GossipResponse::Rejected(
                     RejectionReason::UnsupportedFeature,
-                ))
+                ));
             }
         } else {
             self.send_data_internal(
@@ -353,9 +354,10 @@ impl GossipClient {
                         GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
                     })
                 } else {
-                    Ok(GossipResponse::Rejected(
+                    // No V1 translation — return early to skip scoring (no network call was made)
+                    return Ok(GossipResponse::Rejected(
                         RejectionReason::UnsupportedFeature,
-                    ))
+                    ));
                 }
             } else {
                 self.send_data_internal(
