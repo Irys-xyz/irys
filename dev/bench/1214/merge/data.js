@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773922248094,
+  "lastUpdate": 1773924019925,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -575,6 +575,86 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "d86d598ce9e85ee9a1f24a9e6cb84d4f6a78a98b",
+          "message": "perf(vdf): optimize hot loop with direct compress256 and copy elimination",
+          "timestamp": "2026-03-19T10:28:02Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1214/commits/d86d598ce9e85ee9a1f24a9e6cb84d4f6a78a98b"
+        },
+        "date": 1773924019112,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.494394,
+            "range": "± 0.234617",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 770.20619,
+            "range": "± 19.353228",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.396152,
+            "range": "± 13.865509",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.398378,
+            "range": "± 0.18405",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1199.443832,
+            "range": "± 4.286207",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1559.767605,
+            "range": "± 3.41085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.260073,
+            "range": "± 0.213714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.260008,
+            "range": "± 1.149238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.135422,
+            "range": "± 2.24371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000121,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
