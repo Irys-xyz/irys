@@ -35,6 +35,9 @@ env:
   RUST_BACKTRACE: short
   # keep build artifacts contained to this repo's workspace on the self-hosted runner
   CARGO_TARGET_DIR: ${{ github.workspace }}/.target
+  CARGO_BUILD_RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: /shared/sccache
+  SCCACHE_CACHE_SIZE: 40G
 
 jobs:
   flaky-tests:
@@ -167,4 +170,8 @@ jobs:
           if [ -f flaky-test-results/summary.md ]; then
             cat flaky-test-results/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 

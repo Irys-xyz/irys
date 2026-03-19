@@ -10,7 +10,22 @@ runs:
         components: rustfmt,clippy,cargo,llvm-tools-preview
         cache: false
 
-    - uses: Swatinem/rust-cache@v2
+
+    # rust-cache preserves the target/ directory (proc-macros, build scripts,
+    # workspace crate fingerprints) between runs on the same runner.
+    # sccache handles cross-runner sharing of rustc compilation units.
+    #
+    # suffix-key includes git SHA so each commit saves its own cache. On miss,
+    # prefix matching restores the most recent cache from the same branch
+    # (or default branch), giving us fresh workspace fingerprints.
+    - name: Get commit SHA for cache key
+      id: cache-key
+      shell: bash
+      run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+    - uses: JesseTheRobot/rust-cache@020cd345deec604d4c4f73d8cef18267a8202091
       with:
+        prefix-key: "v0"
+        suffix-key: ${{ steps.cache-key.outputs.sha }}
         cache-on-failure: true
         cache-all-crates: true
+        cache-workspace-crates: "true"

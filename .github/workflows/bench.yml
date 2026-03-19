@@ -9,7 +9,7 @@ concurrency:
 
 on:
   pull_request:
-    types: [opened, synchronize, closed]
+    types: [closed]
   pull_request_review:
     types: [submitted]
   push:
@@ -21,6 +21,9 @@ env:
   RUST_BACKTRACE: 1
   IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
   CARGO_INCREMENTAL: 0
+  CARGO_BUILD_RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: /shared/sccache
+  SCCACHE_CACHE_SIZE: 40G
 
 jobs:
   gate:
@@ -95,26 +98,11 @@ jobs:
             fi
           fi
 
-          # For pull_request events, check PR description
-          if [[ "${{ github.event_name }}" == "pull_request" && "$SHOULD_RUN" == "true" ]]; then
+          # For pull_request_review events, check PR description
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "$SHOULD_RUN" == "true" ]]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
             if ! check_pr_description "$PR_NUMBER"; then
               SHOULD_RUN=false
-            fi
-          fi
-
-          # For pull_request_review events, only run on approvals; check PR description
-          if [[ "${{ github.event_name }}" == "pull_request_review" && "$SHOULD_RUN" == "true" ]]; then
-            if [[ "${{ github.event.review.state }}" != "approved" ]]; then
-              echo "Review is not an approval, skipping..."
-              SHOULD_RUN=false
-            fi
-
-            if [[ "$SHOULD_RUN" == "true" ]]; then
-              PR_NUMBER="${{ github.event.pull_request.number }}"
-              if ! check_pr_description "$PR_NUMBER"; then
-                SHOULD_RUN=false
-              fi
             fi
           fi
 
@@ -161,7 +149,12 @@ jobs:
     name: cargo bench
     runs-on: [self-hosted, misc-runner]
     needs: gate
-    if: ${{ needs.gate.outputs.should-run == 'true' }}
+    if: >-
+      needs.gate.outputs.should-run == 'true' && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
+      )
     timeout-minutes: 30
     permissions:
       contents: write
@@ -245,3 +238,7 @@ jobs:
                 body,
               });
             }
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
