@@ -11,10 +11,7 @@ use reth::{
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
-use reth_db::{
-    init_db,
-    mdbx::MEGABYTE,
-};
+use reth_db::{init_db, mdbx::MEGABYTE};
 use reth_node_builder::{
     rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
     NodeComponentsBuilder, NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
@@ -96,7 +93,6 @@ impl From<RethNodeProvider> for RethNode {
         val.0.as_ref().clone()
     }
 }
-
 
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
