@@ -865,7 +865,12 @@ impl GossipClient {
                 serde_json::to_vec(&self.create_request_v2(proof.clone())),
             ),
             GossipDataV2::PdChunk(_) => {
-                // PdChunk is not broadcast via gossip push; it uses pull-based P2P
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P.
+                // TODO: If PdChunk gains push semantics, returning None here causes
+                // the fallback path (send_data_and_update_the_score_detached) to
+                // treat it as a spurious success — scoring peers up and recording
+                // seen-state incorrectly. Must return a proper (route, bytes) or
+                // handle the variant before reaching broadcast_data.
                 return None;
             }
         };
@@ -1083,7 +1088,8 @@ impl GossipClient {
                 .await
             }
             GossipDataV2::PdChunk(_) => {
-                // PdChunk is not broadcast via gossip push; it uses pull-based P2P
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P.
+                // TODO: Re-evaluate if PdChunk gains push semantics.
                 Ok(GossipResponse::Rejected(
                     RejectionReason::UnsupportedFeature,
                 ))
