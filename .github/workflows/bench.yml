@@ -21,6 +21,9 @@ env:
   RUST_BACKTRACE: 1
   IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
   CARGO_INCREMENTAL: 0
+  CARGO_BUILD_RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: /shared/sccache
+  SCCACHE_CACHE_SIZE: 40G
 
 jobs:
   gate:
@@ -91,7 +94,12 @@ jobs:
     name: cargo bench
     runs-on: [self-hosted, misc-runner]
     needs: gate
-    if: ${{ needs.gate.outputs.should-run == 'true' }}
+    if: >-
+      needs.gate.outputs.should-run == 'true' && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
+      )
     timeout-minutes: 30
     permissions:
       contents: write
@@ -211,3 +219,7 @@ jobs:
                 body,
               });
             }
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
