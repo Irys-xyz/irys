@@ -31,18 +31,10 @@ use reth_db::transaction::DbTxMut;
 use reth_db::{
     ClientVersion, DatabaseEnv, DatabaseError,
     cursor::*,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration, SyncMode},
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
 };
 use reth_db_api::Database as _;
 use tracing::{debug, warn};
-
-fn db_sync_mode_to_mdbx(mode: DbSyncMode) -> SyncMode {
-    match mode {
-        DbSyncMode::Durable => SyncMode::Durable,
-        DbSyncMode::SafeNoSync => SyncMode::SafeNoSync,
-        DbSyncMode::UtterlyNoSync => SyncMode::UtterlyNoSync,
-    }
-}
 
 /// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
 pub trait IrysDatabaseArgs {
@@ -65,7 +57,7 @@ impl IrysDatabaseArgs for DatabaseArguments {
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
             .with_growth_step((10 * MEGABYTE).into())
             .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode))))
+            .with_sync_mode(Some(sync_mode.into())))
     }
 
     fn irys_testing() -> eyre::Result<DatabaseArguments> {
@@ -82,7 +74,7 @@ impl IrysDatabaseArgs for DatabaseArguments {
             // so trade durability for write throughput by skipping fsync operations.
             // SafeNoSync preserves DB integrity on crash (rolls back to last steady
             // commit) — only recent uncommitted transactions are lost.
-            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode))))
+            .with_sync_mode(Some(sync_mode.into())))
     }
 }
 

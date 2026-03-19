@@ -13,7 +13,7 @@ use reth::{
 use reth_chainspec::ChainSpec;
 use reth_db::{
     init_db,
-    mdbx::{SyncMode, MEGABYTE},
+    mdbx::MEGABYTE,
 };
 use reth_node_builder::{
     rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
@@ -97,13 +97,6 @@ impl From<RethNodeProvider> for RethNode {
     }
 }
 
-fn db_sync_mode_to_mdbx(mode: irys_types::DbSyncMode) -> SyncMode {
-    match mode {
-        irys_types::DbSyncMode::Durable => SyncMode::Durable,
-        irys_types::DbSyncMode::SafeNoSync => SyncMode::SafeNoSync,
-        irys_types::DbSyncMode::UtterlyNoSync => SyncMode::UtterlyNoSync,
-    }
-}
 
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
@@ -201,7 +194,7 @@ pub async fn run_node(
         .database_args()
         .with_growth_step((10 * MEGABYTE).into())
         .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-        .with_sync_mode(Some(db_sync_mode_to_mdbx(node_config.reth.db_sync_mode)));
+        .with_sync_mode(Some(node_config.reth.db_sync_mode.into()));
 
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();

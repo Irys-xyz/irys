@@ -31,8 +31,7 @@ impl RunMode {
 }
 
 /// Database sync mode controlling durability vs write performance.
-/// Wraps `reth_db::mdbx::SyncMode` so it can live in `irys-types` without
-/// depending on `reth_db`.
+/// Mirrors `reth_db::mdbx::SyncMode` which doesn't derive Serialize/Deserialize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DbSyncMode {
     /// fsync after every transaction — safest, slowest.
@@ -41,6 +40,16 @@ pub enum DbSyncMode {
     SafeNoSync,
     /// No fsync, no crash safety — fastest, for tests only.
     UtterlyNoSync,
+}
+
+impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
+    fn from(mode: DbSyncMode) -> Self {
+        match mode {
+            DbSyncMode::Durable => Self::Durable,
+            DbSyncMode::SafeNoSync => Self::SafeNoSync,
+            DbSyncMode::UtterlyNoSync => Self::UtterlyNoSync,
+        }
+    }
 }
 
 /// Database durability and sync settings.
