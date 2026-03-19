@@ -108,6 +108,95 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     Ok(())
 }
 
+#[test_log::test(tokio::test)]
+async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::Result<()> {
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(1_000_000_000_000_000_000_000_000_u128),
+            ..Default::default()
+        },
+    )]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = signer.create_publish_transaction(
+        data,
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+
+    post_chunk(&app, &tx, 0, &chunks).await;
+    post_chunk(&app, &tx, 1, &chunks).await;
+    post_chunk(&app, &tx, 2, &chunks).await;
+    post_data_tx(&app, &tx).await;
+
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
+        .await?;
+
+    let stale_parent_hash = genesis_node.get_max_difficulty_block().block_hash;
+    let inclusion_block = genesis_node.mine_block().await?;
+    assert!(
+        inclusion_block.data_ledgers[DataLedger::Publish]
+            .tx_ids
+            .0
+            .contains(&tx.header.id),
+        "tx should be promoted into Publish when all chunks are present before tx ingress"
+    );
+
+    let raw_mempool_header = genesis_node
+        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
+        .await?;
+    assert_eq!(
+        raw_mempool_header.metadata().included_height,
+        Some(inclusion_block.height)
+    );
+    assert_eq!(
+        raw_mempool_header.promoted_height(),
+        Some(inclusion_block.height)
+    );
+
+    let best_txs = genesis_node.get_best_mempool_tx(stale_parent_hash).await?;
+
+    assert!(
+        !best_txs
+            .submit_tx
+            .iter()
+            .any(|header| header.id == tx.header.id),
+        "confirmed promoted tx must not be reselected into Submit when building on a stale parent"
+    );
+    assert!(
+        !best_txs
+            .publish_tx
+            .txs
+            .iter()
+            .any(|header| header.id == tx.header.id),
+        "already-promoted tx must not be selected for Publish again"
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};

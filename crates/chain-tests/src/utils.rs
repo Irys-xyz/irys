@@ -2259,6 +2259,22 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
+    /// Read a storage tx directly from the in-memory mempool without DB fallback or metadata overlay.
+    pub async fn get_storage_tx_header_from_raw_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<DataTransactionHeader> {
+        self.node_ctx
+            .mempool_guard
+            .atomic_state()
+            .batch_valid_submit_ledger_tx_cloned(&[*tx_id])
+            .await
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| eyre::eyre!("No raw mempool tx header found for txid {:?}", tx_id))
+    }
+
     /// Polls the mempool until the transaction's `included_height` is set.
     /// The mempool updates `included_height` asynchronously after `BlockConfirmed`.
     pub async fn wait_for_tx_included(
@@ -2281,6 +2297,35 @@ impl IrysNodeTest<IrysNodeCtx> {
             "included_height not set for tx {} after {} seconds",
             tx_id,
             max_seconds
+        ))
+    }
+
+    /// Poll the raw mempool until both included and promoted heights match the expected block height.
+    pub async fn wait_for_tx_confirmed_in_raw_mempool(
+        &self,
+        tx_id: &H256,
+        expected_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<DataTransactionHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_tx_confirmed_in_raw_mempool");
+        for _ in 0..(max_seconds * 10) {
+            match self.get_storage_tx_header_from_raw_mempool(tx_id).await {
+                Ok(header)
+                    if header.metadata().included_height == Some(expected_height)
+                        && header.promoted_height() == Some(expected_height) =>
+                {
+                    return Ok(header);
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "raw mempool metadata not updated for tx {} after {} seconds (expected included/promoted height {})",
+            tx_id,
+            max_seconds,
+            expected_height
         ))
     }
 
