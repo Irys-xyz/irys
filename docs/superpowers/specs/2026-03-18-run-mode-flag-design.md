@@ -200,14 +200,17 @@ Replaces the dual-check (`cfg!(debug_assertions)` + `.tmp` path heuristic) and t
 Two independent warnings:
 
 1. **Debug build warning** (stays at current location, before config load):
-   ```
+
+   ```text
    WARNING: Running a debug build. Performance will be degraded.
    RECOMPILE WITH --release for production use.
    ```
+
    Reworded to focus on compilation profile (optimizations, debug symbols) since durability is no longer tied to it. No sleep — just a warning.
 
 2. **Test mode warning** (after `load_config()`, before `IrysNode::bind_listeners()`):
-   ```
+
+   ```text
    WARNING: run_mode is set to Test. Durability and performance settings
    are optimized for testing, not production. If this is unintentional,
    check your node configuration.
@@ -245,29 +248,25 @@ The `testnet()` constructor similarly needs the new fields, but with production 
 
 ### 6. `open_or_create_db` Signature Change and Blast Radius
 
-The `open_or_create_db` function currently accepts an `args: Option<DatabaseArguments>` where sync mode is baked into the default args when `args` is `None`. The `sync_mode` parameter is used only when building default args; when `args` is `Some(...)`, the caller's args (including any sync mode they set) are used as-is:
+The `open_or_create_db` function accepts caller-built `DatabaseArguments` directly, with no separate `sync_mode` parameter. Callers use `DatabaseArguments::irys_default(sync_mode)?` (or `irys_cache`, `irys_testing`) to build sync-mode-aware args before passing them in:
 
 ```rust
 pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
-    sync_mode: DbSyncMode,
+    args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = args.unwrap_or(
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            .with_growth_step((10 * MEGABYTE).into())
-            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-            .with_sync_mode(Some(sync_mode.into()))
-    );
-    // ...
+    let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
+    Ok(db)
 }
+
+// Most callers build args via the IrysDatabaseArgs trait:
+open_or_create_db(path, tables, DatabaseArguments::irys_default(sync_mode)?);
 ```
 
-When `args` is `Some(...)`, the caller has full control over `DatabaseArguments` including sync mode. The `sync_mode` parameter only applies to the default case. This preserves the ability for callers like `open_or_create_cache_db` and `create_or_open_submodule_db` to fully customize their database arguments.
+Each caller is responsible for building `DatabaseArguments` with the appropriate `DbSyncMode`. The `DatabaseArguments::irys_default` constructor embeds the sync mode alongside standard settings (unbounded read transaction duration, 10 MB growth step, 20 MB shrink threshold). Specialized callers like `open_or_create_cache_db` and `create_or_open_submodule_db` use their own constructors (`irys_cache`, `irys_default` with custom geometry) to tailor `DatabaseArguments` while still honoring `DbSyncMode`.
 
-**Direct callers of `open_or_create_db` passing `args: None`** (~22 call sites):
+**Direct callers of `open_or_create_db` using `DatabaseArguments::irys_default` or `irys_testing`** (~22 call sites):
 
 | Location | Count | Notes |
 |----------|-------|-------|
@@ -284,9 +283,9 @@ When `args` is `Some(...)`, the caller has full control over `DatabaseArguments`
 | `crates/actors/src/cache_service.rs` (tests) | ~8 | Pass `DbSyncMode::UtterlyNoSync` |
 | `crates/utils/debug-utils/src/db.rs` | 1 | Pass `DbSyncMode::Durable` (operates on real DBs) |
 
-**Direct callers of `open_or_create_db` passing `args: Some(...)`** — these callers build their own `DatabaseArguments` which take precedence over the `sync_mode` parameter:
-- `open_or_create_cache_db` — builds its own args with the caller-provided `DbSyncMode` baked in. The `sync_mode` param passed to `open_or_create_db` is unused.
-- `create_or_open_submodule_db` in `crates/database/src/submodule/db.rs` — builds custom args (growth step, geometry) without setting sync mode. The `sync_mode` param is unused; the MDBX library default applies. This pre-existing behavior is preserved.
+**Direct callers of `open_or_create_db`** — each caller builds its own `DatabaseArguments` embedding the desired `DbSyncMode`, which `open_or_create_db` passes through to MDBX:
+- `open_or_create_cache_db` — builds `DatabaseArguments::irys_cache(sync_mode)` with the caller-provided `DbSyncMode` baked into the `DatabaseArguments`. The `sync_mode` is honored for cache DBs through these args.
+- `create_or_open_submodule_db` in `crates/database/src/submodule/db.rs` — builds `DatabaseArguments::irys_default(sync_mode)` with custom geometry (max size 2 TB). The `sync_mode` parameter is now honored for submodule DBs through these sync-mode-aware `DatabaseArguments`, rather than falling back to MDBX library defaults.
 
 **Callers of `open_or_create_irys_consensus_data_db`** (the wrapper, which also gains a `DbSyncMode` param):
 

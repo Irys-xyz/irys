@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::{env, path::PathBuf, time::Duration};
 
-/// Controls whether the node runs with production or test optimizations.
-/// Test mode uses faster but less durable settings (e.g. no fsync, no CPU pinning).
+/// Informational label for the node's intended operating context.
+/// Does **not** drive any subsystem behavior — individual config fields control durability,
+/// caching, CPU pinning, etc. Used only for startup warnings and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RunMode {
     #[default]
@@ -206,7 +207,9 @@ pub struct NodeConfig {
     #[serde(default)]
     pub sync: SyncConfig,
 
-    /// Controls test vs production behavior for durability, caching, and resource allocation.
+    /// Informational label indicating whether the node was configured for test or production use.
+    /// Does not propagate to subsystem configs — durability, caching, and resource allocation
+    /// are controlled by their own fields (e.g. `database.sync_mode`, `reth.db_sync_mode`).
     #[serde(default)]
     pub run_mode: RunMode,
 

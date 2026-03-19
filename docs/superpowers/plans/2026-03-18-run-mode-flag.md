@@ -896,7 +896,7 @@ Expected: PASS
 
 Run: `cargo xtask test`
 
-Expected: All existing tests pass. Behavior is unchanged — debug builds still get `UtterlyNoSync` via `testing()` constructors, release builds still get `Durable` via defaults.
+Expected: All existing tests pass. Behavior is unchanged — running with test configs (`NodeConfig::testing()` / `ConsensusConfig::testing()` / `run_mode: Test`) yields `UtterlyNoSync`; running with default config yields `Durable`.
 
 - [ ] **Step 4: Commit any fixes**
 
