@@ -58,7 +58,7 @@ use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CommitmentTransaction,
-    Config, ConsensusOptions, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    Config, ConsensusOptions, CorePinning, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
     SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
     UnixTimestampMs, H256, U256,
@@ -1993,7 +1993,6 @@ impl IrysNode {
         Arc::new(chunk_provider)
     }
 
-    #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
@@ -2010,38 +2009,42 @@ impl IrysNode {
         shutdown_token: CancellationToken,
     ) -> oneshot::Receiver<()> {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
-        // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
-        // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
-        let is_test_based_on_base_dir = config
-            .node_config
-            .base_directory
-            .parent()
-            .is_some_and(|p| p.ends_with(".tmp"));
-        let is_test_based_on_cfg_flag = cfg!(debug_assertions);
-        if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            panic!(
-                "VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)"
-            )
-        }
         let span = tracing::Span::current();
         let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
 
         std::thread::spawn({
             let vdf_config = config.vdf.clone();
+            let core_pinning = config.node_config.vdf.core_pinning;
             move || {
                 let _span = span.enter();
 
-                // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
-                if is_test_based_on_base_dir || is_test_based_on_cfg_flag {
-                    info!("Disabling VDF core pinning")
-                } else {
-                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-
-                    for core in core_ids {
-                        let success = core_affinity::set_for_current(core);
-                        if success {
+                match core_pinning {
+                    CorePinning::Disabled => {
+                        info!("VDF core pinning disabled");
+                    }
+                    CorePinning::Auto => {
+                        if let Some(core_ids) = core_affinity::get_core_ids() {
+                            let pinned = core_ids.into_iter().any(|core| {
+                                if core_affinity::set_for_current(core) {
+                                    info!("VDF thread pinned to core {:?}", core);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if !pinned {
+                                warn!("VDF core pinning failed: no core could be set, running unpinned");
+                            }
+                        } else {
+                            warn!("VDF core pinning skipped: could not enumerate core IDs");
+                        }
+                    }
+                    CorePinning::Core(id) => {
+                        let core = core_affinity::CoreId { id };
+                        if core_affinity::set_for_current(core) {
                             info!("VDF thread pinned to core {:?}", core);
-                            break;
+                        } else {
+                            warn!("Failed to pin VDF thread to core {}", id);
                         }
                     }
                 }
@@ -2411,8 +2414,10 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env =
-        open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
+    let irys_db_env = open_or_create_irys_consensus_data_db(
+        &node_config.irys_consensus_data_dir(),
+        node_config.database.sync_mode,
+    )?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
     debug!("Irys DB initialized");
     Ok(irys_db)

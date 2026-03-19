@@ -97,6 +97,14 @@ impl From<RethNodeProvider> for RethNode {
     }
 }
 
+fn db_sync_mode_to_mdbx(mode: irys_types::DbSyncMode) -> SyncMode {
+    match mode {
+        irys_types::DbSyncMode::Durable => SyncMode::Durable,
+        irys_types::DbSyncMode::SafeNoSync => SyncMode::SafeNoSync,
+        irys_types::DbSyncMode::UtterlyNoSync => SyncMode::UtterlyNoSync,
+    }
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -166,11 +174,10 @@ pub async fn run_node(
     // important: keep blobs disabled in our mempool
     reth_config.txpool.disable_blobs_support = true;
 
-    if cfg!(debug_assertions) {
-        reth_config.engine.cross_block_cache_size = 10;
-    } else {
-        reth_config.txpool.additional_validation_tasks = 2;
+    if let Some(cache_size) = node_config.reth.cross_block_cache_size_megabytes {
+        reth_config.engine.cross_block_cache_size = cache_size;
     }
+    reth_config.txpool.additional_validation_tasks = node_config.reth.additional_validation_tasks;
 
     // Enable Prometheus metrics endpoint for local scraping by OTEL collector sidecar.
     let metrics_port = if random_ports { "0" } else { "9001" };
@@ -194,11 +201,7 @@ pub async fn run_node(
         .database_args()
         .with_growth_step((10 * MEGABYTE).into())
         .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-        .with_sync_mode(if cfg!(debug_assertions) {
-            Some(SyncMode::UtterlyNoSync)
-        } else {
-            Some(SyncMode::Durable)
-        });
+        .with_sync_mode(Some(db_sync_mode_to_mdbx(node_config.reth.db_sync_mode)));
 
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();
