@@ -45,6 +45,24 @@ enum ParentValidationResult {
     Cancelled,
 }
 
+/// Outcome of the shadow transaction validation task under sibling cancellation.
+///
+/// Unlike the five `ValidationResult` tasks, shadow_tx returns rich data on success
+/// (`ExecutionData` + `PdBlockGuard`), so it can't use `with_cancel` directly.
+/// This enum makes the three possible outcomes explicit and compiler-checked,
+/// replacing string-based cancellation detection.
+enum ShadowTxOutcome {
+    /// Validation succeeded; carries data needed for reth submission.
+    Ok(
+        alloy_rpc_types_engine::ExecutionData,
+        Option<crate::validation_service::pd_block_guard::PdBlockGuard>,
+    ),
+    /// Task was cancelled because a sibling validation task failed.
+    Cancelled,
+    /// Genuine validation failure.
+    Err(eyre::Report),
+}
+
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
 pub(super) struct BlockValidationTask {
@@ -584,17 +602,22 @@ impl BlockValidationTask {
         let commitment_ordering_task = with_cancel(commitment_ordering_task, cancel.clone());
         let data_txs_validation_task = with_cancel(data_txs_validation_task, cancel.clone());
 
-        // Wrap the shadow_tx_task separately (returns eyre::Result, not ValidationResult)
+        // Wrap the shadow_tx_task separately (returns ShadowTxOutcome, not ValidationResult)
         let shadow_tx_task = {
             let cancel = cancel.clone();
             async move {
                 tokio::select! {
                     result = shadow_tx_task => {
-                        if result.is_err() { cancel.cancel(); }
-                        result
+                        match result {
+                            Ok((data, guard)) => ShadowTxOutcome::Ok(data, guard),
+                            Err(err) => {
+                                cancel.cancel();
+                                ShadowTxOutcome::Err(err)
+                            }
+                        }
                     }
                     _ = cancel.cancelled() => {
-                        Err(eyre::eyre!("cancelled: sibling validation task failed"))
+                        ShadowTxOutcome::Cancelled
                     }
                 }
             }
@@ -616,30 +639,6 @@ impl BlockValidationTask {
             commitment_ordering_task,
             data_txs_validation_task
         );
-
-        // Check shadow_tx_result to extract ExecutionData.
-        // If the error is a cancellation sentinel (from a sibling task failing),
-        // don't report it yet — fall through to find the real error below.
-        let shadow_tx_outcome = match shadow_tx_result {
-            Ok(data) => Ok(data),
-            Err(ref err)
-                if err
-                    .to_string()
-                    .contains("cancelled: sibling validation task failed") =>
-            {
-                // Shadow tx was cancelled because a sibling failed — the real
-                // error is in one of the other results. Don't return early.
-                tracing::debug!("Shadow tx cancelled by sibling failure, looking for real error");
-                Err(err.to_string())
-            }
-            Err(err) => {
-                // Genuine shadow tx validation failure
-                tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
-                    err.to_string(),
-                ));
-            }
-        };
 
         let all_validation_results = [
             &recall_result,
@@ -670,25 +669,26 @@ impl BlockValidationTask {
             })
         };
 
-        // If shadow tx was cancelled by a sibling, surface the real error.
-        if let Err(shadow_cancel_msg) = &shadow_tx_outcome {
-            // First pass: find the real (non-cancellation) error
-            if let Some(real_error) = find_real_error() {
-                return ValidationResult::Invalid(real_error);
+        // Extract execution data from shadow_tx, handling cancellation and failure.
+        let (execution_data, _pd_guard) = match shadow_tx_result {
+            ShadowTxOutcome::Ok(data, guard) => (data, guard),
+            ShadowTxOutcome::Cancelled => {
+                tracing::debug!("Shadow tx cancelled by sibling failure, looking for real error");
+                // Surface the real sibling error that triggered cancellation.
+                let error = find_real_error().or_else(find_any_error).unwrap_or(
+                    ValidationError::ValidationCancelled {
+                        reason: "shadow tx cancelled but no sibling error found".into(),
+                    },
+                );
+                return ValidationResult::Invalid(error);
             }
-            // Fallback: report any cancellation error from the validation tasks
-            if let Some(any_error) = find_any_error() {
-                return ValidationResult::Invalid(any_error);
+            ShadowTxOutcome::Err(err) => {
+                tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
+                return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
+                    err.to_string(),
+                ));
             }
-            // Edge case: no validation task has an error but shadow was cancelled.
-            // This shouldn't happen, but report the shadow cancellation.
-            return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
-                shadow_cancel_msg.clone(),
-            ));
-        }
-
-        // shadow_tx_outcome is Ok — unwrap the execution data
-        let (execution_data, _pd_guard) = shadow_tx_outcome.unwrap();
+        };
 
         match (
             &recall_result,

@@ -1770,11 +1770,20 @@ mod tests {
 
         let state = service.pending_fetches.get(&key).unwrap();
         assert_eq!(state.status, fetch::FetchPhase::Backoff);
-        assert!(state.abort_handle.is_none(), "abort_handle must be None in Backoff");
-        assert!(state.retry_queue_key.is_some(), "retry_queue_key must be set in Backoff");
+        assert!(
+            state.abort_handle.is_none(),
+            "abort_handle must be None in Backoff"
+        );
+        assert!(
+            state.retry_queue_key.is_some(),
+            "retry_queue_key must be set in Backoff"
+        );
         assert_eq!(state.attempt, 1);
         assert!(state.excluded_peers.contains(&peer_1));
-        assert!(!service.retry_queue.is_empty(), "retry_queue must have an entry");
+        assert!(
+            !service.retry_queue.is_empty(),
+            "retry_queue must have an entry"
+        );
 
         // Simulate the retry firing and a second fetch attempt completing.
         // Reset to Fetching to test the second failure transition.
@@ -1788,11 +1797,23 @@ mod tests {
 
         let state = service.pending_fetches.get(&key).unwrap();
         assert_eq!(state.status, fetch::FetchPhase::Backoff);
-        assert!(state.abort_handle.is_none(), "abort_handle must be None in Backoff (round 2)");
-        assert!(state.retry_queue_key.is_some(), "retry_queue_key must be set in Backoff (round 2)");
+        assert!(
+            state.abort_handle.is_none(),
+            "abort_handle must be None in Backoff (round 2)"
+        );
+        assert!(
+            state.retry_queue_key.is_some(),
+            "retry_queue_key must be set in Backoff (round 2)"
+        );
         assert_eq!(state.attempt, 2);
-        assert!(state.excluded_peers.contains(&peer_1), "peer_1 should still be excluded");
-        assert!(state.excluded_peers.contains(&peer_2), "peer_2 should now be excluded");
+        assert!(
+            state.excluded_peers.contains(&peer_1),
+            "peer_1 should still be excluded"
+        );
+        assert!(
+            state.excluded_peers.contains(&peer_2),
+            "peer_2 should now be excluded"
+        );
     }
 
     /// When on_retry_ready fires but no peers can be resolved, the fetch must
