@@ -92,6 +92,10 @@ jobs:
           sparse-checkout: .claude/skills/design-extraction
           fetch-depth: 1
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install Claude Code
         run: npm install @anthropic-ai/claude-code@2.1.73
 
