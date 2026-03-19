@@ -40,9 +40,9 @@ pub trait ChunkStorageProvider: Send + Sync + std::fmt::Debug {
         ledger_offset: u64,
     ) -> eyre::Result<Option<Bytes>>;
 
-    /// Returns a chunk in the best available format for PD serving:
-    /// unpacked from MDBX CachedChunks if available, packed from storage module otherwise.
-    /// No on-the-fly unpacking — only returns unpacked if already cached.
+    /// Returns a chunk for PD serving. Currently always returns packed data from
+    /// storage modules. In the future, may check MDBX CachedChunks first and
+    /// return unpacked data when available (avoiding unpacking cost for the caller).
     fn get_chunk_for_pd(
         &self,
         ledger: u32,
