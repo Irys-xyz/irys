@@ -33,5 +33,6 @@ runs:
         prefix-key: "v0"
         suffix-key: ${{ steps.cache-key.outputs.sha }}
         cache-on-failure: true
+        cache-bin: "false"
         cache-all-crates: true
         cache-workspace-crates: "true"
