@@ -759,6 +759,13 @@ mod tests {
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
+        // TOML doesn't include these fields, so they default to production values
+        expected_config.run_mode = RunMode::default();
+        expected_config.database = DatabaseConfig::default();
+        expected_config.reth.db_sync_mode = DbSyncMode::Durable;
+        expected_config.reth.cross_block_cache_size_megabytes = None;
+        expected_config.reth.additional_validation_tasks = 2;
+        expected_config.vdf.core_pinning = CorePinning::default();
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
