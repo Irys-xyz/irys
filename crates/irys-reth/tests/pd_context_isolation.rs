@@ -10,7 +10,8 @@ use dashmap::DashMap;
 use irys_reth::evm::IrysEvmFactory;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{
-    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgsTypeId, U18, U34,
+    encode_pd_fee,
 };
 use reth_evm::EvmEnv;
 use reth_evm::EvmFactory as _;
@@ -38,6 +39,20 @@ fn create_access_list_with_chunks(num_chunks: u64) -> AccessList {
         storage_keys: vec![
             B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
             B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
+            B256::from(
+                encode_pd_fee(
+                    PdAccessListArgsTypeId::PdPriorityFee as u8,
+                    U256::from(1_u64),
+                )
+                .expect("test fee encoding"),
+            ),
+            B256::from(
+                encode_pd_fee(
+                    PdAccessListArgsTypeId::PdBaseFeeCap as u8,
+                    U256::from(1_u64),
+                )
+                .expect("test fee encoding"),
+            ),
         ],
     }])
 }

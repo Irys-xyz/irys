@@ -31,6 +31,8 @@ pub fn parse_access_list(access_list: &Vec<AccessListItem>) -> eyre::Result<Pars
                     PdAccessListArg::ByteRead(bytes_range_specifier) => {
                         parsed.byte_reads.push(bytes_range_specifier)
                     }
+                    // Fee keys are handled by the canonical PD parser, skip here
+                    PdAccessListArg::PdPriorityFee(_) | PdAccessListArg::PdBaseFeeCap(_) => {}
                 },
                 Err(_) => continue,
             }

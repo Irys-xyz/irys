@@ -2,7 +2,7 @@
 
 use std::ops::Div as _;
 
-use alloy_primitives::{aliases::U200, B256};
+use alloy_primitives::{aliases::U200, B256, U256};
 use eyre::{eyre, OptionExt as _};
 use ruint::Uint;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub enum PdAccessListArgsTypeId {
     ChunkRead = 0,
     ByteRead = 1,
+    PdPriorityFee = 2,
+    PdBaseFeeCap = 3,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -26,6 +28,8 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
         match id {
             0 => Ok(Self::ChunkRead),
             1 => Ok(Self::ByteRead),
+            2 => Ok(Self::PdPriorityFee),
+            3 => Ok(Self::PdBaseFeeCap),
             _ => Err(PdAccessListArgsTypeIdDecodeError::UnknownPdAccessListArgsTypeId(id)),
         }
     }
@@ -34,6 +38,8 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
 pub enum PdAccessListArg {
     ChunkRead(ChunkRangeSpecifier),
     ByteRead(ByteRangeSpecifier),
+    PdPriorityFee(U256),
+    PdBaseFeeCap(U256),
 }
 
 impl PdAccessListArg {
@@ -41,6 +47,8 @@ impl PdAccessListArg {
         match *self {
             Self::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
             Self::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
+            Self::PdPriorityFee(_) => PdAccessListArgsTypeId::PdPriorityFee,
+            Self::PdBaseFeeCap(_) => PdAccessListArgsTypeId::PdBaseFeeCap,
         }
     }
 
@@ -48,6 +56,14 @@ impl PdAccessListArg {
         match self {
             Self::ChunkRead(range_specifier) => range_specifier.encode(),
             Self::ByteRead(bytes_range_specifier) => bytes_range_specifier.encode(),
+            Self::PdPriorityFee(fee) => {
+                encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, *fee)
+                    .expect("PdPriorityFee encode: fee must be > 0 and <= MAX_PD_FEE")
+            }
+            Self::PdBaseFeeCap(fee) => {
+                encode_pd_fee(PdAccessListArgsTypeId::PdBaseFeeCap as u8, *fee)
+                    .expect("PdBaseFeeCap encode: fee must be > 0 and <= MAX_PD_FEE")
+            }
         }
     }
 
@@ -61,6 +77,14 @@ impl PdAccessListArg {
             }
             PdAccessListArgsTypeId::ByteRead => {
                 Ok(Self::ByteRead(ByteRangeSpecifier::decode(bytes)?))
+            }
+            PdAccessListArgsTypeId::PdPriorityFee => {
+                let fee = decode_pd_fee(bytes, PdAccessListArgsTypeId::PdPriorityFee as u8)?;
+                Ok(Self::PdPriorityFee(fee))
+            }
+            PdAccessListArgsTypeId::PdBaseFeeCap => {
+                let fee = decode_pd_fee(bytes, PdAccessListArgsTypeId::PdBaseFeeCap as u8)?;
+                Ok(Self::PdBaseFeeCap(fee))
             }
         }
     }
@@ -168,8 +192,11 @@ impl<T: PdAccessListArgSerde> From<&B256> for PdArgsEncWrapper<T> {
 #[cfg(test)]
 mod range_specifier_tests {
 
-    use crate::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
-    use alloy_primitives::aliases::U200;
+    use crate::range_specifier::{
+        decode_pd_fee, encode_pd_fee, ChunkRangeSpecifier, PdAccessListArg,
+        PdAccessListArgSerde as _, PdAccessListArgsTypeId, MAX_PD_FEE,
+    };
+    use alloy_primitives::{aliases::U200, U256};
 
     #[test]
     fn test_encode_decode_roundtrip() -> eyre::Result<()> {
@@ -199,6 +226,146 @@ mod range_specifier_tests {
 
         assert_eq!(max_values, decoded);
     }
+
+    #[test]
+    fn test_pd_fee_encode_decode_roundtrip() -> eyre::Result<()> {
+        let priority_fee = U256::from(1_000_000_u64);
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, priority_fee)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, priority_fee);
+
+        let base_fee = U256::from(500_000_u64);
+        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let encoded = encode_pd_fee(type_byte, base_fee)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, base_fee);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pd_fee_reject_zero() {
+        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, U256::ZERO);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("fee must be > 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_pd_fee_reject_overflow() {
+        let over_max = MAX_PD_FEE.checked_add(U256::from(1)).expect("no overflow");
+        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, over_max);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("fee exceeds u248 max"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_pd_fee_reject_wrong_type_byte() -> eyre::Result<()> {
+        let fee = U256::from(42_u64);
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, fee)?;
+
+        // Try decoding with the wrong expected type byte
+        let wrong_type = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let result = decode_pd_fee(&encoded, wrong_type);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected type byte"),
+            "unexpected error: {err}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pd_fee_max_value() -> eyre::Result<()> {
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, MAX_PD_FEE)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, MAX_PD_FEE);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pd_fee_small_value() -> eyre::Result<()> {
+        let fee = U256::from(1);
+        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let encoded = encode_pd_fee(type_byte, fee)?;
+
+        // The encoded form should be: type_byte, 30 zero bytes, then 0x01
+        assert_eq!(encoded[0], type_byte);
+        for &b in &encoded[1..31] {
+            assert_eq!(b, 0x00, "expected zero byte in padding");
+        }
+        assert_eq!(encoded[31], 0x01);
+
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, fee);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pd_access_list_arg_fee_roundtrip() -> eyre::Result<()> {
+        // PdPriorityFee variant
+        let priority_fee = U256::from(999_999_u64);
+        let arg = PdAccessListArg::PdPriorityFee(priority_fee);
+        let encoded = arg.encode();
+        let decoded = PdAccessListArg::decode(&encoded)?;
+        match decoded {
+            PdAccessListArg::PdPriorityFee(f) => assert_eq!(f, priority_fee),
+            other => panic!("expected PdPriorityFee, got {:?}", other.type_id()),
+        }
+
+        // PdBaseFeeCap variant
+        let base_fee = U256::from(123_456_789_u64);
+        let arg = PdAccessListArg::PdBaseFeeCap(base_fee);
+        let encoded = arg.encode();
+        let decoded = PdAccessListArg::decode(&encoded)?;
+        match decoded {
+            PdAccessListArg::PdBaseFeeCap(f) => assert_eq!(f, base_fee),
+            other => panic!("expected PdBaseFeeCap, got {:?}", other.type_id()),
+        }
+
+        Ok(())
+    }
+}
+
+/// Maximum PD fee value: 2^248 - 1. Fits in 31 bytes.
+pub const MAX_PD_FEE: U256 = U256::from_be_bytes([
+    0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+]);
+
+/// Encode a U256 fee into a 32-byte access list key with type prefix.
+/// Returns Err if fee is zero or exceeds `MAX_PD_FEE`.
+pub fn encode_pd_fee(type_byte: u8, fee: U256) -> eyre::Result<[u8; 32]> {
+    eyre::ensure!(fee > U256::ZERO, "fee must be > 0");
+    eyre::ensure!(fee <= MAX_PD_FEE, "fee exceeds u248 max");
+    let mut buf = [0_u8; 32];
+    buf[0] = type_byte;
+    let be_bytes = fee.to_be_bytes::<32>();
+    buf[1..32].copy_from_slice(&be_bytes[1..32]);
+    Ok(buf)
+}
+
+/// Decode a U256 fee from a 32-byte access list key.
+/// The top byte of the U256 is forced to 0 (u248 bound by construction).
+pub fn decode_pd_fee(bytes: &[u8; 32], expected_type: u8) -> eyre::Result<U256> {
+    eyre::ensure!(bytes[0] == expected_type, "unexpected type byte");
+    let mut be_bytes = [0_u8; 32];
+    be_bytes[1..32].copy_from_slice(&bytes[1..32]);
+    let fee = U256::from_be_bytes(be_bytes);
+    eyre::ensure!(fee > U256::ZERO, "fee must be > 0");
+    Ok(fee)
 }
 
 pub type U34 = Uint<34, 1>;

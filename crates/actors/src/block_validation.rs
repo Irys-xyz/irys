@@ -18,9 +18,7 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_reth::pd_tx::{
-    detect_and_decode_pd_header, extract_pd_chunk_specs, sum_pd_chunks_in_access_list,
-};
+use irys_reth::pd_tx::{PdParseResult, parse_pd_transaction};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -1446,13 +1444,23 @@ pub(crate) async fn shadow_transactions_are_valid(
         let mut total_pd_chunks: u64 = 0;
 
         for tx in evm_block.body.transactions.iter() {
-            let input = tx.input();
-            if let Ok(Some(_header)) = detect_and_decode_pd_header(input)
-                && let Some(access_list) = tx.access_list()
-            {
-                let chunks = sum_pd_chunks_in_access_list(access_list);
-                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-                pd_chunk_specs.extend(extract_pd_chunk_specs(access_list));
+            if let Some(access_list) = tx.access_list() {
+                match parse_pd_transaction(access_list) {
+                    PdParseResult::ValidPd(meta) => {
+                        total_pd_chunks = total_pd_chunks.saturating_add(meta.total_chunks);
+                        pd_chunk_specs.extend(meta.data_reads);
+                    }
+                    PdParseResult::InvalidPd(err) => {
+                        tracing::debug!(
+                            block_hash = %block.block_hash,
+                            evm_block_hash = %block.evm_block_hash,
+                            %err,
+                            "Rejecting block: contains invalid PD transaction",
+                        );
+                        eyre::bail!("Block contains invalid PD transaction: {err}");
+                    }
+                    PdParseResult::NotPd => {}
+                }
             }
         }
 

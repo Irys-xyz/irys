@@ -4,10 +4,7 @@ use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
 use alloy_primitives::{aliases::U200, TxKind, U256};
 use alloy_signer_local::LocalSigner;
-use irys_reth::pd_tx::{
-    build_pd_access_list, detect_and_decode_pd_header, prepend_pd_header_v1_to_calldata,
-    sum_pd_chunks_in_access_list, PdHeaderV1,
-};
+use irys_reth::pd_tx::{build_pd_access_list_with_fees, sum_pd_chunks_in_access_list};
 use irys_types::{range_specifier::ChunkRangeSpecifier, NodeConfig};
 
 #[test_log::test(actix_web::test)]
@@ -63,7 +60,17 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         offset: 0,
         chunk_count: 20,
     });
-    let access_list = build_pd_access_list(storage_keys);
+    // Build access list with 80 chunks AND fee parameters.
+    // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
+    // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
+    // With 80 chunks, we need: total_fees >= 1e16, so per-chunk >= 1e16/80 = 1.25e14 wei.
+    // Using higher values for safety margin.
+    let access_list = build_pd_access_list_with_fees(
+        storage_keys,
+        std::iter::empty(),
+        U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
+        U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
+    );
     let chunks = sum_pd_chunks_in_access_list(&access_list);
     assert!(
         chunks > genesis_max_accepted_chunks_per_block,
@@ -74,33 +81,24 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         "expect chunks to fit in the limits of the peer node"
     );
 
-    // Build transaction calldata with PD header
-    // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
-    // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
-    // With 80 chunks, we need: total_fees >= 1e16, so per-chunk >= 1e16/80 = 1.25e14 wei.
-    // Using higher values for safety margin.
-    let header = PdHeaderV1 {
-        max_priority_fee_per_chunk: U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
-        max_base_fee_per_chunk: U256::from(1_000_000_000_000_000_u64),     // 1e15 wei = 0.001 IRYS
-    };
-    let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
-
     // Create and sign EIP-1559 transaction manually using LocalSigner
     let local_signer = LocalSigner::from(pd_tx_signer.signer.clone());
     let mut tx = TxEip1559 {
         access_list,
         chain_id,
         gas_limit: 100_000,
-        input: calldata,
+        input: alloy_primitives::Bytes::new(),
         max_fee_per_gas: 1_000_000_000, // basefee=0 => effective gas price 0
         max_priority_fee_per_gas: 0,
         nonce: 0,
         to: TxKind::Call(alloy_primitives::Address::random()),
         value: U256::ZERO,
     };
-    let _decoded = detect_and_decode_pd_header(&tx.input)
-        .expect("pd header parse error")
-        .unwrap();
+    // Verify PD metadata parses correctly from the access list
+    assert!(matches!(
+        irys_reth::pd_tx::parse_pd_transaction(&tx.access_list),
+        irys_reth::pd_tx::PdParseResult::ValidPd(_)
+    ));
     let signature = local_signer
         .sign_transaction_sync(&mut tx)
         .expect("PD tx must be signable");
