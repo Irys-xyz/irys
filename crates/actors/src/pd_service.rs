@@ -1561,4 +1561,179 @@ mod tests {
             "cache should be empty after tx release"
         );
     }
+
+    /// When one chunk permanently fails, the waiting block is failed and removed
+    /// from `pending_blocks`. Any *other* in-flight fetches for the same block
+    /// must have that block removed from their `waiting_blocks` set, otherwise a
+    /// later successful fetch would add a cache reference under a block hash
+    /// that will never be released (permanent cache pin).
+    #[test]
+    fn test_fail_pending_fetch_detaches_block_from_sibling_fetches() {
+        let (mut service, _tmp) = test_service();
+        let block_hash = B256::with_last_byte(0xF1);
+        let key_a = ChunkKey {
+            ledger: 0,
+            offset: 10,
+        };
+        let key_b = ChunkKey {
+            ledger: 0,
+            offset: 11,
+        };
+
+        // Simulate: block needs chunks A and B, both missing locally.
+        // Set up pending_blocks entry.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        service.pending_blocks.insert(
+            block_hash,
+            fetch::PendingBlockProvision {
+                remaining_keys: HashSet::from([key_a, key_b]),
+                all_keys: vec![key_a, key_b],
+                response: resp_tx,
+            },
+        );
+
+        // Set up pending_fetches for both chunks, each waiting on the block.
+        service.pending_fetches.insert(
+            key_a,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_hash]),
+                attempt: 0,
+                generation: 0,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+        service.pending_fetches.insert(
+            key_b,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_hash]),
+                attempt: 0,
+                generation: 1,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+
+        // Chunk A permanently fails.
+        service.fail_pending_fetch(&key_a);
+
+        // The block should have received an error.
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_err(), "block should have been failed");
+
+        // pending_blocks entry should be gone.
+        assert!(
+            !service.pending_blocks.contains_key(&block_hash),
+            "pending_blocks should not contain the failed block"
+        );
+
+        // Key B's fetch state should no longer reference the block.
+        if let Some(state_b) = service.pending_fetches.get(&key_b) {
+            assert!(
+                !state_b.waiting_blocks.contains(&block_hash),
+                "sibling fetch for key_b must not reference the failed block"
+            );
+        }
+        // If key_b had no other waiters, it should have been cancelled entirely.
+        assert!(
+            !service.pending_fetches.contains_key(&key_b),
+            "fetch for key_b should be cancelled (no remaining waiters)"
+        );
+    }
+
+    /// Same scenario as above, but chunk B also has a *second* block waiting.
+    /// After chunk A fails (killing block X), chunk B's fetch should survive
+    /// because block Y still needs it.
+    #[test]
+    fn test_fail_pending_fetch_preserves_sibling_fetch_with_other_waiters() {
+        let (mut service, _tmp) = test_service();
+        let block_x = B256::with_last_byte(0xF2);
+        let block_y = B256::with_last_byte(0xF3);
+        let key_a = ChunkKey {
+            ledger: 0,
+            offset: 20,
+        };
+        let key_b = ChunkKey {
+            ledger: 0,
+            offset: 21,
+        };
+
+        // Block X needs chunks A and B.
+        let (resp_tx_x, resp_rx_x) = oneshot::channel();
+        service.pending_blocks.insert(
+            block_x,
+            fetch::PendingBlockProvision {
+                remaining_keys: HashSet::from([key_a, key_b]),
+                all_keys: vec![key_a, key_b],
+                response: resp_tx_x,
+            },
+        );
+
+        // Block Y needs only chunk B.
+        let (_resp_tx_y, _resp_rx_y) = oneshot::channel();
+        service.pending_blocks.insert(
+            block_y,
+            fetch::PendingBlockProvision {
+                remaining_keys: HashSet::from([key_b]),
+                all_keys: vec![key_b],
+                response: _resp_tx_y,
+            },
+        );
+
+        // pending_fetches: A waits on X, B waits on X and Y.
+        service.pending_fetches.insert(
+            key_a,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_x]),
+                attempt: 0,
+                generation: 0,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+        service.pending_fetches.insert(
+            key_b,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_x, block_y]),
+                attempt: 0,
+                generation: 1,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+
+        // Chunk A permanently fails — kills block X.
+        service.fail_pending_fetch(&key_a);
+
+        // Block X should have received an error.
+        let result = resp_rx_x.blocking_recv().unwrap();
+        assert!(result.is_err());
+
+        // Key B's fetch should still exist because block Y is waiting.
+        assert!(
+            service.pending_fetches.contains_key(&key_b),
+            "fetch for key_b should survive — block_y still needs it"
+        );
+        let state_b = service.pending_fetches.get(&key_b).unwrap();
+        assert!(
+            !state_b.waiting_blocks.contains(&block_x),
+            "block_x must be detached from key_b"
+        );
+        assert!(
+            state_b.waiting_blocks.contains(&block_y),
+            "block_y must still be waiting on key_b"
+        );
+    }
 }
