@@ -264,7 +264,11 @@ impl StorageModule {
 
             let submodule_db_path = sub_base_path.join("db");
             debug!("submodule_db_path: {:?}", submodule_db_path);
-            let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
+            let submodule_db = create_or_open_submodule_db(
+                &submodule_db_path,
+                config.node_config.database.sync_mode,
+            )
+            .map_err(|e| {
                 eyre!(
                     "Failed to create or open submodule database: {} - {}",
                     submodule_db_path.display(),

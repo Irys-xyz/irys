@@ -1743,8 +1743,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysBlockHeader, IrysPeerId,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1756,8 +1756,11 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                    .expect("can't open temp dir"),
+                open_or_create_irys_consensus_data_db(
+                    &temp_dir.path().to_path_buf(),
+                    DbSyncMode::UtterlyNoSync,
+                )
+                .expect("can't open temp dir"),
             ));
 
             let block_requests = Arc::new(Mutex::new(vec![]));
@@ -1933,8 +1936,11 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                    .expect("can't open temp dir"),
+                open_or_create_irys_consensus_data_db(
+                    &temp_dir.path().to_path_buf(),
+                    DbSyncMode::UtterlyNoSync,
+                )
+                .expect("can't open temp dir"),
             ));
 
             let mut node_config = NodeConfig::testing();
@@ -2011,8 +2017,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-            PeerNetworkSender, PeerScore, SyncMode,
+            Config, DatabaseProvider, DbSyncMode, IrysAddress, NodeConfig, NodeInfo, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -2078,8 +2084,11 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
-            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                .expect("can't open temp dir");
+            let db_env = open_or_create_irys_consensus_data_db(
+                &temp_dir.path().to_path_buf(),
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();
@@ -2208,8 +2217,11 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
-            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                .expect("can't open temp dir");
+            let db_env = open_or_create_irys_consensus_data_db(
+                &temp_dir.path().to_path_buf(),
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();

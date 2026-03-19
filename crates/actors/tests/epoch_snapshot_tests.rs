@@ -14,7 +14,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::PartitionChunkRange;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    BlockTransactions, DataLedger, DbSyncMode, H256, IrysBlockHeader, SealedBlock,
     partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
@@ -764,9 +764,11 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let db_env =
-        irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
-            .expect("to create DB");
+    let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        &base_path,
+        DbSyncMode::UtterlyNoSync,
+    )
+    .expect("to create DB");
     let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
     let block_index = BlockIndex::new_for_testing(db);
 

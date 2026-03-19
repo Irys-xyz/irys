@@ -1,11 +1,13 @@
 use std::sync::{Arc, RwLock};
 
 use irys_database::{
-    db::IrysDatabaseExt as _, insert_block_header, open_or_create_db, tables::IrysTables,
+    IrysDatabaseArgs as _, db::IrysDatabaseExt as _, insert_block_header, open_or_create_db,
+    tables::IrysTables,
 };
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
+use reth_db::mdbx::DatabaseArguments;
 use tempfile::tempdir;
 
 use super::get_anchor_height;
@@ -29,7 +31,12 @@ fn mock_header(height: u64, block_hash: H256) -> IrysBlockHeader {
 
 fn test_db() -> (tempfile::TempDir, DatabaseProvider) {
     let tmp = tempdir().unwrap();
-    let db = open_or_create_db(tmp.path(), IrysTables::ALL, None).unwrap();
+    let db = open_or_create_db(
+        tmp.path(),
+        IrysTables::ALL,
+        DatabaseArguments::irys_testing().unwrap(),
+    )
+    .unwrap();
     let provider = DatabaseProvider(Arc::new(db));
     (tmp, provider)
 }
