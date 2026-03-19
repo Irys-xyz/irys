@@ -18,6 +18,9 @@ env:
   RUST_BACKTRACE: 1
   IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
   CARGO_INCREMENTAL: 0
+  CARGO_BUILD_RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: /shared/sccache
+  SCCACHE_CACHE_SIZE: 40G
 
 
 jobs:
@@ -161,6 +164,10 @@ jobs:
       - name: cargo test
         run: RUST_LOG=info cargo xtask test
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   cargo-check:
     name: cargo check
     runs-on: [self-hosted, misc-runner]
@@ -180,6 +187,10 @@ jobs:
 
       - name: cargo check
         run: RUSTFLAGS="-D warnings" cargo xtask full-check
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   cargo-fmt:
     name: cargo fmt
@@ -215,6 +226,10 @@ jobs:
       - name: cargo clippy
         run: cargo xtask clippy -- --all-features -- -Dwarnings
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   cargo-doc:
     name: cargo doc
     runs-on: [self-hosted, misc-runner]
@@ -235,6 +250,10 @@ jobs:
       - name: cargo test docs
         run: RUST_LOG=info cargo test --doc
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   cargo-unused-deps:
     name: cargo unused-deps
     runs-on: [self-hosted, misc-runner]
@@ -251,6 +270,10 @@ jobs:
 
       - name: cargo unused deps
         run: cargo xtask unused-deps
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   typos:
     runs-on: [self-hosted, misc-runner]
