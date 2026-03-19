@@ -1736,4 +1736,185 @@ mod tests {
             "block_y must still be waiting on key_b"
         );
     }
+
+    /// Exercises Fetching → Backoff transitions multiple times, verifying that
+    /// status, abort_handle, and retry_queue_key stay consistent at each step.
+    #[tokio::test]
+    async fn test_retry_fetching_to_backoff_field_consistency() {
+        let (mut service, _tmp) = test_service();
+        let tx_hash = B256::with_last_byte(0x01);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 50,
+        };
+        let peer_1: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let peer_2: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+
+        // Manually insert a PdChunkFetchState in Fetching phase.
+        service.pending_fetches.insert(
+            key,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::from([tx_hash]),
+                waiting_blocks: HashSet::new(),
+                attempt: 0,
+                generation: 0,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+
+        // --- Transition 1: Fetching → Backoff ---
+        service.on_fetch_all_peers_failed(key, vec![peer_1]);
+
+        let state = service.pending_fetches.get(&key).unwrap();
+        assert_eq!(state.status, fetch::FetchPhase::Backoff);
+        assert!(state.abort_handle.is_none(), "abort_handle must be None in Backoff");
+        assert!(state.retry_queue_key.is_some(), "retry_queue_key must be set in Backoff");
+        assert_eq!(state.attempt, 1);
+        assert!(state.excluded_peers.contains(&peer_1));
+        assert!(!service.retry_queue.is_empty(), "retry_queue must have an entry");
+
+        // Simulate the retry firing and a second fetch attempt completing.
+        // Reset to Fetching to test the second failure transition.
+        let state = service.pending_fetches.get_mut(&key).unwrap();
+        state.status = fetch::FetchPhase::Fetching;
+        state.retry_queue_key = None;
+        state.abort_handle = None;
+
+        // --- Transition 2: Fetching → Backoff (second failure) ---
+        service.on_fetch_all_peers_failed(key, vec![peer_2]);
+
+        let state = service.pending_fetches.get(&key).unwrap();
+        assert_eq!(state.status, fetch::FetchPhase::Backoff);
+        assert!(state.abort_handle.is_none(), "abort_handle must be None in Backoff (round 2)");
+        assert!(state.retry_queue_key.is_some(), "retry_queue_key must be set in Backoff (round 2)");
+        assert_eq!(state.attempt, 2);
+        assert!(state.excluded_peers.contains(&peer_1), "peer_1 should still be excluded");
+        assert!(state.excluded_peers.contains(&peer_2), "peer_2 should now be excluded");
+    }
+
+    /// When on_retry_ready fires but no peers can be resolved, the fetch must
+    /// be permanently failed. This also verifies that retry_queue_key is cleared
+    /// before the failure path runs (preventing double-remove panics).
+    #[tokio::test]
+    async fn test_retry_ready_no_peers_permanently_fails() {
+        let (mut service, _tmp) = test_service();
+        let block_hash = B256::with_last_byte(0xF6);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 70,
+        };
+
+        // Set up a pending block.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        service.pending_blocks.insert(
+            block_hash,
+            fetch::PendingBlockProvision {
+                remaining_keys: HashSet::from([key]),
+                all_keys: vec![key],
+                response: resp_tx,
+            },
+        );
+
+        // Insert fetch state in Backoff phase (simulating a previous failure).
+        // Use a real DelayQueue key so the stale-key cleanup path is exercised.
+        let retry_entry_for_queue = fetch::RetryEntry {
+            key,
+            generation: 0,
+            excluded_peers: HashSet::new(),
+        };
+        let queue_key = service
+            .retry_queue
+            .insert(retry_entry_for_queue, std::time::Duration::from_secs(60));
+        service.pending_fetches.insert(
+            key,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_hash]),
+                attempt: 1,
+                generation: 0,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Backoff,
+                abort_handle: None,
+                retry_queue_key: Some(queue_key),
+            },
+        );
+
+        // Fire the retry — no peers available (mock peer list is empty).
+        let retry_entry = fetch::RetryEntry {
+            key,
+            generation: 0,
+            excluded_peers: HashSet::new(),
+        };
+        service.on_retry_ready(retry_entry);
+
+        // Fetch should be permanently failed.
+        assert!(
+            !service.pending_fetches.contains_key(&key),
+            "fetch should be removed after no-peers permanent failure"
+        );
+        assert!(
+            !service.pending_blocks.contains_key(&block_hash),
+            "pending block should be failed"
+        );
+        let result = resp_rx.await.unwrap();
+        assert!(result.is_err(), "block should receive an error");
+    }
+
+    /// After MAX_CHUNK_FETCH_RETRIES attempts, the next failure must
+    /// permanently fail the fetch and notify waiting blocks with an error.
+    #[test]
+    fn test_retry_exhaustion_permanently_fails() {
+        let (mut service, _tmp) = test_service();
+        let block_hash = B256::with_last_byte(0xF5);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 60,
+        };
+
+        // Set up a pending block waiting on this chunk.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        service.pending_blocks.insert(
+            block_hash,
+            fetch::PendingBlockProvision {
+                remaining_keys: HashSet::from([key]),
+                all_keys: vec![key],
+                response: resp_tx,
+            },
+        );
+
+        // Insert fetch state at the retry limit.
+        service.pending_fetches.insert(
+            key,
+            fetch::PdChunkFetchState {
+                waiting_txs: HashSet::new(),
+                waiting_blocks: HashSet::from([block_hash]),
+                attempt: fetch::MAX_CHUNK_FETCH_RETRIES,
+                generation: 0,
+                excluded_peers: HashSet::new(),
+                status: fetch::FetchPhase::Fetching,
+                abort_handle: None,
+                retry_queue_key: None,
+            },
+        );
+
+        // This failure should trigger permanent failure, not a retry.
+        service.on_fetch_all_peers_failed(key, vec![]);
+
+        // Fetch state should be gone.
+        assert!(
+            !service.pending_fetches.contains_key(&key),
+            "fetch should be permanently removed after exhausting retries"
+        );
+
+        // Block should have been failed.
+        assert!(
+            !service.pending_blocks.contains_key(&block_hash),
+            "pending block should be removed"
+        );
+        let result = resp_rx.blocking_recv().unwrap();
+        assert!(result.is_err(), "block should receive an error");
+    }
 }
