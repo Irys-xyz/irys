@@ -151,13 +151,15 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         .await?;
 
     // ChunkMigrationService writes chunk data to storage modules asynchronously
-    // after block migration. Poll until the last uploaded chunk is available
-    // (all chunks are written in a single synchronous handler, so if the last
-    // one is present, all preceding chunks are too).
+    // after block migration. Poll until the first chunk is available.
+    // (All chunks within a storage module are written in a single synchronous
+    // handler call, so once the first is present the rest in that module are too.
+    // Chunks may span multiple partitions/storage modules, so polling the last
+    // offset isn't safe — it may be in a partition the node doesn't store.)
     node_a
         .wait_for_chunk_in_storage(
             DataLedger::Publish,
-            LedgerChunkOffset::from(offset_before + num_chunks_uploaded - 1),
+            LedgerChunkOffset::from(offset_before),
             seconds_to_wait,
         )
         .await?;
