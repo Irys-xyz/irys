@@ -831,7 +831,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block height in block index
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
@@ -1089,7 +1094,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Wait for a canonical block at `target_height` using a hybrid strategy:
     /// short-interval canonical polling plus BlockStateUpdated subscription.
     #[tracing::instrument(level = "trace", skip_all)]
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1233,7 +1243,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "ledger={:?} offset={} seconds={} {}",
+        ledger,
+        offset,
+        seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk<T, B>(
         &self,
         app: &T,
@@ -1282,7 +1298,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// check number of chunks in the CachedChunks table
     /// return Ok(()) once it matches the expected value
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "expected_value={} timeout_secs={} {}",
+        expected_value,
+        timeout_secs,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
@@ -1312,6 +1333,101 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Timed out after {} seconds waiting for chunk_cache_count == {}",
             timeout_secs,
             expected_value
+        ))
+    }
+
+    /// Poll until a specific chunk key is present in the PD `ChunkDataIndex` cache.
+    ///
+    /// This is useful for tests that need to wait for a P2P fetch to complete
+    /// rather than using a fixed sleep.
+    pub async fn wait_for_pd_chunk_in_cache(
+        &self,
+        ledger: u32,
+        offset: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self
+                .node_ctx
+                .chunk_data_index
+                .contains_key(&(ledger, offset))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk ({}, {}) in ChunkDataIndex",
+            timeout_secs,
+            ledger,
+            offset,
+        ))
+    }
+
+    /// Poll until a PD transaction hash appears in the `ready_pd_txs` set.
+    ///
+    /// This is useful for tests that need to wait for PdService to finish
+    /// fetching all chunks for a mempool PD transaction.
+    pub async fn wait_for_ready_pd_tx(
+        &self,
+        tx_hash: &alloy_core::primitives::B256,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self.node_ctx.ready_pd_txs.contains(tx_hash) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for PD tx {:?} in ready_pd_txs",
+            timeout_secs,
+            tx_hash,
+        ))
+    }
+
+    /// Poll until a chunk is available in the storage modules (written by
+    /// `ChunkMigrationService` after block migration).
+    ///
+    /// This replaces fixed sleeps after `wait_for_migrated_txs`, which only
+    /// guarantees block index persistence — chunk data is written asynchronously.
+    pub async fn wait_for_chunk_in_storage(
+        &self,
+        ledger: irys_types::DataLedger,
+        offset: irys_types::LedgerChunkOffset,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if matches!(
+                self.node_ctx
+                    .chunk_provider
+                    .get_chunk_by_ledger_offset(ledger, offset),
+                Ok(Some(_))
+            ) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk at ({:?}, {:?}) in storage modules",
+            timeout_secs,
+            ledger,
+            offset,
         ))
     }
 
@@ -1598,7 +1714,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.get_block_by_hash(&hash)
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "num_blocks={} {}",
+        num_blocks,
+        self.diag_wait_state().await
+    ))]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders

@@ -135,6 +135,12 @@ pub struct IrysNodeCtx {
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
     backfill_complete: Arc<tokio::sync::Notify>,
+    /// Shared chunk data index populated by PdService during provisioning.
+    /// Keys are `(ledger: u32, offset: u64)`.
+    pub chunk_data_index: irys_types::chunk_provider::ChunkDataIndex,
+    /// Set of PD transaction hashes that have all chunks provisioned and are ready
+    /// for block inclusion.
+    pub ready_pd_txs: std::sync::Arc<dashmap::DashSet<revm_primitives::B256>>,
 }
 
 impl IrysNodeCtx {
@@ -1738,6 +1744,9 @@ impl IrysNode {
         let block_status_provider =
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
 
+        // set up chunk provider (before P2PService so it can be wired into GossipDataHandler)
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
         // create a circular dependency, since BlockPool also depends on actors. This can be
@@ -1766,6 +1775,9 @@ impl IrysNode {
             block_index_guard.clone(),
             block_tree_guard.clone(),
             std::time::Instant::now(),
+            Some(
+                chunk_provider.clone() as Arc<dyn irys_types::chunk_provider::ChunkStorageProvider>
+            ),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
@@ -1833,16 +1845,25 @@ impl IrysNode {
             shutdown_token.clone(),
         );
 
-        // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
-
         // Spawn PD service with real ChunkProvider (replaces the old MockChunkProvider-based PdChunkManager)
+        let pd_chunk_fetcher: std::sync::Arc<dyn irys_types::chunk_provider::PdChunkFetcher> =
+            std::sync::Arc::new(irys_p2p::pd_chunk_fetcher::GossipPdChunkFetcher::new(
+                gossip_data_handler.gossip_client.clone(),
+                peer_list_guard.clone(),
+            ));
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
             pd_chunk_rx,
             chunk_provider.clone(),
             runtime_handle.clone(),
             chunk_data_index.clone(),
             ready_pd_txs.clone(),
+            peer_list_guard.clone(),
+            pd_chunk_fetcher,
+            block_tree_guard.clone(),
+            block_index_guard.clone(),
+            irys_db.clone(),
+            config.consensus.num_chunks_in_partition,
+            config.node_config.miner_address(),
         );
         debug!("PD service initialized");
 
@@ -1938,6 +1959,8 @@ impl IrysNode {
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
             backfill_complete,
+            chunk_data_index,
+            ready_pd_txs,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules

@@ -84,7 +84,14 @@ Key services in `crates/actors/src/`:
 - **CL (Irys)**: block production, PoA consensus, storage commitments, block tree
 - **EL (Reth fork)**: EVM state transitions, eth_* JSON-RPC
 - **Shadow transactions**: protocol-level actions (rewards, storage fees, staking) encoded as EVM txs sent to `SHADOW_TX_DESTINATION_ADDR` and executed via `IRYS_SHADOW_EXEC` precompile
+- **Programmable Data (PD)**: EVM-level transactions that access on-chain chunk data via the PD precompile (`0x500`). PD txs specify chunks by `(partition_index, offset, chunk_count)` in the EIP-2930 access list — they carry no `data_root`. This is distinct from `DataTransactionHeader`, which is a CL primitive for committing data on-chain. There is no runtime correlation between PD EVM transactions and DataTransactionHeaders; the binding of `data_root` to ledger offset exists only in the CL block state (block index + confirmed DataTransactionHeaders in MDBX). **PD operates exclusively on the Publish ledger** — this is a permanent design constraint, not a temporary limitation.
 - Integration via payload building / fork choice update / payload validation
+
+### BlockTree vs BlockIndex
+
+- **BlockTree** — in-memory `HashMap<BlockHash, BlockMetadata>` holding the last `block_tree_depth` (50) blocks. Contains candidates, blocks under validation, and recently validated blocks. This is the live fork-choice state.
+- **BlockIndex** — MDBX-persisted, height-indexed store of confirmed blocks. Populated only at `block_migration_depth` (6 blocks deep from canonical tip) via `BlockMigrationService::persist_block`. `DataTransactionHeader`s are also written to MDBX only at migration time.
+- A block being validated is in the BlockTree but NOT in the BlockIndex. The BlockIndex contains blocks confirmed at least 6 blocks ago.
 
 ### Storage & Packing
 
