@@ -54,6 +54,14 @@ pub(crate) fn bind_capacity(c_src: &Path) {
 }
 
 pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
+    // Unset RUSTC_WRAPPER to prevent sccache from wrapping nvcc.
+    // cc-rs checks RUSTC_WRAPPER and applies it to ALL compilers including nvcc,
+    // which causes CUDA compilation to fail. Cargo propagates
+    // CARGO_BUILD_RUSTC_WRAPPER → RUSTC_WRAPPER in build script environments,
+    // so unsetting here is the only reliable way to prevent it.
+    // SAFETY: build scripts are single-threaded; no other threads observe this env var.
+    unsafe { env::remove_var("RUSTC_WRAPPER") };
+
     let mut cc = cc::Build::new();
     cc.cuda(true)
         .cudart("static")
