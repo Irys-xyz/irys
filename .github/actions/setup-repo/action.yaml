@@ -16,7 +16,7 @@ runs:
     # fully support (specifically, prefix-based restore key matching).
     - name: Force cache API v1
       shell: bash
-      run: echo "ACTIONS_CACHE_SERVICE_V2=" >> "$GITHUB_ENV"
+      run: echo "ACTIONS_CACHE_SERVICE_V2=" >> "$GITHUB_ENV" && echo "$GITHUB_ENV" && echo env
 
     # rust-cache preserves the target/ directory (proc-macros, build scripts,
     # workspace crate fingerprints) between runs on the same runner.
