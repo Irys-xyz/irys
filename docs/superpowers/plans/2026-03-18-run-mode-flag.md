@@ -316,86 +316,112 @@ with serde defaults for backward compatibility."
 
 ---
 
-## Task 2: Update database functions to accept `DbSyncMode`
+## Task 2: Add `IrysDatabaseArgs` trait and update database functions
 
 **Files:**
-- Modify: `crates/database/src/database.rs:39-86`
-- Modify: `crates/database/src/lib.rs` (if needed for re-export)
+- Modify: `crates/database/src/database.rs`
+- Modify: `crates/database/src/lib.rs` (re-export `IrysDatabaseArgs`)
 
-- [ ] **Step 1: Add `db_sync_mode_to_mdbx` helper function**
+The `From<DbSyncMode> for reth_db::mdbx::SyncMode` conversion is already implemented in `crates/types/src/config/node.rs` (no orphan rule issue since `DbSyncMode` is defined in `irys-types` which depends on `reth_db`). No standalone helper function is needed — callers use `.into()`.
 
-At the top of `crates/database/src/database.rs`, add the import and a local conversion helper. A `From` impl is not possible here due to Rust's orphan rule — neither `DbSyncMode` (from `irys-types`) nor `SyncMode` (from `reth_db`) is local to this crate.
+- [x] **Step 1: Add `IrysDatabaseArgs` extension trait**
+
+Add the trait and impl to the top of `crates/database/src/database.rs` (after imports). This trait provides preset constructors for `DatabaseArguments` that embed the sync mode, growth/shrink geometry, and unbounded read transaction duration:
 
 ```rust
 use irys_types::DbSyncMode;
 
-pub fn db_sync_mode_to_mdbx(mode: DbSyncMode) -> SyncMode {
-    match mode {
-        DbSyncMode::Durable => SyncMode::Durable,
-        DbSyncMode::SafeNoSync => SyncMode::SafeNoSync,
-        DbSyncMode::UtterlyNoSync => SyncMode::UtterlyNoSync,
+/// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
+pub trait IrysDatabaseArgs {
+    /// Default args with the given sync mode.
+    ///
+    /// Unbounded read transaction duration, 10 MB growth step, 20 MB shrink threshold.
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+
+    /// Default args with `UtterlyNoSync` — for tests only.
+    fn irys_testing() -> eyre::Result<DatabaseArguments>;
+
+    /// Cache-tuned args: larger growth/shrink thresholds (50 MB / 100 MB).
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+}
+
+impl IrysDatabaseArgs for DatabaseArguments {
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            .with_growth_step((10 * MEGABYTE).into())
+            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
+            .with_sync_mode(Some(sync_mode.into())))
+    }
+
+    fn irys_testing() -> eyre::Result<DatabaseArguments> {
+        Self::irys_default(DbSyncMode::UtterlyNoSync)
+    }
+
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            .with_growth_step((50 * MEGABYTE).into())
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
+            .with_sync_mode(Some(sync_mode.into())))
     }
 }
 ```
 
-Note: `SyncMode` here is `reth_db::mdbx::SyncMode`, already imported at line 32. The same helper pattern is used in `crates/reth-node-bridge/src/node.rs`. This function must be `pub` because `create_or_open_submodule_db` needs to call it when constructing custom `DatabaseArguments`.
+Key design decisions:
+- `irys_default` is the standard preset used by most DB open calls (consensus DB, submodule DBs).
+- `irys_testing` is a convenience shortcut for `irys_default(UtterlyNoSync)`.
+- `irys_cache` uses larger geometry (50 MB growth / 100 MB shrink) for cache DBs that handle bigger write batches.
+- All presets use `sync_mode.into()` which invokes the `From<DbSyncMode> for SyncMode` impl in `irys-types`.
 
-- [ ] **Step 2: Update `open_or_create_db` signature**
+- [x] **Step 2: Update `open_or_create_db` signature**
 
-Change the function at line 39 from:
+The function takes a required `DatabaseArguments` (not `Option`). Callers construct args via the `IrysDatabaseArgs` presets, which already embed the sync mode. The `cfg!(debug_assertions)` block is removed — sync mode is now fully determined by the `DatabaseArguments`:
 
 ```rust
 pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
+    args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
+    let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
+    Ok(db)
+}
 ```
 
-to:
+Note: The old signature had `args: Option<DatabaseArguments>` with a fallback that applied `cfg!(debug_assertions)` sync mode. The new signature requires `args: DatabaseArguments` — the `IrysDatabaseArgs` presets make this ergonomic and ensure sync mode is always explicitly set.
+
+- [x] **Step 3: Update `open_or_create_cache_db`**
+
+This function takes `sync_mode: DbSyncMode` and constructs the args internally via the `irys_cache` preset:
 
 ```rust
-pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
+pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
     sync_mode: DbSyncMode,
 ) -> eyre::Result<DatabaseEnv> {
+    open_or_create_db(path, tables, DatabaseArguments::irys_cache(sync_mode)?)
+}
 ```
-
-Replace the `cfg!(debug_assertions)` block (lines 50-54) with:
-
-```rust
-            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode)))
-```
-
-- [ ] **Step 3: Update `open_or_create_cache_db` signature**
-
-Change the function at line 64 similarly — add `sync_mode: DbSyncMode` parameter and replace `cfg!(debug_assertions)` (lines 79-83) with:
-
-```rust
-            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode)))
-```
-
-Also update the call to `open_or_create_db` at line 85 to pass the new `sync_mode` argument.
 
 **Note:** `open_or_create_cache_db` currently has zero external callers, so `DatabaseConfig::cache_sync_mode` has no consumer yet. We update the function for consistency and future use.
 
-- [ ] **Step 4: Run compile check on this crate**
+- [x] **Step 4: Run compile check on this crate**
 
 Run: `cargo check -p irys-database`
 
-Expected: Errors in test code within this crate. The production code should be fine since callers are in other crates.
+Expected: Errors in callers (other crates and test code within this crate) due to the changed `open_or_create_db` signature. Tests within this crate use `DatabaseArguments::irys_testing()` to construct args.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add crates/database/src/database.rs
-git commit -m "feat: add DbSyncMode param to open_or_create_db
+git add crates/database/src/database.rs crates/database/src/lib.rs
+git commit -m "feat: add IrysDatabaseArgs trait, replace cfg!(debug_assertions) in DB open
 
-Replace cfg!(debug_assertions) with explicit DbSyncMode parameter.
-Sync mode is only applied when args is None; custom DatabaseArguments
-take precedence."
+Add IrysDatabaseArgs extension trait with irys_default/irys_testing/irys_cache
+presets. open_or_create_db now takes required DatabaseArguments (was Option).
+Sync mode is embedded in DatabaseArguments via the presets."
 ```
 
 ---
@@ -403,31 +429,35 @@ take precedence."
 ## Task 3: Update database wrapper functions
 
 **Files:**
-- Modify: `crates/storage/src/irys_consensus_data_db.rs:6`
-- Modify: `crates/database/src/submodule/db.rs:24`
+- Modify: `crates/storage/src/irys_consensus_data_db.rs`
+- Modify: `crates/database/src/submodule/db.rs`
 
-- [ ] **Step 1: Update `open_or_create_irys_consensus_data_db`**
+Both wrappers now accept `sync_mode: DbSyncMode` and use `IrysDatabaseArgs` presets to construct `DatabaseArguments` before passing them to `open_or_create_db`.
 
-In `crates/storage/src/irys_consensus_data_db.rs`, change the signature at line 6 to accept `DbSyncMode` and pass it through:
+- [x] **Step 1: Update `open_or_create_irys_consensus_data_db`**
+
+In `crates/storage/src/irys_consensus_data_db.rs`, accept `sync_mode` and use the `irys_default` preset:
 
 ```rust
+use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
 use irys_types::DbSyncMode;
+use reth_db::mdbx::DatabaseArguments;
 
 pub fn open_or_create_irys_consensus_data_db(
     path: &PathBuf,
     sync_mode: DbSyncMode,
 ) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, IrysTables::ALL, None, sync_mode)
+    open_or_create_db(path, IrysTables::ALL, DatabaseArguments::irys_default(sync_mode)?)
 }
 ```
 
-- [ ] **Step 2: Update `create_or_open_submodule_db`**
+- [x] **Step 2: Update `create_or_open_submodule_db`**
 
-In `crates/database/src/submodule/db.rs`, the function passes `Some(args)` to `open_or_create_db`. Since `open_or_create_db` only applies `sync_mode` in its `unwrap_or` (i.e. when `args` is `None`), we must call `.with_sync_mode(...)` on the `DatabaseArguments` ourselves. First make `db_sync_mode_to_mdbx` public in `database.rs`, then import and use it here:
+In `crates/database/src/submodule/db.rs`, accept `sync_mode` and use `irys_default` preset with an additional `.with_geometry_max_size(Some(2 * TERABYTE))` override for submodule-specific geometry:
 
 ```rust
 use irys_types::DbSyncMode;
-use crate::database::db_sync_mode_to_mdbx;
+use crate::IrysDatabaseArgs as _;
 
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(
     path: P,
@@ -436,20 +466,15 @@ pub fn create_or_open_submodule_db<P: AsRef<Path>>(
     open_or_create_db(
         path,
         SubmoduleTables::ALL,
-        Some(
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-                .with_growth_step((10 * MEGABYTE).into())
-                .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-                .with_geometry_max_size(Some(2 * TERABYTE))
-                .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode))),
-        ),
-        sync_mode,
+        DatabaseArguments::irys_default(sync_mode)?
+            .with_geometry_max_size(Some(2 * TERABYTE)),
     )
 }
 ```
 
-- [ ] **Step 3: Commit**
+Note: The submodule preset chains `.with_geometry_max_size()` onto the standard `irys_default` args, avoiding a separate preset for a single override.
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/storage/src/irys_consensus_data_db.rs crates/database/src/submodule/db.rs
