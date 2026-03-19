@@ -3125,7 +3125,7 @@ mod tests {
 
         // Create epoch service with random miner address
         let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-            &data_dir.path().to_path_buf(),
+            data_dir.path(),
             DbSyncMode::UtterlyNoSync,
         )
         .expect("to create DB");

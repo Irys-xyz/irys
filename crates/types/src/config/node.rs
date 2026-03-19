@@ -1344,4 +1344,62 @@ mod run_mode_tests {
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
         assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
     }
+
+    /// Regression test: a legacy TOML config that predates the `run_mode`,
+    /// `database`, `reth.db_sync_mode`, and `vdf.core_pinning` fields must
+    /// still deserialize successfully, with every omitted field receiving its
+    /// intended default value.
+    #[test]
+    fn legacy_config_deserialization_regression() {
+        // Minimal legacy TOML — every new field is intentionally absent.
+        let legacy_toml = r#"
+            node_mode = "Genesis"
+            sync_mode = "Full"
+            consensus = "Testing"
+            mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+            reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+
+            [[trusted_peers]]
+            gossip = "127.0.0.1:8081"
+            api = "127.0.0.1:8080"
+            [trusted_peers.execution]
+            peering_tcp_addr = "127.0.0.1:30303"
+            peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+            [gossip]
+            bind_port = 0
+            public_port = 0
+
+            [http]
+            bind_port = 0
+            public_port = 0
+
+            # Legacy reth section — no db_sync_mode field
+            [reth.network]
+            bind_port = 0
+            public_port = 0
+
+            # Legacy vdf section — no core_pinning field
+            [vdf]
+            parallel_verification_thread_limit = 4
+        "#;
+
+        let config: NodeConfig = toml::from_str(legacy_toml).expect("legacy TOML must deserialize");
+
+        // run_mode defaults to Production
+        assert_eq!(config.run_mode, RunMode::Production);
+        assert_eq!(config.run_mode, RunMode::default());
+
+        // database defaults
+        assert_eq!(config.database, DatabaseConfig::default());
+        assert_eq!(config.database.sync_mode, DbSyncMode::Durable);
+        assert_eq!(config.database.cache_sync_mode, DbSyncMode::SafeNoSync);
+
+        // reth.db_sync_mode defaults to Durable
+        assert_eq!(config.reth.db_sync_mode, DbSyncMode::Durable);
+
+        // vdf.core_pinning defaults to Auto
+        assert_eq!(config.vdf.core_pinning, CorePinning::Auto);
+        assert_eq!(config.vdf.core_pinning, CorePinning::default());
+    }
 }

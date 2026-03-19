@@ -265,11 +265,9 @@ impl GossipServiceTestFixture {
         // peer_id is separate from mining_address in V2
         let config = Config::new_with_random_peer_id(node_config);
 
-        let db_env = open_or_create_irys_consensus_data_db(
-            &temp_dir.path().to_path_buf(),
-            DbSyncMode::UtterlyNoSync,
-        )
-        .expect("can't open temp dir");
+        let db_env =
+            open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
         let (service_senders, service_receivers) =

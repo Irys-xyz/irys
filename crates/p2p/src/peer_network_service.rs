@@ -1187,7 +1187,7 @@ mod tests {
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
         DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&path.to_path_buf(), DbSyncMode::UtterlyNoSync)
+            open_or_create_irys_consensus_data_db(path, DbSyncMode::UtterlyNoSync)
                 .expect("open test database"),
         ))
     }

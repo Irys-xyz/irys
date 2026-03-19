@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use irys_database::db::IrysDupCursorExt as _;
 use irys_database::db_cache::CachedChunk;
 use irys_database::{IrysDatabaseArgs as _, impl_compression_for_compact, open_or_create_db};
-use irys_types::Base64;
+use irys_types::{Base64, DbSyncMode};
 use paste::paste;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO as _;
@@ -88,7 +88,7 @@ fn main() -> eyre::Result<()> {
     let db = open_or_create_db(
         tmpdir,
         DupSortTables::ALL,
-        DatabaseArguments::irys_testing()?,
+        DatabaseArguments::irys_default(DbSyncMode::SafeNoSync)?,
     )?;
     let write_tx = db.tx_mut()?;
     // write two chunks to the same key

@@ -2415,7 +2415,7 @@ fn init_reth_db(
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env = open_or_create_irys_consensus_data_db(
-        &node_config.irys_consensus_data_dir(),
+        node_config.irys_consensus_data_dir(),
         node_config.database.sync_mode,
     )?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
