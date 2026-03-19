@@ -10,14 +10,6 @@ runs:
         components: rustfmt,clippy,cargo,llvm-tools-preview
         cache: false
 
-    # Force @actions/cache to use V1 REST API. Modern runners set
-    # ACTIONS_CACHE_SERVICE_V2=true which switches to a twirp/protobuf
-    # protocol that our self-hosted FalconDev cache server may not
-    # fully support (specifically, prefix-based restore key matching).
-    - name: Force cache API v1
-      shell: bash
-      run: echo "ACTIONS_CACHE_SERVICE_V2=" >> "$GITHUB_ENV" && echo "$GITHUB_ENV" && echo env
-
     # rust-cache preserves the target/ directory (proc-macros, build scripts,
     # workspace crate fingerprints) between runs on the same runner.
     # sccache handles cross-runner sharing of rustc compilation units.
@@ -36,3 +28,8 @@ runs:
         cache-bin: "false"
         cache-all-crates: true
         cache-workspace-crates: "true"
+      # Force V1 REST API — modern runners set ACTIONS_CACHE_SERVICE_V2=true
+      # which uses a twirp protocol our self-hosted cache server doesn't
+      # fully support (prefix-based restore key matching fails in V2).
+      env:
+        ACTIONS_CACHE_SERVICE_V2: ""
