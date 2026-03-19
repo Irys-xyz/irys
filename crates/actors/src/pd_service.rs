@@ -464,6 +464,15 @@ impl PdService {
                         self.cache.remove(k);
                     }
                 }
+                // Detach this block from other pending fetches so that later
+                // successes don't add a permanent cache reference under a
+                // block that will never be released.
+                for k in &pending.all_keys {
+                    if let Some(fetch_state) = self.pending_fetches.get_mut(k) {
+                        fetch_state.waiting_blocks.remove(block_hash);
+                    }
+                    self.cancel_fetch_if_no_waiters(k);
+                }
             }
         }
 
