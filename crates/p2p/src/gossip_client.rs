@@ -1572,6 +1572,16 @@ impl GossipClient {
         }
     }
 
+    fn pd_chunk(gossip_data: GossipDataV2) -> Result<ChunkFormat, PeerNetworkError> {
+        match gossip_data {
+            GossipDataV2::PdChunk(chunk) => Ok(chunk),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected PdChunk, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
     fn block_body(gossip_data: GossipDataV2) -> Result<Arc<BlockBody>, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::BlockBody(body) => Ok(body),
@@ -2274,45 +2284,27 @@ impl GossipClient {
                 }
             }
 
-            // --- Gossip fallback ---
+            // --- Gossip fallback (with handshake retry) ---
             // Look up the peer in the peer list to get their PeerId and PeerListItem
             if let Some(peer_list_item) = peer_list.peer_by_gossip_address(peer.gossip) {
                 let peer_id = peer_list_item.peer_id;
                 let peer_tuple = (peer_id, peer_list_item);
 
                 match self
-                    .pull_primitive_data_and_update_the_score(
-                        &peer_tuple,
+                    .pull_primitive_data_from_peer_with_retry(
                         gossip_request.clone(),
+                        &peer_tuple,
                         peer_list,
+                        Self::pd_chunk,
                     )
                     .await
                 {
-                    Ok(GossipResponse::Accepted(Some(GossipDataV2::PdChunk(chunk_format)))) => {
+                    Ok((_peer_id, chunk_format)) => {
                         debug!(
                             "Successfully pulled PD chunk (ledger={}, offset={}) via gossip from peer {}",
                             ledger, offset, peer_id
                         );
                         return Ok((chunk_format, peer.api));
-                    }
-                    Ok(GossipResponse::Accepted(Some(other))) => {
-                        warn!(
-                            "Gossip pull from peer {} returned unexpected data type: {:?}",
-                            peer_id,
-                            other.data_type_and_id()
-                        );
-                    }
-                    Ok(GossipResponse::Accepted(None)) => {
-                        warn!(
-                            "Peer {} does not have PD chunk (ledger={}, offset={})",
-                            peer_id, ledger, offset
-                        );
-                    }
-                    Ok(GossipResponse::Rejected(reason)) => {
-                        warn!(
-                            "Peer {} rejected PD chunk gossip request: {:?}",
-                            peer_id, reason
-                        );
                     }
                     Err(e) => {
                         warn!(
