@@ -17,9 +17,9 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
-    SealedBlock,
+    BlockBody, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, MempoolConfig,
+    NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
+    RethPeerInfo, SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -65,8 +65,11 @@ struct MockedServices {
 impl MockedServices {
     fn new(config: &Config) -> Self {
         let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
-                .expect("can't open temp dir"),
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("can't open temp dir"),
         ));
 
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());

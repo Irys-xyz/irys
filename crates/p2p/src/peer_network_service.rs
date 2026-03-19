@@ -1144,7 +1144,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
+        Config, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage,
+        RethPeerInfo,
     };
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
@@ -1186,7 +1187,8 @@ mod tests {
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
         DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&path.to_path_buf()).expect("open test database"),
+            open_or_create_irys_consensus_data_db(path, DbSyncMode::UtterlyNoSync)
+                .expect("open test database"),
         ))
     }
 

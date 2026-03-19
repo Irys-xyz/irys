@@ -86,7 +86,9 @@ impl Ord for DataRootInfo {
 
 #[cfg(test)]
 mod tests {
-    use crate::open_or_create_db;
+    use crate::{IrysDatabaseArgs as _, open_or_create_db};
+
+    use reth_db::mdbx::DatabaseArguments;
 
     use super::*;
 
@@ -99,7 +101,12 @@ mod tests {
 
         let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
 
-        let db = open_or_create_db(temp_dir, SubmoduleTables::ALL, None).unwrap();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )
+        .unwrap();
 
         let write_tx = db.tx_mut()?;
 

@@ -1694,8 +1694,8 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        Config, DatabaseProvider, IrysPeerId, NodeConfig, PeerAddress, PeerNetworkSender,
-        PeerScore, RethPeerInfo,
+        Config, DatabaseProvider, DbSyncMode, IrysPeerId, NodeConfig, PeerAddress,
+        PeerNetworkSender, PeerScore, RethPeerInfo,
     };
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
@@ -1708,7 +1708,8 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let db_env =
-            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).expect("db");
+            open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                .expect("db");
         let db = DatabaseProvider(Arc::new(db_env));
         let (tx, _rx) = mpsc::unbounded_channel();
         let peer_network_sender = PeerNetworkSender::new(tx);

@@ -887,7 +887,7 @@ impl ChunkCacheService {
 mod tests {
     use super::*;
     use irys_database::{
-        database, open_or_create_db,
+        IrysDatabaseArgs as _, database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
@@ -898,6 +898,7 @@ mod tests {
         UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
@@ -909,7 +910,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -993,7 +994,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1096,7 +1097,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1192,7 +1193,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1269,7 +1270,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1409,7 +1410,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1531,7 +1532,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1599,7 +1600,7 @@ mod tests {
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 

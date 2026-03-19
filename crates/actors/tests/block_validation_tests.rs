@@ -1,7 +1,7 @@
 use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
-use irys_database::open_or_create_db;
+use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
     Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
@@ -85,7 +85,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     let db_env = open_or_create_db(
         irys_testing_utils::utils::temporary_directory(None, false),
         irys_database::tables::IrysTables::ALL,
-        None,
+        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
     )
     .unwrap();
     let db = DatabaseProvider(Arc::new(db_env));

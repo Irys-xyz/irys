@@ -473,18 +473,19 @@ mod tests {
         CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
     };
     use crate::migration::check_db_version_and_run_migrations_if_needed;
-    use crate::open_or_create_db;
     use crate::tables::IrysTables;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
         IrysDataTxHeaders,
     };
+    use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
         Base64, ChunkPathHash, DataRoot, DataTransactionHeader, H256, IrysAddress, IrysBlockHeader,
         TxChunkOffset, UnixTimestamp,
     };
+    use reth_db::mdbx::DatabaseArguments;
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::{Database as _, DatabaseError};
 
@@ -495,10 +496,18 @@ mod tests {
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {
         // Create separate old and new DBs with no schema version set
         let old_db_path = temporary_directory(None, false);
-        let old_db = RethDbWrapper::new(open_or_create_db(old_db_path, IrysTables::ALL, None)?);
+        let old_db = RethDbWrapper::new(open_or_create_db(
+            old_db_path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?);
 
         let new_db_path = temporary_directory(None, false);
-        let new_db = open_or_create_db(new_db_path, IrysTables::ALL, None)?;
+        let new_db = open_or_create_db(
+            new_db_path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
 
         let old_version = old_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
         let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
@@ -642,7 +651,7 @@ mod tests {
         use crate::tables::IrysDataTxMetadata;
 
         let db_path = temporary_directory(None, false);
-        let db = open_or_create_db(db_path, IrysTables::ALL, None)?;
+        let db = open_or_create_db(db_path, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
 
         // Set schema version to 1
         let _ = db.update(|tx| -> Result<(), DatabaseError> {
@@ -784,7 +793,7 @@ mod tests {
         };
 
         let db_path = temporary_directory(None, false);
-        let db = open_or_create_db(db_path, IrysTables::ALL, None)?;
+        let db = open_or_create_db(db_path, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
 
         // Set schema version to 1
         let _ = db.update(|tx| -> Result<(), DatabaseError> {
