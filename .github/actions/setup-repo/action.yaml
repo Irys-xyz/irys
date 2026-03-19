@@ -24,7 +24,7 @@ runs:
       run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
     - uses: JesseTheRobot/rust-cache@020cd345deec604d4c4f73d8cef18267a8202091
       with:
-        prefix-key: "v1"
+        prefix-key: "v0"
         suffix-key: ${{ steps.cache-key.outputs.sha }}
         cache-on-failure: true
         cache-all-crates: true
