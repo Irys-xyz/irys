@@ -10,7 +10,6 @@
 //! Node B must fetch them from Node A to validate PD transactions.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
@@ -90,9 +89,6 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
         .await;
 
-    // Wait for HTTP server to be ready
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
     // --- Upload real data on Node A: 16 chunks x 32 bytes = 512 bytes ---
     let data_bytes: Vec<u8> = (0..num_chunks_uploaded * chunk_size)
         .map(|i| (i & 0xff) as u8)
@@ -155,8 +151,14 @@ pub(crate) async fn setup_pd_p2p_test() -> eyre::Result<PdP2pTestContext> {
         .await?;
 
     // ChunkMigrationService writes chunk data to storage modules asynchronously
-    // after block migration. Wait for it to complete.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // after block migration. Poll until at least the first chunk is available.
+    node_a
+        .wait_for_chunk_in_storage(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(offset_before),
+            seconds_to_wait,
+        )
+        .await?;
 
     let data_start_offset = offset_before;
     info!(
@@ -336,7 +338,7 @@ async fn test_pd_chunk_p2p_happy_path() -> eyre::Result<()> {
     info!("PD tx injected on Node A: {:?}", tx_hash);
 
     // Wait for PD monitor on Node A to detect and provision chunks from local storage.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.node_a.wait_for_ready_pd_tx(&tx_hash, 30).await?;
 
     // Mine a block on Node A (without auto-gossip so we control timing).
     let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
@@ -450,7 +452,9 @@ async fn test_pd_chunk_p2p_multiple_txs() -> eyre::Result<()> {
     info!("PD tx3 injected (offsets +4..+5): {:?}", tx3_hash);
 
     // Wait for PD monitor on Node A to provision all chunks.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.node_a.wait_for_ready_pd_tx(&tx1_hash, 30).await?;
+    ctx.node_a.wait_for_ready_pd_tx(&tx2_hash, 30).await?;
+    ctx.node_a.wait_for_ready_pd_tx(&tx3_hash, 30).await?;
 
     // Mine a block on Node A.
     let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
@@ -556,7 +560,7 @@ async fn test_pd_chunk_p2p_deduplication() -> eyre::Result<()> {
 
     // Wait for the PD monitor on Node A to detect T2 and provision chunks locally.
     // Node A has chunks in storage, so this just needs the mempool monitor cycle.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.node_a.wait_for_ready_pd_tx(&t2_hash, 30).await?;
 
     // Mine a block on Node A containing T2.
     let (block, eth_payload, _) = ctx.node_a.mine_block_without_gossip().await?;
@@ -644,12 +648,15 @@ async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
         ctx.local_offset, tx_hash,
     );
 
-    // Wait for PdService on Node B to detect the tx from the mempool monitor
-    // and attempt to provision chunks. With P2P fetch implemented, this should
-    // trigger a pull request to Node A for the 2 chunks.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for PdService on Node B to P2P-fetch chunks from Node A and mark tx ready.
+    let publish_ledger = DataLedger::Publish as u32;
+    for i in 0..2_u64 {
+        ctx.node_b
+            .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + i, 30)
+            .await?;
+    }
+    ctx.node_b.wait_for_ready_pd_tx(&tx_hash, 30).await?;
 
-    // PdService fetches chunks from Node A via P2P, transitioning the tx to Ready.
     // Verify the node is running and chunks are populated.
     let node_b_height = ctx.node_b.get_canonical_chain_height().await;
     info!(
@@ -659,7 +666,6 @@ async fn test_pd_chunk_p2p_mempool_path() -> eyre::Result<()> {
 
     // Verify chunks are in Node B's ChunkDataIndex (PD cache) after P2P fetch.
     // Also verify byte-level correctness: fetched chunks must match uploaded data.
-    let publish_ledger = DataLedger::Publish as u32;
     let chunk_size = ctx.chunk_size as usize;
     for i in 0..2_u64 {
         let global_offset = ctx.data_start_offset + i;

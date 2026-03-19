@@ -1396,6 +1396,41 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Poll until a chunk is available in the storage modules (written by
+    /// `ChunkMigrationService` after block migration).
+    ///
+    /// This replaces fixed sleeps after `wait_for_migrated_txs`, which only
+    /// guarantees block index persistence — chunk data is written asynchronously.
+    pub async fn wait_for_chunk_in_storage(
+        &self,
+        ledger: irys_types::DataLedger,
+        offset: irys_types::LedgerChunkOffset,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if matches!(
+                self.node_ctx
+                    .chunk_provider
+                    .get_chunk_by_ledger_offset(ledger, offset),
+                Ok(Some(_))
+            ) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk at ({:?}, {:?}) in storage modules",
+            timeout_secs,
+            ledger,
+            offset,
+        ))
+    }
+
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
