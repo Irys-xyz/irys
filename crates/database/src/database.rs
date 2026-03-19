@@ -1,6 +1,8 @@
 use std::ops::RangeBounds;
 use std::path::Path;
 
+use irys_types::DbSyncMode;
+
 use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
@@ -34,26 +36,63 @@ use reth_db::{
 use reth_db_api::Database as _;
 use tracing::{debug, warn};
 
+fn db_sync_mode_to_mdbx(mode: DbSyncMode) -> SyncMode {
+    match mode {
+        DbSyncMode::Durable => SyncMode::Durable,
+        DbSyncMode::SafeNoSync => SyncMode::SafeNoSync,
+        DbSyncMode::UtterlyNoSync => SyncMode::UtterlyNoSync,
+    }
+}
+
+/// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
+pub trait IrysDatabaseArgs {
+    /// Default args with the given sync mode.
+    ///
+    /// Unbounded read transaction duration, 10 MB growth step, 20 MB shrink threshold.
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+
+    /// Default args with `UtterlyNoSync` — for tests only.
+    fn irys_testing() -> eyre::Result<DatabaseArguments>;
+
+    /// Cache-tuned args: larger growth/shrink thresholds (50 MB / 100 MB).
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+}
+
+impl IrysDatabaseArgs for DatabaseArguments {
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((10 * MEGABYTE).into())
+            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
+            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode))))
+    }
+
+    fn irys_testing() -> eyre::Result<DatabaseArguments> {
+        Self::irys_default(DbSyncMode::UtterlyNoSync)
+    }
+
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((50 * MEGABYTE).into())
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
+            // Cache data is non-authoritative and can be rebuilt from chain state,
+            // so trade durability for write throughput by skipping fsync operations.
+            // SafeNoSync preserves DB integrity on crash (rolls back to last steady
+            // commit) — only recent uncommitted transactions are lost.
+            .with_sync_mode(Some(db_sync_mode_to_mdbx(sync_mode))))
+    }
+}
+
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
 pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
+    args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = args.unwrap_or(
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((10 * MEGABYTE).into())
-            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-            .with_sync_mode(if cfg!(debug_assertions) {
-                Some(SyncMode::UtterlyNoSync)
-            } else {
-                Some(SyncMode::Durable)
-            }),
-    );
-
     // Note: Metrics recorder should be installed via init_telemetry() before this is called.
     // The OpenTelemetryRecorder bridges `metrics` crate to OTEL for push-based export.
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
@@ -64,25 +103,9 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
+    sync_mode: DbSyncMode,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = args.unwrap_or(
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((50 * MEGABYTE).into())
-            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
-            // Cache data is non-authoritative and can be rebuilt from chain state,
-            // so trade durability for write throughput by skipping fsync operations.
-            // SafeNoSync preserves DB integrity on crash (rolls back to last steady
-            // commit) — only recent uncommitted transactions are lost.
-            .with_sync_mode(if cfg!(debug_assertions) {
-                Some(SyncMode::UtterlyNoSync)
-            } else {
-                Some(SyncMode::SafeNoSync)
-            }),
-    );
-    open_or_create_db(path, tables, Some(args))
+    open_or_create_db(path, tables, DatabaseArguments::irys_cache(sync_mode)?)
 }
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
@@ -827,7 +850,11 @@ mod tests {
         insert_commitment_tx, tables::IrysTables,
     };
 
-    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
+    use super::{
+        IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
+        tx_header_by_txid,
+    };
+    use reth_db::mdbx::DatabaseArguments;
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
@@ -847,7 +874,12 @@ mod tests {
                 metadata: irys_types::DataTransactionMetadata::arbitrary(&mut u)?,
             });
 
-        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+        let db = open_or_create_db(
+            path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         // Write a Tx
         let _ = db.update(|tx| insert_tx_header(tx, &tx_header))?;
@@ -905,6 +937,8 @@ mod tests {
         use tempfile::tempdir;
 
         use super::open_or_create_db;
+        use crate::IrysDatabaseArgs as _;
+        use reth_db::mdbx::DatabaseArguments;
 
         fn make_tx_header(tx_id: H256) -> DataTransactionHeader {
             DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
@@ -920,7 +954,12 @@ mod tests {
         #[test]
         fn returns_header_when_included_on_canonical_chain_within_height() {
             let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+            let db = open_or_create_db(
+                path,
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
 
             let tx_id = H256::random();
             let tx_header = make_tx_header(tx_id);
@@ -949,7 +988,12 @@ mod tests {
         #[test]
         fn rejects_header_when_included_height_exceeds_max() {
             let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+            let db = open_or_create_db(
+                path,
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
 
             let tx_id = H256::random();
             let tx_header = make_tx_header(tx_id);
@@ -978,7 +1022,12 @@ mod tests {
         #[test]
         fn rejects_header_at_unmigrated_height() {
             let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+            let db = open_or_create_db(
+                path,
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
 
             let tx_id = H256::random();
             let tx_header = make_tx_header(tx_id);
