@@ -6,7 +6,6 @@ use irys_vdf::{
     apply_reset_seed, last_step_checkpoints_is_valid, step_number_to_salt_number, vdf_sha,
     vdf_sha_verification,
 };
-use sha2::{Digest as _, Sha256};
 
 const DEFAULT_PARALLEL_VERIFICATION_THREAD_LIMIT: usize = 4;
 
@@ -49,13 +48,13 @@ fn build_tiers() -> [Tier; 3] {
             name: "testnet",
             config: testnet_config,
             sample_size: 10,
-            measurement_time: Duration::from_secs(65),
+            measurement_time: Duration::from_secs(75),
         },
         Tier {
             name: "mainnet",
             config: mainnet_config,
             sample_size: 10,
-            measurement_time: Duration::from_secs(65),
+            measurement_time: Duration::from_secs(100),
         },
     ]
 }
@@ -77,17 +76,9 @@ fn bench_vdf_sha(c: &mut Criterion) {
         group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
             let mut checkpoints = vec![H256::default(); num_checkpoints];
             b.iter(|| {
-                let mut hasher = Sha256::new();
-                let mut salt = U256::from(0);
+                let salt = U256::from(0);
                 let mut seed = fixed_seed();
-                vdf_sha(
-                    &mut hasher,
-                    &mut salt,
-                    &mut seed,
-                    num_checkpoints,
-                    iters,
-                    &mut checkpoints,
-                );
+                vdf_sha(salt, &mut seed, num_checkpoints, iters, &mut checkpoints);
                 std::hint::black_box(&checkpoints);
                 seed
             });
@@ -104,14 +95,10 @@ fn bench_vdf_sha_verification(c: &mut Criterion) {
     for tier in &tiers {
         let num_checkpoints = tier.config.num_checkpoints_in_vdf_step;
         let iters = tier.config.num_iterations_per_checkpoint();
-        let iters_usize: usize = iters.try_into().unwrap();
-
         group.sample_size(tier.sample_size);
         group.measurement_time(tier.measurement_time);
         group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
-            b.iter(|| {
-                vdf_sha_verification(U256::from(0), fixed_seed(), num_checkpoints, iters_usize)
-            });
+            b.iter(|| vdf_sha_verification(U256::from(0), fixed_seed(), num_checkpoints, iters));
         });
     }
 
@@ -130,14 +117,12 @@ fn bench_parallel_verification(c: &mut Criterion) {
         let num_checkpoints = config.num_checkpoints_in_vdf_step;
         let prev_output = fixed_seed();
         let global_step: u64 = 2;
-        let mut salt = U256::from(step_number_to_salt_number(config, global_step - 1));
+        let salt = U256::from(step_number_to_salt_number(config, global_step - 1));
         let mut seed = prev_output;
         let mut checkpoints = vec![H256::default(); num_checkpoints];
-        let mut hasher = Sha256::new();
 
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             num_checkpoints,
             config.num_iterations_per_checkpoint(),

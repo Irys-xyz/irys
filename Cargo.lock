@@ -5644,6 +5644,7 @@ dependencies = [
  "irys-types",
  "nodit",
  "openssl",
+ "proptest",
  "rayon",
  "reth-db",
  "sha2",

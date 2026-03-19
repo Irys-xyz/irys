@@ -5,7 +5,6 @@ use irys_types::block_provider::BlockProvider;
 use irys_types::{
     AtomicVdfStepNumber, H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed,
 };
-use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -27,12 +26,10 @@ pub fn run_vdf_for_genesis_block(
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
 
     for global_step_number in 0..=1 {
-        let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(config, global_step_number));
+        let salt = U256::from(step_number_to_salt_number(config, global_step_number));
 
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
             config.num_iterations_per_checkpoint(),
@@ -44,7 +41,7 @@ pub fn run_vdf_for_genesis_block(
         } else {
             genesis_block.vdf_limiter_info.global_step_number = 1;
             genesis_block.vdf_limiter_info.output = hash;
-            genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone();
+            genesis_block.vdf_limiter_info.last_step_checkpoints.0 = checkpoints.clone(); // clone: checkpoints reused across loop iterations
             genesis_block.vdf_limiter_info.steps.0 = vec![hash];
         }
 
@@ -70,7 +67,6 @@ pub fn run_vdf<B: BlockProvider>(
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
 
-    let mut hasher = Sha256::new();
     let mut hash: H256 = current_vdf_hash;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
     let mut global_step_number = global_step_number;
@@ -158,15 +154,14 @@ pub fn run_vdf<B: BlockProvider>(
 
         let now = Instant::now();
 
-        let mut salt = U256::from(step_number_to_salt_number(config, global_step_number));
+        let salt = U256::from(step_number_to_salt_number(config, global_step_number));
 
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
             config.num_iterations_per_checkpoint(),
-            &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
+            &mut checkpoints,
         );
 
         let elapsed = now.elapsed();
@@ -180,15 +175,11 @@ pub fn run_vdf<B: BlockProvider>(
             canonical_global_step_number,
         );
         chain_sync_state.record_vdf_step(global_step_number);
-        info!(
-            "Seed created {} step number {}",
-            hash.clone(),
-            global_step_number
-        );
+        info!("Seed created {} step number {}", hash, global_step_number);
 
         broadcast_mining_service.broadcast(
             Seed(hash),
-            H256List(checkpoints.clone()),
+            H256List(checkpoints.clone()), // clone: checkpoints reused across loop iterations
             global_step_number,
         );
 
@@ -284,21 +275,18 @@ mod tests {
     #[tokio::test]
     async fn test_vdf_step() {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
         let mut hash: H256 = H256::random();
         let original_hash = hash;
-        let mut salt: U256 = U256::from(10);
-        let original_salt = salt;
+        let salt: U256 = U256::from(10);
 
         init_tracing();
 
         debug!("VDF difficulty: {}", config.vdf.sha_1s_difficulty);
         let now = Instant::now();
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut hash,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),
@@ -309,10 +297,10 @@ mod tests {
 
         let now = Instant::now();
         let checkpoints2 = vdf_sha_verification(
-            original_salt,
+            salt,
             original_hash,
             config.vdf.num_checkpoints_in_vdf_step,
-            config.vdf.num_iterations_per_checkpoint() as usize,
+            config.vdf.num_iterations_per_checkpoint(),
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
@@ -388,8 +376,7 @@ mod tests {
             .unwrap();
 
         // calculate last step checkpoints
-        let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
@@ -398,8 +385,7 @@ mod tests {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),
@@ -500,8 +486,7 @@ mod tests {
             .unwrap();
 
         // calculate last step checkpoints
-        let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
@@ -510,8 +495,7 @@ mod tests {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),

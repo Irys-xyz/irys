@@ -80,7 +80,7 @@ assert_matches = "1"
 bytes = "1.5"
 derive_more = { version = "2", features = ["full"] }
 eyre = "0.6"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["compress"] }
 rayon = "1.8.0"
 reqwest = "0.12.15"
 color-eyre = "0.6"
