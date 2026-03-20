@@ -18,9 +18,9 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem,
-    TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    DataRoot, DataTransactionHeader, DatabaseProvider, DatabaseVersion, H256, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE,
+    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -810,8 +810,14 @@ pub fn walk_all<T: Table, TX: DbTx>(
     Ok(walker.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(), DatabaseError> {
-    tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
+pub fn set_database_schema_version<T: DbTxMut>(
+    tx: &T,
+    version: DatabaseVersion,
+) -> Result<(), DatabaseError> {
+    tx.put::<Metadata>(
+        MetadataKey::DBSchemaVersion,
+        (version as u32).to_le_bytes().to_vec(),
+    )
 }
 
 pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
@@ -830,16 +836,14 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 
 #[cfg(test)]
 mod tests {
-    use arbitrary::Arbitrary as _;
-    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
-    use rand::Rng as _;
-    use reth_db::Database as _;
-    use tempfile::tempdir;
-
     use crate::{
         block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
         insert_commitment_tx, tables::IrysTables,
     };
+    use arbitrary::Arbitrary as _;
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
+    use rand::Rng as _;
+    use reth_db::Database as _;
 
     use super::{
         IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
@@ -849,7 +853,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
-        let path = tempdir()?;
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         println!("TempDir: {:?}", path);
 
         // Generate arbitrary metadata using Arbitrary trait with properly sized buffer
@@ -925,7 +929,6 @@ mod tests {
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
-        use tempfile::tempdir;
 
         use super::open_or_create_db;
         use crate::IrysDatabaseArgs as _;
@@ -944,7 +947,7 @@ mod tests {
         /// Tx included at height 5 on canonical chain, queried with max_height=10 → found
         #[test]
         fn returns_header_when_included_on_canonical_chain_within_height() {
-            let path = tempdir().unwrap();
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
                 IrysTables::ALL,
@@ -978,7 +981,7 @@ mod tests {
         /// Tx included at height 5, but queried with max_height=3 → rejected (too new for parent)
         #[test]
         fn rejects_header_when_included_height_exceeds_max() {
-            let path = tempdir().unwrap();
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
                 IrysTables::ALL,
@@ -1012,14 +1015,13 @@ mod tests {
         /// Tx included at height 5, no MigratedBlockHashes entry → rejected
         #[test]
         fn rejects_header_at_unmigrated_height() {
-            let path = tempdir().unwrap();
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
                 IrysTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
-
             let tx_id = H256::random();
             let tx_header = make_tx_header(tx_id);
 
