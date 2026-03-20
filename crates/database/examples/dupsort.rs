@@ -77,13 +77,9 @@ impl Compact for CachedChunk2 {
 /// This is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value.
 /// Completely identical values (subkey + data) **are** deduplicated, but partially identical (same subkey + different data) are **NOT**, see chunk3.
 fn main() -> eyre::Result<()> {
-    let builder = tempfile::Builder::new()
-        .prefix("irys-test-")
-        .rand_bytes(8)
-        .tempdir();
-    let tmpdir = builder
-        .expect("Not able to create a temporary directory.")
-        .keep();
+    let tmpdir = irys_testing_utils::utils::TempDirBuilder::new()
+        .keep()
+        .build();
 
     let db = open_or_create_db(
         tmpdir,

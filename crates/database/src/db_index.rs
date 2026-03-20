@@ -200,14 +200,12 @@ mod tests {
     use super::*;
     use crate::tables::IrysTables;
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
-
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
-    use tempfile::tempdir;
 
     #[test]
     fn test_commitment_metadata_operations() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
             IrysTables::ALL,
@@ -251,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_data_metadata_operations() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
             IrysTables::ALL,
@@ -309,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_batch_commitment_operations() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
             IrysTables::ALL,
@@ -350,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_batch_data_operations() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
             IrysTables::ALL,

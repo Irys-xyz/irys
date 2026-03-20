@@ -134,7 +134,7 @@ mod tests {
 
     use super::*;
     use irys_packing::unpack_with_entropy;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         Base64, Config, ConsensusConfig, DataTransactionLedger, H256, LedgerChunkRange, NodeConfig,
         PartitionChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
@@ -145,7 +145,10 @@ mod tests {
 
     #[test]
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("get_by_data_tx_offset_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {

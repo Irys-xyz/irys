@@ -20,7 +20,7 @@ use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvi
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
@@ -248,7 +248,10 @@ impl GossipServiceTestFixture {
     /// Can panic
     #[must_use]
     pub(crate) fn new() -> Self {
-        let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
+        let temp_dir = TempDirBuilder::new()
+            .prefix("gossip_test_fixture")
+            .with_tracing()
+            .build();
         let gossip_port = random_free_port();
         let api_port = random_free_port();
 

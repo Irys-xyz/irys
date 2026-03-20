@@ -3,7 +3,7 @@ use color_eyre::eyre;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
 use rand::{Rng as _, SeedableRng as _};
 use std::panic;
-use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
+use std::{fs::create_dir_all, path::PathBuf, sync::Once};
 pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
@@ -18,25 +18,21 @@ use tracing_subscriber::{
 #[cfg(feature = "telemetry")]
 use std::backtrace::Backtrace;
 
-pub fn initialize_tracing() {
-    if std::env::var_os("RUST_BACKTRACE").is_none() {
-        unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
-    }
-    let _ = SubscriberBuilder::default()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_span_events(fmt::format::FmtSpan::NONE)
-        .finish()
-        .with(ErrorLayer::default())
-        .try_init();
-    let _ = setup_panic_hook();
-}
+static TRACING_INIT: Once = Once::new();
 
-/// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
-/// The temp directory is prefixed by `<name>` (default: "irys-test-"), and automatically deletes itself on test completion -
-/// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
-pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
-    initialize_tracing();
-    temporary_directory(name, keep)
+pub fn initialize_tracing() {
+    TRACING_INIT.call_once(|| {
+        if std::env::var_os("RUST_BACKTRACE").is_none() {
+            unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
+        }
+        let _ = SubscriberBuilder::default()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_span_events(fmt::format::FmtSpan::NONE)
+            .finish()
+            .with(ErrorLayer::default())
+            .try_init();
+        let _ = setup_panic_hook();
+    });
 }
 
 /// Constant used to make sure .tmp shows up in the right place all the time
@@ -67,28 +63,84 @@ pub fn tmp_base_dir() -> PathBuf {
         );
     }
 
-    // Default fallback
-    PathBuf::from_str(CARGO_MANIFEST_DIR)
-        .unwrap()
-        .join("../../.tmp")
+    // Default fallback — three levels up from crates/utils/testing-utils/ to workspace root
+    PathBuf::from(CARGO_MANIFEST_DIR).join("../../../.tmp")
 }
 
-/// Creates a temporary directory
-pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
-    let tmp_path = tmp_base_dir();
+/// Builder for test temporary directories.
+///
+/// # Examples
+/// ```ignore
+/// // All defaults (prefix "irys-test-", auto-delete)
+/// let dir = TempDirBuilder::new().build();
+///
+/// // Custom prefix
+/// let dir = TempDirBuilder::new().prefix("my-test-").build();
+///
+/// // Keep on disk for debugging
+/// let dir = TempDirBuilder::new().prefix("my-test-").keep().build();
+///
+/// // Initialize tracing first
+/// let dir = TempDirBuilder::new().with_tracing().build();
+/// ```
+pub struct TempDirBuilder<'a> {
+    prefix: &'a str,
+    keep: bool,
+    tracing: bool,
+}
 
-    create_dir_all(&tmp_path).unwrap();
+impl<'a> TempDirBuilder<'a> {
+    pub fn new() -> Self {
+        Self {
+            prefix: "irys-test-",
+            keep: false,
+            tracing: false,
+        }
+    }
 
-    let builder = tempfile::Builder::new()
-        .prefix(name.unwrap_or("irys-test-"))
-        .rand_bytes(8)
-        .disable_cleanup(keep)
-        .tempdir_in(tmp_path);
+    /// Set the directory name prefix (default: `"irys-test-"`)
+    pub fn prefix(mut self, prefix: &'a str) -> Self {
+        self.prefix = prefix;
+        self
+    }
 
-    let temp_dir = builder.expect("Not able to create a temporary directory.");
+    /// Keep the directory on disk after the test (default: auto-delete)
+    pub fn keep(mut self) -> Self {
+        self.keep = true;
+        self
+    }
 
-    debug!("using random path: {:?} ", &temp_dir);
-    temp_dir
+    /// Initialize tracing before creating the directory
+    pub fn with_tracing(mut self) -> Self {
+        self.tracing = true;
+        self
+    }
+
+    /// Build and return the `TempDir`
+    pub fn build(self) -> TempDir {
+        if self.tracing {
+            initialize_tracing();
+        }
+
+        let tmp_path = tmp_base_dir();
+        create_dir_all(&tmp_path).unwrap();
+
+        let dir = tempfile::Builder::new()
+            .prefix(self.prefix)
+            .rand_bytes(8)
+            .disable_cleanup(self.keep)
+            .tempdir_in(tmp_path)
+            .expect("Not able to create a temporary directory.");
+
+        debug!("using random path: {:?} ", &dir);
+        dir
+    }
+}
+
+impl Default for TempDirBuilder<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn setup_panic_hook() -> eyre::Result<()> {

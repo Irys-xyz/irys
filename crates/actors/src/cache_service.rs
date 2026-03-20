@@ -907,8 +907,9 @@ mod tests {
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -991,8 +992,9 @@ mod tests {
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1094,8 +1096,9 @@ mod tests {
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1190,8 +1193,9 @@ mod tests {
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1267,8 +1271,9 @@ mod tests {
     // Chunks older than threshold should be deleted while newer ones should remain.
     #[tokio::test]
     async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1407,8 +1412,9 @@ mod tests {
         node_config.cache.max_cache_size_bytes = 96;
         let config_below = Config::new_with_random_peer_id(node_config.clone());
 
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1529,8 +1535,9 @@ mod tests {
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
@@ -1597,8 +1604,9 @@ mod tests {
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
