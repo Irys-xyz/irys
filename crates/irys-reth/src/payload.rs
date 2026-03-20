@@ -489,13 +489,12 @@ impl CombinedTransactionIterator {
             return 0;
         }
 
-        let access_list = transaction
+        match transaction
             .transaction
             .access_list()
-            .cloned()
-            .unwrap_or_default();
-        match parse_pd_transaction(&access_list) {
-            PdParseResult::ValidPd(meta) => meta.total_chunks,
+            .map(parse_pd_transaction)
+        {
+            Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
             _ => 0,
         }
     }
@@ -530,9 +529,8 @@ impl CombinedTransactionIterator {
             if !is_sprite_active {
                 return 0;
             }
-            let access_list = tx.transaction.access_list().cloned().unwrap_or_default();
-            match parse_pd_transaction(&access_list) {
-                PdParseResult::ValidPd(meta) => meta.total_chunks,
+            match tx.transaction.access_list().map(parse_pd_transaction) {
+                Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
                 _ => 0,
             }
         }) {

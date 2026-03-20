@@ -262,11 +262,12 @@ where
 
         // Reject PD transactions before Sprite hardfork is active
         if !self.is_sprite_active() {
-            let access_list = tx.access_list().cloned().unwrap_or_default();
-            if !matches!(
-                crate::pd_tx::parse_pd_transaction(&access_list),
-                crate::pd_tx::PdParseResult::NotPd
-            ) {
+            if tx.access_list().is_some_and(|al| {
+                !matches!(
+                    crate::pd_tx::parse_pd_transaction(al),
+                    crate::pd_tx::PdParseResult::NotPd
+                )
+            }) {
                 tracing::trace!(
                     sender = ?tx.sender(),
                     tx_hash = ?tx.hash(),
@@ -283,9 +284,8 @@ where
 
         // Validate PD transaction structure and minimum fees when Sprite is active
         if self.is_sprite_active() {
-            let access_list = tx.access_list().cloned().unwrap_or_default();
-            match crate::pd_tx::parse_pd_transaction(&access_list) {
-                crate::pd_tx::PdParseResult::InvalidPd(err) => {
+            match tx.access_list().map(crate::pd_tx::parse_pd_transaction) {
+                Some(crate::pd_tx::PdParseResult::InvalidPd(err)) => {
                     tracing::trace!(
                         sender = ?tx.sender(),
                         tx_hash = ?tx.hash(),
@@ -299,7 +299,7 @@ where
                         ),
                     ));
                 }
-                crate::pd_tx::PdParseResult::ValidPd(meta) => {
+                Some(crate::pd_tx::PdParseResult::ValidPd(meta)) => {
                     // Calculate total fees in IRYS tokens:
                     // (base_fee_cap_per_chunk + priority_fee_per_chunk) × total_chunks
                     let total_per_chunk = meta
@@ -326,7 +326,7 @@ where
                         ));
                     }
                 }
-                crate::pd_tx::PdParseResult::NotPd => {}
+                Some(crate::pd_tx::PdParseResult::NotPd) | None => {}
             }
         }
 
@@ -431,9 +431,11 @@ where
         // PD header max priority fee per chunk and chunk count, if present.
         // Only consider PD tips when Sprite hardfork is active.
         let pd_total_tip = if self.is_sprite_active() {
-            let access_list = transaction.access_list().cloned().unwrap_or_default();
-            match crate::pd_tx::parse_pd_transaction(&access_list) {
-                crate::pd_tx::PdParseResult::ValidPd(meta) => {
+            match transaction
+                .access_list()
+                .map(crate::pd_tx::parse_pd_transaction)
+            {
+                Some(crate::pd_tx::PdParseResult::ValidPd(meta)) => {
                     alloy_primitives::U256::from(meta.total_chunks)
                         .saturating_mul(meta.priority_fee_per_chunk)
                 }
