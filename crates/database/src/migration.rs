@@ -857,6 +857,7 @@ mod tests {
     fn test_unstamped_db_with_data_migrates_to_current() {
         use crate::db::IrysDatabaseExt as _;
         use crate::migration::ensure_db_version_compatible;
+        use crate::tables::IrysDataTxMetadata;
 
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
@@ -866,22 +867,57 @@ mod tests {
         )
         .unwrap();
 
+        let legacy_tx_id = H256::random();
+
         // Write data WITHOUT setting a schema version — simulates mainnet-0.1.x (V0).
         db.update_eyre(|tx| {
+            // Insert a block header (existing coverage).
             let block_hash = H256::random();
             let header = IrysBlockHeader::default();
             tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
+
+            // Insert a legacy-format tx header with promoted_height to exercise
+            // the v1→v2 rewrite path.
+            let old_header = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: legacy_tx_id,
+                    promoted_height: Some(42),
+                    ..Default::default()
+                },
+            );
+            tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                legacy_tx_id,
+                super::old_structures::CompactTxHeaderOld(old_header),
+            )?;
             Ok(())
         })
         .unwrap();
 
-        // Should stamp V1 then migrate V1 → V2 (metadata back-fill)
+        // Should stamp V1 then migrate V1 → V2 (tx header rewrite + metadata back-fill)
         ensure_db_version_compatible(&db).unwrap();
 
+        // Verify schema version is CURRENT.
         let version = db
             .view(|tx| crate::database_schema_version(tx).unwrap())
             .unwrap();
         assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
+
+        // Verify the legacy record was rewritten into the new IrysDataTxHeaders shape.
+        let migrated_header = db
+            .view(|tx| tx.get::<IrysDataTxHeaders>(legacy_tx_id))
+            .unwrap()
+            .unwrap()
+            .expect("legacy tx header should exist in new table after migration");
+        assert_eq!(migrated_header.0.id(), legacy_tx_id);
+
+        // Verify promoted_height was split out into IrysDataTxMetadata.
+        let metadata = db
+            .view(|tx| tx.get::<IrysDataTxMetadata>(legacy_tx_id))
+            .unwrap()
+            .unwrap()
+            .expect("metadata entry should exist for legacy record with promoted_height");
+        assert_eq!(metadata.0.promoted_height, Some(42));
+        assert_eq!(metadata.0.included_height, None);
     }
 
     #[test]
