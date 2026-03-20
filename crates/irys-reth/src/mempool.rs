@@ -267,19 +267,20 @@ where
                     crate::pd_tx::parse_pd_transaction(al),
                     crate::pd_tx::PdParseResult::NotPd
                 )
-            }) {
-                tracing::trace!(
-                    sender = ?tx.sender(),
-                    tx_hash = ?tx.hash(),
-                    "PD transaction rejected: Sprite hardfork not active"
-                );
-                return Err(TransactionValidationOutcome::Invalid(
-                    tx,
-                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                        InvalidTransactionError::TxTypeNotSupported,
-                    ),
-                ));
-            }
+            })
+        {
+            tracing::trace!(
+                sender = ?tx.sender(),
+                tx_hash = ?tx.hash(),
+                "PD transaction rejected: Sprite hardfork not active"
+            );
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::TxTypeNotSupported,
+                ),
+            ));
+        }
 
         // Validate PD transaction structure and minimum fees when Sprite is active
         if self.is_sprite_active() {
