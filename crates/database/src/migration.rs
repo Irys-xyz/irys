@@ -407,45 +407,37 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
         );
     };
 
-    // Enumerate every variant explicitly so the compiler forces an update
+    // Migrate forward one version at a time until we reach CURRENT.
+    // The match enumerates every variant so the compiler forces an update
     // when a new DatabaseVersion is added.
-    match version {
-        DatabaseVersion::V0 => {
-            // Shouldn't happen (we stamp V1 above for unstamped DBs), but
-            // handle defensively in case a V0 value was written explicitly.
-            debug!("Explicit V0 stamp found — upgrading to V1.");
-            db.update_eyre(|tx| {
-                crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
-                Ok(())
-            })?;
-            debug!("Applying migration from V1 to V2");
-            db.update_eyre(|tx| {
-                v1_to_v2::migrate(tx)?;
-                Ok(())
-            })?;
-            debug!(
-                "All migrations complete, database now at V{}",
-                DatabaseVersion::CURRENT
-            );
-        }
-
-        DatabaseVersion::V1 => {
-            debug!("Applying migration from V1 to V2");
-            db.update_eyre(|tx| {
-                v1_to_v2::migrate(tx)?;
-                Ok(())
-            })?;
-            debug!(
-                "All migrations complete, database now at V{}",
-                DatabaseVersion::CURRENT
-            );
-        }
-
-        DatabaseVersion::V2 => {
-            debug!(
-                "Database schema is up-to-date (V{})",
-                DatabaseVersion::CURRENT
-            );
+    let mut version = version;
+    loop {
+        match version {
+            DatabaseVersion::V0 => {
+                // Shouldn't happen (we stamp V1 above for unstamped DBs), but
+                // handle defensively in case a V0 value was written explicitly.
+                debug!("Explicit V0 stamp found — upgrading to V1.");
+                db.update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
+                    Ok(())
+                })?;
+                version = DatabaseVersion::V1;
+            }
+            DatabaseVersion::V1 => {
+                debug!("Applying migration from V1 to V2");
+                db.update_eyre(|tx| {
+                    v1_to_v2::migrate(tx)?;
+                    Ok(())
+                })?;
+                version = DatabaseVersion::V2;
+            }
+            DatabaseVersion::CURRENT => {
+                debug!(
+                    "Database schema is up-to-date (V{})",
+                    DatabaseVersion::CURRENT
+                );
+                break;
+            }
         }
     }
 
