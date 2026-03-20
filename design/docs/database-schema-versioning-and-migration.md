@@ -24,7 +24,10 @@ The function then handles three cases based on the stamped version:
 - **CURRENT version**: no-op.
 - **Newer version than the binary**: returns an `eyre::bail!` error with a clear message telling the operator to use the newer binary or restore from backup. Rollback is explicitly unsupported.
 
-Each migration is a module (`v1_to_v2`) in `crates/database/src/migration.rs` that receives a mutable MDBX transaction. Migrations process records in batches (10 000 records per batch) to keep memory bounded on large databases. The version stamp is written inside the migration transaction, so a crash mid-migration leaves the database at the old version and the migration re-runs on next startup.
+Each migration is a module (`v1_to_v2`) in `crates/database/src/migration.rs` that receives a mutable MDBX transaction. Migrations process records in batches (10 000 records per batch) to keep memory bounded on large databases. The crash semantics differ between the initial stamp and subsequent migrations:
+
+- **Initial unstamped path (V0→V1):** `DatabaseVersion::V1` is committed in its own write transaction *before* the migration loop begins. If the node crashes after this commit but before `v1_to_v2` completes, the database is left stamped V1 with no data changes — on next startup the migration loop picks up at V1 and re-runs `v1_to_v2` from scratch.
+- **Subsequent migrations (V1→V2 and beyond):** The version stamp is written inside the same MDBX write transaction as the migration itself (e.g., `v1_to_v2::migrate` writes `DatabaseVersion::V2` at the end of the transaction). A crash mid-migration rolls back the entire transaction — both the data changes and the version bump — leaving the database at the previous version so the migration re-runs on next startup.
 
 The V1→V2 migration specifically:
 1. Reads every `IrysDataTxHeaders` record using the old Compact layout (with `promoted_height` inline), writes the new layout (without it), and moves `promoted_height` values into `IrysDataTxMetadata`.
