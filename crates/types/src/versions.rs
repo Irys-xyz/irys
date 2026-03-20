@@ -31,12 +31,24 @@ pub enum DatabaseVersion {
 
     /// Introduced the `db_version` metadata key.
     ///
+    /// Transaction headers store all data inline, including `promoted_height`
+    /// embedded directly in `DataTransactionHeaderV1`. No per-transaction
+    /// metadata tracking beyond what is in the header itself.
+    ///
     /// * Record format is unchanged from V0 — `DataTransactionHeaderV1`
     ///   still contains `promoted_height` inline.
     /// * First version to have the `db_version` metadata key stamped on disk.
     V1 = 1,
 
     /// Metadata back-fill migration.
+    ///
+    /// Extracts per-transaction metadata into dedicated tables, separating
+    /// lifecycle tracking from transaction headers. Adds `included_height`
+    /// (block where tx entered the ledger) and moves `promoted_height`
+    /// (block where data tx was promoted from Submit to Publish) out of the
+    /// header. Enables the transaction status API (Pending/Confirmed/Finalized)
+    /// and makes future metadata additions possible without header format
+    /// migrations.
     ///
     /// * Moved the `promoted_height` field out of `DataTransactionHeaderV1`
     ///   and into `IrysDataTxMetadata`, keeping on-chain data minimal.
@@ -81,13 +93,26 @@ impl std::fmt::Display for DatabaseVersion {
 )]
 #[repr(u32)]
 pub enum ProtocolVersion {
-    /// Original handshake format ([`crate::HandshakeRequestV1`] / [`crate::HandshakeResponseV1`]).
+    /// Original gossip handshake.
     ///
-    /// * Compact-encoded signing preimage.
+    /// Nodes identify by mining address with ECDSA signature proof. Uses
+    /// `reth_codecs::Compact` encoding (Rust-only). Data messages
+    /// authenticated by IP matching against handshake registration. No
+    /// consensus compatibility check at connection time.
+    ///
+    /// * Compact-encoded signing preimage
+    ///   ([`crate::HandshakeRequestV1`] / [`crate::HandshakeResponseV1`]).
     /// * Peers identified solely by `mining_address`.
     V1 = 1,
 
     /// Extended handshake with peer identity and config validation.
+    ///
+    /// Adds a dedicated random `peer_id` separate from mining address, so
+    /// nodes can detect multiple peers mining the same address (often from
+    /// copy-pasting a config). Switches to standard RLP encoding for
+    /// cross-language compatibility on signed handshake messages. Includes
+    /// `consensus_config_hash` to reject incompatible peers at handshake
+    /// time.
     ///
     /// * Added `peer_id` ([`crate::IrysPeerId`]) for independent P2P identity.
     /// * Added `consensus_config_hash` so peers reject misconfigured nodes
@@ -185,16 +210,24 @@ pub enum TransactionVersion {
     /// * `Unstake` – withdraw staked tokens.
     ///
     /// Signing preimage: Compact-encoded fields.
+    ///
+    /// V1 commitment transactions were deprecated by the Aurora hardfork due
+    /// to non-canonical RLP encoding incompatibilities across language
+    /// implementations. After Aurora activation, only V2+ commitment
+    /// transactions are accepted on-chain.
     V1 = 1,
 
     /// Added the `UpdateRewardAddress` commitment type and switched to RLP
     /// signing.
     ///
-    /// Changes from V1:
-    /// * New commitment type `UpdateRewardAddress` – allows a miner to
-    ///   redirect block rewards to a different address without unstaking.
-    /// * Signing preimage changed from Compact encoding to canonical RLP,
-    ///   aligning with the rest of the protocol's wire format.
+    /// Adds the `UpdateRewardAddress` commitment transaction variant,
+    /// allowing nodes to change their reward address without unstaking.
+    /// Switches signing preimage from Compact encoding to canonical RLP,
+    /// aligning with the rest of the protocol's wire format.
+    ///
+    /// * New commitment type `UpdateRewardAddress` – redirect block rewards
+    ///   to a different address without unstaking.
+    /// * Signing preimage changed from Compact encoding to canonical RLP.
     V2 = 2,
 }
 
