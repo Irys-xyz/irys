@@ -54,6 +54,8 @@ pub enum PdValidationError {
     UnknownTypeByte(u8),
     #[error("duplicate ChunkRead key")]
     DuplicateDataRead,
+    #[error("duplicate ByteRead key")]
+    DuplicateByteRead,
     #[error("invalid ChunkRead encoding: {0}")]
     InvalidDataRead(String),
     #[error("invalid ByteRead encoding: {0}")]
@@ -170,6 +172,7 @@ pub fn parse_pd_transaction(access_list: &AccessList) -> PdParseResult {
     let mut priority_fee: Option<U256> = None;
     let mut base_fee_cap: Option<U256> = None;
     let mut seen_chunk_reads: HashSet<[u8; 32]> = HashSet::new();
+    let mut seen_byte_reads: HashSet<[u8; 32]> = HashSet::new();
 
     for key in &pd_item.storage_keys {
         let type_byte = key.0[0];
@@ -188,7 +191,12 @@ pub fn parse_pd_transaction(access_list: &AccessList) -> PdParseResult {
                 }
             },
             Ok(PdAccessListArgsTypeId::ByteRead) => match ByteRangeSpecifier::decode(&key.0) {
-                Ok(spec) => byte_reads.push(spec),
+                Ok(spec) => {
+                    if !seen_byte_reads.insert(key.0) {
+                        return PdParseResult::InvalidPd(PdValidationError::DuplicateByteRead);
+                    }
+                    byte_reads.push(spec);
+                }
                 Err(e) => {
                     return PdParseResult::InvalidPd(PdValidationError::InvalidByteRead(
                         e.to_string(),
@@ -294,6 +302,7 @@ mod tests {
     use super::*;
     use crate::test_utils::chunk_spec_with_params;
     use alloy_primitives::Address;
+    use irys_types::range_specifier::{U18, U34};
 
     fn other_address() -> Address {
         Address::repeat_byte(0xff)
@@ -671,6 +680,85 @@ mod tests {
         assert!(matches!(
             parse_pd_transaction(&access_list),
             PdParseResult::InvalidPd(PdValidationError::DuplicateDataRead)
+        ));
+    }
+
+    #[test]
+    fn test_parse_invalid_duplicate_byte_read() {
+        let byte_spec = ByteRangeSpecifier {
+            index: 0,
+            chunk_offset: 0,
+            byte_offset: U18::from(0_u32),
+            length: U34::from(100_u64),
+        };
+        let byte_key = B256::from(byte_spec.encode());
+        // One valid chunk read (required), then two identical byte reads
+        let mut storage_keys: Vec<B256> =
+            vec![B256::from(chunk_spec(1).encode()), byte_key, byte_key];
+        storage_keys.push(B256::from(
+            encode_pd_fee(
+                PdAccessListArgsTypeId::PdPriorityFee as u8,
+                U256::from(100_u64),
+            )
+            .expect("valid fee"),
+        ));
+        storage_keys.push(B256::from(
+            encode_pd_fee(
+                PdAccessListArgsTypeId::PdBaseFeeCap as u8,
+                U256::from(200_u64),
+            )
+            .expect("valid fee"),
+        ));
+        let access_list = AccessList::from(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys,
+        }]);
+        assert!(matches!(
+            parse_pd_transaction(&access_list),
+            PdParseResult::InvalidPd(PdValidationError::DuplicateByteRead)
+        ));
+    }
+
+    #[test]
+    fn test_parse_distinct_byte_reads_accepted() {
+        let byte_spec_a = ByteRangeSpecifier {
+            index: 0,
+            chunk_offset: 0,
+            byte_offset: U18::from(0_u32),
+            length: U34::from(100_u64),
+        };
+        let byte_spec_b = ByteRangeSpecifier {
+            index: 0,
+            chunk_offset: 1,
+            byte_offset: U18::from(0_u32),
+            length: U34::from(100_u64),
+        };
+        let mut storage_keys: Vec<B256> = vec![
+            B256::from(chunk_spec(1).encode()),
+            B256::from(byte_spec_a.encode()),
+            B256::from(byte_spec_b.encode()),
+        ];
+        storage_keys.push(B256::from(
+            encode_pd_fee(
+                PdAccessListArgsTypeId::PdPriorityFee as u8,
+                U256::from(100_u64),
+            )
+            .expect("valid fee"),
+        ));
+        storage_keys.push(B256::from(
+            encode_pd_fee(
+                PdAccessListArgsTypeId::PdBaseFeeCap as u8,
+                U256::from(200_u64),
+            )
+            .expect("valid fee"),
+        ));
+        let access_list = AccessList::from(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys,
+        }]);
+        assert!(matches!(
+            parse_pd_transaction(&access_list),
+            PdParseResult::ValidPd(_)
         ));
     }
 

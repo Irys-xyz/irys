@@ -2620,6 +2620,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         // producing an empty chunk key set. This means PdService marks the tx as Ready
         // (0 required chunks) without needing real data uploaded. Tests that need real
         // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
+        //
+        // Note: the sentinel does NOT affect parse_pd_transaction() — byte 0 of each
+        // encoded key is always the type discriminant (0x00 = ChunkRead), and partition_index
+        // occupies bytes 1-25 only. The parser sees valid ChunkRead entries regardless of
+        // the partition_index value. The sentinel's effect is confined to PdService::specs_to_keys().
         let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
             partition_index: alloy_primitives::aliases::U200::MAX,
             offset: offset_base + i as u32,
