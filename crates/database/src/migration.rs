@@ -1,16 +1,13 @@
-use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
+use crate::db::IrysDatabaseExt as _;
+use irys_types::DatabaseVersion;
 
 use crate::reth_db::{
-    Database as _, DatabaseEnv, DatabaseError,
-    table::TableImporter,
+    DatabaseEnv, DatabaseError,
     transaction::{DbTx, DbTxMut},
 };
 
 use std::fmt::Debug;
 use tracing::debug;
-
-/// Bump this every time you need to migrate data
-const CURRENT_DB_VERSION: u32 = 2;
 
 // Old DataTransactionHeaderV1 structure used in migration modules
 // This is kept for historical migration purposes only
@@ -140,54 +137,6 @@ mod old_structures {
         const DUPSORT: bool = false;
         type Key = H256;
         type Value = CompactTxHeaderOld;
-    }
-}
-
-mod v0_to_v1 {
-    use super::*;
-    use crate::tables::{
-        CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
-        IrysDataTxHeaders,
-    };
-    use reth_db::cursor::DbCursorRO as _;
-    use reth_db::table::Table;
-
-    pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
-    where
-        TXOld: DbTxMut + DbTx + Debug,
-        TXNew: DbTxMut + DbTx + Debug + TableImporter,
-    {
-        debug!("Migrating from v0 to v1");
-        move_all_records::<IrysBlockHeaders, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<IrysDataTxHeaders, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<CachedDataRoots, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<CachedChunksIndex, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<CachedChunks, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<IngressProofs, TXOld, TXNew>(tx_old, tx_new)?;
-
-        crate::set_database_schema_version(tx_new, 1)?;
-        Ok(())
-    }
-
-    fn move_all_records<T: Table, TXOld, TXNew>(
-        tx_old: &TXOld,
-        tx_new: &TXNew,
-    ) -> Result<(), DatabaseError>
-    where
-        TXOld: DbTxMut + DbTx + Debug,
-        TXNew: DbTxMut + DbTx + Debug + TableImporter,
-    {
-        debug!("Migrating table: {}", T::NAME);
-        let mut binding = tx_old.cursor_read::<T>()?;
-        let entries = binding.walk(None)?;
-
-        // Insert entries into new DB
-        for table_row in entries {
-            let (key, value) = table_row?;
-            tx_new.put::<T>(key, value)?;
-        }
-
-        tx_old.clear::<T>()
     }
 }
 
@@ -409,7 +358,7 @@ mod v1_to_v2 {
             blocks_processed, data_tx_metadata_updates, commitment_tx_metadata_updates
         );
 
-        crate::set_database_schema_version(tx, 2)?;
+        crate::set_database_schema_version(tx, DatabaseVersion::V2)?;
         debug!(
             "Migration from v1 to v2 completed: migrated {} transaction headers, processed {} blocks",
             total_migrated, blocks_processed
@@ -418,49 +367,78 @@ mod v1_to_v2 {
     }
 }
 
-/// This function migrates data from an old DB instance to a new DB instance.
-pub fn check_db_version_and_run_migrations_if_needed(
-    old_db: &RethDbWrapper,
-    new_db: &DatabaseEnv,
-) -> eyre::Result<()> {
-    debug!("Checking if database migration is needed.");
-    let version = new_db.view(crate::database_schema_version)??;
-    debug!("Database version: {:?}", version);
-    debug!("Current database version: {:?}", CURRENT_DB_VERSION);
-    if let Some(v) = version {
-        // A version exists. If it’s less than CURRENT_DB_VERSION, apply sequential migrations.
-        if v < CURRENT_DB_VERSION {
-            debug!(
-                "Applying sequential migrations from {:?} to {:?}",
-                v, CURRENT_DB_VERSION
-            );
+/// Checks the database schema version on startup and either:
+/// - Migrates forward from V0/V1 through to CURRENT
+/// - Returns an error if the DB version is newer than the binary (rollback not supported)
+/// - No-ops if versions match
+///
+/// A database without a version stamp is treated as V0 (the versioning system
+/// didn't exist yet). The V0→V1 transition is purely "add the stamp" — no data
+/// format change — so we unconditionally stamp V1 and then run V1→V2. On a
+/// truly fresh (empty) database the V1→V2 migration is a no-op.
+pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
+    use reth_db::Database as _;
 
-            // Apply migrations sequentially
-            if v < 2 {
-                debug!("Applying migration from v1 to v2");
-                new_db.update_eyre(|tx| {
+    let raw_version = db.view(crate::database_schema_version)??;
+
+    // No version stamp → V0 database (or brand-new). Stamp V1 so the
+    // migration chain below handles it uniformly.
+    let raw = match raw_version {
+        Some(v) => v,
+        None => {
+            debug!("No database version stamp found — treating as V0, stamping V1.");
+            db.update_eyre(|tx| {
+                crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
+                Ok(())
+            })?;
+            DatabaseVersion::V1 as u32
+        }
+    };
+
+    // Try to convert the stored u32 into a known DatabaseVersion variant.
+    // If the conversion fails the DB was written by a newer binary.
+    let Some(version) = DatabaseVersion::from_u32(raw) else {
+        eyre::bail!(
+            "Database schema version {} is newer than this binary supports \
+             (version {}). Running an older binary against a newer database is not \
+             supported. Use the newer binary or restore the database from a backup.",
+            raw,
+            DatabaseVersion::CURRENT
+        );
+    };
+
+    // Migrate forward one version at a time until we reach CURRENT.
+    // The match enumerates every variant so the compiler forces an update
+    // when a new DatabaseVersion is added.
+    let mut version = version;
+    loop {
+        match version {
+            DatabaseVersion::V0 => {
+                // Shouldn't happen (we stamp V1 above for unstamped DBs), but
+                // handle defensively in case a V0 value was written explicitly.
+                debug!("Explicit V0 stamp found — upgrading to V1.");
+                db.update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
+                    Ok(())
+                })?;
+                version = DatabaseVersion::V1;
+            }
+            DatabaseVersion::V1 => {
+                debug!("Applying migration from V1 to V2");
+                db.update_eyre(|tx| {
                     v1_to_v2::migrate(tx)?;
                     Ok(())
                 })?;
+                version = DatabaseVersion::V2;
+            }
+            DatabaseVersion::CURRENT => {
+                debug!(
+                    "Database schema is up-to-date (V{})",
+                    DatabaseVersion::CURRENT
+                );
+                break;
             }
         }
-    } else {
-        debug!(
-            "No DB schema version information found in the new database. Applying initial migration from v0 to v1."
-        );
-        old_db.update_eyre(|tx_old| {
-            new_db.update_eyre(|tx_new| {
-                v0_to_v1::migrate(tx_old, tx_new)?;
-                Ok(())
-            })
-        })?;
-
-        // After v0->v1, apply v1->v2
-        debug!("Applying migration from v1 to v2 after initial migration");
-        new_db.update_eyre(|tx| {
-            v1_to_v2::migrate(tx)?;
-            Ok(())
-        })?;
     }
 
     Ok(())
@@ -468,199 +446,36 @@ pub fn check_db_version_and_run_migrations_if_needed(
 
 #[cfg(test)]
 mod tests {
-    use crate::db::RethDbWrapper;
-    use crate::db_cache::{
-        CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
-    };
-    use crate::migration::check_db_version_and_run_migrations_if_needed;
-    use crate::tables::IrysTables;
-    use crate::tables::{
-        CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
-        IrysDataTxHeaders,
-    };
+    use crate::tables::{IrysBlockHeaders, IrysDataTxHeaders, IrysTables};
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
-    use irys_testing_utils::utils::temporary_directory;
-    use irys_types::ingress::CachedIngressProof;
-    use irys_types::{
-        Base64, ChunkPathHash, DataRoot, DataTransactionHeader, H256, IrysAddress, IrysBlockHeader,
-        TxChunkOffset, UnixTimestamp,
-    };
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{H256, IrysBlockHeader};
     use reth_db::mdbx::DatabaseArguments;
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::{Database as _, DatabaseError};
 
-    use super::CURRENT_DB_VERSION;
-
-    // test ensures v0→v1 migration moves representative records to the new DB, clears old DB tables, and sets the schema version.
-    #[test]
-    fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {
-        // Create separate old and new DBs with no schema version set
-        let old_db_path = temporary_directory(None, false);
-        let old_db = RethDbWrapper::new(open_or_create_db(
-            old_db_path,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?);
-
-        let new_db_path = temporary_directory(None, false);
-        let new_db = open_or_create_db(
-            new_db_path,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-
-        let old_version = old_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert!(old_version.is_none());
-        assert!(new_version.is_none());
-
-        // Insert one entry per representative table (including dupsort tables) into the old DB
-        let block_hash: H256 = H256::random();
-        let tx_id: H256 = H256::random();
-        let data_root: DataRoot = H256::random();
-        let chunk_path_hash: ChunkPathHash = H256::random();
-        let address: IrysAddress = IrysAddress::random();
-
-        {
-            let write_tx = old_db.tx_mut()?;
-
-            // IrysBlockHeaders (non-dupsort)
-            let header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
-                block_hash,
-                height: 1,
-                ..Default::default()
-            });
-            write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
-
-            // IrysDataTxHeaders (non-dupsort)
-            let tx_header = DataTransactionHeader::V1(Default::default());
-            write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
-
-            let cached_at = UnixTimestamp::now()?;
-            // CachedDataRoots (non-dupsort)
-            let cdr = CachedDataRoot {
-                data_size: 1,
-                data_size_confirmed: true,
-                txid_set: vec![tx_id],
-                block_set: vec![block_hash],
-                expiry_height: None,
-                cached_at,
-            };
-            write_tx.put::<CachedDataRoots>(data_root, cdr)?;
-
-            // CachedChunksIndex (dupsort with subkey = u32 encoded inside value)
-            let index_entry = CachedChunkIndexEntry {
-                index: TxChunkOffset::from(0),
-                meta: CachedChunkIndexMetadata {
-                    chunk_path_hash,
-                    updated_at: UnixTimestamp::now()?,
-                },
-            };
-            write_tx.put::<CachedChunksIndex>(data_root, index_entry)?;
-
-            // CachedChunks (non-dupsort key = ChunkPathHash)
-            let chunk = CachedChunk {
-                chunk: None,
-                data_path: Base64(vec![]),
-            };
-            write_tx.put::<CachedChunks>(chunk_path_hash, chunk)?;
-
-            // IngressProofs (dupsort with subkey = Address encoded inside value)
-            let cached_proof = CachedIngressProof {
-                address,
-                ..Default::default()
-            };
-            write_tx.put::<IngressProofs>(data_root, cached_proof.into())?;
-
-            write_tx.commit()?;
-        }
-
-        // Verify counts in old DB (1 each) and new DB (0 each) before migration
-        let old_counts_pre = old_db.view(
-            |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
-                Ok((
-                    tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysDataTxHeaders>()?,
-                    tx.entries::<CachedDataRoots>()?,
-                    tx.entries::<CachedChunksIndex>()?,
-                    tx.entries::<CachedChunks>()?,
-                    tx.entries::<IngressProofs>()?,
-                ))
-            },
-        )??;
-        assert_eq!(old_counts_pre, (1, 1, 1, 1, 1, 1));
-
-        let new_counts_pre = new_db.view(
-            |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
-                Ok((
-                    tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysDataTxHeaders>()?,
-                    tx.entries::<CachedDataRoots>()?,
-                    tx.entries::<CachedChunksIndex>()?,
-                    tx.entries::<CachedChunks>()?,
-                    tx.entries::<IngressProofs>()?,
-                ))
-            },
-        )??;
-        assert_eq!(new_counts_pre, (0, 0, 0, 0, 0, 0));
-
-        // Run migration from v0 to v1
-        check_db_version_and_run_migrations_if_needed(&old_db, &new_db)?;
-
-        // Verify new DB now contains those entries (1 each)
-        let new_counts_post = new_db.view(
-            |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
-                Ok((
-                    tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysDataTxHeaders>()?,
-                    tx.entries::<CachedDataRoots>()?,
-                    tx.entries::<CachedChunksIndex>()?,
-                    tx.entries::<CachedChunks>()?,
-                    tx.entries::<IngressProofs>()?,
-                ))
-            },
-        )??;
-        assert_eq!(new_counts_post, (1, 1, 1, 1, 1, 1));
-
-        // Verify old DB was cleared by migration (0 each)
-        let old_counts_post = old_db.view(
-            |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
-                Ok((
-                    tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysDataTxHeaders>()?,
-                    tx.entries::<CachedDataRoots>()?,
-                    tx.entries::<CachedChunksIndex>()?,
-                    tx.entries::<CachedChunks>()?,
-                    tx.entries::<IngressProofs>()?,
-                ))
-            },
-        )??;
-        assert_eq!(old_counts_post, (0, 0, 0, 0, 0, 0));
-
-        // Schema version should be set to CURRENT_DB_VERSION (2)
-        // Note: migration runs v0->v1, then v1->v2, so a final version is 2
-        let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(new_version.unwrap(), CURRENT_DB_VERSION);
-
-        Ok(())
-    }
+    use irys_types::DatabaseVersion;
 
     // Test ensures v1→v2 migration correctly moves promoted_height to IrysDataTxMetadata
     #[test]
     fn should_migrate_from_v1_to_v2() -> eyre::Result<()> {
         use crate::tables::IrysDataTxMetadata;
 
-        let db_path = temporary_directory(None, false);
-        let db = open_or_create_db(db_path, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
+        let db_path = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            db_path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
 
         // Set schema version to 1
         let _ = db.update(|tx| -> Result<(), DatabaseError> {
-            crate::set_database_schema_version(tx, 1)?;
+            crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
             Ok(())
         })?;
 
         let version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(version, Some(1));
+        assert_eq!(version, Some(DatabaseVersion::V1 as u32));
 
         // Create test data in OLD format (with promoted_height field)
         let tx_id_1: H256 = H256::random();
@@ -718,7 +533,7 @@ mod tests {
 
         // Verify that a schema version is updated to 2
         let new_version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(new_version.unwrap(), 2);
+        assert_eq!(new_version.unwrap(), DatabaseVersion::V2 as u32);
 
         // Verify headers were migrated correctly
         // Note: promoted_height() reads from the metadata field which is not auto-loaded
@@ -792,17 +607,21 @@ mod tests {
             SystemTransactionLedger,
         };
 
-        let db_path = temporary_directory(None, false);
-        let db = open_or_create_db(db_path, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
+        let db_path = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            db_path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
 
         // Set schema version to 1
         let _ = db.update(|tx| -> Result<(), DatabaseError> {
-            crate::set_database_schema_version(tx, 1)?;
+            crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
             Ok(())
         })?;
 
         let version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(version, Some(1));
+        assert_eq!(version, Some(DatabaseVersion::V1 as u32));
 
         // Create test data: transaction IDs
         let submit_tx_id: H256 = H256::random();
@@ -897,7 +716,7 @@ mod tests {
 
         // Verify schema version is updated to 2
         let new_version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(new_version.unwrap(), 2);
+        assert_eq!(new_version.unwrap(), DatabaseVersion::V2 as u32);
 
         // Verify IrysDataTxMetadata was created/updated correctly
 
@@ -943,5 +762,185 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_fresh_db_gets_current_version_stamped() {
+        use crate::migration::ensure_db_version_compatible;
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        ensure_db_version_compatible(&db).unwrap();
+        let version = db
+            .view(|tx| crate::database_schema_version(tx).unwrap())
+            .unwrap();
+        assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
+    }
+
+    #[test]
+    fn test_matching_version_passes() {
+        use crate::db::IrysDatabaseExt as _;
+        use crate::migration::ensure_db_version_compatible;
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        db.update_eyre(|tx| {
+            crate::set_database_schema_version(tx, DatabaseVersion::CURRENT)?;
+            Ok(())
+        })
+        .unwrap();
+        ensure_db_version_compatible(&db).unwrap();
+    }
+
+    #[test]
+    fn test_newer_db_version_is_rejected() {
+        use crate::db::IrysDatabaseExt as _;
+        use crate::metadata::MetadataKey;
+        use crate::migration::ensure_db_version_compatible;
+        use crate::tables::Metadata;
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        // Write a version higher than CURRENT directly to simulate a newer binary's DB
+        let future_version = DatabaseVersion::CURRENT as u32 + 1;
+        db.update_eyre(|tx| {
+            tx.put::<Metadata>(
+                MetadataKey::DBSchemaVersion,
+                future_version.to_le_bytes().to_vec(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let result = ensure_db_version_compatible(&db);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("newer than this binary supports"));
+    }
+
+    #[test]
+    fn test_unstamped_db_migrates_to_current() {
+        use crate::migration::ensure_db_version_compatible;
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        // No schema version set — simulates a V0 / fresh database.
+        // Should stamp V1 then migrate V1 → V2.
+        ensure_db_version_compatible(&db).unwrap();
+
+        let version = db
+            .view(|tx| crate::database_schema_version(tx).unwrap())
+            .unwrap();
+        assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
+    }
+
+    #[test]
+    fn test_unstamped_db_with_data_migrates_to_current() {
+        use crate::db::IrysDatabaseExt as _;
+        use crate::migration::ensure_db_version_compatible;
+        use crate::tables::IrysDataTxMetadata;
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let legacy_tx_id = H256::random();
+
+        // Write data WITHOUT setting a schema version — simulates mainnet-0.1.x (V0).
+        db.update_eyre(|tx| {
+            // Insert a block header (existing coverage).
+            let block_hash = H256::random();
+            let header = IrysBlockHeader::default();
+            tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
+
+            // Insert a legacy-format tx header with promoted_height to exercise
+            // the v1→v2 rewrite path.
+            let old_header = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: legacy_tx_id,
+                    promoted_height: Some(42),
+                    ..Default::default()
+                },
+            );
+            tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                legacy_tx_id,
+                super::old_structures::CompactTxHeaderOld(old_header),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Should stamp V1 then migrate V1 → V2 (tx header rewrite + metadata back-fill)
+        ensure_db_version_compatible(&db).unwrap();
+
+        // Verify schema version is CURRENT.
+        let version = db
+            .view(|tx| crate::database_schema_version(tx).unwrap())
+            .unwrap();
+        assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
+
+        // Verify the legacy record was rewritten into the new IrysDataTxHeaders shape.
+        let migrated_header = db
+            .view(|tx| tx.get::<IrysDataTxHeaders>(legacy_tx_id))
+            .unwrap()
+            .unwrap()
+            .expect("legacy tx header should exist in new table after migration");
+        assert_eq!(migrated_header.0.id(), legacy_tx_id);
+
+        // Verify promoted_height was split out into IrysDataTxMetadata.
+        let metadata = db
+            .view(|tx| tx.get::<IrysDataTxMetadata>(legacy_tx_id))
+            .unwrap()
+            .unwrap()
+            .expect("metadata entry should exist for legacy record with promoted_height");
+        assert_eq!(metadata.0.promoted_height, Some(42));
+        assert_eq!(metadata.0.included_height, None);
+    }
+
+    #[test]
+    fn test_older_db_version_migrates_forward() {
+        use crate::db::IrysDatabaseExt as _;
+        use crate::migration::ensure_db_version_compatible;
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        db.update_eyre(|tx| {
+            crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
+            Ok(())
+        })
+        .unwrap();
+        ensure_db_version_compatible(&db).unwrap();
+        let version = db
+            .view(|tx| crate::database_schema_version(tx).unwrap())
+            .unwrap();
+        assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
     }
 }

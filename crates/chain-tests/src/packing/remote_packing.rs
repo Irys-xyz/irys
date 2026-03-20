@@ -4,7 +4,7 @@ use irys_actors::packing_service::PackingRequest;
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing_worker::worker::start_worker;
-use irys_testing_utils::{initialize_tracing, setup_tracing_and_temp_dir};
+use irys_testing_utils::{initialize_tracing, TempDirBuilder};
 use irys_types::{
     ie,
     partition::{PartitionAssignment, PartitionHash},
@@ -66,7 +66,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
     let to_pack = 10;
     let packing_end = num_chunks - to_pack;
 
-    let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
+    let tmp_dir = TempDirBuilder::new().prefix("test_packing_actor").build();
 
     let base_path = tmp_dir.path().to_path_buf();
     let node_config = NodeConfig {

@@ -184,13 +184,10 @@ mod tests {
 
     #[test]
     fn db_compact_dataroot_info() -> eyre::Result<()> {
-        let builder = tempfile::Builder::new()
+        let tmpdir = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("irys-datarootinfo-")
-            .rand_bytes(8)
-            .tempdir();
-        let tmpdir = builder
-            .expect("Not able to create a temporary directory.")
-            .keep();
+            .keep()
+            .build();
 
         let db = open_or_create_db(
             tmpdir,

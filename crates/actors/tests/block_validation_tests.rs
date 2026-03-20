@@ -82,8 +82,9 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
     ];
 
+    let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
     let db_env = open_or_create_db(
-        irys_testing_utils::utils::temporary_directory(None, false),
+        _tmp_dir.path(),
         irys_database::tables::IrysTables::ALL,
         reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
     )

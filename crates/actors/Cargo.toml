@@ -28,7 +28,6 @@ openssl.workspace = true
 irys-reth-node-bridge.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
-tempfile.workspace = true
 irys-testing-utils.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true

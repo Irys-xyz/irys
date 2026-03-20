@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_domain::get_canonical_chain;
-use irys_testing_utils::utils::temporary_directory;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::NodeConfig;
 
 #[test_log::test(tokio::test)]
@@ -53,7 +53,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
 #[test_log::test(tokio::test)]
 async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
     // setup consistent test directory for this test
-    let temp_dir = temporary_directory(None, false);
+    let temp_dir = TempDirBuilder::new().build();
     let test_dir = temp_dir.path().to_path_buf();
 
     let config = NodeConfig::testing();
