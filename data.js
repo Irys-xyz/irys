@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774018212211,
+  "lastUpdate": 1774033779180,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -901,6 +901,90 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 278.620485,
             "range": "± 1.96714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9725fe915cee133f296b7d51feefd9d706d3e31e",
+          "message": "docs: enrich version enum doc comments (#1237)\n\ndocs: enrich version enum doc comments with operator-facing descriptions\n\nAdd higher-level \"why it matters\" context to each version variant's doc\ncomments, complementing the existing implementation-focused bullet points.\nDescriptions sourced from the release dashboard glossary.\n\nCo-authored-by: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-20T11:52:42-07:00",
+          "tree_id": "c08aecc6a426047916df76ad7433e384239848f4",
+          "url": "https://github.com/Irys-xyz/irys/commit/9725fe915cee133f296b7d51feefd9d706d3e31e"
+        },
+        "date": 1774033778480,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.212718,
+            "range": "± 0.025195",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.960184,
+            "range": "± 3.284064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.885322,
+            "range": "± 1.08108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.358182,
+            "range": "± 0.02301",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1197.735492,
+            "range": "± 2.838824",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1556.796505,
+            "range": "± 3.836688",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.54714,
+            "range": "± 0.211408",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.659296,
+            "range": "± 1.724996",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.894918,
+            "range": "± 1.201053",
             "unit": "ms/iter"
           },
           {
