@@ -3065,14 +3065,14 @@ mod tests {
     use irys_database::add_genesis_commitments;
     use irys_database::db::IrysDatabaseExt as _;
     use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
-    use irys_testing_utils::utils::temporary_directory;
+    use irys_testing_utils::tempfile::TempDir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger, H256,
-        H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256, hash_sha256,
-        irys::IrysSigner, partition::PartitionAssignment,
+        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger,
+        DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
     };
     use std::sync::Arc;
-    use tempfile::TempDir;
     use tracing::{debug, info};
 
     pub(super) struct TestContext {
@@ -3087,7 +3087,9 @@ mod tests {
     }
 
     async fn init() -> (TempDir, TestContext) {
-        let data_dir = temporary_directory(Some("block_validation_tests"), false);
+        let data_dir = TempDirBuilder::new()
+            .prefix("block_validation_tests")
+            .build();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
@@ -3125,7 +3127,8 @@ mod tests {
 
         // Create epoch service with random miner address
         let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-            &data_dir.path().to_path_buf(),
+            data_dir.path(),
+            DbSyncMode::UtterlyNoSync,
         )
         .expect("to create DB");
         let db = irys_types::DatabaseProvider(Arc::new(db_env));

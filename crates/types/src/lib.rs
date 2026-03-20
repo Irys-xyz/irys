@@ -39,6 +39,7 @@ pub mod tx_known_status;
 pub mod tx_source;
 pub mod version;
 pub mod versioning;
+pub mod versions;
 
 pub mod canonical;
 pub mod traced;
@@ -91,5 +92,6 @@ pub use traced::*;
 pub use tx_known_status::*;
 pub use version::*;
 pub use versioning::*;
+pub use versions::*;
 
 pub type AtomicVdfStepNumber = Arc<AtomicU64>;

@@ -327,31 +327,31 @@ fn save_to_file(path: &Path, data: &PersistedSupplyState) -> Result<()> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use std::sync::atomic::AtomicU64;
 
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn create_test_supply_state() -> SupplyState {
+    /// Returns (TempDir, SupplyState) — caller must keep TempDir alive so the
+    /// state file directory is not deleted before the test finishes.
+    fn create_test_supply_state() -> (irys_testing_utils::utils::tempfile::TempDir, SupplyState) {
         create_test_supply_state_with_backfill(None, U256::zero())
     }
 
     fn create_test_supply_state_with_backfill(
         backfill_height: Option<u64>,
         backfill_value: U256,
-    ) -> SupplyState {
-        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!("supply_state_test_{}", counter));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let state_file = temp_dir.join(FILE_NAME);
+    ) -> (irys_testing_utils::utils::tempfile::TempDir, SupplyState) {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("supply-state-test-")
+            .build();
+        let state_file = temp_dir.path().join(FILE_NAME);
 
-        SupplyState {
+        let state = SupplyState {
             inner: RwLock::new(SupplyStateData::default()),
             ready: AtomicBool::new(false),
             first_migration_notify: Notify::new(),
             persisted_backfill_height: backfill_height,
             persisted_backfill_value: backfill_value,
             state_file,
-        }
+        };
+        (temp_dir, state)
     }
 
     fn arb_u256_bytes() -> impl Strategy<Value = [u8; 32]> {
@@ -377,7 +377,7 @@ mod tests {
 
         #[test]
         fn sequential_rewards_accumulate_correctly(rewards in prop::collection::vec(0_u64..1_000_000, 1..50)) {
-            let state = create_test_supply_state();
+            let (_dir, state) = create_test_supply_state();
 
             let mut expected_cumulative = U256::zero();
             for (height, &reward) in rewards.iter().enumerate() {
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn add_block_reward_rejects_non_sequential() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
         state.add_block_reward(0, U256::from(100)).unwrap();
 
         let result = state.add_block_reward(2, U256::from(100));
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn add_block_reward_rejects_duplicate_height() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
         state.add_block_reward(0, U256::from(100)).unwrap();
 
         let result = state.add_block_reward(0, U256::from(100));
@@ -420,26 +420,26 @@ mod tests {
 
     #[test]
     fn add_block_reward_rejects_overlap_with_persisted_backfill() {
-        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let (_dir, state) = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
 
         // First migration at height 49 (equal to persisted backfill) should fail
         let result = state.add_block_reward(49, U256::from(100));
         assert!(result.is_err());
 
         // First migration at height 48 (below persisted backfill) should fail
-        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let (_dir2, state) = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
         let result = state.add_block_reward(48, U256::from(100));
         assert!(result.is_err());
 
         // First migration at height 50 (above persisted backfill) should succeed
-        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let (_dir3, state) = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
         let result = state.add_block_reward(50, U256::from(100));
         assert!(result.is_ok());
     }
 
     #[test]
     fn first_migration_can_be_any_height() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
 
         state.add_block_reward(100, U256::from(500)).unwrap();
 
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn add_historical_sum_adds_to_current_value() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
 
         state.add_block_reward(50, U256::from(100)).unwrap();
         state.add_block_reward(51, U256::from(200)).unwrap();
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn first_migration_at_genesis_needs_no_backfill() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
 
         state.add_block_reward(0, U256::from(100)).unwrap();
 
@@ -493,10 +493,10 @@ mod tests {
 
     #[test]
     fn restart_resets_runtime_state_but_loads_backfill_point() {
-        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!("supply_state_restart_test_{}", counter));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let state_file = temp_dir.join(FILE_NAME);
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("supply-state-restart-test-")
+            .build();
+        let state_file = temp_dir.path().join(FILE_NAME);
 
         // First run: complete backfill
         {
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn is_ready_state_transitions() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
 
         assert!(!state.is_ready());
 
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn add_historical_sum_is_idempotent() {
-        let state = create_test_supply_state();
+        let (_dir, state) = create_test_supply_state();
 
         state.add_block_reward(10, U256::from(100)).unwrap();
         state
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn backfill_with_previous_persisted_value() {
         // Simulate restart where we already have some backfill completed
-        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let (_dir, state) = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
 
         // New migration comes in at height 100
         state.add_block_reward(100, U256::from(100)).unwrap();
@@ -605,7 +605,8 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let state = Arc::new(create_test_supply_state());
+        let (_dir, state) = create_test_supply_state();
+        let state = Arc::new(state);
         let first_migration_height = 50_u64;
         let migration_count = 50_u64;
         let reward_per_block = 100_u64;

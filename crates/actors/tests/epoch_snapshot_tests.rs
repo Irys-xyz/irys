@@ -10,11 +10,11 @@ use irys_database::{
     db::IrysDatabaseExt as _,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::PartitionChunkRange;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    BlockTransactions, DataLedger, DbSyncMode, H256, IrysBlockHeader, SealedBlock,
     partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
@@ -32,7 +32,7 @@ use tracing::{debug, error};
 async fn genesis_test() {
     // setup temp dir
     let mut config = NodeConfig::testing();
-    let tmp_dir = setup_tracing_and_temp_dir(None, false);
+    let tmp_dir = TempDirBuilder::new().with_tracing().build();
     let base_path = tmp_dir.path().to_path_buf();
     config.base_directory = base_path;
     let config: Config = Config::new_with_random_peer_id(config);
@@ -167,7 +167,10 @@ async fn genesis_test() {
 
 #[tokio::test]
 async fn add_slots_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("add_slots_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
@@ -261,7 +264,10 @@ async fn unique_addresses_per_slot_test() {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
 
-    let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("unique_addresses_per_slot_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
@@ -408,7 +414,10 @@ High-level steps:
      consistent with the ledger state.
 */
 async fn partition_expiration_and_repacking_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("partition_expiration_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let chunk_count = 10;
@@ -753,7 +762,10 @@ async fn partition_expiration_and_repacking_test() {
 
 #[tokio::test]
 async fn epoch_blocks_reinitialization_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("epoch_block_reinitialization_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let consensus_config = ConsensusConfig {
@@ -767,9 +779,11 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let db_env =
-        irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
-            .expect("to create DB");
+    let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        &base_path,
+        DbSyncMode::UtterlyNoSync,
+    )
+    .expect("to create DB");
     let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
     let block_index = BlockIndex::new_for_testing(db);
 
@@ -935,7 +949,10 @@ async fn epoch_blocks_reinitialization_test() {
 async fn partitions_assignment_determinism_test() {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
-    let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("partitions_assignment_determinism_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let consensus_config = ConsensusConfig {
