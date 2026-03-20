@@ -349,6 +349,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
         GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
         GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::PdChunk(..) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -527,6 +528,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
             GossipDataV2::BlockBody(Arc::new(create_test_block_body(hash))),
         )),
         GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::PdChunk(..) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());

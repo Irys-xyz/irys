@@ -3,18 +3,20 @@
 use alloy_primitives::B256;
 use bytes::Bytes;
 use dashmap::DashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::range_specifier::ChunkRangeSpecifier;
+use crate::ChunkFormat;
 
 /// Configuration values needed for chunk operations.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkConfig {
     pub num_chunks_in_partition: u64,
     pub chunk_size: u64,
-    pub entropy_packing_iterations: u8,
-    pub chain_id: u16,
+    pub entropy_packing_iterations: u32,
+    pub chain_id: u64,
 }
 
 impl ChunkConfig {
@@ -22,8 +24,8 @@ impl ChunkConfig {
         Self {
             num_chunks_in_partition: consensus.num_chunks_in_partition,
             chunk_size: consensus.chunk_size,
-            entropy_packing_iterations: consensus.entropy_packing_iterations as u8,
-            chain_id: consensus.chain_id as u16,
+            entropy_packing_iterations: consensus.entropy_packing_iterations,
+            chain_id: consensus.chain_id,
         }
     }
 }
@@ -38,8 +40,49 @@ pub trait ChunkStorageProvider: Send + Sync + std::fmt::Debug {
         ledger_offset: u64,
     ) -> eyre::Result<Option<Bytes>>;
 
+    /// Returns a chunk for PD serving. Currently always returns packed data from
+    /// storage modules. In the future, may check MDBX CachedChunks first and
+    /// return unpacked data when available (avoiding unpacking cost for the caller).
+    fn get_chunk_for_pd(
+        &self,
+        ledger: u32,
+        ledger_offset: u64,
+    ) -> eyre::Result<Option<ChunkFormat>>;
+
     #[must_use]
     fn config(&self) -> ChunkConfig;
+}
+
+/// Error returned when a PD chunk fetch fails.
+#[derive(Debug)]
+pub struct PdChunkFetchFailure {
+    pub message: String,
+    /// API addresses of peers that were tried and failed.
+    pub failed_peers: Vec<SocketAddr>,
+}
+
+/// Success result from a PD chunk fetch, including which peer served it.
+#[derive(Debug)]
+pub struct PdChunkFetchSuccess {
+    pub chunk: ChunkFormat,
+    /// API address of the peer that served this chunk (for attribution on
+    /// verification failure).
+    pub serving_peer: SocketAddr,
+}
+
+/// Fetches PD chunks from remote peers (HTTP + gossip fallback).
+/// Defined in irys-types so irys-actors can use it without depending on irys-p2p.
+#[async_trait::async_trait]
+pub trait PdChunkFetcher: Send + Sync + 'static {
+    /// Fetch a chunk from the given peers. Tries each peer in order.
+    /// Returns the chunk and which peer served it, or an error with the list of
+    /// failed peer addresses.
+    async fn fetch_chunk(
+        &self,
+        peers: &[crate::PeerAddress],
+        ledger: u32,
+        offset: u64,
+    ) -> Result<PdChunkFetchSuccess, PdChunkFetchFailure>;
 }
 
 // ============================================================================

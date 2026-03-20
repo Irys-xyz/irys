@@ -25,6 +25,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
+use irys_types::chunk_provider::ChunkStorageProvider;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::Traced;
 use irys_types::{
@@ -176,6 +177,7 @@ impl P2PService {
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
         started_at: Instant,
+        storage_provider: Option<Arc<dyn ChunkStorageProvider>>,
     ) -> GossipResult<(
         Server,
         ServerHandle,
@@ -227,6 +229,7 @@ impl P2PService {
             started_at,
             consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            storage_provider,
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),

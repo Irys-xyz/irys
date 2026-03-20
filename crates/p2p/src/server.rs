@@ -1381,6 +1381,9 @@ where
                     format!("block body {:?}", block_hash)
                 }
                 GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
+                GossipDataRequestV2::PdChunk(ledger_id, offset) => {
+                    format!("pd chunk (ledger={ledger_id}, offset={offset})")
+                }
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
