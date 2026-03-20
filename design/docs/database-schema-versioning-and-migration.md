@@ -41,7 +41,7 @@ See also: [Centralized Version Enums](centralized-version-enums.md)
 
 - Operators get a clear, actionable error instead of silent corruption when running version-mismatched binaries
 - Migrations are deterministic and idempotent — re-running after a crash re-applies from the last stamped version
-- Each new schema change requires adding a `DatabaseVersion` variant, a migration module, and a match arm in `ensure_db_version_compatible`. The match explicitly enumerates every `DatabaseVersion` variant by name (no wildcard/catch-all, no `CURRENT` alias as a pattern), so the compiler will emit an exhaustiveness error when a new variant is added — forcing the developer to handle it
+- Each new schema change requires adding a `DatabaseVersion` variant, a migration module, and a match arm in `ensure_db_version_compatible()`. The match enumerates every `DatabaseVersion` variant without a wildcard/catch-all: older versions are matched by their concrete names (`V0`, `V1`, …) and the terminal arm matches `DatabaseVersion::CURRENT` (a `const` alias defined on the enum). Because Rust resolves const patterns to their concrete variant for exhaustiveness analysis, adding a new variant (e.g. `V3`) makes the match non-exhaustive — the compiler forces the developer to add a migration arm before the `CURRENT` terminator
 - Old Compact layouts accumulate in `migration.rs` as historical artifacts; this is intentional to preserve decode capability for databases at any prior version
 - The migration runs synchronously at startup, blocking service initialization — acceptable because migrations are infrequent and correctness outweighs startup latency
 
