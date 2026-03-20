@@ -261,8 +261,8 @@ where
         }
 
         // Reject PD transactions before Sprite hardfork is active
-        if !self.is_sprite_active() {
-            if tx.access_list().is_some_and(|al| {
+        if !self.is_sprite_active()
+            && tx.access_list().is_some_and(|al| {
                 !matches!(
                     crate::pd_tx::parse_pd_transaction(al),
                     crate::pd_tx::PdParseResult::NotPd
@@ -280,7 +280,6 @@ where
                     ),
                 ));
             }
-        }
 
         // Validate PD transaction structure and minimum fees when Sprite is active
         if self.is_sprite_active() {
