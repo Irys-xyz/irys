@@ -15,6 +15,85 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::{env, path::PathBuf, time::Duration};
 
+/// Informational label for the node's intended operating context.
+/// Does **not** drive any subsystem behavior — individual config fields control durability,
+/// caching, CPU pinning, etc. Used only for startup warnings and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RunMode {
+    #[default]
+    Production,
+    Test,
+}
+
+impl RunMode {
+    pub fn is_test(&self) -> bool {
+        matches!(self, Self::Test)
+    }
+}
+
+/// Database sync mode controlling durability vs write performance.
+/// Mirrors `reth_db::mdbx::SyncMode` which doesn't derive Serialize/Deserialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DbSyncMode {
+    /// fsync after every transaction — safest, slowest.
+    Durable,
+    /// No fsync, but DB integrity preserved on crash (uncommitted txns lost).
+    SafeNoSync,
+    /// No fsync, no crash safety — fastest, for tests only.
+    UtterlyNoSync,
+}
+
+impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
+    fn from(mode: DbSyncMode) -> Self {
+        match mode {
+            DbSyncMode::Durable => Self::Durable,
+            DbSyncMode::SafeNoSync => Self::SafeNoSync,
+            DbSyncMode::UtterlyNoSync => Self::UtterlyNoSync,
+        }
+    }
+}
+
+/// Database durability and sync settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseConfig {
+    /// Sync mode for the main Irys consensus database.
+    #[serde(default = "default_db_sync_mode")]
+    pub sync_mode: DbSyncMode,
+
+    /// Sync mode for the cache database.
+    #[serde(default = "default_cache_db_sync_mode")]
+    pub cache_sync_mode: DbSyncMode,
+}
+
+fn default_db_sync_mode() -> DbSyncMode {
+    DbSyncMode::Durable
+}
+fn default_cache_db_sync_mode() -> DbSyncMode {
+    DbSyncMode::SafeNoSync
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            sync_mode: default_db_sync_mode(),
+            cache_sync_mode: default_cache_db_sync_mode(),
+        }
+    }
+}
+
+/// Controls whether and how the VDF thread is pinned to a CPU core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CorePinning {
+    /// Do not pin the VDF thread to any core.
+    Disabled,
+    /// Pin to the first available core (current production behavior).
+    #[default]
+    Auto,
+    /// Pin to a specific core by ID.
+    Core(usize),
+}
+
 /// # Node Configuration
 ///
 /// The main configuration for an Irys node, containing all settings needed
@@ -127,6 +206,16 @@ pub struct NodeConfig {
     /// Sync parameters - how many blocks to pull in parallel, timeouts, etc
     #[serde(default)]
     pub sync: SyncConfig,
+
+    /// Informational label indicating whether the node was configured for test or production use.
+    /// Does not propagate to subsystem configs — durability, caching, and resource allocation
+    /// are controlled by their own fields (e.g. `database.sync_mode`, `reth.db_sync_mode`).
+    #[serde(default)]
+    pub run_mode: RunMode,
+
+    /// Database durability settings.
+    #[serde(default)]
+    pub database: DatabaseConfig,
 }
 
 /// # Node Operation Mode
@@ -385,6 +474,26 @@ impl_network_config_with_defaults!(GossipConfig);
 #[serde(deny_unknown_fields)]
 pub struct RethConfig {
     pub network: RethNetworkConfig,
+
+    /// Sync mode for the Reth embedded database.
+    #[serde(default = "default_reth_db_sync_mode")]
+    pub db_sync_mode: DbSyncMode,
+
+    /// Override for Reth engine cross-block cache size in MB.
+    /// None means use Reth's default.
+    #[serde(default)]
+    pub cross_block_cache_size_megabytes: Option<usize>,
+
+    /// Number of additional transaction validation tasks.
+    #[serde(default = "default_additional_validation_tasks")]
+    pub additional_validation_tasks: usize,
+}
+
+fn default_reth_db_sync_mode() -> DbSyncMode {
+    DbSyncMode::Durable
+}
+fn default_additional_validation_tasks() -> usize {
+    2
 }
 
 /// # Reth network Configuration
@@ -641,6 +750,10 @@ fn default_network_defaults() -> NetworkDefaults {
 pub struct VdfNodeConfig {
     /// Maximum number of threads to use for parallel VDF verification
     pub parallel_verification_thread_limit: usize,
+
+    /// Controls whether and how the VDF thread is pinned to a CPU core.
+    #[serde(default)]
+    pub core_pinning: CorePinning,
 }
 
 impl Default for VdfNodeConfig {
@@ -648,6 +761,7 @@ impl Default for VdfNodeConfig {
         Self {
             // TODO: default to something like numcpus - 4
             parallel_verification_thread_limit: 4,
+            core_pinning: CorePinning::default(),
         }
     }
 }
@@ -766,6 +880,11 @@ impl NodeConfig {
         self
     }
 
+    pub fn with_run_mode(mut self, run_mode: RunMode) -> Self {
+        self.run_mode = run_mode;
+        self
+    }
+
     pub fn with_genesis_peer_discovery_timeout(mut self, timeout_millis: u64) -> Self {
         self.genesis_peer_discovery_timeout_millis = timeout_millis;
         self
@@ -874,6 +993,9 @@ impl NodeConfig {
                     bind_port: 0,
                     peer_id: Default::default(),
                 },
+                db_sync_mode: DbSyncMode::UtterlyNoSync,
+                cross_block_cache_size_megabytes: Some(10),
+                additional_validation_tasks: 0,
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -914,6 +1036,7 @@ impl NodeConfig {
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
+                core_pinning: CorePinning::Disabled,
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -922,6 +1045,11 @@ impl NodeConfig {
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
             sync: SyncConfig::default(),
+            run_mode: RunMode::Test,
+            database: DatabaseConfig {
+                sync_mode: DbSyncMode::UtterlyNoSync,
+                cache_sync_mode: DbSyncMode::UtterlyNoSync,
+            },
         }
     }
 
@@ -1022,6 +1150,9 @@ impl NodeConfig {
                     bind_port: 9009,
                     peer_id: Default::default(),
                 },
+                db_sync_mode: DbSyncMode::Durable,
+                cross_block_cache_size_megabytes: None,
+                additional_validation_tasks: 2,
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -1063,6 +1194,7 @@ impl NodeConfig {
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
+                core_pinning: CorePinning::Auto,
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -1073,6 +1205,8 @@ impl NodeConfig {
             stake_pledge_drives: false,
 
             sync: SyncConfig::default(),
+            run_mode: RunMode::Production,
+            database: DatabaseConfig::default(),
         }
     }
 
@@ -1170,4 +1304,102 @@ fn default_irys_path() -> PathBuf {
     env::current_dir()
         .expect("Unable to determine working dir, aborting")
         .join(".irys")
+}
+
+#[cfg(test)]
+mod run_mode_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[test]
+    fn run_mode_defaults_to_production() {
+        assert_eq!(RunMode::default(), RunMode::Production);
+        assert!(!RunMode::default().is_test());
+        assert!(RunMode::Test.is_test());
+    }
+
+    #[rstest]
+    #[case(DbSyncMode::Durable)]
+    #[case(DbSyncMode::SafeNoSync)]
+    #[case(DbSyncMode::UtterlyNoSync)]
+    fn db_sync_mode_serde_round_trip(#[case] mode: DbSyncMode) {
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: DbSyncMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, deserialized);
+    }
+
+    #[rstest]
+    #[case(CorePinning::Disabled)]
+    #[case(CorePinning::Auto)]
+    #[case(CorePinning::Core(42))]
+    fn core_pinning_serde_round_trip(#[case] pinning: CorePinning) {
+        let json = serde_json::to_string(&pinning).unwrap();
+        let deserialized: CorePinning = serde_json::from_str(&json).unwrap();
+        assert_eq!(pinning, deserialized);
+    }
+
+    #[test]
+    fn database_config_defaults() {
+        let config = DatabaseConfig::default();
+        assert_eq!(config.sync_mode, DbSyncMode::Durable);
+        assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
+    }
+
+    /// Regression test: a legacy TOML config that predates the `run_mode`,
+    /// `database`, `reth.db_sync_mode`, and `vdf.core_pinning` fields must
+    /// still deserialize successfully, with every omitted field receiving its
+    /// intended default value.
+    #[test]
+    fn legacy_config_deserialization_regression() {
+        // Minimal legacy TOML — every new field is intentionally absent.
+        let legacy_toml = r#"
+            node_mode = "Genesis"
+            sync_mode = "Full"
+            consensus = "Testing"
+            mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+            reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+
+            [[trusted_peers]]
+            gossip = "127.0.0.1:8081"
+            api = "127.0.0.1:8080"
+            [trusted_peers.execution]
+            peering_tcp_addr = "127.0.0.1:30303"
+            peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+            [gossip]
+            bind_port = 0
+            public_port = 0
+
+            [http]
+            bind_port = 0
+            public_port = 0
+
+            # Legacy reth section — no db_sync_mode field
+            [reth.network]
+            bind_port = 0
+            public_port = 0
+
+            # Legacy vdf section — no core_pinning field
+            [vdf]
+            parallel_verification_thread_limit = 4
+        "#;
+
+        let config: NodeConfig = toml::from_str(legacy_toml).expect("legacy TOML must deserialize");
+
+        // run_mode defaults to Production
+        assert_eq!(config.run_mode, RunMode::Production);
+        assert_eq!(config.run_mode, RunMode::default());
+
+        // database defaults
+        assert_eq!(config.database, DatabaseConfig::default());
+        assert_eq!(config.database.sync_mode, DbSyncMode::Durable);
+        assert_eq!(config.database.cache_sync_mode, DbSyncMode::SafeNoSync);
+
+        // reth.db_sync_mode defaults to Durable
+        assert_eq!(config.reth.db_sync_mode, DbSyncMode::Durable);
+
+        // vdf.core_pinning defaults to Auto
+        assert_eq!(config.vdf.core_pinning, CorePinning::Auto);
+        assert_eq!(config.vdf.core_pinning, CorePinning::default());
+    }
 }

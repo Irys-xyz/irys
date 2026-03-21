@@ -1,3 +1,4 @@
+pub use crate::versions::ProtocolVersion;
 use crate::{
     decode_address, encode_address, serialization::string_u64, Arbitrary, IrysPeerId,
     IrysSignature, RethPeerInfo, H256,
@@ -20,68 +21,6 @@ pub enum PeerResponse {
     Accepted(HandshakeResponse),
     #[serde(rename = "rejected")]
     Rejected(RejectedResponse),
-}
-
-// Explicit integer protocol versions
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
-)]
-#[repr(u32)]
-pub enum ProtocolVersion {
-    V1 = 1,
-    V2 = 2,
-}
-
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        Self::current()
-    }
-}
-
-impl From<u32> for ProtocolVersion {
-    fn from(v: u32) -> Self {
-        match v {
-            1 => Self::V1,
-            2 => Self::V2,
-            _ => Self::default(),
-        }
-    }
-}
-
-impl ProtocolVersion {
-    pub const fn current() -> Self {
-        Self::V2
-    }
-
-    pub fn supported_versions() -> &'static [Self] {
-        &[Self::V1, Self::V2]
-    }
-
-    pub fn supported_versions_u32() -> &'static [u32] {
-        &[Self::V1 as u32, Self::V2 as u32]
-    }
-}
-
-/// We can't derive these impls directly due to the RLP not supporting repr structs/enums
-impl alloy_rlp::Encodable for ProtocolVersion {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        (*self as u32).encode(out);
-    }
-
-    fn length(&self) -> usize {
-        (*self as u32).length()
-    }
-}
-
-impl alloy_rlp::Decodable for ProtocolVersion {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let value = u32::decode(buf)?;
-        match value {
-            1 => Ok(Self::V1),
-            2 => Ok(Self::V2),
-            _ => Err(alloy_rlp::Error::Custom("unknown protocol version")),
-        }
-    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.

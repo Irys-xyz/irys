@@ -198,15 +198,20 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::open_or_create_db;
     use crate::tables::IrysTables;
+    use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::Database as _;
-    use tempfile::tempdir;
+    use reth_db::mdbx::DatabaseArguments;
 
     #[test]
     fn test_commitment_metadata_operations() {
-        let temp_dir = tempdir().unwrap();
-        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         let tx_id = H256::random();
 
@@ -244,8 +249,13 @@ mod tests {
 
     #[test]
     fn test_data_metadata_operations() {
-        let temp_dir = tempdir().unwrap();
-        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         let tx_id = H256::random();
 
@@ -297,8 +307,13 @@ mod tests {
 
     #[test]
     fn test_batch_commitment_operations() {
-        let temp_dir = tempdir().unwrap();
-        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         let tx_ids = vec![H256::random(), H256::random(), H256::random()];
 
@@ -333,8 +348,13 @@ mod tests {
 
     #[test]
     fn test_batch_data_operations() {
-        let temp_dir = tempdir().unwrap();
-        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         let tx_ids = vec![H256::random(), H256::random(), H256::random()];
 

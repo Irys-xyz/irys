@@ -1,5 +1,5 @@
 use irys_database::{
-    cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
+    IrysDatabaseArgs as _, cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     open_or_create_db,
     submodule::{get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset},
@@ -7,7 +7,7 @@ use irys_database::{
 };
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
 use irys_storage::*;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
     Base64, Config, ConsensusConfig, ConsensusOptions, DataLedger, DataTransaction,
     DataTransactionHeader, DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange,
@@ -17,11 +17,15 @@ use irys_types::{
 };
 use openssl::sha;
 use reth_db::Database as _;
+use reth_db::mdbx::DatabaseArguments;
 use tracing::info;
 
 #[test_log::test(test)]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("storage_module_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
     let mut node_config = NodeConfig::testing();
@@ -344,7 +348,12 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // =========================================================================
 
     // Manually update the data_root -> partition_hash index
-    let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+    let db = open_or_create_db(
+        tmp_dir,
+        IrysTables::ALL,
+        DatabaseArguments::irys_testing().unwrap(),
+    )
+    .unwrap();
     let _part_hash_0 = storage_modules[0].partition_hash().unwrap();
     let _part_hash_1 = storage_modules[1].partition_hash().unwrap();
 

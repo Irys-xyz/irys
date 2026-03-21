@@ -1,17 +1,26 @@
 use irys_database::{
-    block_index_item_by_height, db::IrysDatabaseExt as _, insert_block_index_items_for_block,
-    open_or_create_db, prune_ledger_range, tables::IrysTables,
+    IrysDatabaseArgs as _, block_index_item_by_height, db::IrysDatabaseExt as _,
+    insert_block_index_items_for_block, open_or_create_db, prune_ledger_range, tables::IrysTables,
 };
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{DataLedger, DataTransactionLedger, H256, H256List, IrysBlockHeader, hash_sha256};
+use reth_db::mdbx::DatabaseArguments;
 use tracing::info;
 
 #[test_log::test(test)]
 fn index_and_prune_block_index() -> eyre::Result<()> {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("index_and_prune_block_index"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("index_and_prune_block_index")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
-    let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+    let db = open_or_create_db(
+        tmp_dir,
+        IrysTables::ALL,
+        DatabaseArguments::irys_testing().unwrap(),
+    )
+    .unwrap();
 
     let tx_ids = H256List::new();
 

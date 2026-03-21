@@ -512,16 +512,22 @@ mod tests {
     use super::BlockIndex;
     use super::*;
     use crate::BlockBounds;
-    use irys_database::open_or_create_db;
     use irys_database::tables::IrysTables;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::H256;
+    use reth_db::mdbx::DatabaseArguments;
     use std::fs::{self, File};
     use std::io::Write as _;
     use std::sync::Arc;
 
     fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
-        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+        let db = open_or_create_db(
+            path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
         DatabaseProvider(Arc::new(db))
     }
 
@@ -594,7 +600,10 @@ mod tests {
 
     #[test]
     fn read_and_write_block_index() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index_db"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("read_and_write_block_index_db")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let db = create_test_db(&base_path.join("db"));
         let block_index = BlockIndex::new_for_testing(db);
@@ -689,7 +698,10 @@ mod tests {
 
     #[test]
     fn migration_from_file_to_db() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("migration_from_file_to_db"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("migration_from_file_to_db")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
 
         let mut node_config = NodeConfig::testing();

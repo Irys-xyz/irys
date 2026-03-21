@@ -44,7 +44,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
-use irys_testing_utils::utils::temporary_directory;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -62,8 +62,8 @@ use irys_types::{
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
 };
+use irys_vdf::compute_step_checkpoints;
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
@@ -89,6 +89,7 @@ pub async fn capacity_chunk_solution(
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
+    reset_seed: H256,
 ) -> SolutionContext {
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
@@ -122,25 +123,8 @@ pub async fn capacity_chunk_solution(
             }
         };
 
-        // Calculate last step checkpoints for current_step - 1
-        let mut hasher = Sha256::new();
-        let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.vdf,
-            current_step.saturating_sub(1),
-        ));
-        let mut seed = steps[0];
-
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            config.vdf.num_checkpoints_in_vdf_step,
-            config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
-        );
+        let (_seed, checkpoints) =
+            compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed);
 
         // Determine recall range for this step
         let recall_range_idx = block_validation::get_recall_range(
@@ -242,27 +226,7 @@ pub async fn capacity_chunk_solution(
         chunk: entropy_chunk,
         vdf_step: current_step,
         checkpoints: H256List(
-            // recompute checkpoints for fallback
-            {
-                let mut h = Sha256::new();
-                let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.vdf,
-                    current_step.saturating_sub(1),
-                ));
-                let mut sd = steps[0];
-                let mut cps: Vec<H256> =
-                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-                vdf_sha(
-                    &mut h,
-                    &mut s,
-                    &mut sd,
-                    config.vdf.num_checkpoints_in_vdf_step,
-                    config.vdf.num_iterations_per_checkpoint(),
-                    &mut cps,
-                );
-                H256List(cps)
-            }
-            .0,
+            compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed).1,
         ),
         seed: Seed(steps[1]),
         solution_hash,
@@ -339,7 +303,7 @@ impl IrysNodeTest<()> {
     }
 
     fn new_inner(mut config: NodeConfig) -> Self {
-        let temp_dir = temporary_directory(None, false);
+        let temp_dir = TempDirBuilder::new().build();
         config.base_directory = temp_dir.path().to_path_buf();
         let restart_http_ports = config.http.bind_port == 0;
         let restart_gossip_ports = config.gossip.bind_port == 0;
@@ -2296,6 +2260,22 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
+    /// Read a storage tx directly from the in-memory mempool without DB fallback or metadata overlay.
+    pub async fn get_storage_tx_header_from_raw_mempool(
+        &self,
+        tx_id: &H256,
+    ) -> eyre::Result<DataTransactionHeader> {
+        self.node_ctx
+            .mempool_guard
+            .atomic_state()
+            .batch_valid_submit_ledger_tx_cloned(&[*tx_id])
+            .await
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| eyre::eyre!("No raw mempool tx header found for txid {:?}", tx_id))
+    }
+
     /// Polls the mempool until the transaction's `included_height` is set.
     /// The mempool updates `included_height` asynchronously after `BlockConfirmed`.
     pub async fn wait_for_tx_included(
@@ -2318,6 +2298,35 @@ impl IrysNodeTest<IrysNodeCtx> {
             "included_height not set for tx {} after {} seconds",
             tx_id,
             max_seconds
+        ))
+    }
+
+    /// Poll the raw mempool until both included and promoted heights match the expected block height.
+    pub async fn wait_for_tx_confirmed_in_raw_mempool(
+        &self,
+        tx_id: &H256,
+        expected_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<DataTransactionHeader> {
+        self.ensure_vdf_running_for_sync("wait_for_tx_confirmed_in_raw_mempool");
+        for _ in 0..(max_seconds * 10) {
+            match self.get_storage_tx_header_from_raw_mempool(tx_id).await {
+                Ok(header)
+                    if header.metadata().included_height == Some(expected_height)
+                        && header.promoted_height() == Some(expected_height) =>
+                {
+                    return Ok(header);
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "raw mempool metadata not updated for tx {} after {} seconds (expected included/promoted height {})",
+            tx_id,
+            max_seconds,
+            expected_height
         ))
     }
 
@@ -3613,21 +3622,15 @@ pub async fn solution_context_with_poa_chunk(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
-        // Compute checkpoints for (step-1)
-        let mut hasher = Sha256::new();
-        let mut salt =
-            irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
-        let mut seed = steps[0];
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            node_ctx.config.vdf.num_checkpoints_in_vdf_step,
-            node_ctx.config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
-        );
+        let reset_seed = {
+            let read = node_ctx.block_tree_guard.read();
+            let parent_hash = read.get_max_cumulative_difficulty_block().1;
+            read.get_block(&parent_hash)
+                .map(|b| b.vdf_limiter_info.next_seed)
+                .unwrap_or_default()
+        };
+        let (_seed, checkpoints) =
+            compute_step_checkpoints(&node_ctx.config.vdf, step, steps[0], reset_seed);
 
         // For deterministic linkage without recall-range dependency, use offset 0
         let partition_hash = H256::zero();
@@ -3685,6 +3688,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,
+        prev_block.vdf_limiter_info.next_seed,
     )
     .await;
     if !was_vdf_enabled {
