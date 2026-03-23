@@ -146,8 +146,11 @@ impl IrysEthereumNode {
             >,
     {
         // Create pool builder with PD chunk sender
-        let pool_builder =
-            IrysPoolBuilder::new(self.hardfork_config.clone(), self.pd_chunk_sender.clone());
+        let pool_builder = IrysPoolBuilder::new(
+            self.hardfork_config.clone(),
+            self.pd_chunk_sender.clone(),
+            self.chunk_config,
+        );
 
         ComponentsBuilder::default()
             .node_types::<Node>()
@@ -161,6 +164,7 @@ impl IrysEthereumNode {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
                 ready_pd_txs: self.ready_pd_txs.clone(),
+                chunk_config: self.chunk_config,
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())

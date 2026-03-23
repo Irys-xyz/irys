@@ -650,7 +650,8 @@ where
             );
 
             // Parse PD fee metadata from the access list (canonical parser).
-            match crate::pd_tx::parse_pd_transaction(&tx.access_list) {
+            let chunk_config = self.context.chunk_config();
+            match crate::pd_tx::parse_pd_transaction(&tx.access_list, &chunk_config) {
                 crate::pd_tx::PdParseResult::InvalidPd(err) => {
                     tracing::debug!(?err, "Invalid PD transaction rejected at EVM layer");
                     return Err(EVMError::Transaction(

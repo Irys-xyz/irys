@@ -7,7 +7,7 @@ use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
 use futures::StreamExt as _;
 use irys_types::UnixTimestamp;
-use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
+use irys_types::chunk_provider::{ChunkConfig, PdChunkMessage, PdChunkSender};
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth::{
     api::FullNodeTypes,
@@ -45,6 +45,8 @@ pub struct IrysPoolBuilder {
     /// The pool builder will spawn a monitoring task to detect
     /// PD transactions and send messages to the PdChunkManager.
     pd_chunk_sender: PdChunkSender,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 impl std::fmt::Debug for IrysPoolBuilder {
@@ -52,16 +54,22 @@ impl std::fmt::Debug for IrysPoolBuilder {
         f.debug_struct("IrysPoolBuilder")
             .field("hardfork_config", &self.hardfork_config)
             .field("pd_chunk_sender", &"<sender>")
+            .field("chunk_config", &self.chunk_config)
             .finish()
     }
 }
 
 impl IrysPoolBuilder {
     /// Creates a new pool builder with the given hardfork configuration.
-    pub fn new(hardfork_config: Arc<IrysHardforkConfig>, pd_chunk_sender: PdChunkSender) -> Self {
+    pub fn new(
+        hardfork_config: Arc<IrysHardforkConfig>,
+        pd_chunk_sender: PdChunkSender,
+        chunk_config: ChunkConfig,
+    ) -> Self {
         Self {
             hardfork_config,
             pd_chunk_sender,
+            chunk_config,
         }
     }
 }
@@ -122,6 +130,7 @@ where
 
         let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
         let hardfork_config = self.hardfork_config;
+        let chunk_config = self.chunk_config;
         let validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .kzg_settings(ctx.kzg_settings()?)
@@ -132,12 +141,13 @@ where
                 .map(|eth_validator| IrysShadowTxValidator {
                     eth_tx_validator: eth_validator,
                     hardfork_config: hardfork_config.clone(),
+                    chunk_config,
                 });
 
         // Clone hardfork_config for use in the PD monitoring task before moving it to ordering
         let hardfork_for_pd_monitor = hardfork_config.clone();
 
-        let ordering = PdAwareCoinbaseTipOrdering::new(hardfork_config);
+        let ordering = PdAwareCoinbaseTipOrdering::new(hardfork_config, chunk_config);
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -204,7 +214,15 @@ where
             ctx.task_executor()
                 .spawn_critical_with_graceful_shutdown_signal(
                     "pd transaction monitoring task",
-                    |shutdown| pd_transaction_monitor(pool_clone, sender, hardfork_clone, shutdown),
+                    |shutdown| {
+                        pd_transaction_monitor(
+                            pool_clone,
+                            sender,
+                            hardfork_clone,
+                            chunk_config,
+                            shutdown,
+                        )
+                    },
                 );
             info!(target: "reth::cli", "PD transaction monitoring task spawned");
         }
@@ -218,6 +236,8 @@ pub struct IrysShadowTxValidator<Client, T, Evm> {
     eth_tx_validator: EthTransactionValidator<Client, T, Evm>,
     /// Hardfork configuration for checking Sprite activation.
     hardfork_config: Arc<IrysHardforkConfig>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 impl<Client, Tx, Evm> IrysShadowTxValidator<Client, Tx, Evm>
@@ -264,7 +284,7 @@ where
         if !self.is_sprite_active()
             && tx.access_list().is_some_and(|al| {
                 !matches!(
-                    crate::pd_tx::parse_pd_transaction(al),
+                    crate::pd_tx::parse_pd_transaction(al, &self.chunk_config),
                     crate::pd_tx::PdParseResult::NotPd
                 )
             })
@@ -284,7 +304,11 @@ where
 
         // Validate PD transaction structure and minimum fees when Sprite is active
         if self.is_sprite_active() {
-            match tx.access_list().map(crate::pd_tx::parse_pd_transaction) {
+            let chunk_config = self.chunk_config;
+            match tx
+                .access_list()
+                .map(|al| crate::pd_tx::parse_pd_transaction(al, &chunk_config))
+            {
                 Some(crate::pd_tx::PdParseResult::InvalidPd(err)) => {
                     tracing::trace!(
                         sender = ?tx.sender(),
@@ -378,14 +402,17 @@ where
 pub struct PdAwareCoinbaseTipOrdering<T> {
     /// Hardfork configuration for checking Sprite activation.
     hardfork_config: Arc<IrysHardforkConfig>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
     _phantom: PhantomData<T>,
 }
 
 impl<T> PdAwareCoinbaseTipOrdering<T> {
     /// Creates a new ordering with the given hardfork configuration.
-    pub fn new(hardfork_config: Arc<IrysHardforkConfig>) -> Self {
+    pub fn new(hardfork_config: Arc<IrysHardforkConfig>, chunk_config: ChunkConfig) -> Self {
         Self {
             hardfork_config,
+            chunk_config,
             _phantom: PhantomData,
         }
     }
@@ -405,6 +432,7 @@ impl<T> Clone for PdAwareCoinbaseTipOrdering<T> {
     fn clone(&self) -> Self {
         Self {
             hardfork_config: self.hardfork_config.clone(),
+            chunk_config: self.chunk_config,
             _phantom: PhantomData,
         }
     }
@@ -431,9 +459,10 @@ where
         // PD header max priority fee per chunk and chunk count, if present.
         // Only consider PD tips when Sprite hardfork is active.
         let pd_total_tip = if self.is_sprite_active() {
+            let chunk_config = self.chunk_config;
             match transaction
                 .access_list()
-                .map(crate::pd_tx::parse_pd_transaction)
+                .map(|al| crate::pd_tx::parse_pd_transaction(al, &chunk_config))
             {
                 Some(crate::pd_tx::PdParseResult::ValidPd(meta)) => {
                     alloy_primitives::U256::from(meta.total_chunks)
@@ -467,6 +496,7 @@ async fn pd_transaction_monitor<P>(
     pool: P,
     chunk_sender: PdChunkSender,
     hardfork_config: Arc<IrysHardforkConfig>,
+    chunk_config: ChunkConfig,
     mut shutdown: GracefulShutdown,
 ) where
     P: TransactionPool,
@@ -505,7 +535,7 @@ async fn pd_transaction_monitor<P>(
 
                 if let Some(access_list) = tx.transaction.access_list()
                     && let crate::pd_tx::PdParseResult::ValidPd(meta) =
-                        crate::pd_tx::parse_pd_transaction(access_list)
+                        crate::pd_tx::parse_pd_transaction(access_list, &chunk_config)
                     && known_pd_txs.insert(tx_hash)
                 {
                     let chunk_specs = meta.data_reads;

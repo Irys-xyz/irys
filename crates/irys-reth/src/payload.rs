@@ -31,6 +31,7 @@
 use crate::IrysPayloadBuilderAttributes;
 use crate::pd_tx::{PdParseResult, parse_pd_transaction};
 use alloy_consensus::Transaction as _;
+use irys_types::chunk_provider::ChunkConfig;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -344,6 +345,8 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     hardforks: Arc<IrysHardforkConfig>,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 impl<Pool, Client, EvmConfig> std::fmt::Debug for IrysPayloadBuilder<Pool, Client, EvmConfig>
@@ -361,6 +364,7 @@ where
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
             .field("ready_pd_txs", &"<dashset>")
+            .field("chunk_config", &self.chunk_config)
             .finish()
     }
 }
@@ -374,6 +378,8 @@ pub struct CombinedTransactionIterator {
     is_sprite_active: bool,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 struct ShadowTxQueue {
@@ -492,7 +498,7 @@ impl CombinedTransactionIterator {
         match transaction
             .transaction
             .access_list()
-            .map(parse_pd_transaction)
+            .map(|al| parse_pd_transaction(al, &self.chunk_config))
         {
             Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
             _ => 0,
@@ -508,6 +514,7 @@ impl CombinedTransactionIterator {
         max_pd_chunks_per_block: u64,
         is_sprite_active: bool,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+        chunk_config: ChunkConfig,
     ) -> Self {
         Self {
             shadow: ShadowTxQueue::from_shadow_transactions(timestamp, shadow_txs),
@@ -515,6 +522,7 @@ impl CombinedTransactionIterator {
             pool_iter,
             is_sprite_active,
             ready_pd_txs,
+            chunk_config,
         }
     }
 
@@ -525,11 +533,16 @@ impl CombinedTransactionIterator {
 
         // Check deferred PD transactions - need to capture is_sprite_active for closure
         let is_sprite_active = self.is_sprite_active;
+        let chunk_config = self.chunk_config;
         if let Some(tx) = self.pd_budget.pop_ready_deferred(|tx| {
             if !is_sprite_active {
                 return 0;
             }
-            match tx.transaction.access_list().map(parse_pd_transaction) {
+            match tx
+                .transaction
+                .access_list()
+                .map(|al| parse_pd_transaction(al, &chunk_config))
+            {
                 Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
                 _ => 0,
             }
@@ -613,6 +626,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         max_pd_chunks_per_block: u64,
         hardforks: Arc<IrysHardforkConfig>,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+        chunk_config: ChunkConfig,
     ) -> Self {
         Self {
             client,
@@ -622,6 +636,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             max_pd_chunks_per_block,
             hardforks,
             ready_pd_txs,
+            chunk_config,
         }
     }
 }
@@ -655,6 +670,7 @@ where
             self.max_pd_chunks_per_block,
             is_sprite_active,
             self.ready_pd_txs.clone(),
+            self.chunk_config,
         ))
     }
 }
@@ -892,6 +908,12 @@ mod tests {
         ready_pd_txs.insert(revm_primitives::B256::from_slice(pd_large_hash.as_slice()));
 
         // is_sprite_active = true to enable PD chunk budgeting for this test
+        let chunk_config = ChunkConfig {
+            num_chunks_in_partition: 51_872_000,
+            chunk_size: 262_144,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        };
         let mut iterator = CombinedTransactionIterator::new(
             timestamp,
             vec![shadow_tx],
@@ -899,6 +921,7 @@ mod tests {
             7_500,
             true,
             ready_pd_txs,
+            chunk_config,
         );
 
         let collected: Vec<_> = (&mut iterator).take(3).collect();

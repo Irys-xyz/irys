@@ -1435,7 +1435,8 @@ pub(crate) async fn shadow_transactions_are_valid(
 
     // 2.5. Validate PD chunk budget and collect chunk specs (only if Sprite hardfork is active)
     let block_timestamp = irys_types::UnixTimestamp::from_secs(block_timestamp_sec as u64);
-    let mut pd_chunk_specs: Vec<irys_types::range_specifier::ChunkRangeSpecifier> = Vec::new();
+    let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&config.consensus);
+    let mut pd_chunk_specs: Vec<irys_types::range_specifier::PdDataRead> = Vec::new();
     if let Some(max_pd_chunks) = config
         .consensus
         .hardforks
@@ -1445,7 +1446,7 @@ pub(crate) async fn shadow_transactions_are_valid(
 
         for tx in evm_block.body.transactions.iter() {
             if let Some(access_list) = tx.access_list() {
-                match parse_pd_transaction(access_list) {
+                match parse_pd_transaction(access_list, &chunk_config) {
                     PdParseResult::ValidPd(meta) => {
                         total_pd_chunks = total_pd_chunks.saturating_add(meta.total_chunks);
                         pd_chunk_specs.extend(meta.data_reads);

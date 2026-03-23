@@ -130,10 +130,13 @@ impl PdPricing {
             gas_used_ratio_vec.push(utilization_percent);
 
             // Extract priority fees and calculate percentiles
+            let chunk_config =
+                irys_types::chunk_provider::ChunkConfig::from_consensus(&self.config.consensus);
             let block_priority_fees = Self::calculate_priority_fee_percentiles(
                 &evm_block,
                 reward_percentiles,
                 &ema_price,
+                &chunk_config,
             )?;
             reward_vec.push(block_priority_fees);
         }
@@ -203,7 +206,9 @@ impl PdPricing {
         evm_block: &reth_ethereum_primitives::Block,
         block_timestamp: irys_types::UnixTimestamp,
     ) -> eyre::Result<Amount<Percentage>> {
-        let pd_chunks_used = count_pd_chunks_in_block(evm_block);
+        let chunk_config =
+            irys_types::chunk_provider::ChunkConfig::from_consensus(&self.config.consensus);
+        let pd_chunks_used = count_pd_chunks_in_block(evm_block, &chunk_config);
         let max_pd_chunks = self
             .config
             .consensus
@@ -226,8 +231,9 @@ impl PdPricing {
         evm_block: &reth_ethereum_primitives::Block,
         reward_percentiles: &[u8],
         ema_price: &IrysTokenPrice,
+        chunk_config: &irys_types::chunk_provider::ChunkConfig,
     ) -> eyre::Result<BlockPriorityFees> {
-        let block_priority_fees = extract_priority_fees_from_block(evm_block);
+        let block_priority_fees = extract_priority_fees_from_block(evm_block, chunk_config);
 
         let mut percentile_map = std::collections::HashMap::new();
         if !block_priority_fees.is_empty() {
