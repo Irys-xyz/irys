@@ -8,6 +8,7 @@ use revm::primitives::hardfork::SpecId;
 use std::borrow::Cow;
 use tracing::{debug, warn};
 
+use crate::instructions::pd_return_marker::{clear_pd_return_marker, set_pd_return_marker};
 use crate::precompiles::pd::constants::PD_BASE_GAS_COST;
 use crate::precompiles::pd::error::{PdPrecompileError, try_encode_as_revert};
 use crate::precompiles::pd::functions::{readBytesCall, readDataCall};
@@ -24,6 +25,9 @@ use super::context::PdContext;
 #[inline]
 fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
     (move |input: PrecompileInput<'_>| -> PrecompileResult {
+        // Clear any stale marker from a previous CALL/STATICCALL in this tx.
+        clear_pd_return_marker();
+
         let data = input.data;
         let gas_limit = input.gas;
         debug!(
@@ -114,7 +118,13 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
         match result {
             Ok(bytes) => {
                 // ABI-encode the return value: abi.encode(bytes memory data)
-                let encoded = readDataCall::abi_encode_returns(&bytes);
+                let encoded: alloy_primitives::Bytes =
+                    readDataCall::abi_encode_returns(&bytes).into();
+
+                // Record this allocation as the PD return marker so that the
+                // custom RETURNDATACOPY handler can identify it by pointer
+                // identity and skip memory expansion gas.
+                set_pd_return_marker(&encoded);
 
                 debug!(
                     gas_used = PD_BASE_GAS_COST,
@@ -122,7 +132,7 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
                     "PD precompile: execution successful"
                 );
 
-                Ok(PrecompileOutput::new(PD_BASE_GAS_COST, encoded.into()))
+                Ok(PrecompileOutput::new(PD_BASE_GAS_COST, encoded))
             }
             Err(e) => {
                 // Try to encode as ABI custom error revert
