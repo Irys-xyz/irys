@@ -94,12 +94,15 @@ mod tests {
 
     #[test]
     fn test_offset_range_queries() -> eyre::Result<()> {
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_testing_utils::utils::TempDirBuilder;
         use reth_db::cursor::*;
         use reth_db::transaction::*;
         use reth_db::*;
 
-        let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
+        let temp_dir = TempDirBuilder::new()
+            .prefix("test_offset_range_queries")
+            .with_tracing()
+            .build();
 
         let db = open_or_create_db(
             temp_dir,

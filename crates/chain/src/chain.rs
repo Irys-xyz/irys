@@ -2418,6 +2418,7 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
         node_config.irys_consensus_data_dir(),
         node_config.database.sync_mode,
     )?;
+    irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
     debug!("Irys DB initialized");
     Ok(irys_db)

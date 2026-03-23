@@ -1740,7 +1740,7 @@ mod tests {
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
             Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysBlockHeader, IrysPeerId,
@@ -1751,7 +1751,7 @@ mod tests {
 
         #[tokio::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
@@ -1928,7 +1928,7 @@ mod tests {
         #[tokio::test]
         async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers(
         ) -> eyre::Result<()> {
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
@@ -2008,7 +2008,7 @@ mod tests {
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
             Config, DatabaseProvider, DbSyncMode, IrysAddress, NodeConfig, NodeInfo, PeerAddress,
@@ -2077,7 +2077,7 @@ mod tests {
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let db_env =
                 open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
                     .expect("can't open temp dir");
@@ -2208,7 +2208,7 @@ mod tests {
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let db_env =
                 open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
                     .expect("can't open temp dir");

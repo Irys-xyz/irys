@@ -8,7 +8,6 @@ use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
 use reth_db::mdbx::DatabaseArguments;
-use tempfile::tempdir;
 
 use super::get_anchor_height;
 
@@ -29,8 +28,8 @@ fn mock_header(height: u64, block_hash: H256) -> IrysBlockHeader {
     header
 }
 
-fn test_db() -> (tempfile::TempDir, DatabaseProvider) {
-    let tmp = tempdir().unwrap();
+fn test_db() -> (irys_testing_utils::tempfile::TempDir, DatabaseProvider) {
+    let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
     let db = open_or_create_db(
         tmp.path(),
         IrysTables::ALL,

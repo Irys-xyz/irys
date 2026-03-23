@@ -44,7 +44,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
-use irys_testing_utils::utils::temporary_directory;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -303,7 +303,7 @@ impl IrysNodeTest<()> {
     }
 
     fn new_inner(mut config: NodeConfig) -> Self {
-        let temp_dir = temporary_directory(None, false);
+        let temp_dir = TempDirBuilder::new().build();
         config.base_directory = temp_dir.path().to_path_buf();
         let restart_http_ports = config.http.bind_port == 0;
         let restart_gossip_ports = config.gossip.bind_port == 0;

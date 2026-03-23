@@ -1692,7 +1692,7 @@ mod tests {
     use super::*;
     use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         Config, DatabaseProvider, DbSyncMode, IrysPeerId, NodeConfig, PeerAddress,
         PeerNetworkSender, PeerScore, RethPeerInfo,
@@ -1704,7 +1704,7 @@ mod tests {
     #[tokio::test]
     // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
     async fn handle_invalid_block_penalizes_peer() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let db_env =

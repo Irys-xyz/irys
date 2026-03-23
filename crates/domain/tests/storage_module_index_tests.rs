@@ -7,7 +7,7 @@ use irys_database::{
 };
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
 use irys_storage::*;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
     Base64, Config, ConsensusConfig, ConsensusOptions, DataLedger, DataTransaction,
     DataTransactionHeader, DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange,
@@ -22,7 +22,10 @@ use tracing::info;
 
 #[test_log::test(test)]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("storage_module_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
     let mut node_config = NodeConfig::testing();
