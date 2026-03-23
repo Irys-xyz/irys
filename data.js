@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774262815057,
+  "lastUpdate": 1774264207050,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1075,6 +1075,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6044eccc5efe41a7cdc0cfb3507733bcfe2fcdaa",
+          "message": "fix(ci): replace envsubst with node for prompt templating (#1238)\n\n* fix(ci): replace envsubst with node for prompt templating\n\n* refactor(ci): review comments",
+          "timestamp": "2026-03-23T10:53:25Z",
+          "tree_id": "f9f5407b44664bb0fc7f5d63c763c9ac9656659a",
+          "url": "https://github.com/Irys-xyz/irys/commit/6044eccc5efe41a7cdc0cfb3507733bcfe2fcdaa"
+        },
+        "date": 1774264206311,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.224011,
+            "range": "± 0.074086",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.624781,
+            "range": "± 5.322816",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.510226,
+            "range": "± 3.048523",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.403524,
+            "range": "± 0.078877",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1200.86557,
+            "range": "± 8.960017",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1558.234064,
+            "range": "± 14.364306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.13232,
+            "range": "± 0.085495",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.736862,
+            "range": "± 3.571809",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.547763,
+            "range": "± 1.846593",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
