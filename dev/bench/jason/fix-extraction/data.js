@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774033779180,
+  "lastUpdate": 1774262469394,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -985,6 +985,86 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.894918,
             "range": "± 1.201053",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "9d6e2e657e30070d5111a19b6d7b4e30aa30c5cb",
+          "message": "fix(ci): replace envsubst with node for prompt templating",
+          "timestamp": "2026-03-20T18:52:47Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1238/commits/9d6e2e657e30070d5111a19b6d7b4e30aa30c5cb"
+        },
+        "date": 1774262468690,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.401712,
+            "range": "± 0.122608",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 770.771579,
+            "range": "± 28.567546",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1019.878088,
+            "range": "± 32.074797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.427736,
+            "range": "± 0.176109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1241.810155,
+            "range": "± 64.249357",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1557.067758,
+            "range": "± 2.728176",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.603734,
+            "range": "± 0.280928",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.475375,
+            "range": "± 1.09129",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.749105,
+            "range": "± 1.231657",
             "unit": "ms/iter"
           },
           {
