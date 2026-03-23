@@ -30,10 +30,12 @@ use reth_evm::{
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
+use revm::bytecode::opcode::RETURNDATACOPY;
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
 use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
 use revm::handler::EthFrame;
 use revm::inspector::NoOpInspector;
+use revm::interpreter::Instruction;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
@@ -43,6 +45,8 @@ use tracing::trace;
 use irys_types::storage_pricing::TOKEN_SCALE;
 
 use super::*;
+use crate::instructions::pd_return_marker::PdReturnMarkerScope;
+use crate::instructions::returndatacopy::irys_returndatacopy;
 use crate::precompiles::pd::context::PdContext;
 use crate::precompiles::pd::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
@@ -412,6 +416,13 @@ impl EvmFactory for IrysEvmFactory {
         if is_sprite_active {
             let pd_context = evm.pd_context().clone();
             register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+            // Replace RETURNDATACOPY with PD-aware handler that skips memory expansion
+            // gas when return data came from the PD precompile.
+            evm.inner.instruction.insert_instruction(
+                RETURNDATACOPY,
+                Instruction::new(irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>, 3),
+            );
         }
 
         evm
@@ -456,6 +467,13 @@ impl EvmFactory for IrysEvmFactory {
         if is_sprite_active {
             let pd_context = evm.pd_context().clone();
             register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+            // Replace RETURNDATACOPY with PD-aware handler that skips memory expansion
+            // gas when return data came from the PD precompile.
+            evm.inner.instruction.insert_instruction(
+                RETURNDATACOPY,
+                Instruction::new(irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>, 3),
+            );
         }
 
         evm
@@ -615,6 +633,10 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
+        // Clear PD return marker at transaction boundary. The scope guard ensures
+        // the marker is cleared on entry and on every exit path (normal or early return).
+        let _pd_return_marker_scope = PdReturnMarkerScope::new();
+
         // Reject blob-carrying transactions (EIP-4844) at execution time.
         // We keep Cancun active but explicitly disable blobs/sidecars.
         if !tx.blob_hashes.is_empty()
