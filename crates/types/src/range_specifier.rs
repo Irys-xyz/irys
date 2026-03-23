@@ -74,7 +74,6 @@ pub struct PdDataRead {
 }
 
 /// Maximum value for the `byte_off` field (2^24 - 1).
-#[cfg(test)]
 const BYTE_OFF_MAX: u32 = (1 << 24) - 1;
 
 impl PdDataRead {
@@ -145,6 +144,11 @@ impl PdDataRead {
     /// Encode this `PdDataRead` into a 32-byte access list storage key.
     #[must_use]
     pub fn encode(&self) -> [u8; 32] {
+        debug_assert!(
+            self.byte_off <= BYTE_OFF_MAX,
+            "byte_off {:#010X} exceeds u24 max",
+            self.byte_off
+        );
         let mut buf = [0_u8; 32];
         buf[0] = PdAccessListArgsTypeId::DataRead as u8;
         buf[1..9].copy_from_slice(&self.partition_index.to_be_bytes());
@@ -361,9 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn byte_off_u24_overflow_in_encode() {
-        // byte_off values > BYTE_OFF_MAX (0xFFFFFF) would lose bits in u24 encoding.
-        // Verify encode truncates top byte (since byte_off is u32 but wire is u24).
+    fn byte_off_u24_max_roundtrip() {
+        // Verify that the maximum valid byte_off (0xFFFFFF) roundtrips correctly.
         let spec = PdDataRead {
             partition_index: 0,
             start: 0,
