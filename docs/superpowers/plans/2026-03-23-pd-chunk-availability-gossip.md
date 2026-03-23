@@ -4,7 +4,7 @@
 
 **Goal:** Replace pull-only PD chunk fetching with availability gossip + targeted pull, spreading load away from canonical partition assignees without gossiping chunk bytes.
 
-**Architecture:** After a block is validated, an announcer task in `crates/actors` extracts the block's PD chunk specs, checks which chunks the local node can serve, coalesces them into compact range metadata, and sends pre-built fragments to `P2PService` via a dedicated channel. P2PService fans out fragments to a bounded peer subset. Receivers store provider hints in a TTL cache. When fetching PD chunks, nodes try hinted providers before canonical assignees. No chunk bytes are ever gossiped.
+**Architecture:** After a block is validated, an announcer task in `crates/actors` uses `extract_pd_chunk_specs_from_block(...)` to derive the block's PD chunk specs, checks which chunks the local node can serve through the same storage path that `get_chunk_for_pd(...)` uses, coalesces them into compact range metadata, and sends pre-built fragments to `P2PService` via a dedicated channel. `P2PService` fans out fragments to a bounded peer subset. Receivers store provider hints in a TTL cache. When fetching PD chunks, nodes try hinted providers before canonical assignees. No chunk bytes are ever gossiped, and validators that previously fetched chunks must be able to re-serve them from `CachedChunks`.
 
 **Tech Stack:** Rust 1.93, moka (TTL cache), actix-web (HTTP route), tokio channels
 
@@ -18,7 +18,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `crates/p2p/src/pd_chunk_provider_cache.rs` | TTL-bounded cache: `(ledger, offset)` -> bounded set of provider `SocketAddr` |
+| `crates/p2p/src/pd_chunk_provider_cache.rs` | TTL-bounded cache: `(ledger, offset)` -> bounded set of provider `PeerAddress` |
 | `crates/p2p/src/pd_availability_handler.rs` | Receive handler for `POST /gossip/v2/pd_chunk_availability` |
 | `crates/p2p/src/pd_availability_rate_limiter.rs` | Per-peer sliding-window byte/chunk budget |
 | `crates/actors/src/pd_availability_announcer.rs` | Background task: subscribe to Valid blocks, build availability fragments, send to P2PService for fanout |
@@ -28,7 +28,7 @@
 | File | Change |
 |------|--------|
 | `crates/types/src/gossip.rs` | Add `PdChunkRange`, `PdChunkAvailabilityBatch`, `GossipDataV2::PdChunkAvailability`, `GossipCacheKey::PdChunkAvailability` |
-| `crates/types/src/config/node.rs` | Add `PdAvailabilityConfig` with fanout/rate-limit/fetch params, nest in `ConsensusConfig` |
+| `crates/types/src/config/node.rs` | Add `PdAvailabilityConfig` with fanout/rate-limit/fetch params, nest in `P2PGossipConfig` |
 | `crates/types/src/chunk_provider.rs` | Add `has_chunk_for_pd` method to `ChunkStorageProvider` trait |
 | `crates/types/src/range_specifier.rs` | Add `specs_to_ledger_offsets()`, `coalesce_ledger_offsets_to_ranges()` |
 | `crates/domain/src/models/chunk_provider.rs` | Implement `has_chunk_for_pd`; fix `get_chunk_for_pd` to check `CachedChunks` first |
@@ -46,13 +46,13 @@
 
 ## Key Architectural Decisions
 
-1. **Announce orchestration lives in `crates/actors`**, not `crates/p2p`. The announcer needs `ExecutionPayloadCache`, `BlockTreeReadGuard`, `extract_pd_chunk_specs` (from `irys-reth`), and `ChunkStorageProvider`. The actors crate already has access to all of these. P2PService only handles fanout (its natural responsibility).
+1. **Announce orchestration lives in `crates/actors`**, not `crates/p2p`. The announcer needs `ExecutionPayloadCache`, `BlockTreeReadGuard`, `extract_pd_chunk_specs_from_block` (from `irys-reth`), and `ChunkStorageProvider`. The actors crate already has access to all of these. `P2PService` only handles fanout (its natural responsibility).
 
 2. **Communication via a dedicated `UnboundedSender/Receiver` channel** in `ServiceSenders`. The announcer sends pre-built `Vec<PdChunkAvailabilityBatch>` fragments. P2PService reads them and fans out to selected peers. This follows the existing `gossip_broadcast` channel pattern.
 
 3. **No modification to `BlockStateUpdated`**. The announcer subscribes to the existing `block_state_events` broadcast, then independently looks up the block header (from `BlockTreeReadGuard`) and EVM block (from `ExecutionPayloadCache`) to extract PD chunk specs.
 
-4. **`PdChunkProviderCache` uses `moka::sync::Cache`** with 5-minute TTL, matching the existing `GossipCache` pattern. Values are `SmallVec<[SocketAddr; 8]>` to stay cache-line friendly.
+4. **`PdChunkProviderCache` uses `moka::sync::Cache`** with 5-minute TTL, matching the existing `GossipCache` pattern. Values are `SmallVec<[PeerAddress; 8]>` so the pull path can use hinted peers directly without reconstructing addresses from a gossip socket.
 
 5. **Fanout peer selection**: half from best-scored peers, half random, shuffled. This avoids clique-only behavior while prioritizing reliable peers.
 
@@ -184,11 +184,11 @@ Expected: PASS
 - [ ] **Step 7: Compile check**
 
 Run: `cargo check -p irys-types -p irys-p2p -p irys-actors`
-Expected: Compilation succeeds (update match arms in p2p/actors for new enum variants as needed — add `PdChunkAvailability` arms that mirror the existing `PdChunk` handling: return `None` in `pre_serialize_for_broadcast`, return `Rejected` in `send_data`, etc.)
+Expected: Compilation succeeds. Update all exhaustiveness sites for the new enum variant. `PdChunkAvailability` is a real push-gossiped control-plane message, so do **not** mirror `PdChunk`'s non-sendable behavior. If the implementation reuses generic helpers, add proper `GossipRoutes::PdChunkAvailability` serialization/send arms for V2 and `UnsupportedFeature` for V1. If the implementation keeps PD availability on a dedicated fanout path only, make that explicit and ensure any generic match arms fail loudly instead of silently behaving like `PdChunk`.
 
 ---
 
-## Task 2: Config Parameters
+## Task 2: P2P-Local Config Parameters
 
 **Files:**
 - Modify: `crates/types/src/config/node.rs`
@@ -198,7 +198,8 @@ Expected: Compilation succeeds (update match arms in p2p/actors for new enum var
 Add near the existing `P2PGossipConfig` (around line 541):
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct PdAvailabilityConfig {
     /// Number of peers to send availability announcements to.
     pub fanout: usize,
@@ -237,15 +238,15 @@ impl Default for PdAvailabilityConfig {
 }
 ```
 
-- [ ] **Step 2: Add field to `ConsensusConfig`**
+- [ ] **Step 2: Add field to `P2PGossipConfig`**
 
-In `ConsensusConfig` (around line 121), add:
+In `P2PGossipConfig`, add:
 
 ```rust
 pub pd_availability: PdAvailabilityConfig,
 ```
 
-Ensure `#[serde(default)]` is applied so existing configs deserialize without this field.
+Because `P2PGossipConfig` already lives under node-local config, this keeps fanout, route caps, TTLs, and pull-order knobs out of the canonically hashed `ConsensusConfig`. Ensure `#[serde(default)]` continues to apply so existing configs deserialize without this field.
 
 - [ ] **Step 3: Compile check**
 
@@ -524,19 +525,18 @@ fn has_chunk_for_pd(&self, ledger: u32, ledger_offset: u64) -> eyre::Result<bool
 - [ ] **Step 2: Implement `has_chunk_for_pd` in domain**
 
 In `crates/domain/src/models/chunk_provider.rs`, add the implementation. The approach:
-1. Check CachedChunks MDBX table for the `(data_root, tx_chunk_offset)` — but we don't have those from `(ledger, offset)` alone. So check if the packed storage has it.
-2. Alternatively: try the same path as `get_chunk_for_pd` but return `bool` without materializing bytes.
+1. Resolve `(ledger, offset)` through the same metadata path used by PD validation until you can determine `(data_root, tx_chunk_offset)`.
+2. Check `CachedChunksIndex` / `CachedChunks` first.
+3. If not present there, check packed storage.
+4. Reuse shared helper logic so `has_chunk_for_pd(...)` and `get_chunk_for_pd(...)` agree about what is servable.
 
 ```rust
 fn has_chunk_for_pd(&self, ledger: u32, ledger_offset: u64) -> eyre::Result<bool> {
-    let ledger = DataLedger::try_from(ledger)?;
-    // Check packed storage (does not require reading full bytes if the storage
-    // module can do an index-only check).
-    Ok(self.has_chunk_by_ledger_offset(ledger, LedgerChunkOffset::from(ledger_offset)))
+    Ok(self.get_chunk_for_pd(ledger, ledger_offset)?.is_some())
 }
 ```
 
-If `has_chunk_by_ledger_offset` doesn't exist, implement it as a thin wrapper that checks the storage module's chunk index without reading the full chunk data. If the storage module API only supports full reads, fall back to `get_chunk_by_ledger_offset(...).map(|opt| opt.is_some())` and add a `// TODO: optimize to index-only check` comment.
+If the storage module API exposes a cheap existence check, use it for the packed-storage leg. But `has_chunk_for_pd(...)` still must include `CachedChunks`; otherwise validators that fetched a chunk during validation will not be allowed to announce it later.
 
 - [ ] **Step 3: Fix `get_chunk_for_pd` to check CachedChunks first**
 
@@ -557,18 +557,16 @@ fn get_chunk_for_pd(&self, ledger: u32, ledger_offset: u64) -> eyre::Result<Opti
 }
 ```
 
-The `get_cached_chunk_for_pd` helper needs to look up the chunk in the `CachedChunks` MDBX table. This requires resolving `(ledger, offset)` → `(data_root, tx_chunk_offset)` → `CachedChunksIndex` → `CachedChunks`. The resolution depends on the block index (to find which tx covers that offset and its data_root).
+The `get_cached_chunk_for_pd` helper needs to look up the chunk in the `CachedChunks` MDBX table. This requires resolving `(ledger, offset)` → `(data_root, tx_chunk_offset)` → `CachedChunksIndex` → `CachedChunks`. The resolution depends on the same block-index / tx-metadata path that PD verification already uses.
 
-**Important:** If this resolution is complex, it is acceptable to leave the `CachedChunks` lookup as a follow-up. The `has_chunk_for_pd` check for the availability announce flow only needs to check packed storage (which is where assignees store data). Non-assignee validators will announce chunks they have in their in-memory `ChunkCache` (the LRU cache in `PdService`), not CachedChunks. The CachedChunks-first optimization for `get_chunk_for_pd` is a serving optimization that can be done separately.
+**This is not optional.** The design goal is that validators who fetched PD chunks can later advertise and serve them. `PdService`'s private in-memory `ChunkCache` is not visible to the announcer and is not the serving path behind `get_chunk_for_pd(...)`. Therefore `CachedChunks` support must land in this task, not as a follow-up.
 
-For now, a simpler `has_chunk_for_pd`:
+Add a regression test for this exact case:
 
-```rust
-fn has_chunk_for_pd(&self, ledger: u32, ledger_offset: u64) -> eyre::Result<bool> {
-    // For assignees: check packed storage
-    self.get_chunk_for_pd(ledger, ledger_offset).map(|opt| opt.is_some())
-}
-```
+1. insert an unpacked PD chunk into `CachedChunks`
+2. make packed storage miss
+3. assert `get_chunk_for_pd(...)` returns the cached unpacked chunk
+4. assert `has_chunk_for_pd(...)` returns `true`
 
 - [ ] **Step 4: Update all implementations of `ChunkStorageProvider`**
 
@@ -595,10 +593,13 @@ Expected: PASS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use irys_types::PeerAddress;
 
-    fn addr(port: u16) -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], port))
+    fn addr(port: u16) -> PeerAddress {
+        PeerAddress {
+            gossip: ([127, 0, 0, 1], port).into(),
+            api: ([127, 0, 0, 1], port + 1000).into(),
+        }
     }
 
     #[test]
@@ -657,13 +658,13 @@ Expected: FAIL
 ```rust
 use moka::sync::Cache;
 use smallvec::SmallVec;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::Mutex;
+use irys_types::PeerAddress;
 
 type PdChunkKey = (u32, u64); // (ledger, offset)
-type ProviderSet = Arc<Mutex<SmallVec<[SocketAddr; 8]>>>;
+type ProviderSet = Arc<Mutex<SmallVec<[PeerAddress; 8]>>>;
 
 /// Short-lived cache mapping PD chunk coordinates to provider peer addresses.
 /// Advisory only — entries may be stale. Pull code must tolerate misses.
@@ -683,7 +684,7 @@ impl PdChunkProviderCache {
     }
 
     /// Record that `provider` can serve chunk `(ledger, offset)`.
-    pub fn insert(&self, ledger: u32, offset: u64, provider: SocketAddr) {
+    pub fn insert(&self, ledger: u32, offset: u64, provider: PeerAddress) {
         let key = (ledger, offset);
         let set = self.inner.get_with(key, || {
             Arc::new(Mutex::new(SmallVec::new()))
@@ -695,7 +696,7 @@ impl PdChunkProviderCache {
     }
 
     /// Get known providers for chunk `(ledger, offset)`.
-    pub fn get_providers(&self, ledger: u32, offset: u64) -> SmallVec<[SocketAddr; 8]> {
+    pub fn get_providers(&self, ledger: u32, offset: u64) -> SmallVec<[PeerAddress; 8]> {
         match self.inner.get(&(ledger, offset)) {
             Some(set) => set.lock().clone(),
             None => SmallVec::new(),
@@ -717,7 +718,7 @@ Expected: PASS
 
 - [ ] **Step 6: Verify `smallvec` dependency**
 
-Check if `smallvec` is already in `crates/p2p/Cargo.toml`. If not, add it. Alternatively, use `Vec<SocketAddr>` instead of `SmallVec` to avoid a new dependency.
+Check if `smallvec` is already in `crates/p2p/Cargo.toml`. If not, add it. Alternatively, use `Vec<PeerAddress>` instead of `SmallVec` to avoid a new dependency.
 
 ---
 
@@ -1073,7 +1074,7 @@ async fn handle_pd_chunk_availability_v2(
     }
 
     // 4. Structural validation
-    let pd_config = &server.config.consensus_config.pd_availability;
+    let pd_config = &server.config.node_config.p2p_gossip.pd_availability;
     if let Err(e) = validate_batch(
         batch,
         pd_config.max_chunks_per_message,
@@ -1083,14 +1084,14 @@ async fn handle_pd_chunk_availability_v2(
         return HttpResponse::Ok().json(GossipResponse::Rejected(RejectionReason::InvalidData));
     }
 
-    // 5. Resolve source peer gossip address
-    let peer_gossip_addr = peer.address.gossip;
+    // 5. Resolve source peer address
+    let peer_address = peer.address.clone();
 
     // 6. Expand ranges and insert into provider cache
     for range in &batch.ranges {
         for i in 0..range.chunk_count as u64 {
             let offset = range.start_offset + i;
-            server.pd_chunk_provider_cache.insert(range.ledger, offset, peer_gossip_addr);
+            server.pd_chunk_provider_cache.insert(range.ledger, offset, peer_address.clone());
         }
     }
 
@@ -1112,7 +1113,7 @@ In `crates/p2p/src/server.rs`, in the `routes()` method (around line 1455), with
 .service(
     web::resource(GossipRoutes::PdChunkAvailability.as_str())
         .app_data(web::JsonConfig::default().limit(
-            config.consensus_config.pd_availability.max_body_bytes
+            config.node_config.p2p_gossip.pd_availability.max_body_bytes
         ))
         .route(web::post().to(
             Self::handle_pd_chunk_availability_v2
@@ -1131,7 +1132,7 @@ pub pd_chunk_provider_cache: PdChunkProviderCache,
 pub pd_availability_rate_limiter: PdAvailabilityRateLimiter,
 ```
 
-Initialize them in the constructor using `PdAvailabilityConfig` from `config.consensus_config.pd_availability`.
+Initialize them in the constructor using `PdAvailabilityConfig` from `config.node_config.p2p_gossip.pd_availability`.
 
 - [ ] **Step 8: Compile check**
 
@@ -1233,6 +1234,27 @@ mod tests {
             assert!(f.ranges.len() <= 3);
         }
     }
+
+    #[test]
+    fn long_contiguous_range_is_split_by_chunk_budget() {
+        let available_offsets: Vec<(u32, u64)> = (0..600).map(|i| (0u32, i)).collect();
+        let block_hash = H256::random().into();
+
+        let fragments = build_availability_fragments(
+            &available_offsets,
+            block_hash,
+            256,
+            64,
+        );
+
+        assert_eq!(fragments.len(), 3);
+        assert_eq!(fragments[0].total_announced_chunks(), 256);
+        assert_eq!(fragments[1].total_announced_chunks(), 256);
+        assert_eq!(fragments[2].total_announced_chunks(), 88);
+        for f in &fragments {
+            assert!(f.total_announced_chunks() <= 256);
+        }
+    }
 }
 ```
 
@@ -1249,6 +1271,8 @@ use irys_types::range_specifier::coalesce_ledger_offsets_to_ranges;
 use irys_types::{BlockHash, H256};
 
 /// Build bounded availability fragments from a set of available offsets.
+/// Important: a single large contiguous run must itself be split across
+/// fragments if it exceeds `max_chunks_per_message`.
 pub fn build_availability_fragments(
     available_offsets: &[(u32, u64)],
     block_hash: BlockHash,
@@ -1267,21 +1291,48 @@ pub fn build_availability_fragments(
     let mut current_chunks: u64 = 0;
 
     for range in ranges {
-        let range_chunks = range.total_chunks();
-        let would_exceed_ranges = current_ranges.len() + 1 > max_ranges_per_message;
-        let would_exceed_chunks = current_chunks + range_chunks > max_chunks_per_message as u64;
+        let mut next_offset = range.start_offset;
+        let mut remaining = range.total_chunks();
 
-        if !current_ranges.is_empty() && (would_exceed_ranges || would_exceed_chunks) {
-            fragments.push(PdChunkAvailabilityBatch {
-                availability_id: H256::random(),
-                block_hash,
-                ranges: std::mem::take(&mut current_ranges),
+        while remaining > 0 {
+            if current_ranges.len() == max_ranges_per_message
+                || current_chunks == max_chunks_per_message as u64
+            {
+                fragments.push(PdChunkAvailabilityBatch {
+                    availability_id: H256::random(),
+                    block_hash,
+                    ranges: std::mem::take(&mut current_ranges),
+                });
+                current_chunks = 0;
+            }
+
+            let chunk_budget = (max_chunks_per_message as u64).saturating_sub(current_chunks);
+            let take = remaining
+                .min(chunk_budget)
+                .min(u16::MAX as u64);
+
+            debug_assert!(take > 0);
+
+            current_ranges.push(PdChunkRange {
+                ledger: range.ledger,
+                start_offset: next_offset,
+                chunk_count: take as u16,
             });
-            current_chunks = 0;
-        }
+            current_chunks += take;
+            next_offset += take;
+            remaining -= take;
 
-        current_ranges.push(range);
-        current_chunks += range_chunks;
+            if current_ranges.len() == max_ranges_per_message
+                || current_chunks == max_chunks_per_message as u64
+            {
+                fragments.push(PdChunkAvailabilityBatch {
+                    availability_id: H256::random(),
+                    block_hash,
+                    ranges: std::mem::take(&mut current_ranges),
+                });
+                current_chunks = 0;
+            }
+        }
     }
 
     if !current_ranges.is_empty() {
@@ -1317,12 +1368,12 @@ impl ValidationResult {
 
 ```rust
 use crate::block_tree_service::BlockStateUpdated;
-use irys_types::config::ConsensusConfig;
+use irys_types::config::PdAvailabilityConfig;
 use irys_types::gossip::PdChunkAvailabilityBatch;
 use irys_types::range_specifier::specs_to_ledger_offsets;
 use irys_types::chunk_provider::ChunkStorageProvider;
 use irys_types::BlockHash;
-use irys_reth::pd_tx::extract_pd_chunk_specs;
+use irys_reth::pd_tx::extract_pd_chunk_specs_from_block;
 use irys_domain::ExecutionPayloadCache;
 use irys_domain::guards::BlockTreeReadGuard;
 use tokio::sync::{broadcast, mpsc};
@@ -1335,7 +1386,7 @@ pub struct PdAvailabilityAnnouncer {
     block_tree: BlockTreeReadGuard,
     execution_payload_cache: ExecutionPayloadCache,
     storage_provider: Arc<dyn ChunkStorageProvider>,
-    consensus_config: ConsensusConfig,
+    pd_availability_config: PdAvailabilityConfig,
 }
 
 impl PdAvailabilityAnnouncer {
@@ -1345,7 +1396,7 @@ impl PdAvailabilityAnnouncer {
         block_tree: BlockTreeReadGuard,
         execution_payload_cache: ExecutionPayloadCache,
         storage_provider: Arc<dyn ChunkStorageProvider>,
-        consensus_config: ConsensusConfig,
+        pd_availability_config: PdAvailabilityConfig,
     ) -> Self {
         Self {
             block_state_rx,
@@ -1353,7 +1404,7 @@ impl PdAvailabilityAnnouncer {
             block_tree,
             execution_payload_cache,
             storage_provider,
-            consensus_config,
+            pd_availability_config,
         }
     }
 
@@ -1392,11 +1443,8 @@ impl PdAvailabilityAnnouncer {
             .get_locally_stored_evm_block(evm_block_hash)
             .ok_or_else(|| eyre::eyre!("EVM block not in cache"))?;
 
-        // 3. Extract PD chunk specs from EVM block
-        let pd_specs: Vec<_> = evm_block.body.transactions.iter()
-            .filter_map(|tx| tx.access_list())
-            .flat_map(|al| extract_pd_chunk_specs(al))
-            .collect();
+        // 3. Extract PD chunk specs from EVM block using the shared block-level helper
+        let pd_specs = extract_pd_chunk_specs_from_block(&evm_block);
 
         if pd_specs.is_empty() {
             return Ok(()); // No PD transactions in this block
@@ -1424,7 +1472,7 @@ impl PdAvailabilityAnnouncer {
         }
 
         // 6. Build fragments
-        let pd_config = &self.consensus_config.pd_availability;
+        let pd_config = &self.pd_availability_config;
         let fragments = build_availability_fragments(
             &available_offsets,
             block_hash,
@@ -1614,7 +1662,7 @@ spawn_pd_availability_fanout_task(
     self.client.clone(),
     peer_list.clone(),
     self.cache.clone(),
-    config.consensus_config.pd_availability.clone(),
+    config.node_config.p2p_gossip.pd_availability,
     self_peer_id,
     self.sync_state.clone(),
     self.runtime_handle.clone(),
@@ -1665,15 +1713,8 @@ async fn fetch_chunk(
     let pd_config = /* get from config or store on struct */;
 
     // 1. Look up hinted providers
-    let hinted_addrs = self.provider_cache.get_providers(ledger, offset);
-
-    // 2. Convert hinted SocketAddrs to PeerAddress
-    //    (look up full PeerAddress from PeerList by gossip address)
-    let mut hinted_peers: Vec<PeerAddress> = hinted_addrs
-        .iter()
-        .filter_map(|addr| self.peer_list.peer_by_gossip_address(*addr))
-        .map(|item| item.address.clone())
-        .collect();
+    let mut hinted_peers: Vec<PeerAddress> =
+        self.provider_cache.get_providers(ledger, offset).into_iter().collect();
 
     // Shuffle and cap hinted peers
     hinted_peers.shuffle(&mut rand::rng());
@@ -1723,7 +1764,7 @@ Expected: PASS
 In `chain.rs`, during service initialization, create the shared cache:
 
 ```rust
-let pd_availability_config = &config.consensus_config.pd_availability;
+let pd_availability_config = &config.node_config.p2p_gossip.pd_availability;
 let pd_chunk_provider_cache = PdChunkProviderCache::new(
     pd_availability_config.provider_cache_ttl_secs,
     pd_availability_config.max_providers_per_chunk,
@@ -1750,7 +1791,7 @@ if let Some(ref storage_provider) = storage_provider {
         block_tree.clone(),
         execution_payload_cache.clone(),
         storage_provider.clone(),
-        config.consensus_config.clone(),
+        config.node_config.p2p_gossip.pd_availability,
     );
     tokio::spawn(announcer.run());
 }
@@ -1810,7 +1851,7 @@ Task 12 must come last.
 - `PdChunkProviderCache` — insert, lookup, max providers, dedup
 - `PdAvailabilityRateLimiter` — budget enforcement, per-peer isolation
 - `validate_batch` — publish-only, sorted, non-overlapping, bounded
-- `build_availability_fragments` — splitting, single fragment, empty input
+- `build_availability_fragments` — splitting, single fragment, empty input, oversized contiguous range splitting
 - `select_fanout_peers` — half-scored half-random, self-exclusion
 
 ### Integration Tests (follow-up)
@@ -1820,7 +1861,8 @@ After all tasks compile, add an integration test in `crates/chain/tests/`:
 2. Node A produces a block with PD transactions
 3. Verify Node A sends `PdChunkAvailabilityBatch` to Node B
 4. Verify Node B stores provider hints for the announced offsets
-5. When Node C fetches a PD chunk, verify it tries Node A/B (hinted) before assignees
+5. Verify a validator that fetched a chunk can later serve it from `CachedChunks`
+6. When Node C fetches a PD chunk, verify it tries Node A/B (hinted) before assignees
 
 This requires the `IrysNodeTest` harness from `crates/chain/tests/` and follows the existing multi-node test patterns.
 
@@ -1835,3 +1877,4 @@ Per the design document, verify these invariants hold:
 - [ ] **Never rebroadcast third-party announcements.** The announcer only announces chunks this node can serve (`has_chunk_for_pd` == true).
 - [ ] **Never reuse `GossipCacheKey::Block`.** A dedicated `GossipCacheKey::PdChunkAvailability(H256)` variant is used.
 - [ ] **Never rely on batch-count rate limiting alone.** The route has a `max_body_bytes` cap AND `PdAvailabilityRateLimiter` enforces per-peer chunk budget.
+- [ ] **Fetched validators can participate.** A chunk fetched during validation becomes visible through `CachedChunks`, so `has_chunk_for_pd(...)` and `get_chunk_for_pd(...)` both treat it as servable.
