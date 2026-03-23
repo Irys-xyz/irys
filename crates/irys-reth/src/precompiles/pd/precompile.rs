@@ -1,5 +1,4 @@
 use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
-use alloy_primitives::Bytes;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use reth_evm::precompiles::PrecompilesMap;
 use revm::precompile::PrecompileError;
@@ -8,11 +7,14 @@ use revm::primitives::hardfork::SpecId;
 use std::borrow::Cow;
 use tracing::{debug, warn};
 
-use crate::precompiles::pd::constants::PD_BASE_GAS_COST;
+use crate::precompiles::pd::constants::{
+    INDEX_OFFSET, LENGTH_FIELD_OFFSET, LENGTH_SIZE, OFFSET_FIELD_OFFSET, OFFSET_SIZE,
+    PD_BASE_GAS_COST, READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN, READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
+};
 use crate::precompiles::pd::error::PdPrecompileError;
 use crate::precompiles::pd::functions::PdFunctionId;
-use crate::precompiles::pd::read_bytes::{read_bytes_range_by_index, read_partial_byte_range};
-use crate::precompiles::pd::utils::parse_access_list;
+use crate::precompiles::pd::read_bytes::read_chunk_data;
+use crate::precompiles::pd::utils::parse_pd_specifiers;
 
 use super::context::PdContext;
 
@@ -52,8 +54,6 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
             return Err(PdPrecompileError::MissingAccessList.into());
         }
 
-        let call_data = Bytes::copy_from_slice(data);
-
         let decoded_id = PdFunctionId::try_from(data[0]).map_err(|e| {
             warn!(function_id = data[0], "PD precompile: unknown function ID");
             PrecompileError::Other(Cow::Owned(format!("PD precompile: {}", e)))
@@ -61,37 +61,92 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
 
         debug!(function_id = ?decoded_id, "PD precompile: decoded function ID");
 
-        let parsed = parse_access_list(&access_list).map_err(|e| {
-            warn!(error = ?e, "PD precompile: failed to parse access list");
-            PdPrecompileError::InvalidAccessList {
-                reason: e.to_string(),
-            }
-        })?;
+        let specifiers =
+            parse_pd_specifiers(&access_list, &pd_context.chunk_config()).map_err(|e| {
+                warn!(error = ?e, "PD precompile: failed to parse access list");
+                PdPrecompileError::InvalidAccessList {
+                    reason: e.to_string(),
+                }
+            })?;
 
-        // Note: available_gas is passed to read functions for interface compatibility but
-        // is intentionally unused. PD chunk I/O is metered via per-chunk IRYS token fees
-        // (deducted in IrysEvm::transact_raw), not via EVM gas. The only EVM gas charged
-        // is the flat PD_BASE_GAS_COST.
-        let available_gas = gas_limit.saturating_sub(PD_BASE_GAS_COST);
+        // Note: available_gas is passed for interface compatibility but is intentionally unused.
+        // PD chunk I/O is metered via per-chunk IRYS token fees (deducted in
+        // IrysEvm::transact_raw), not via EVM gas. The only EVM gas charged is
+        // the flat PD_BASE_GAS_COST.
+        let _available_gas = gas_limit.saturating_sub(PD_BASE_GAS_COST);
 
-        let res = match decoded_id {
+        let result_bytes = match decoded_id {
             PdFunctionId::ReadFullByteRange => {
-                read_bytes_range_by_index(&call_data, available_gas, &pd_context, parsed)?
+                // Calldata: [function_id(1), index(1)]
+                if data.len() != READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN {
+                    return Err(PdPrecompileError::InvalidCalldataLength {
+                        function: "ReadFullByteRange",
+                        expected: READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN,
+                        actual: data.len(),
+                    }
+                    .into());
+                }
+                let index = data[INDEX_OFFSET];
+                let spec =
+                    specifiers
+                        .get(index as usize)
+                        .ok_or(PdPrecompileError::SpecifierNotFound {
+                            index,
+                            available: specifiers.len(),
+                        })?;
+                read_chunk_data(spec, spec.byte_off, spec.len, &pd_context)?
             }
             PdFunctionId::ReadPartialByteRange => {
-                read_partial_byte_range(&call_data, available_gas, &pd_context, parsed)?
+                // Calldata: [function_id(1), index(1), offset(4), length(4)]
+                if data.len() != READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN {
+                    return Err(PdPrecompileError::InvalidCalldataLength {
+                        function: "ReadPartialByteRange",
+                        expected: READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
+                        actual: data.len(),
+                    }
+                    .into());
+                }
+                let index = data[INDEX_OFFSET];
+
+                let offset_end = OFFSET_FIELD_OFFSET + OFFSET_SIZE;
+                let offset =
+                    u32::from_be_bytes(data[OFFSET_FIELD_OFFSET..offset_end].try_into().map_err(
+                        |_| PdPrecompileError::InvalidCalldataLength {
+                            function: "ReadPartialByteRange (offset field)",
+                            expected: OFFSET_SIZE,
+                            actual: data[OFFSET_FIELD_OFFSET..].len(),
+                        },
+                    )?);
+
+                let length_end = LENGTH_FIELD_OFFSET + LENGTH_SIZE;
+                let length =
+                    u32::from_be_bytes(data[LENGTH_FIELD_OFFSET..length_end].try_into().map_err(
+                        |_| PdPrecompileError::InvalidCalldataLength {
+                            function: "ReadPartialByteRange (length field)",
+                            expected: LENGTH_SIZE,
+                            actual: data[LENGTH_FIELD_OFFSET..].len(),
+                        },
+                    )?);
+
+                let spec =
+                    specifiers
+                        .get(index as usize)
+                        .ok_or(PdPrecompileError::SpecifierNotFound {
+                            index,
+                            available: specifiers.len(),
+                        })?;
+                read_chunk_data(spec, offset, length, &pd_context)?
             }
         };
 
-        let total_gas = PD_BASE_GAS_COST.checked_add(res.gas_used).ok_or_else(|| {
+        let total_gas = PD_BASE_GAS_COST.checked_add(0).ok_or_else(|| {
             warn!(
                 base_gas = PD_BASE_GAS_COST,
-                operation_gas = res.gas_used,
                 "PD precompile: gas calculation overflow"
             );
             PdPrecompileError::GasOverflow {
                 base: PD_BASE_GAS_COST,
-                operation: res.gas_used,
+                operation: 0,
             }
         })?;
 
@@ -106,14 +161,14 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
 
         debug!(
             gas_used = total_gas,
-            bytes_returned = res.bytes.len(),
+            bytes_returned = result_bytes.len(),
             "PD precompile: execution successful"
         );
 
         Ok(PrecompileOutput {
             gas_used: total_gas,
             gas_refunded: 0,
-            bytes: res.bytes,
+            bytes: result_bytes,
             reverted: false,
         })
     })
@@ -143,7 +198,7 @@ mod tests {
     use alloy_evm::{Evm as _, EvmFactory as _};
     use alloy_primitives::{Address, B256, Bytes};
     use dashmap::DashMap;
-    use irys_types::range_specifier::{PdAccessListArgsTypeId, encode_pd_fee};
+    use irys_types::range_specifier::{PdAccessListArgsTypeId, PdDataRead, encode_pd_fee};
     use reth_evm::EvmEnv;
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database::CacheDB;
@@ -267,39 +322,28 @@ mod tests {
         evm.transact_raw(tx).unwrap()
     }
 
+    /// Build a PD access list with a single data read specifier and test fees.
+    fn build_test_access_list(spec: &PdDataRead) -> AccessList {
+        use alloy_eips::eip2930::AccessListItem;
+        with_test_fees(AccessList(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![B256::from(spec.encode())],
+        }]))
+    }
+
     #[test]
     fn pd_precompile_read_full_byte_range() {
-        use alloy_eips::eip2930::AccessListItem;
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
         };
 
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 1,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(100).unwrap(),
-        };
-
-        let access_list = with_test_fees(AccessList(vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }]));
-
+        let access_list = build_test_access_list(&spec);
         let result = execute_precompile(vec![0, 0], access_list, 1);
         assert!(result.result.is_success(), "transaction should succeed");
 
-        // Verify gas cost is at least the base cost
-        // Note: total gas includes EVM overhead, so we check it's at least the precompile cost
         let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
@@ -321,9 +365,6 @@ mod tests {
 
     #[test]
     fn test_insufficient_input_data() {
-        use alloy_eips::eip2930::AccessList;
-        use alloy_evm::{Evm as _, EvmFactory as _};
-
         let chunk_data_index = test_chunk_data_index(0);
         let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
@@ -343,58 +384,26 @@ mod tests {
 
     #[test]
     fn test_read_partial_byte_range() {
-        use alloy_eips::eip2930::{AccessList, AccessListItem};
-        use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 500,
+            byte_off: 0,
         };
 
-        let chunk_data_index = test_chunk_data_index(2);
-        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
-        let mut cfg_env = CfgEnv::default();
-        cfg_env.spec = SpecId::CANCUN;
-        let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
-
-        // Setup access list
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 2,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(500).unwrap(),
-        };
-
-        let access_list_items = vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }];
+        let access_list = build_test_access_list(&spec);
 
         // Use function ID 1 (ReadPartialByteRange) with index 0, offset 100, length 200
         let mut input = vec![1, 0]; // function_id=1, index=0
         input.extend_from_slice(&100_u32.to_be_bytes()); // offset=100
         input.extend_from_slice(&200_u32.to_be_bytes()); // length=200
 
-        let tx = tx_env_default(
-            Bytes::from(input),
-            with_test_fees(AccessList(access_list_items)),
-        );
-
-        let result = evm.transact_raw(tx).unwrap();
+        let result = execute_precompile(input, access_list, 2);
         assert!(
             result.result.is_success(),
             "ReadPartialByteRange should succeed"
         );
 
-        // Verify gas is at least the base cost
         let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
@@ -404,9 +413,6 @@ mod tests {
 
     #[test]
     fn test_no_access_list() {
-        use alloy_eips::eip2930::AccessList;
-        use alloy_evm::{Evm as _, EvmFactory as _};
-
         let chunk_data_index = test_chunk_data_index(0);
         let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
@@ -426,12 +432,14 @@ mod tests {
 
     #[test]
     fn test_invalid_function_id() {
-        use alloy_eips::eip2930::{AccessList, AccessListItem};
-        use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
         };
+
+        let access_list = build_test_access_list(&spec);
 
         let chunk_data_index = test_chunk_data_index(1);
         let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
@@ -440,28 +448,8 @@ mod tests {
         let block_env = BlockEnv::default();
         let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 1,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(100).unwrap(),
-        };
-
-        let access_list_items = vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }];
-
         let input = Bytes::from(vec![99, 0]); // Function ID 99 doesn't exist
-        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
+        let tx = tx_env_default(input, access_list);
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -472,51 +460,21 @@ mod tests {
 
     #[test]
     fn test_moderate_chunks() {
-        use alloy_eips::eip2930::{AccessList, AccessListItem};
-        use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 5000,
+            byte_off: 0,
         };
 
-        let chunk_data_index = test_chunk_data_index(20);
-        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
-        let mut cfg_env = CfgEnv::default();
-        cfg_env.spec = SpecId::CANCUN;
-        let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
+        let access_list = build_test_access_list(&spec);
 
-        // Test with moderate number of chunks
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 20,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(5000).unwrap(),
-        };
-
-        let access_list_items = vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }];
-
-        let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
-
-        let result = evm.transact_raw(tx).unwrap();
+        let result = execute_precompile(vec![0, 0], access_list, 20);
         assert!(
             result.result.is_success(),
-            "transaction should succeed with 20 chunks"
+            "transaction should succeed with moderate chunks"
         );
 
-        // Verify gas cost is at least the base cost
         let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
@@ -527,103 +485,65 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_chunks() {
-        use alloy_eips::eip2930::{AccessList, AccessListItem};
-        use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
-        };
+    fn test_zero_len_rejected() {
+        // PdDataRead with len=0 is rejected at decode time, so we can't even
+        // construct a valid access list key for it. This tests that the
+        // precompile rejects the invalid access list.
+        use alloy_eips::eip2930::AccessListItem;
+
+        // Manually construct a key with len=0 (type byte 0x01 but len field = 0)
+        let mut key = [0_u8; 32];
+        key[0] = 0x01; // type byte
+        // partition_index=0 at [1..9] (already zero)
+        // start=0 at [9..13] (already zero)
+        // len=0 at [13..17] (already zero)
+        // byte_off=0 at [17..20] (already zero)
+
+        let access_list = with_test_fees(AccessList(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![B256::from(key)],
+        }]));
 
         let chunk_data_index = test_chunk_data_index(0);
         let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
         let block_env = BlockEnv::default();
         let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
-        // Test with 0 chunks -- with Sprite active, a zero-chunk PD transaction
-        // is rejected because total fees (0) fall below the minimum PD transaction
-        // cost threshold.
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 0,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(0).unwrap(),
-        };
-
-        let access_list_items = vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }];
-
         let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
+        let tx = tx_env_default(input, access_list);
 
-        // Zero-chunk PD transactions are rejected at the EVM layer because the
-        // total PD fees (0) are below the minimum PD transaction cost.
+        // Zero-len PdDataRead is rejected at access list parse time
         let result = evm.transact_raw(tx);
-        assert!(
-            result.is_err(),
-            "zero-chunk PD transaction should be rejected (fees below minimum cost)"
-        );
+        // The transaction should either error or revert
+        match result {
+            Ok(r) => assert!(
+                !r.result.is_success(),
+                "zero-len specifier should not succeed"
+            ),
+            Err(_) => {} // Also acceptable — rejected at EVM layer
+        }
     }
 
     #[test]
     fn test_large_chunks_no_overflow() {
-        use alloy_eips::eip2930::{AccessList, AccessListItem};
-        use alloy_evm::{Evm as _, EvmFactory as _};
-        use alloy_primitives::{B256, aliases::U200};
-        use irys_types::range_specifier::{
-            ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 10000,
+            byte_off: 0,
         };
 
-        let chunk_data_index = test_chunk_data_index(1000);
-        let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
-        let mut cfg_env = CfgEnv::default();
-        cfg_env.spec = SpecId::CANCUN;
-        let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
+        let access_list = build_test_access_list(&spec);
 
-        // Test with 1000 chunks to verify no overflow in gas calculation
-        let chunk_range = ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count: 1000,
-        };
-        let byte_range = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 0,
-            byte_offset: U18::ZERO,
-            length: U34::try_from(10000).unwrap(),
-        };
-
-        let access_list_items = vec![AccessListItem {
-            address: PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![
-                B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-                B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-            ],
-        }];
-
-        let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
-
-        let result = evm.transact_raw(tx).unwrap();
+        let result = execute_precompile(vec![0, 0], access_list, 1000);
         assert!(
             result.result.is_success(),
             "transaction should succeed with large chunk count"
         );
 
-        // Verify gas cost is at least the base cost
         let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,

@@ -20,23 +20,11 @@ pub enum PdPrecompileError {
         actual: usize,
     },
 
-    #[error("byte range index {index} not found in access list (available: {available})")]
-    ByteRangeNotFound { index: u8, available: usize },
-
-    #[error("chunk range index {index} not found in access list (available: {available})")]
-    ChunkRangeNotFound { index: u8, available: usize },
-
     #[error("invalid access list format: {reason}")]
     InvalidAccessList { reason: String },
 
     #[error("gas calculation overflow (base: {base}, operation: {operation})")]
     GasOverflow { base: u64, operation: u64 },
-
-    #[error("failed to apply offset {offset} to byte range: {reason}")]
-    OffsetTranslationFailed { offset: u32, reason: String },
-
-    #[error("invalid length value {length}: {reason}")]
-    InvalidLength { length: u32, reason: String },
 
     #[error("partition index {index} exceeds u64::MAX")]
     PartitionIndexTooLarge { index: String },
@@ -55,16 +43,16 @@ pub enum PdPrecompileError {
     },
 
     #[error(
-        "calculated offset out of range (usize overflow): chunk_offset={chunk_offset}, chunk_size={chunk_size}, byte_offset={byte_offset}"
+        "calculated offset out of range (overflow): partition_index={partition_index}, start={start}, num_chunks_in_partition={num_chunks_in_partition}"
     )]
     OffsetOutOfRange {
-        chunk_offset: u16,
-        chunk_size: u64,
-        byte_offset: u64,
+        partition_index: u64,
+        start: u32,
+        num_chunks_in_partition: u64,
     },
 
-    #[error("length {length} exceeds usize::MAX")]
-    LengthOutOfRange { length: u64 },
+    #[error("specifier index {index} not found (available: {available})")]
+    SpecifierNotFound { index: u8, available: usize },
 }
 
 impl From<PdPrecompileError> for PrecompileError {

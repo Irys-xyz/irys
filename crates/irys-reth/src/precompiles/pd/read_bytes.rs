@@ -1,295 +1,90 @@
-//! PD precompile byte range read implementations.
+//! PD precompile chunk read implementation.
 //!
-//! Provides three read operations for accessing byte ranges from the Programmable Data system:
-//!
-//! 1. **Full byte range read** ([`read_bytes_range_by_index`]) - Reads complete byte range from access list
-//! 2. **Partial byte range read** ([`read_partial_byte_range`]) - Applies offset/length to existing range
-//! 3. **Core byte range read** ([`read_bytes_range`]) - Fetches chunks and returns requested bytes
+//! Provides a single core function ([`read_chunk_data`]) that fetches chunk data
+//! for a [`PdDataRead`] specifier and extracts the requested byte range.
 
-use alloy_primitives::{Bytes, aliases::U200};
-use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
-use irys_types::storage::ii;
-use irys_types::{LedgerChunkOffset, LedgerChunkRange, ledger_chunk_offset_ii};
-use revm::precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
+use alloy_primitives::Bytes;
+use irys_types::range_specifier::PdDataRead;
 use tracing::{debug, warn};
 
-use super::constants::{
-    INDEX_OFFSET, LENGTH_FIELD_OFFSET, LENGTH_SIZE, OFFSET_FIELD_OFFSET, OFFSET_SIZE,
-    READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN, READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
-};
 use super::context::PdContext;
 use super::error::PdPrecompileError;
-use super::utils::ParsedAccessLists;
 
-fn calculate_chunk_offsets(
-    partition_index: &U200,
+/// Read chunk data for a [`PdDataRead`] specifier and extract the requested byte range.
+///
+/// # Arguments
+///
+/// - `spec` — the decoded data read specifier from the access list
+/// - `offset` — byte offset into the concatenated chunk data (`byte_off` for readData,
+///   calldata offset for readBytes)
+/// - `length` — number of bytes to read (`len` for readData, calldata length for readBytes)
+/// - `context` — PD execution context providing chunk config and chunk retrieval
+///
+/// # Gas
+///
+/// Returns `gas_used = 0` in the [`PrecompileOutput`](revm::precompile::PrecompileOutput).
+/// PD chunk I/O is metered via per-chunk fees in IRYS tokens (deducted in
+/// `IrysEvm::transact_raw`), not via EVM gas. The caller adds `PD_BASE_GAS_COST` on top.
+pub fn read_chunk_data(
+    spec: &PdDataRead,
     offset: u32,
-    chunk_count: u16,
-    num_chunks_in_partition: u64,
-) -> Result<LedgerChunkRange, PdPrecompileError> {
-    let partition_index_u64: u64 = (*partition_index).try_into().map_err(|_| {
-        warn!(partition_index = %partition_index, "Partition index exceeds u64::MAX");
-        PdPrecompileError::PartitionIndexTooLarge {
-            index: partition_index.to_string(),
-        }
-    })?;
+    length: u32,
+    context: &PdContext,
+) -> Result<Bytes, PdPrecompileError> {
+    let config = context.config();
+    let chunk_size = config.chunk_size;
+    let chunks_needed = spec.chunks_needed(chunk_size);
 
-    let base_offset = num_chunks_in_partition
-        .checked_mul(partition_index_u64)
+    // Calculate ledger offsets from partition-relative coordinates
+    let base_offset = config
+        .num_chunks_in_partition
+        .checked_mul(spec.partition_index)
         .ok_or_else(|| {
             warn!(
-                num_chunks_in_partition,
-                partition_index = partition_index_u64,
+                partition_index = spec.partition_index,
+                num_chunks_in_partition = config.num_chunks_in_partition,
                 "Partition offset calculation overflow"
             );
             PdPrecompileError::OffsetOutOfRange {
-                chunk_offset: 0,
-                chunk_size: num_chunks_in_partition,
-                byte_offset: partition_index_u64,
+                partition_index: spec.partition_index,
+                start: spec.start,
+                num_chunks_in_partition: config.num_chunks_in_partition,
             }
         })?;
 
-    let start = base_offset.checked_add(offset as u64).ok_or_else(|| {
+    let ledger_start = base_offset.checked_add(spec.start as u64).ok_or_else(|| {
         warn!(
             base_offset,
-            chunk_offset = offset,
-            "Chunk start offset calculation overflow"
+            start = spec.start,
+            "Ledger start offset calculation overflow"
         );
         PdPrecompileError::OffsetOutOfRange {
-            chunk_offset: offset as u16,
-            chunk_size: 0,
-            byte_offset: base_offset,
+            partition_index: spec.partition_index,
+            start: spec.start,
+            num_chunks_in_partition: config.num_chunks_in_partition,
         }
     })?;
-
-    let end = start.checked_add(chunk_count as u64).ok_or_else(|| {
-        warn!(start, chunk_count, "Chunk end offset calculation overflow");
-        PdPrecompileError::OffsetOutOfRange {
-            chunk_offset: chunk_count,
-            chunk_size: 0,
-            byte_offset: start,
-        }
-    })?;
-
-    Ok(LedgerChunkRange::from(ledger_chunk_offset_ii!(start, end)))
-}
-
-fn calculate_byte_offset(
-    chunk_offset: u16,
-    byte_offset: u64,
-    chunk_size: u64,
-) -> Result<usize, PdPrecompileError> {
-    let chunk_bytes = u64::from(chunk_offset)
-        .checked_mul(chunk_size)
-        .ok_or_else(|| {
-            warn!(chunk_offset, chunk_size, "Chunk byte offset overflow");
-            PdPrecompileError::OffsetOutOfRange {
-                chunk_offset,
-                chunk_size,
-                byte_offset: 0,
-            }
-        })?;
-
-    let absolute_offset = chunk_bytes.checked_add(byte_offset).ok_or_else(|| {
-        warn!(chunk_bytes, byte_offset, "Absolute byte offset overflow");
-        PdPrecompileError::OffsetOutOfRange {
-            chunk_offset,
-            chunk_size,
-            byte_offset,
-        }
-    })?;
-
-    absolute_offset.try_into().map_err(|_| {
-        warn!(absolute_offset, "Offset exceeds usize::MAX");
-        PdPrecompileError::OffsetOutOfRange {
-            chunk_offset,
-            chunk_size,
-            byte_offset,
-        }
-    })
-}
-
-#[derive(Debug)]
-struct ReadBytesRangeByIndexArgs {
-    index: u8,
-}
-
-impl ReadBytesRangeByIndexArgs {
-    pub(crate) fn decode(bytes: &Bytes) -> Result<Self, PrecompileError> {
-        if bytes.len() != READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN {
-            return Err(PdPrecompileError::InvalidCalldataLength {
-                function: "ReadFullByteRange",
-                expected: READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN,
-                actual: bytes.len(),
-            }
-            .into());
-        }
-        Ok(Self {
-            index: bytes[INDEX_OFFSET],
-        })
-    }
-}
-
-/// Read a full byte range from PD storage, selected by access list index.
-///
-/// `_gas_limit` is accepted for interface compatibility but intentionally unused.
-/// PD chunk I/O is metered via per-chunk fees in IRYS tokens (deducted in
-/// `IrysEvm::transact_raw`), not via EVM gas. See [`PD_BASE_GAS_COST`] for details.
-pub fn read_bytes_range_by_index(
-    call_data: &Bytes,
-    _gas_limit: u64,
-    context: &PdContext,
-    access_lists: ParsedAccessLists,
-) -> PrecompileResult {
-    let ReadBytesRangeByIndexArgs { index } = ReadBytesRangeByIndexArgs::decode(call_data)?;
-    let bytes_range = *access_lists.byte_reads.get(index as usize).ok_or(
-        PdPrecompileError::ByteRangeNotFound {
-            index,
-            available: access_lists.byte_reads.len(),
-        },
-    )?;
-    read_bytes_range(bytes_range, context, access_lists)
-}
-
-#[derive(Debug)]
-struct ReadPartialByteRangeArgs {
-    index: u8,
-    offset: u32,
-    length: u32,
-}
-
-impl ReadPartialByteRangeArgs {
-    pub(crate) fn decode(bytes: &Bytes) -> Result<Self, PrecompileError> {
-        if bytes.len() != READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN {
-            return Err(PdPrecompileError::InvalidCalldataLength {
-                function: "ReadPartialByteRange",
-                expected: READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
-                actual: bytes.len(),
-            }
-            .into());
-        }
-
-        let index = bytes[INDEX_OFFSET];
-
-        let offset_end = OFFSET_FIELD_OFFSET + OFFSET_SIZE;
-        let offset =
-            u32::from_be_bytes(bytes[OFFSET_FIELD_OFFSET..offset_end].try_into().map_err(
-                |_| PdPrecompileError::InvalidCalldataLength {
-                    function: "ReadPartialByteRange (offset field)",
-                    expected: OFFSET_SIZE,
-                    actual: bytes[OFFSET_FIELD_OFFSET..].len(),
-                },
-            )?);
-
-        let length_end = LENGTH_FIELD_OFFSET + LENGTH_SIZE;
-        let length =
-            u32::from_be_bytes(bytes[LENGTH_FIELD_OFFSET..length_end].try_into().map_err(
-                |_| PdPrecompileError::InvalidCalldataLength {
-                    function: "ReadPartialByteRange (length field)",
-                    expected: LENGTH_SIZE,
-                    actual: bytes[LENGTH_FIELD_OFFSET..].len(),
-                },
-            )?);
-
-        Ok(Self {
-            index,
-            offset,
-            length,
-        })
-    }
-}
-
-/// Read a sub-range of bytes from a PD byte range, selected by access list index.
-///
-/// `_gas_limit` is accepted for interface compatibility but intentionally unused.
-/// PD chunk I/O is metered via per-chunk fees in IRYS tokens (deducted in
-/// `IrysEvm::transact_raw`), not via EVM gas. See [`PD_BASE_GAS_COST`] for details.
-pub fn read_partial_byte_range(
-    call_data: &Bytes,
-    _gas_limit: u64,
-    context: &PdContext,
-    access_lists: ParsedAccessLists,
-) -> PrecompileResult {
-    let ReadPartialByteRangeArgs {
-        index,
-        offset,
-        length,
-    } = ReadPartialByteRangeArgs::decode(call_data)?;
-
-    let mut bytes_range = *access_lists.byte_reads.get(index as usize).ok_or(
-        PdPrecompileError::ByteRangeNotFound {
-            index,
-            available: access_lists.byte_reads.len(),
-        },
-    )?;
-
-    let chunk_size = context.config().chunk_size;
-    bytes_range
-        .translate_offset(chunk_size, offset as u64)
-        .map_err(|e| PdPrecompileError::OffsetTranslationFailed {
-            offset,
-            reason: e.to_string(),
-        })?;
-
-    bytes_range.length = U34::try_from(length).map_err(|e| PdPrecompileError::InvalidLength {
-        length,
-        reason: e.to_string(),
-    })?;
-
-    read_bytes_range(bytes_range, context, access_lists)
-}
-
-pub fn read_bytes_range(
-    bytes_range: ByteRangeSpecifier,
-    context: &PdContext,
-    access_lists: ParsedAccessLists,
-) -> PrecompileResult {
-    let ByteRangeSpecifier {
-        index,
-        chunk_offset,
-        byte_offset,
-        length,
-    } = bytes_range;
-
-    let chunk_read_range = access_lists.chunk_reads.get(index as usize).ok_or(
-        PdPrecompileError::ChunkRangeNotFound {
-            index,
-            available: access_lists.chunk_reads.len(),
-        },
-    )?;
-
-    let ChunkRangeSpecifier {
-        partition_index,
-        offset,
-        chunk_count,
-    } = chunk_read_range;
-
-    let config = context.config();
-    let chunk_size = config.chunk_size;
-
-    let ledger_range = calculate_chunk_offsets(
-        partition_index,
-        *offset,
-        *chunk_count,
-        config.num_chunks_in_partition,
-    )?;
-
-    let ledger_start = ledger_range.start();
-    let ledger_end = ledger_range.end();
 
     debug!(
-        partition_index = %partition_index,
-        chunk_offset = offset,
-        chunk_count = chunk_count,
-        ledger_start = *ledger_start,
-        ledger_end = *ledger_end,
+        partition_index = spec.partition_index,
+        start = spec.start,
+        chunks_needed,
+        ledger_start,
         "Fetching chunks from cache"
     );
 
-    // Fetch and collect all chunks from cache
-    let mut bytes = Vec::with_capacity((*chunk_count as u64 * chunk_size) as usize);
+    // Fetch and concatenate all chunks
+    let mut bytes = Vec::with_capacity((chunks_needed * chunk_size) as usize);
+    for i in 0..chunks_needed {
+        let ledger_offset = ledger_start.checked_add(i).ok_or_else(|| {
+            warn!(ledger_start, chunk_index = i, "Ledger offset overflow");
+            PdPrecompileError::OffsetOutOfRange {
+                partition_index: spec.partition_index,
+                start: spec.start,
+                num_chunks_in_partition: config.num_chunks_in_partition,
+            }
+        })?;
 
-    for ledger_offset in *ledger_start..*ledger_end {
         let unpacked_chunk = context
             .get_chunk(0, ledger_offset)
             .map_err(|e| {
@@ -306,79 +101,69 @@ pub fn read_bytes_range(
                 }
             })?;
 
-        bytes.extend(unpacked_chunk);
+        bytes.extend(&*unpacked_chunk);
     }
 
     debug!(
         total_bytes_fetched = bytes.len(),
-        chunks_fetched = chunk_count,
-        "Successfully fetched all chunks from cache"
+        chunks_needed, "Successfully fetched all chunks from cache"
     );
 
-    let offset_usize = calculate_byte_offset(chunk_offset, byte_offset.to(), chunk_size)?;
+    // Validate length > 0
+    if length == 0 {
+        return Err(PdPrecompileError::ByteRangeOutOfBounds {
+            start: offset as usize,
+            end: offset as usize,
+            available: bytes.len(),
+        });
+    }
 
-    let length_usize: usize = length.to::<u64>().try_into().map_err(|_| {
-        warn!(length = %length, "Length conversion out of range");
-        PdPrecompileError::LengthOutOfRange {
-            length: length.to::<u64>(),
+    // Extract byte range
+    let start = offset as usize;
+    let end = start.checked_add(length as usize).ok_or_else(|| {
+        warn!(start, length, "Byte range end overflow");
+        PdPrecompileError::ByteRangeOutOfBounds {
+            start,
+            end: usize::MAX,
+            available: bytes.len(),
         }
     })?;
 
-    // Bounds check
-    if offset_usize + length_usize > bytes.len() {
+    if end > bytes.len() {
         warn!(
-            offset = offset_usize,
-            length = length_usize,
-            end = offset_usize + length_usize,
+            start,
+            end,
             available = bytes.len(),
             "Requested byte range exceeds available data"
         );
         return Err(PdPrecompileError::ByteRangeOutOfBounds {
-            start: offset_usize,
-            end: offset_usize + length_usize,
+            start,
+            end,
             available: bytes.len(),
-        }
-        .into());
+        });
     }
 
-    // Extract exact bytes requested
-    let extracted: Bytes = bytes
-        .drain(offset_usize..offset_usize + length_usize)
-        .collect();
+    let extracted = Bytes::copy_from_slice(&bytes[start..end]);
 
     debug!(
         bytes_extracted = extracted.len(),
         "Byte range extraction successful"
     );
 
-    // gas_used is intentionally 0 — PD chunk I/O costs are paid via per-chunk fees
-    // in IRYS tokens (deducted in IrysEvm::transact_raw), not via EVM gas.
-    // The caller (pd_precompile) adds PD_BASE_GAS_COST on top of this value.
-    Ok(PrecompileOutput {
-        gas_used: 0,
-        gas_refunded: 0,
-        bytes: extracted,
-        reverted: false,
-    })
+    Ok(extracted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::precompiles::pd::context::PdContext;
-    use crate::precompiles::pd::utils::ParsedAccessLists;
     use dashmap::DashMap;
-    use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
+    use irys_types::chunk_provider::ChunkConfig;
     use std::sync::Arc;
-
-    /// Creates a test PD context with a ChunkDataIndex pre-populated with zero-filled chunks.
-    fn create_test_context() -> PdContext {
-        create_test_context_with_chunks(1)
-    }
 
     /// Creates a test PD context with N pre-populated zero-filled chunks at offsets 0..N.
     fn create_test_context_with_chunks(num_chunks: u64) -> PdContext {
-        let chunk_config = irys_types::chunk_provider::ChunkConfig {
+        let chunk_config = ChunkConfig {
             num_chunks_in_partition: 100,
             chunk_size: 256_000,
             entropy_packing_iterations: 0,
@@ -392,350 +177,121 @@ mod tests {
         PdContext::new(chunk_config, chunk_data_index)
     }
 
-    /// Creates parsed access lists from chunk and byte range specifiers.
-    fn create_test_parsed_access_lists(
-        chunk_reads: Vec<ChunkRangeSpecifier>,
-        byte_reads: Vec<ByteRangeSpecifier>,
-    ) -> ParsedAccessLists {
-        ParsedAccessLists {
-            chunk_reads,
-            byte_reads,
-        }
+    #[test]
+    fn test_valid_read_single_chunk() {
+        let context = create_test_context_with_chunks(1);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
+
+        let result = read_chunk_data(&spec, 0, 100, &context);
+        assert!(result.is_ok(), "Valid single-chunk read should succeed");
+        assert_eq!(result.unwrap().len(), 100);
     }
 
-    mod read_bytes_range_by_index_args {
-        use super::*;
-        use rstest::rstest;
+    #[test]
+    fn test_read_with_byte_offset() {
+        let context = create_test_context_with_chunks(1);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 50,
+            byte_off: 100,
+        };
 
-        #[rstest]
-        #[case(&[0], true)] // Too short (need 2 bytes)
-        #[case(&[0, 1], false)] // Valid length
-        #[case(&[0, 1, 2], true)] // Too long
-        fn test_length_validation(#[case] calldata: &[u8], #[case] should_error: bool) {
-            let bytes = Bytes::from(calldata.to_vec());
-            let result = ReadBytesRangeByIndexArgs::decode(&bytes);
-
-            if should_error {
-                let err = result.expect_err("Should fail with invalid calldata length");
-                assert!(
-                    matches!(err, PrecompileError::Other(_)),
-                    "Expected PrecompileError::Other, got: {:?}",
-                    err
-                );
-                if let PrecompileError::Other(msg) = err {
-                    assert!(
-                        msg.contains("invalid calldata length"),
-                        "Expected 'invalid calldata length' in error, got: {}",
-                        msg
-                    );
-                }
-            } else {
-                assert!(result.is_ok(), "Valid calldata should decode successfully");
-            }
-        }
+        let result = read_chunk_data(&spec, 100, 50, &context);
+        assert!(result.is_ok(), "Read with byte offset should succeed");
+        assert_eq!(result.unwrap().len(), 50);
     }
 
-    mod read_partial_byte_range_args {
-        use super::*;
-        use rstest::rstest;
+    #[test]
+    fn test_read_partial_with_custom_offset_and_length() {
+        let context = create_test_context_with_chunks(2);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 500,
+            byte_off: 0,
+        };
+        // chunks_needed = ceil(500 / 256_000) = 1, so total data = 256_000
 
-        #[rstest]
-        #[case(&[0, 1, 2, 3], true)] // Too short (need 10 bytes)
-        #[case(&[0; 10], false)] // Valid length
-        #[case(&[0; 11], true)] // Too long
-        fn test_length_validation(#[case] calldata: &[u8], #[case] should_error: bool) {
-            let bytes = Bytes::from(calldata.to_vec());
-            let result = ReadPartialByteRangeArgs::decode(&bytes);
-
-            if should_error {
-                let err = result.expect_err("Should fail with invalid calldata length");
-                assert!(
-                    err.to_string().contains("invalid calldata length"),
-                    "Expected 'invalid calldata length' in error, got: {}",
-                    err
-                );
-            } else {
-                assert!(result.is_ok(), "Valid calldata should decode successfully");
-            }
-        }
+        // Read a sub-range at offset 100, length 200
+        let result = read_chunk_data(&spec, 100, 200, &context);
+        assert!(result.is_ok(), "Partial read should succeed");
+        assert_eq!(result.unwrap().len(), 200);
     }
 
-    mod read_bytes_range_by_index {
-        use super::*;
+    #[test]
+    fn test_zero_length_returns_error() {
+        let context = create_test_context_with_chunks(1);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
 
-        #[test]
-        fn test_index_out_of_bounds() {
-            let context = create_test_context();
-            let calldata = Bytes::from(vec![0, 5]); // Request index 5
-
-            // Create access list with only 2 byte reads
-            use irys_types::range_specifier::U18;
-            let byte_reads = vec![
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::ZERO,
-                    length: U34::try_from(100).unwrap(),
-                },
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::ZERO,
-                    length: U34::try_from(100).unwrap(),
-                },
-            ];
-            let parsed = create_test_parsed_access_lists(vec![], byte_reads);
-
-            let result = read_bytes_range_by_index(&calldata, 100000, &context, parsed);
-
-            let err = result.expect_err("Should fail with index out of bounds");
-            if let PrecompileError::Other(msg) = err {
-                assert!(
-                    msg.contains("not found in access list"),
-                    "Expected 'not found in access list' in error, got: {}",
-                    msg
-                );
-            }
-        }
-
-        #[test]
-        fn test_invalid_calldata_length() {
-            use irys_types::range_specifier::U18;
-            let context = create_test_context();
-            let calldata = Bytes::from(vec![0]); // Too short
-
-            let byte_reads = vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::ZERO,
-                length: U34::try_from(100).unwrap(),
-            }];
-            let parsed = create_test_parsed_access_lists(vec![], byte_reads);
-
-            let result = read_bytes_range_by_index(&calldata, 100000, &context, parsed);
-
-            let err = result.expect_err("Should fail with invalid calldata");
-            if let PrecompileError::Other(msg) = err {
-                assert!(
-                    msg.contains("invalid calldata length"),
-                    "Expected 'invalid calldata length' in error, got: {}",
-                    msg
-                );
-            }
-        }
+        let result = read_chunk_data(&spec, 0, 0, &context);
+        assert!(result.is_err(), "Zero length should fail");
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ByteRangeOutOfBounds { .. }
+        ));
     }
 
-    mod read_partial_byte_range {
-        use super::*;
-
-        #[test]
-        fn test_invalid_calldata() {
-            use irys_types::range_specifier::U18;
-            let context = create_test_context();
-            let calldata = Bytes::from(vec![0; 5]); // Wrong length
-
-            let byte_reads = vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::ZERO,
-                length: U34::try_from(100).unwrap(),
-            }];
-            let parsed = create_test_parsed_access_lists(vec![], byte_reads);
-
-            let result = read_partial_byte_range(&calldata, 100000, &context, parsed);
-
-            let err = result.expect_err("Should fail with invalid calldata");
-            if let PrecompileError::Other(msg) = err {
-                assert!(
-                    msg.contains("invalid calldata"),
-                    "Expected 'invalid calldata' in error, got: {}",
-                    msg
-                );
-            }
-        }
-
-        #[test]
-        fn test_index_out_of_bounds() {
-            use irys_types::range_specifier::U18;
-            let context = create_test_context();
-
-            let mut calldata = vec![0, 10]; // function_id=0, index=10
-            calldata.extend_from_slice(&0_u32.to_be_bytes());
-            calldata.extend_from_slice(&100_u32.to_be_bytes());
-            let calldata = Bytes::from(calldata);
-
-            // Only 2 byte reads, but requesting index 10
-            let byte_reads = vec![
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::ZERO,
-                    length: U34::try_from(100).unwrap(),
-                },
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::ZERO,
-                    length: U34::try_from(100).unwrap(),
-                },
-            ];
-            let parsed = create_test_parsed_access_lists(vec![], byte_reads);
-
-            let result = read_partial_byte_range(&calldata, 100000, &context, parsed);
-
-            let err = result.expect_err("Should fail with index out of bounds");
-            if let PrecompileError::Other(msg) = err {
-                assert!(
-                    msg.contains("not found in access list"),
-                    "Expected 'not found in access list' in error, got: {}",
-                    msg
-                );
-            }
-        }
+    #[test]
+    fn test_range_exceeds_available_data() {
+        let context = create_test_context_with_chunks(1);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
+        // chunks_needed = 1, total data = 256_000 bytes
+        // Request offset 255_900, length 200 → end = 256_100 > 256_000
+        let result = read_chunk_data(&spec, 255_900, 200, &context);
+        assert!(result.is_err(), "Out-of-bounds range should fail");
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ByteRangeOutOfBounds { .. }
+        ));
     }
 
-    mod read_bytes_range {
-        use super::*;
+    #[test]
+    fn test_chunk_not_found() {
+        let context = create_test_context_with_chunks(0); // No chunks in index
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
 
-        #[test]
-        fn test_chunk_range_index_out_of_bounds() {
-            use alloy_primitives::aliases::U200;
-            use irys_types::range_specifier::U18;
-            let context = create_test_context();
-
-            // ByteRangeSpecifier with index=5 but only provide 2 chunk reads
-            let byte_range = ByteRangeSpecifier {
-                index: 5,
-                chunk_offset: 0,
-                byte_offset: U18::ZERO,
-                length: U34::try_from(100).unwrap(),
-            };
-
-            let chunk_reads = vec![
-                ChunkRangeSpecifier {
-                    partition_index: U200::ZERO,
-                    offset: 0,
-                    chunk_count: 1,
-                },
-                ChunkRangeSpecifier {
-                    partition_index: U200::ZERO,
-                    offset: 1,
-                    chunk_count: 1,
-                },
-            ];
-
-            let parsed = create_test_parsed_access_lists(chunk_reads, vec![]);
-
-            let result = read_bytes_range(byte_range, &context, parsed);
-
-            let err = result.expect_err("Should fail with chunk index out of bounds");
-            if let PrecompileError::Other(msg) = err {
-                assert!(
-                    msg.contains("chunk range index") && msg.contains("not found"),
-                    "Expected 'chunk range index ... not found' in error, got: {}",
-                    msg
-                );
-            }
-        }
-
-        #[test]
-        fn test_valid_read() {
-            use alloy_primitives::aliases::U200;
-            use irys_types::range_specifier::U18;
-            let context = create_test_context();
-
-            let byte_range = ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::ZERO,
-                length: U34::try_from(100).unwrap(),
-            };
-
-            let chunk_reads = vec![ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset: 0,
-                chunk_count: 1,
-            }];
-
-            let parsed = create_test_parsed_access_lists(chunk_reads, vec![]);
-
-            let result = read_bytes_range(byte_range, &context, parsed);
-
-            assert!(result.is_ok(), "Valid read should succeed");
-            let output = result.unwrap();
-            assert_eq!(output.bytes.len(), 100);
-            assert_eq!(output.gas_used, 0);
-        }
+        let result = read_chunk_data(&spec, 0, 100, &context);
+        assert!(result.is_err(), "Missing chunk should fail");
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ChunkNotFound { .. }
+        ));
     }
 
-    mod proptests {
-        use super::*;
-        use proptest::prelude::*;
+    #[test]
+    fn test_multi_chunk_read() {
+        let context = create_test_context_with_chunks(3);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 512_000, // > 256_000, requires 2 chunks
+            byte_off: 0,
+        };
+        // chunks_needed = ceil(512_000 / 256_000) = 2
 
-        proptest! {
-            #[test]
-            fn decode_never_panics_on_arbitrary_bytes(bytes: Vec<u8>) {
-                let bytes = Bytes::from(bytes);
-
-                // Should never panic - only return Ok or Err
-                let _ = ReadBytesRangeByIndexArgs::decode(&bytes);
-                let _ = ReadPartialByteRangeArgs::decode(&bytes);
-            }
-
-            #[test]
-            fn valid_calldata_roundtrip_read_bytes_range_by_index(index: u8) {
-                let calldata = vec![0, index];
-                let bytes = Bytes::from(calldata);
-
-                let decoded = ReadBytesRangeByIndexArgs::decode(&bytes);
-                prop_assert!(decoded.is_ok());
-                prop_assert_eq!(decoded.unwrap().index, index);
-            }
-
-            #[test]
-            fn valid_calldata_roundtrip_read_partial_byte_range(
-                index: u8,
-                offset: u32,
-                length: u32
-            ) {
-                let mut calldata = vec![0, index];
-                calldata.extend_from_slice(&offset.to_be_bytes());
-                calldata.extend_from_slice(&length.to_be_bytes());
-
-                let bytes = Bytes::from(calldata);
-                let decoded = ReadPartialByteRangeArgs::decode(&bytes);
-
-                prop_assert!(decoded.is_ok());
-                let args = decoded.unwrap();
-                prop_assert_eq!(args.index, index);
-                prop_assert_eq!(args.offset, offset);
-                prop_assert_eq!(args.length, length);
-            }
-
-            #[test]
-            fn translate_offset_never_panics(
-                index: u8,
-                chunk_offset: u16,
-                byte_offset in 0_u64..262_144,
-                length in 0_u32..100_000,
-                offset_delta in 0_u64..10_000,
-                chunk_size in 1_u64..1_000_000
-            ) {
-                use irys_types::range_specifier::U18;
-
-                let Ok(length_u34) = U34::try_from(length) else { return Ok(()); };
-                let Ok(byte_offset_u18) = U18::try_from(byte_offset) else { return Ok(()); };
-
-                let mut range = ByteRangeSpecifier {
-                    index,
-                    chunk_offset,
-                    byte_offset: byte_offset_u18,
-                    length: length_u34,
-                };
-
-                // Property: translate_offset should never panic
-                let _ = range.translate_offset(chunk_size, offset_delta);
-            }
-        }
+        let result = read_chunk_data(&spec, 0, 512_000, &context);
+        assert!(result.is_ok(), "Multi-chunk read should succeed");
+        assert_eq!(result.unwrap().len(), 512_000);
     }
 }
