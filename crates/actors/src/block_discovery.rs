@@ -615,6 +615,7 @@ impl BlockDiscoveryServiceInner {
                     block.hash = %new_block_header.block_hash,
                     block.height = new_block_header.height,
                     parent.hash = %parent_block_hash,
+                    // The block may already be gone if an invalid ancestor was removed recursively.
                     "Parent block disappeared from the block tree before prevalidation completed"
                 );
                 return Err(BlockDiscoveryError::PreviousBlockNotFound {
@@ -651,6 +652,7 @@ impl BlockDiscoveryServiceInner {
                             block.hash = %new_block_header.block_hash,
                             block.height = new_block_header.height,
                             parent.hash = %parent_block_hash,
+                            // The block may already be gone if an invalid ancestor was removed recursively.
                             "Parent block disappeared from the block tree after prevalidation completed"
                         );
                         return Err(BlockDiscoveryError::PreviousBlockNotFound {
