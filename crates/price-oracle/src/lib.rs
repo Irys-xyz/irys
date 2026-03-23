@@ -206,6 +206,9 @@ impl IrysPriceOracle {
     }
 
     /// Returns the freshest price along with its last_updated timestamp (in seconds).
+    ///
+    /// Returns `Err` when no oracles are configured — callers should fall back
+    /// to the parent block's oracle price in that case.
     pub fn current_snapshot(&self) -> eyre::Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp)> {
         let mut best_ts: Option<UnixTimestamp> = None;
         let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
@@ -223,5 +226,24 @@ impl IrysPriceOracle {
             (Some(v), Some(ts)) => Ok((v, ts)),
             _ => eyre::bail!("no oracles configured"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_oracle_returns_error() {
+        let oracle = IrysPriceOracle::new(vec![]);
+        let result = oracle.current_snapshot();
+        assert!(result.is_err(), "expected error when no oracles configured");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no oracles configured"),
+            "error message should mention no oracles"
+        );
     }
 }

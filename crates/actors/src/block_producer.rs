@@ -1316,14 +1316,31 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let (fresh_price, oracle_updated_at) = self.inner().price_oracle.current_snapshot()?;
-
-        let oracle_irys_price = choose_oracle_price(
-            parent_block.timestamp.to_secs(),
-            parent_block.oracle_irys_price,
-            fresh_price,
-            oracle_updated_at,
-        );
+        let oracle_irys_price = match self.inner().price_oracle.current_snapshot() {
+            Ok((fresh_price, oracle_updated_at)) => choose_oracle_price(
+                parent_block.timestamp.to_secs(),
+                parent_block.oracle_irys_price,
+                fresh_price,
+                oracle_updated_at,
+            ),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("poisoned") {
+                    tracing::error!(
+                        error = %e,
+                        parent_price = %parent_block.oracle_irys_price,
+                        "oracle price cache lock poisoned, falling back to parent block price"
+                    );
+                } else {
+                    // No oracles configured — carry forward the parent block's price.
+                    tracing::debug!(
+                        parent_price = %parent_block.oracle_irys_price,
+                        "no oracle available, reusing parent block price"
+                    );
+                }
+                parent_block.oracle_irys_price
+            }
+        };
 
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
