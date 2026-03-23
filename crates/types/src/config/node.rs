@@ -1048,7 +1048,7 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: 4,
+                parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
             },
 

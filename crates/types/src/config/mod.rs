@@ -618,7 +618,7 @@ mod tests {
         reset_frequency = 600
         max_allowed_vdf_fork_steps = 60000
         num_checkpoints_in_vdf_step = 25
-        sha_1s_difficulty = 70000
+        sha_1s_difficulty = 1000
 
         [block_reward_config]
         inflation_cap = 100000000
@@ -727,7 +727,7 @@ mod tests {
         public_port = 0
 
         [vdf]
-        parallel_verification_thread_limit = 4
+        parallel_verification_thread_limit = 8
 
         [mempool]
         max_pending_pledge_items = 100
