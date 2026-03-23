@@ -85,9 +85,21 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // wait for chunks to be in CachedChunks table
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
-    // Mine some blocks to trigger block and chunk migration
+    // Wait for proofs before mining so the first inclusion path is stable.
     genesis_node
-        .mine_blocks((1 + block_migration_depth).try_into()?)
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
+        .await?;
+
+    // Mine the first block, then wait for the mempool confirmation metadata
+    // that later block templates rely on before mining the rest.
+    let inclusion_block = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
+        .await?;
+
+    // Mine the remaining blocks to trigger block and chunk migration.
+    genesis_node
+        .mine_blocks(block_migration_depth.try_into()?)
         .await?;
     genesis_node.wait_until_block_index_height(1, 5).await?;
 
