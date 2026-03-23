@@ -5,14 +5,11 @@
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_evm::Evm as _;
-use alloy_primitives::{Address, B256, Bytes, TxKind, U256, aliases::U200};
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use dashmap::DashMap;
 use irys_reth::evm::IrysEvmFactory;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::{
-    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgsTypeId, U18, U34,
-    encode_pd_fee,
-};
+use irys_types::range_specifier::{PdAccessListArgsTypeId, PdDataRead, encode_pd_fee};
 use reth_evm::EvmEnv;
 use reth_evm::EvmFactory as _;
 use revm::context::{BlockEnv, CfgEnv, TxEnv};
@@ -21,24 +18,18 @@ use revm::primitives::hardfork::SpecId;
 use std::sync::Arc;
 
 fn create_access_list_with_chunks(num_chunks: u64) -> AccessList {
-    let chunk_range = ChunkRangeSpecifier {
-        partition_index: U200::ZERO,
-        offset: 0,
-        chunk_count: num_chunks as u16,
-    };
-
-    let byte_range = ByteRangeSpecifier {
-        index: 0,
-        chunk_offset: 0,
-        byte_offset: U18::ZERO,
-        length: U34::try_from(100).unwrap(),
+    // chunk_size=32 in ConsensusConfig::testing()
+    let spec = PdDataRead {
+        partition_index: 0,
+        start: 0,
+        len: (num_chunks * 32) as u32,
+        byte_off: 0,
     };
 
     AccessList(vec![AccessListItem {
         address: PD_PRECOMPILE_ADDRESS,
         storage_keys: vec![
-            B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-            B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
+            B256::from(spec.encode()),
             B256::from(
                 encode_pd_fee(
                     PdAccessListArgsTypeId::PdPriorityFee as u8,
@@ -78,9 +69,10 @@ fn create_pd_transaction(access_list: AccessList) -> TxEnv {
 
 #[test]
 fn test_evm_instances_have_isolated_pd_contexts() {
-    // Create a ChunkDataIndex pre-populated with enough chunks for both EVMs
+    // Create a ChunkDataIndex pre-populated with enough chunks for both EVMs.
+    // chunk_size=32 in ConsensusConfig::testing(), with num_chunks_in_partition=10.
     let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-    let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 256_000]));
+    let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 32]));
     for offset in 0..10_u64 {
         chunk_data_index.insert((0_u32, offset), chunk.clone());
     }

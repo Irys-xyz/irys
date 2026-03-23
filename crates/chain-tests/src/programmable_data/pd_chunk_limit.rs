@@ -2,10 +2,11 @@ use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{aliases::U200, TxKind, U256};
+use alloy_primitives::{TxKind, U256};
 use alloy_signer_local::LocalSigner;
 use irys_reth::pd_tx::{build_pd_access_list_with_fees, sum_pd_chunks_in_access_list};
-use irys_types::{range_specifier::ChunkRangeSpecifier, NodeConfig};
+use irys_types::chunk_provider::ChunkConfig;
+use irys_types::{range_specifier::PdDataRead, NodeConfig};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result<()> {
@@ -54,24 +55,29 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     // Build a PD transaction with 80 chunks (exceeds peer's limit of 10, but within genesis limit of 100)
     let chain_id = genesis_node.node_ctx.config.consensus.chain_id;
 
-    // Build access list with 80 chunks (4 keys * 20 chunks each)
-    let storage_keys = (0..4).map(|i| ChunkRangeSpecifier {
-        partition_index: U200::MAX,
-        offset: i * 20, // distinct offsets to avoid duplicate key rejection
-        chunk_count: 20,
-    });
+    // Build access list with 80 chunks (4 data reads * 20 chunks each).
+    // chunk_size=32, so 20 chunks = 640 bytes per read.
+    let chunk_size = 32_u32;
+    let data_reads: Vec<PdDataRead> = (0..4_u32)
+        .map(|i| PdDataRead {
+            partition_index: u64::MAX,
+            start: i * 20, // distinct offsets to avoid duplicate key rejection
+            len: 20 * chunk_size,
+            byte_off: 0,
+        })
+        .collect();
     // Build access list with 80 chunks AND fee parameters.
     // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
     // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
     // With 80 chunks, we need: total_fees >= 1e16, so per-chunk >= 1e16/80 = 1.25e14 wei.
     // Using higher values for safety margin.
     let access_list = build_pd_access_list_with_fees(
-        storage_keys,
-        std::iter::empty(),
+        &data_reads,
         U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
         U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
-    );
-    let chunks = sum_pd_chunks_in_access_list(&access_list);
+    )?;
+    let chunk_config = ChunkConfig::from_consensus(genesis_config.consensus.get_mut());
+    let chunks = sum_pd_chunks_in_access_list(&access_list, &chunk_config);
     assert!(
         chunks > genesis_max_accepted_chunks_per_block,
         "expect to have more chunks in access list than the genesis node would accept"
@@ -96,7 +102,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     };
     // Verify PD metadata parses correctly from the access list
     assert!(matches!(
-        irys_reth::pd_tx::parse_pd_transaction(&tx.access_list),
+        irys_reth::pd_tx::parse_pd_transaction(&tx.access_list, &chunk_config),
         irys_reth::pd_tx::PdParseResult::ValidPd(_)
     ));
     let signature = local_signer

@@ -11,7 +11,6 @@
 //! - Headerless access list → precompile reverts
 //! - Multi-node block validation (peer pre-loads chunks for validation)
 
-use alloy_core::primitives::aliases::U200;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, U256};
@@ -25,9 +24,7 @@ use std::time::Duration;
 use tracing::info;
 
 use irys_types::precompile::IrysPrecompileOffsets;
-use irys_types::range_specifier::{
-    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArgSerde as _, U18, U34,
-};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
 
@@ -310,16 +307,11 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(partition_index),
-                offset: local_offset,
-                chunk_count: 1,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(data_bytes.len()),
+            vec![PdDataRead {
+                partition_index,
+                start: local_offset,
+                len: data_bytes.len() as u32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0, // nonce
@@ -412,16 +404,11 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(partition_index),
-                offset: local_offset,
-                chunk_count: 3,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(data_bytes.len()),
+            vec![PdDataRead {
+                partition_index,
+                start: local_offset,
+                len: data_bytes.len() as u32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0,
@@ -728,16 +715,11 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(0_u64),
-                offset: 9999,
-                chunk_count: 1,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(32_usize),
+            vec![PdDataRead {
+                partition_index: 0,
+                start: 9999,
+                len: 32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0,
@@ -822,23 +804,15 @@ async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
     invocation_builder = invocation_builder.access_list(
         vec![alloy_eips::eip2930::AccessListItem {
             address: precompile_address,
-            storage_keys: vec![
-                ChunkRangeSpecifier {
-                    partition_index: U200::from(partition_index),
-                    offset: local_offset,
-                    chunk_count: 1,
+            storage_keys: vec![alloy_primitives::B256::from(
+                PdDataRead {
+                    partition_index,
+                    start: local_offset,
+                    len: data_bytes.len() as u32,
+                    byte_off: 0,
                 }
-                .encode()
-                .into(),
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::from(0),
-                    length: U34::from(data_bytes.len()),
-                }
-                .encode()
-                .into(),
-            ],
+                .encode(),
+            )],
         }]
         .into(),
     );

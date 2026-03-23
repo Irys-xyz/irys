@@ -1,4 +1,3 @@
-use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
@@ -6,8 +5,7 @@ use alloy_provider::{Provider as _, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall as _;
-use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::range_specifier::{ByteRangeSpecifier, U18, U34};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
 use k256::ecdsa::SigningKey;
@@ -226,16 +224,11 @@ async fn heavy_test_pd_content_verification() -> eyre::Result<()> {
             &account1,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(partition_index),
-                offset: local_offset,
-                chunk_count: 1,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(data_bytes.len()),
+            vec![PdDataRead {
+                partition_index,
+                start: local_offset,
+                len: data_bytes.len() as u32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0,

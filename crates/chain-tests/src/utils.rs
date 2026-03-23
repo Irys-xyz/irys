@@ -52,7 +52,7 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -2615,27 +2615,21 @@ impl IrysNodeTest<IrysNodeCtx> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build storage keys for the specified number of chunks.
-        // Use U200::MAX as a sentinel partition_index: it overflows u64 in specs_to_keys(),
+        // Build data reads for the specified number of chunks.
+        // Use u64::MAX as a sentinel partition_index: it overflows in specs_to_keys(),
         // producing an empty chunk key set. This means PdService marks the tx as Ready
         // (0 required chunks) without needing real data uploaded. Tests that need real
-        // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
-        //
-        // Note: the sentinel does NOT affect parse_pd_transaction() — byte 0 of each
-        // encoded key is always the type discriminant (0x00 = ChunkRead), and partition_index
-        // occupies bytes 1-25 only. The parser sees valid ChunkRead entries regardless of
-        // the partition_index value. The sentinel's effect is confined to PdService::specs_to_keys().
-        let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
-            partition_index: alloy_primitives::aliases::U200::MAX,
-            offset: offset_base + i as u32,
-            chunk_count: 1,
-        });
-        let access_list = build_pd_access_list_with_fees(
-            storage_keys,
-            std::iter::empty(),
-            priority_fee.into(),
-            base_fee.into(),
-        );
+        // chunk data should use inject_pd_contract_call() with explicit PdDataRead specs.
+        let data_reads: Vec<PdDataRead> = (0..chunks_per_tx)
+            .map(|i| PdDataRead {
+                partition_index: u64::MAX,
+                start: offset_base + i as u32,
+                len: 256_000,
+                byte_off: 0,
+            })
+            .collect();
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee.into())?;
 
         // Create and sign EIP-1559 transaction
         let mut tx = TxEip1559 {
@@ -2722,28 +2716,26 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Build and inject a tx that calls a contract function with PD chunk access.
-    /// PD fees and chunk/byte specifiers are encoded in the access list; the `input`
+    /// PD fees and data read specifiers are encoded in the access list; the `input`
     /// field carries only the clean ABI calldata for the target contract.
     pub async fn inject_pd_contract_call(
         &self,
         signer: &irys_types::irys::IrysSigner,
         contract_address: Address,
         abi_calldata: alloy_primitives::Bytes,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
-        byte_specs: Vec<ByteRangeSpecifier>,
+        data_reads: Vec<PdDataRead>,
         priority_fee_per_chunk: u64,
         nonce: u64,
     ) -> eyre::Result<FixedBytes<32>> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build access list with chunk/byte range specifiers and fee parameters
+        // Build access list with data read specifiers and fee parameters
         let access_list = build_pd_access_list_with_fees(
-            chunk_specs,
-            byte_specs,
+            &data_reads,
             alloy_primitives::U256::from(priority_fee_per_chunk),
             alloy_primitives::U256::from(1_000_000_000_000_000_u64),
-        );
+        )?;
 
         // Create and sign EIP-1559 transaction targeting the contract
         let mut tx = TxEip1559 {

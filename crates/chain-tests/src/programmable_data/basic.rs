@@ -1,5 +1,4 @@
-use alloy_core::primitives::aliases::U200;
-use alloy_core::primitives::{Address, U256};
+use alloy_core::primitives::{Address, B256, U256};
 use alloy_eips::eip2930::AccessListItem;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
@@ -15,8 +14,7 @@ use tracing::{debug, info};
 
 use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
-use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
@@ -268,23 +266,15 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     invocation_builder = invocation_builder.access_list(
         vec![AccessListItem {
             address: precompile_address,
-            storage_keys: vec![
-                ChunkRangeSpecifier {
-                    partition_index: U200::from(0),
-                    offset: 0,
-                    chunk_count: 1_u16,
+            storage_keys: vec![B256::from(
+                PdDataRead {
+                    partition_index: 0,
+                    start: 0,
+                    len: data_bytes.len() as u32,
+                    byte_off: 0,
                 }
-                .encode()
-                .into(),
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::from(0),
-                    length: U34::from(data_bytes.len()),
-                }
-                .encode()
-                .into(),
-            ],
+                .encode(),
+            )],
         }]
         .into(),
     );

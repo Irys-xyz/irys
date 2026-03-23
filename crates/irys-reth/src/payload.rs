@@ -789,9 +789,8 @@ where
 mod tests {
     use super::*;
     use crate::pd_tx::build_pd_access_list_with_fees;
-    use alloy_primitives::aliases::U200;
     use alloy_primitives::{Bytes, U256};
-    use irys_types::range_specifier::ChunkRangeSpecifier;
+    use irys_types::range_specifier::PdDataRead;
     use rand09::{SeedableRng as _, rngs::StdRng};
     use reth_primitives_traits::SignedTransaction;
     use reth_transaction_pool::{PoolTransaction as _, test_utils::TransactionGenerator};
@@ -802,16 +801,15 @@ mod tests {
         nonce: u64,
         chunk_count: u16,
     ) -> EthPooledTransaction {
-        let access_list = build_pd_access_list_with_fees(
-            [ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset: 0,
-                chunk_count,
-            }],
-            std::iter::empty(),
-            U256::from(1_u64),
-            U256::from(1_u64),
-        );
+        let read = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: u32::from(chunk_count) * 256_000,
+            byte_off: 0,
+        };
+        let access_list =
+            build_pd_access_list_with_fees(&[read], U256::from(1_u64), U256::from(1_u64))
+                .expect("test fee encoding should not fail");
         let signed = generator
             .transaction()
             .nonce(nonce)

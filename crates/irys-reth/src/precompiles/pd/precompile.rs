@@ -266,10 +266,10 @@ mod tests {
     }
 
     /// Creates a ChunkDataIndex pre-populated with zero-filled chunks for offsets 0..num_chunks.
-    /// Chunk size matches the testing ConsensusConfig (256_000 bytes).
+    /// Chunk size is 32 bytes, matching `ConsensusConfig::testing()`.
     fn test_chunk_data_index(num_chunks: u64) -> irys_types::chunk_provider::ChunkDataIndex {
         let index = Arc::new(DashMap::new());
-        let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 256_000]));
+        let chunk = Arc::new(bytes::Bytes::from(vec![0_u8; 32]));
         for offset in 0..num_chunks {
             index.insert((0_u32, offset), chunk.clone());
         }
@@ -341,7 +341,8 @@ mod tests {
         };
 
         let access_list = build_test_access_list(&spec);
-        let result = execute_precompile(vec![0, 0], access_list, 1);
+        // chunks_needed = ceil(100/32) = 4 (chunk_size=32 in testing config)
+        let result = execute_precompile(vec![0, 0], access_list, 4);
         assert!(result.result.is_success(), "transaction should succeed");
 
         let min_expected_gas = PD_BASE_GAS_COST;
@@ -384,21 +385,24 @@ mod tests {
 
     #[test]
     fn test_read_partial_byte_range() {
+        // chunk_size=32, num_chunks_in_partition=10 in testing config.
+        // Request 320 bytes total (10 chunks), then read a partial range.
         let spec = PdDataRead {
             partition_index: 0,
             start: 0,
-            len: 500,
+            len: 320,
             byte_off: 0,
         };
 
         let access_list = build_test_access_list(&spec);
 
-        // Use function ID 1 (ReadPartialByteRange) with index 0, offset 100, length 200
+        // Use function ID 1 (ReadPartialByteRange) with index 0, offset 50, length 100
         let mut input = vec![1, 0]; // function_id=1, index=0
-        input.extend_from_slice(&100_u32.to_be_bytes()); // offset=100
-        input.extend_from_slice(&200_u32.to_be_bytes()); // length=200
+        input.extend_from_slice(&50_u32.to_be_bytes()); // offset=50
+        input.extend_from_slice(&100_u32.to_be_bytes()); // length=100
 
-        let result = execute_precompile(input, access_list, 2);
+        // chunks_needed = ceil(320/32) = 10
+        let result = execute_precompile(input, access_list, 10);
         assert!(
             result.result.is_success(),
             "ReadPartialByteRange should succeed"
@@ -441,7 +445,8 @@ mod tests {
 
         let access_list = build_test_access_list(&spec);
 
-        let chunk_data_index = test_chunk_data_index(1);
+        // chunks_needed = ceil(100/32) = 4
+        let chunk_data_index = test_chunk_data_index(4);
         let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -460,16 +465,19 @@ mod tests {
 
     #[test]
     fn test_moderate_chunks() {
+        // chunk_size=32, num_chunks_in_partition=10 in testing config.
+        // Request 7 chunks worth of data (224 bytes).
         let spec = PdDataRead {
             partition_index: 0,
             start: 0,
-            len: 5000,
+            len: 224,
             byte_off: 0,
         };
 
         let access_list = build_test_access_list(&spec);
 
-        let result = execute_precompile(vec![0, 0], access_list, 20);
+        // chunks_needed = ceil(224/32) = 7
+        let result = execute_precompile(vec![0, 0], access_list, 7);
         assert!(
             result.result.is_success(),
             "transaction should succeed with moderate chunks"
@@ -518,30 +526,33 @@ mod tests {
         // Zero-len PdDataRead is rejected at access list parse time
         let result = evm.transact_raw(tx);
         // The transaction should either error or revert
-        match result {
-            Ok(r) => assert!(
+        if let Ok(r) = result {
+            assert!(
                 !r.result.is_success(),
                 "zero-len specifier should not succeed"
-            ),
-            Err(_) => {} // Also acceptable — rejected at EVM layer
+            );
         }
+        // Err case also acceptable — rejected at EVM layer
     }
 
     #[test]
-    fn test_large_chunks_no_overflow() {
+    fn test_max_partition_chunks_no_overflow() {
+        // chunk_size=32, num_chunks_in_partition=10 in testing config.
+        // Request exactly the maximum: 10 chunks (320 bytes).
         let spec = PdDataRead {
             partition_index: 0,
             start: 0,
-            len: 10000,
+            len: 320,
             byte_off: 0,
         };
 
         let access_list = build_test_access_list(&spec);
 
-        let result = execute_precompile(vec![0, 0], access_list, 1000);
+        // chunks_needed = ceil(320/32) = 10
+        let result = execute_precompile(vec![0, 0], access_list, 10);
         assert!(
             result.result.is_success(),
-            "transaction should succeed with large chunk count"
+            "transaction should succeed with max partition chunks"
         );
 
         let min_expected_gas = PD_BASE_GAS_COST;

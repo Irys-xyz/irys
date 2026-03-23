@@ -14,11 +14,11 @@ use std::sync::Arc;
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{aliases::U200, Address, U256};
+use alloy_primitives::{Address, U256};
 use alloy_signer_local::LocalSigner;
 use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_types::irys::IrysSigner;
-use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
 use tracing::info;
 
@@ -234,17 +234,18 @@ async fn build_and_inject_real_pd_tx(
     let chain_id = node.node_ctx.config.consensus.chain_id;
 
     // Build access list referencing real partition/offset values.
-    let specs = vec![ChunkRangeSpecifier {
-        partition_index: U200::from(partition_index),
-        offset,
-        chunk_count,
+    // chunk_size=32 in this test context, so total bytes = chunk_count * 32.
+    let reads = vec![PdDataRead {
+        partition_index,
+        start: offset,
+        len: u32::from(chunk_count) * 32,
+        byte_off: 0,
     }];
     let access_list = build_pd_access_list_with_fees(
-        specs.into_iter(),
-        std::iter::empty(),
+        &reads,
         U256::from(10_000_000_000_000_000_u64), // 0.01 IRYS priority fee
         U256::from(1_000_000_000_000_000_u64),  // 0.001 IRYS base fee cap
-    );
+    )?;
 
     let mut tx = TxEip1559 {
         access_list,
