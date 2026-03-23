@@ -138,16 +138,77 @@ pub fn register_irys_precompiles_if_active(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evm::IrysEvmFactory;
+    use crate::evm::{IRYS_USD_PRICE_ACCOUNT, IrysEvmFactory};
     use alloy_eips::eip2930::AccessList;
     use alloy_evm::{Evm as _, EvmFactory as _};
-    use alloy_primitives::{Address, Bytes};
+    use alloy_primitives::{Address, B256, Bytes};
     use dashmap::DashMap;
+    use irys_types::range_specifier::{PdAccessListArgsTypeId, encode_pd_fee};
     use reth_evm::EvmEnv;
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
+    use revm::database::CacheDB;
     use revm::database_interface::EmptyDB;
     use revm::primitives::{TxKind, U256, hardfork::SpecId};
+    use revm::state::AccountInfo;
     use std::sync::Arc;
+
+    /// Fixed test caller address used across all PD precompile tests so the
+    /// CacheDB can be pre-seeded with sufficient balance for PD fee deduction.
+    const TEST_CALLER: Address = Address::repeat_byte(0x42);
+
+    /// Large fee value that exceeds the minimum PD transaction cost threshold
+    /// configured in the testing hardfork config (0.01 USD at 1e18 scale).
+    /// Using 1 IRYS (1e18) per chunk ensures the min-cost check always passes.
+    const TEST_FEE_PER_CHUNK: u128 = 1_000_000_000_000_000_000;
+
+    /// Appends PD fee keys (PdPriorityFee + PdBaseFeeCap) to an existing access list
+    /// that targets `PD_PRECOMPILE_ADDRESS`. Required because the EVM layer validates
+    /// PD transactions via `parse_pd_transaction()`, which rejects access lists
+    /// missing fee parameters.
+    fn with_test_fees(access_list: AccessList) -> AccessList {
+        let fee = U256::from(TEST_FEE_PER_CHUNK);
+        let mut items = access_list.0;
+        if let Some(pd_item) = items
+            .iter_mut()
+            .find(|i| i.address == PD_PRECOMPILE_ADDRESS)
+        {
+            pd_item.storage_keys.push(B256::from(
+                encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, fee)
+                    .expect("test fee encoding"),
+            ));
+            pd_item.storage_keys.push(B256::from(
+                encode_pd_fee(PdAccessListArgsTypeId::PdBaseFeeCap as u8, fee)
+                    .expect("test fee encoding"),
+            ));
+        }
+        AccessList(items)
+    }
+
+    /// Creates a `CacheDB` pre-seeded with accounts required by the PD fee
+    /// validation path in `transact_raw`:
+    /// - `IRYS_USD_PRICE_ACCOUNT` with a non-zero balance ($1.00 in 1e18 scale)
+    /// - `TEST_CALLER` with a large balance to cover PD fee deductions
+    fn test_db() -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        // IRYS/USD price = $1.00 (1e18 scale)
+        db.insert_account_info(
+            *IRYS_USD_PRICE_ACCOUNT,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000_u128),
+                ..Default::default()
+            },
+        );
+        // Fund the test caller with a very large balance so PD fee deduction
+        // does not fail even for tests with many chunks (e.g., 1000 chunks * 1e18)
+        db.insert_account_info(
+            TEST_CALLER,
+            AccountInfo {
+                balance: U256::MAX / U256::from(2),
+                ..Default::default()
+            },
+        );
+        db
+    }
 
     /// Creates a ChunkDataIndex pre-populated with zero-filled chunks for offsets 0..num_chunks.
     /// Chunk size matches the testing ConsensusConfig (256_000 bytes).
@@ -163,7 +224,7 @@ mod tests {
     /// Creates a default TxEnv for testing PD precompile.
     fn tx_env_default(data: Bytes, access_list: AccessList) -> TxEnv {
         TxEnv {
-            caller: Address::random(),
+            caller: TEST_CALLER,
             kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
             nonce: 0,
             gas_limit: 30_000_000,
@@ -199,7 +260,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         let tx = tx_env_default(input.into(), access_list);
 
@@ -226,13 +287,13 @@ mod tests {
             length: U34::try_from(100).unwrap(),
         };
 
-        let access_list = AccessList(vec![AccessListItem {
+        let access_list = with_test_fees(AccessList(vec![AccessListItem {
             address: PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![
                 B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
                 B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
             ],
-        }]);
+        }]));
 
         let result = execute_precompile(vec![0, 0], access_list, 1);
         assert!(result.result.is_success(), "transaction should succeed");
@@ -268,7 +329,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         let input = Bytes::from(vec![0]); // Only 1 byte (need at least 2)
         let tx = tx_env_default(input, AccessList::default());
@@ -294,7 +355,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         // Setup access list
         let chunk_range = ChunkRangeSpecifier {
@@ -322,7 +383,10 @@ mod tests {
         input.extend_from_slice(&100_u32.to_be_bytes()); // offset=100
         input.extend_from_slice(&200_u32.to_be_bytes()); // length=200
 
-        let tx = tx_env_default(Bytes::from(input), AccessList(access_list_items));
+        let tx = tx_env_default(
+            Bytes::from(input),
+            with_test_fees(AccessList(access_list_items)),
+        );
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -348,7 +412,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         let input = Bytes::from(vec![0, 0]);
         let tx = tx_env_default(input, AccessList::default()); // Empty access list
@@ -374,7 +438,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         let chunk_range = ChunkRangeSpecifier {
             partition_index: U200::ZERO,
@@ -397,7 +461,7 @@ mod tests {
         }];
 
         let input = Bytes::from(vec![99, 0]); // Function ID 99 doesn't exist
-        let tx = tx_env_default(input, AccessList(access_list_items));
+        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -420,7 +484,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         // Test with moderate number of chunks
         let chunk_range = ChunkRangeSpecifier {
@@ -444,7 +508,7 @@ mod tests {
         }];
 
         let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, AccessList(access_list_items));
+        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -476,9 +540,11 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
-        // Test with 0 chunks
+        // Test with 0 chunks -- with Sprite active, a zero-chunk PD transaction
+        // is rejected because total fees (0) fall below the minimum PD transaction
+        // cost threshold.
         let chunk_range = ChunkRangeSpecifier {
             partition_index: U200::ZERO,
             offset: 0,
@@ -500,20 +566,14 @@ mod tests {
         }];
 
         let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, AccessList(access_list_items));
+        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
 
-        let result = evm.transact_raw(tx).unwrap();
+        // Zero-chunk PD transactions are rejected at the EVM layer because the
+        // total PD fees (0) are below the minimum PD transaction cost.
+        let result = evm.transact_raw(tx);
         assert!(
-            result.result.is_success(),
-            "transaction should succeed with zero chunks"
-        );
-
-        // Should charge at least base cost for zero chunks
-        assert!(
-            result.result.gas_used() >= PD_BASE_GAS_COST,
-            "Gas used ({}) should be at least base cost ({})",
-            result.result.gas_used(),
-            PD_BASE_GAS_COST
+            result.is_err(),
+            "zero-chunk PD transaction should be rejected (fees below minimum cost)"
         );
     }
 
@@ -531,7 +591,7 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+        let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
 
         // Test with 1000 chunks to verify no overflow in gas calculation
         let chunk_range = ChunkRangeSpecifier {
@@ -555,7 +615,7 @@ mod tests {
         }];
 
         let input = Bytes::from(vec![0, 0]);
-        let tx = tx_env_default(input, AccessList(access_list_items));
+        let tx = tx_env_default(input, with_test_fees(AccessList(access_list_items)));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(

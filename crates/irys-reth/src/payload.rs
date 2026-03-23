@@ -29,7 +29,7 @@
 //! builder respects mempool ordering while still honoring the PD limit.
 
 use crate::IrysPayloadBuilderAttributes;
-use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
+use crate::pd_tx::{PdParseResult, parse_pd_transaction};
 use alloy_consensus::Transaction as _;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
@@ -489,12 +489,12 @@ impl CombinedTransactionIterator {
             return 0;
         }
 
-        match detect_and_decode_pd_header(transaction.transaction.input()) {
-            Ok(Some(_)) => transaction
-                .transaction
-                .access_list()
-                .map(sum_pd_chunks_in_access_list)
-                .unwrap_or_default(),
+        match transaction
+            .transaction
+            .access_list()
+            .map(parse_pd_transaction)
+        {
+            Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
             _ => 0,
         }
     }
@@ -529,12 +529,8 @@ impl CombinedTransactionIterator {
             if !is_sprite_active {
                 return 0;
             }
-            match detect_and_decode_pd_header(tx.transaction.input()) {
-                Ok(Some(_)) => tx
-                    .transaction
-                    .access_list()
-                    .map(sum_pd_chunks_in_access_list)
-                    .unwrap_or_default(),
+            match tx.transaction.access_list().map(parse_pd_transaction) {
+                Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
                 _ => 0,
             }
         }) {
@@ -776,9 +772,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{PdHeaderV1, build_pd_access_list, prepend_pd_header_v1_to_calldata};
-    use alloy_primitives::U256;
+    use crate::pd_tx::build_pd_access_list_with_fees;
     use alloy_primitives::aliases::U200;
+    use alloy_primitives::{Bytes, U256};
     use irys_types::range_specifier::ChunkRangeSpecifier;
     use rand09::{SeedableRng as _, rngs::StdRng};
     use reth_primitives_traits::SignedTransaction;
@@ -790,21 +786,21 @@ mod tests {
         nonce: u64,
         chunk_count: u16,
     ) -> EthPooledTransaction {
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: U256::from(1),
-            max_base_fee_per_chunk: U256::from(1),
-        };
-        let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
-        let access_list = build_pd_access_list([ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count,
-        }]);
+        let access_list = build_pd_access_list_with_fees(
+            [ChunkRangeSpecifier {
+                partition_index: U200::ZERO,
+                offset: 0,
+                chunk_count,
+            }],
+            std::iter::empty(),
+            U256::from(1_u64),
+            U256::from(1_u64),
+        );
         let signed = generator
             .transaction()
             .nonce(nonce)
             .access_list(access_list)
-            .input(calldata)
+            .input(Bytes::new())
             .into_eip1559();
         let recovered = SignedTransaction::try_into_recovered(signed).unwrap();
         EthPooledTransaction::try_from_consensus(recovered).unwrap()

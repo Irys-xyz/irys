@@ -815,9 +815,9 @@ async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
 
     let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
 
-    // Call readPdChunkIntoStorage with PD access list but NO PD header.
-    // Set explicit gas to bypass eth_call simulation (which would revert and
-    // prevent submission — we want the tx to be mined so we can check its receipt).
+    // Call readPdChunkIntoStorage with PD access list but NO fee keys.
+    // The mempool now rejects PD access lists missing fee parameters as InvalidPd,
+    // so the transaction should fail at submission time, not at execution time.
     let mut invocation_builder = contract.readPdChunkIntoStorage().gas(1_000_000);
     invocation_builder = invocation_builder.access_list(
         vec![alloy_eips::eip2930::AccessListItem {
@@ -843,22 +843,11 @@ async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
         .into(),
     );
 
-    let invocation_call = invocation_builder.send().await?;
-    let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
-    let receipt = node
-        .future_or_mine_on_timeout(&mut invocation_receipt_fut, Duration::from_millis(500))
-        .await??;
-
+    // The tx should be rejected at mempool admission (InvalidPd: missing fee keys).
+    let send_result = invocation_builder.send().await;
     assert!(
-        !receipt.status(),
-        "Headerless tx with PD access list should revert — PD header required for chunk access"
-    );
-
-    // Also verify no data was stored
-    let stored_bytes = contract.getStorage().call().await?;
-    assert!(
-        stored_bytes.is_empty(),
-        "No data should be stored when PD header is missing"
+        send_result.is_err(),
+        "PD access list without fee keys should be rejected by mempool"
     );
 
     node.stop().await;

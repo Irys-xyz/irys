@@ -16,7 +16,7 @@ use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
 use alloy_primitives::{aliases::U200, Address, U256};
 use alloy_signer_local::LocalSigner;
-use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
@@ -239,20 +239,18 @@ async fn build_and_inject_real_pd_tx(
         offset,
         chunk_count,
     }];
-    let access_list = build_pd_access_list(specs.into_iter());
-
-    // PD header with fees high enough to pass min_pd_transaction_cost.
-    let header = PdHeaderV1 {
-        max_priority_fee_per_chunk: U256::from(10_000_000_000_000_000_u64), // 0.01 IRYS
-        max_base_fee_per_chunk: U256::from(1_000_000_000_000_000_u64),      // 0.001 IRYS
-    };
-    let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+    let access_list = build_pd_access_list_with_fees(
+        specs.into_iter(),
+        std::iter::empty(),
+        U256::from(10_000_000_000_000_000_u64), // 0.01 IRYS priority fee
+        U256::from(1_000_000_000_000_000_u64),  // 0.001 IRYS base fee cap
+    );
 
     let mut tx = TxEip1559 {
         access_list,
         chain_id,
         gas_limit: 1_000_000,
-        input: calldata,
+        input: alloy_primitives::Bytes::new(),
         max_fee_per_gas: 20_000_000_000,
         max_priority_fee_per_gas: 1_000_000_000,
         nonce,

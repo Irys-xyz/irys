@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_consensus::Transaction as _;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::B256;
@@ -263,7 +262,12 @@ where
 
         // Reject PD transactions before Sprite hardfork is active
         if !self.is_sprite_active()
-            && let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input)
+            && tx.access_list().is_some_and(|al| {
+                !matches!(
+                    crate::pd_tx::parse_pd_transaction(al),
+                    crate::pd_tx::PdParseResult::NotPd
+                )
+            })
         {
             tracing::trace!(
                 sender = ?tx.sender(),
@@ -278,39 +282,51 @@ where
             ));
         }
 
-        // Validate minimum PD transaction cost when Sprite is active
-        if self.is_sprite_active()
-            && let Ok(Some((pd_header, _))) = crate::pd_tx::detect_and_decode_pd_header(input)
-        {
-            // Count PD chunks from access list
-            let chunks = tx
-                .access_list()
-                .map(sum_pd_chunks_in_access_list)
-                .unwrap_or(0);
+        // Validate PD transaction structure and minimum fees when Sprite is active
+        if self.is_sprite_active() {
+            match tx.access_list().map(crate::pd_tx::parse_pd_transaction) {
+                Some(crate::pd_tx::PdParseResult::InvalidPd(err)) => {
+                    tracing::trace!(
+                        sender = ?tx.sender(),
+                        tx_hash = ?tx.hash(),
+                        ?err,
+                        "PD transaction rejected: invalid PD metadata"
+                    );
+                    return Err(TransactionValidationOutcome::Invalid(
+                        tx,
+                        reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                            InvalidTransactionError::TxTypeNotSupported,
+                        ),
+                    ));
+                }
+                Some(crate::pd_tx::PdParseResult::ValidPd(meta)) => {
+                    // Calculate total fees in IRYS tokens:
+                    // (base_fee_cap_per_chunk + priority_fee_per_chunk) × total_chunks
+                    let total_per_chunk = meta
+                        .base_fee_cap_per_chunk
+                        .saturating_add(meta.priority_fee_per_chunk);
+                    let total_fees = total_per_chunk
+                        .saturating_mul(alloy_primitives::U256::from(meta.total_chunks));
 
-            // Calculate total fees in IRYS tokens:
-            // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
-            let total_per_chunk = pd_header
-                .max_base_fee_per_chunk
-                .saturating_add(pd_header.max_priority_fee_per_chunk);
-            let total_fees = total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
-
-            // Basic sanity check: PD transactions must have non-zero fees.
-            // The full min_pd_transaction_cost validation (USD→IRYS conversion)
-            // happens at EVM execution time.
-            if total_fees.is_zero() {
-                tracing::trace!(
-                    sender = ?tx.sender(),
-                    tx_hash = ?tx.hash(),
-                    chunks = chunks,
-                    "PD transaction rejected: zero total fees"
-                );
-                return Err(TransactionValidationOutcome::Invalid(
-                    tx,
-                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                        InvalidTransactionError::FeeCapTooLow,
-                    ),
-                ));
+                    // Basic sanity check: PD transactions must have non-zero fees.
+                    // The full min_pd_transaction_cost validation (USD→IRYS conversion)
+                    // happens at EVM execution time.
+                    if total_fees.is_zero() {
+                        tracing::trace!(
+                            sender = ?tx.sender(),
+                            tx_hash = ?tx.hash(),
+                            chunks = meta.total_chunks,
+                            "PD transaction rejected: zero total fees"
+                        );
+                        return Err(TransactionValidationOutcome::Invalid(
+                            tx,
+                            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                                InvalidTransactionError::FeeCapTooLow,
+                            ),
+                        ));
+                    }
+                }
+                Some(crate::pd_tx::PdParseResult::NotPd) | None => {}
             }
         }
 
@@ -415,15 +431,13 @@ where
         // PD header max priority fee per chunk and chunk count, if present.
         // Only consider PD tips when Sprite hardfork is active.
         let pd_total_tip = if self.is_sprite_active() {
-            match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
-                Ok(Some((hdr, _))) => {
-                    let pd_tip_per_chunk = hdr.max_priority_fee_per_chunk;
-                    // Always infer PD chunk count from the access list.
-                    let chunks_u64 = transaction
-                        .access_list()
-                        .map(sum_pd_chunks_in_access_list)
-                        .unwrap_or(0_u64);
-                    alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk)
+            match transaction
+                .access_list()
+                .map(crate::pd_tx::parse_pd_transaction)
+            {
+                Some(crate::pd_tx::PdParseResult::ValidPd(meta)) => {
+                    alloy_primitives::U256::from(meta.total_chunks)
+                        .saturating_mul(meta.priority_fee_per_chunk)
                 }
                 _ => alloy_primitives::U256::ZERO,
             }
@@ -489,12 +503,12 @@ async fn pd_transaction_monitor<P>(
                 let tx = &event.transaction;
                 let tx_hash = *tx.hash();
 
-                if let Ok(Some(_)) =
-                    crate::pd_tx::detect_and_decode_pd_header(tx.transaction.input())
+                if let Some(access_list) = tx.transaction.access_list()
+                    && let crate::pd_tx::PdParseResult::ValidPd(meta) =
+                        crate::pd_tx::parse_pd_transaction(access_list)
                     && known_pd_txs.insert(tx_hash)
-                    && let Some(access_list) = tx.transaction.access_list()
                 {
-                    let chunk_specs = crate::pd_tx::extract_pd_chunk_specs(access_list);
+                    let chunk_specs = meta.data_reads;
                     if !chunk_specs.is_empty() {
                         trace!(
                             target: "reth::pd",

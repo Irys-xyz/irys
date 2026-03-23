@@ -484,9 +484,12 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
     // 3. Submit ADEQUATE-FEE transaction (at or above minimum)
     // Use the base fee from the API response (predicted next block fee at index [1])
     // Only adjust priority fee to meet the minimum threshold
+    // Use at least 1 wei for the base fee cap since zero fees are invalid in access list encoding.
+    // The API may return 0 for early blocks before PD activity establishes a base fee.
     let base_fee_from_api: u64 = fee_history.base_fee_per_chunk_irys[1]
         .amount
         .try_into()
+        .map(|v: u64| v.max(1))
         .expect("base_fee should fit in u64");
 
     // The EVM calculates min_cost_irys using on-chain price which may differ from API's EMA.

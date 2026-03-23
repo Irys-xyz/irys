@@ -45,16 +45,14 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::range_specifier::{
-    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArgSerde as _,
-};
+use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -2622,26 +2620,29 @@ impl IrysNodeTest<IrysNodeCtx> {
         // producing an empty chunk key set. This means PdService marks the tx as Ready
         // (0 required chunks) without needing real data uploaded. Tests that need real
         // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
+        //
+        // Note: the sentinel does NOT affect parse_pd_transaction() — byte 0 of each
+        // encoded key is always the type discriminant (0x00 = ChunkRead), and partition_index
+        // occupies bytes 1-25 only. The parser sees valid ChunkRead entries regardless of
+        // the partition_index value. The sentinel's effect is confined to PdService::specs_to_keys().
         let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
             partition_index: alloy_primitives::aliases::U200::MAX,
             offset: offset_base + i as u32,
             chunk_count: 1,
         });
-        let access_list = build_pd_access_list(storage_keys);
-
-        // Build PD header with custom fees
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: priority_fee.into(),
-            max_base_fee_per_chunk: base_fee.into(),
-        };
-        let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+        let access_list = build_pd_access_list_with_fees(
+            storage_keys,
+            std::iter::empty(),
+            priority_fee.into(),
+            base_fee.into(),
+        );
 
         // Create and sign EIP-1559 transaction
         let mut tx = TxEip1559 {
             access_list,
             chain_id,
             gas_limit: 1_000_000,
-            input: calldata,
+            input: alloy_primitives::Bytes::new(),
             max_fee_per_gas: 20_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
             nonce,
@@ -2721,8 +2722,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Build and inject a tx that calls a contract function with PD chunk access.
-    /// Prepends a PD header to the ABI calldata so the EVM strips it before execution,
-    /// while the preloading gate detects the PD header and preloads chunks.
+    /// PD fees and chunk/byte specifiers are encoded in the access list; the `input`
+    /// field carries only the clean ABI calldata for the target contract.
     pub async fn inject_pd_contract_call(
         &self,
         signer: &irys_types::irys::IrysSigner,
@@ -2736,35 +2737,20 @@ impl IrysNodeTest<IrysNodeCtx> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build PD header
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: alloy_primitives::U256::from(priority_fee_per_chunk),
-            max_base_fee_per_chunk: alloy_primitives::U256::from(1_000_000_000_000_000_u64),
-        };
-        let calldata = prepend_pd_header_v1_to_calldata(&header, &abi_calldata);
-
-        // Build access list with chunk and byte range specifiers
-        let mut storage_keys: Vec<alloy_primitives::B256> = chunk_specs
-            .into_iter()
-            .map(|spec| alloy_primitives::B256::from(spec.encode()))
-            .collect();
-        storage_keys.extend(
-            byte_specs
-                .into_iter()
-                .map(|spec| alloy_primitives::B256::from(spec.encode())),
+        // Build access list with chunk/byte range specifiers and fee parameters
+        let access_list = build_pd_access_list_with_fees(
+            chunk_specs,
+            byte_specs,
+            alloy_primitives::U256::from(priority_fee_per_chunk),
+            alloy_primitives::U256::from(1_000_000_000_000_000_u64),
         );
-        let access_list =
-            alloy_eips::eip2930::AccessList::from(vec![alloy_eips::eip2930::AccessListItem {
-                address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
-                storage_keys,
-            }]);
 
         // Create and sign EIP-1559 transaction targeting the contract
         let mut tx = TxEip1559 {
             access_list,
             chain_id,
             gas_limit: 1_000_000,
-            input: calldata,
+            input: abi_calldata,
             max_fee_per_gas: 20_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
             nonce,
