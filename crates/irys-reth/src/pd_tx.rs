@@ -8,7 +8,7 @@ use alloy_primitives::{B256, U256};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::{
     ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, PdAccessListArgSerde as _,
-    PdAccessListArgsTypeId, decode_pd_fee, encode_pd_fee,
+    PdAccessListArgsTypeId, PdFeeDecodeError, decode_pd_fee, encode_pd_fee,
 };
 
 /// Result of parsing a transaction's access list for PD metadata.
@@ -139,6 +139,17 @@ pub fn extract_pd_chunk_specs(
         .collect()
 }
 
+/// Map a [`PdFeeDecodeError`] to the corresponding [`PdValidationError`].
+fn pd_fee_decode_error_to_validation(e: PdFeeDecodeError) -> PdValidationError {
+    match e {
+        PdFeeDecodeError::ZeroFee => PdValidationError::ZeroFee,
+        PdFeeDecodeError::FeeOverflow => PdValidationError::FeeOverflow,
+        PdFeeDecodeError::UnexpectedTypeByte => {
+            PdValidationError::InvalidFeeEncoding(e.to_string())
+        }
+    }
+}
+
 /// Canonical PD transaction parser. Single entry point for all components.
 ///
 /// Examines the transaction's access list for keys under `PD_PRECOMPILE_ADDRESS`.
@@ -210,9 +221,7 @@ pub fn parse_pd_transaction(access_list: &AccessList) -> PdParseResult {
                 match decode_pd_fee(&key.0, PdAccessListArgsTypeId::PdPriorityFee as u8) {
                     Ok(fee) => priority_fee = Some(fee),
                     Err(e) => {
-                        return PdParseResult::InvalidPd(PdValidationError::InvalidFeeEncoding(
-                            e.to_string(),
-                        ));
+                        return PdParseResult::InvalidPd(pd_fee_decode_error_to_validation(e));
                     }
                 }
             }
@@ -223,9 +232,7 @@ pub fn parse_pd_transaction(access_list: &AccessList) -> PdParseResult {
                 match decode_pd_fee(&key.0, PdAccessListArgsTypeId::PdBaseFeeCap as u8) {
                     Ok(fee) => base_fee_cap = Some(fee),
                     Err(e) => {
-                        return PdParseResult::InvalidPd(PdValidationError::InvalidFeeEncoding(
-                            e.to_string(),
-                        ));
+                        return PdParseResult::InvalidPd(pd_fee_decode_error_to_validation(e));
                     }
                 }
             }

@@ -269,6 +269,7 @@ mod range_specifier_tests {
 
     #[test]
     fn test_pd_fee_reject_wrong_type_byte() -> eyre::Result<()> {
+        use crate::range_specifier::PdFeeDecodeError;
         let fee = U256::from(42_u64);
         let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
         let encoded = encode_pd_fee(type_byte, fee)?;
@@ -276,12 +277,7 @@ mod range_specifier_tests {
         // Try decoding with the wrong expected type byte
         let wrong_type = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
         let result = decode_pd_fee(&encoded, wrong_type);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("unexpected type byte"),
-            "unexpected error: {err}"
-        );
+        assert!(matches!(result, Err(PdFeeDecodeError::UnexpectedTypeByte)));
 
         Ok(())
     }
@@ -357,14 +353,32 @@ pub fn encode_pd_fee(type_byte: u8, fee: U256) -> eyre::Result<[u8; 32]> {
     Ok(buf)
 }
 
+/// Typed error returned by [`decode_pd_fee`].
+#[derive(Debug, thiserror::Error)]
+pub enum PdFeeDecodeError {
+    #[error("unexpected type byte")]
+    UnexpectedTypeByte,
+    #[error("fee must be > 0")]
+    ZeroFee,
+    #[error("fee exceeds u248 max")]
+    FeeOverflow,
+}
+
 /// Decode a U256 fee from a 32-byte access list key.
 /// The top byte of the U256 is forced to 0 (u248 bound by construction).
-pub fn decode_pd_fee(bytes: &[u8; 32], expected_type: u8) -> eyre::Result<U256> {
-    eyre::ensure!(bytes[0] == expected_type, "unexpected type byte");
+pub fn decode_pd_fee(bytes: &[u8; 32], expected_type: u8) -> Result<U256, PdFeeDecodeError> {
+    if bytes[0] != expected_type {
+        return Err(PdFeeDecodeError::UnexpectedTypeByte);
+    }
     let mut be_bytes = [0_u8; 32];
     be_bytes[1..32].copy_from_slice(&bytes[1..32]);
     let fee = U256::from_be_bytes(be_bytes);
-    eyre::ensure!(fee > U256::ZERO, "fee must be > 0");
+    if fee > MAX_PD_FEE {
+        return Err(PdFeeDecodeError::FeeOverflow);
+    }
+    if fee == U256::ZERO {
+        return Err(PdFeeDecodeError::ZeroFee);
+    }
     Ok(fee)
 }
 
