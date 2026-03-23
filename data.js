@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774033779180,
+  "lastUpdate": 1774262815057,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -991,6 +991,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "33699735+roberts-pumpurs@users.noreply.github.com",
+            "name": "Roberts Pumpurs",
+            "username": "roberts-pumpurs"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "36469cb638f3ad10ffa8ce84b6f830f370487c43",
+          "message": "fix: avoid block_discovery panic after block validation rejection (#1235)\n\n* fix: avoid block_discovery panic after pd base fee shadow tx rejection\n\nBug: heavy_test_block_with_incorrect_pd_base_fee_gets_rejected exposed a\nrace where a bad parent block was correctly rejected for a\nPdBaseFeeUpdate shadow transaction mismatch, but a descendant was still\nprocessed afterward.\n\nError: block_discovery panicked with \"Parent block ... should be in the\nblock tree!\" after the rejected parent had already been removed, which\ncascaded into service shutdown and SendError failures in the test\nharness.`\n\nFix: return PreviousBlockNotFound instead of panicking when the parent\ndisappears during block discovery, and make block_tree invalid-result\ncleanup idempotent when a descendant was already removed as part of\nancestor cleanup.\n\n* flake fix\n\n* comments",
+          "timestamp": "2026-03-23T11:29:27+01:00",
+          "tree_id": "417df053c0eb008d4d212ca6e7aeb387c3817f5e",
+          "url": "https://github.com/Irys-xyz/irys/commit/36469cb638f3ad10ffa8ce84b6f830f370487c43"
+        },
+        "date": 1774262814177,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.217196,
+            "range": "± 0.059421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.313489,
+            "range": "± 2.113712",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.211271,
+            "range": "± 0.842672",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.79342,
+            "range": "± 0.355164",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1175.858936,
+            "range": "± 8.011496",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1534.270665,
+            "range": "± 5.655554",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.587442,
+            "range": "± 0.065812",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.836515,
+            "range": "± 2.957458",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 294.251308,
+            "range": "± 76.665624",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
