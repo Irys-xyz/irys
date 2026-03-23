@@ -19,7 +19,7 @@ After a node validates a block containing PD transactions, it proactively pushes
 | Push trigger | `BlockStateUpdated` event from `BlockTreeService` | Fires after full validation; gossip already uses broadcast events |
 | Event payload | Enriched `BlockStateUpdated` enum with full block data | Self-contained; no consumer lookups needed |
 | Wire format | `PdChunkBatch { block_hash, chunks: Vec<PdChunkPush> }` | Batch per block; one HTTP request per peer |
-| Dedup | `GossipCacheKey::PdChunk(u32, u64)` + `PdChunkBatch(BlockHash)` | Per-chunk granularity with batch-level shortcut |
+| Dedup | `GossipCacheKey::PdChunk(u32, u64)` per-chunk only | Per-chunk granularity; no batch-level dedup (partial batches must not suppress later complementary batches) |
 | Receiving storage | MDBX `CachedChunks` direct write (bypass `cache_chunk_verified`) | Push chunks don't need ingress proof tracking |
 | Serving from cache | Implement `get_chunk_for_pd` TODO to check `CachedChunks` | Makes push recipients serveable via pull |
 | Peer selection | All peers sorted by score | Same pattern as block broadcast; GossipCache handles dedup |
@@ -55,19 +55,26 @@ BlockTreeService::on_block_validation_finished
 POST /gossip/v2/pd_chunk_batch
   → GossipDataHandler::handle_pd_chunk_batch
     → Sync check (drop if syncing)
-    → Cache check (drop if batch block_hash already seen)
-    → BlockIndex check: verify block_hash is a known migrated block (short-circuit fake batches)
+    → Per-peer rate limit check (dedicated PD batch rate limiter, not DataRequestTracker)
+    → Reject if ledger != DataLedger::Publish for any chunk (enforce PD-only constraint)
     → For each PdChunkPush { ledger, offset, chunk }:
+        Check GossipCache: PdChunk(ledger, offset) already seen → skip this chunk
         derive_chunk_verification_info(block_index, db, chunk_size, Publish, offset)
           → data_root, data_size, tx_chunk_offset
+          (if offset is beyond migrated range → skip this chunk)
         Verify chunk.data_root == expected_data_root
-        Verify validate_path(data_root, &chunk.data_path, tx_chunk_offset * chunk_size)
+        Compute target_byte_offset using data_size (same logic as pd_service.rs:268,
+          handling rightmost chunk edge case — do NOT use tx_chunk_offset * chunk_size)
+        Verify validate_path(data_root, &chunk.data_path, target_byte_offset)
         Verify sha256(chunk.chunk) == leaf_hash
         Compute chunk_path_hash = hash_data_path(&chunk.data_path)
-        Direct write to CachedChunks + CachedChunksIndex
-    → Record seen: PdChunkBatch(block_hash) + PdChunk(ledger, offset) per chunk
+        Check CachedChunks for existing chunk_path_hash → skip if duplicate
+        Write to CachedChunks + CachedChunksIndex
+        Record seen: GossipCacheKey::PdChunk(ledger, offset) for this chunk
     → Return Accepted
 ```
+
+**Note on block_hash**: The `block_hash` in `PdChunkBatch` is the NEW block being validated (not yet migrated to BlockIndex). It is NOT used for verification — each chunk is independently verified against migrated on-chain state via `derive_chunk_verification_info`. The `block_hash` is informational only (logging, tracing). Batch-level dedup by `block_hash` is intentionally NOT used because senders may send partial batches (only chunks they have locally), and batch-level dedup would suppress later complementary batches from other senders.
 
 ### Serving Flow (Pull from Cache)
 
@@ -128,7 +135,7 @@ Add `PdChunkBatch(PdChunkBatch)` variant for push broadcast. Keep `PdChunk(Chunk
 
 ### `GossipCacheKey` Change
 
-Add two variants:
+Add one variant for per-chunk dedup. No batch-level dedup key — partial batches from different senders must not suppress each other:
 
 ```rust
 pub enum GossipCacheKey {
@@ -138,7 +145,6 @@ pub enum GossipCacheKey {
     ExecutionPayload(B256),
     IngressProof(H256),
     PdChunk(u32, u64),          // per-chunk dedup
-    PdChunkBatch(BlockHash),    // per-batch dedup
 }
 ```
 
@@ -252,7 +258,7 @@ Resolution chain: `(ledger, offset)` → binary search `IrysBlockIndexItems` →
 
 - `gossip.rs`: Add `GossipDataV2::PdChunkBatch(PdChunkBatch)` variant (keep `PdChunk(ChunkFormat)` for pull responses)
 - `gossip.rs`: Add `PdChunkPush`, `PdChunkBatch` structs
-- `gossip.rs`: Add `GossipCacheKey::PdChunk(u32, u64)` and `GossipCacheKey::PdChunkBatch(BlockHash)`
+- `gossip.rs`: Add `GossipCacheKey::PdChunk(u32, u64)` (no batch-level key)
 - `gossip.rs`: Convert `BlockStateUpdated` from struct to `Valid`/`Invalid` enum
 - Update all `BlockStateUpdated` consumers to match on the new enum
 
@@ -271,7 +277,7 @@ Resolution chain: `(ledger, offset)` → binary search `IrysBlockIndexItems` →
 - `gossip_client.rs`: Implement `pre_serialize_for_broadcast` for `PdChunkBatch`
 - `gossip_client.rs`: Implement `send_data` for `PdChunkBatch` (V2 send, V1 reject)
 - `gossip_data_handler.rs`: New `handle_pd_chunk_batch` handler
-- `cache.rs`: Add `pd_chunks` and `pd_chunk_batches` moka caches to `GossipCache`
+- `cache.rs`: Add `pd_chunks` moka cache to `GossipCache` (per-chunk dedup only, no batch-level cache)
 - `server.rs`: New route `/gossip/v2/pd_chunk_batch`
 - `types.rs`: Add `GossipRoutes::PdChunkBatch` variant
 - P2PService gains `ChunkStorageProvider`, `BlockIndexReadGuard`, `DatabaseProvider`, `ConsensusConfig` dependencies
@@ -308,8 +314,9 @@ The sender only pushes chunks it can read from local storage modules or MDBX `Ca
 The receiver independently verifies each pushed chunk:
 
 1. **Cross-reference on-chain state**: `derive_chunk_verification_info` resolves `(ledger, offset)` to `(data_root, data_size, tx_chunk_offset)` from the MDBX BlockIndex. This is authoritative — the block has been migrated (depth 6+) and the tx headers are committed.
-2. **Merkle proof**: `validate_path(data_root, data_path, target_byte_offset)` verifies the chunk's position in the transaction's Merkle tree.
+2. **Merkle proof**: `validate_path(data_root, data_path, target_byte_offset)` verifies the chunk's position in the transaction's Merkle tree. The `target_byte_offset` is computed using `data_size` (from trusted MDBX state) to correctly handle the rightmost chunk edge case — reusing the same logic as `pd_service.rs:268`, NOT a naive `tx_chunk_offset * chunk_size`.
 3. **Leaf hash**: `sha256(chunk_bytes) == path_result.leaf_hash` verifies the chunk content matches the proof.
+4. **Ledger constraint**: The receiver rejects any `PdChunkPush` where `ledger != DataLedger::Publish`, enforcing the permanent PD design constraint at the gossip layer.
 
 If any verification fails, the individual chunk is skipped. A partially-valid batch is accepted for its valid chunks.
 
@@ -330,7 +337,7 @@ On `BlockStateUpdated::Valid`, the handler spawns a detached task (same pattern 
 4. Reads chunk data from storage/cache
 5. If no chunks collected, returns early
 6. Constructs `PdChunkBatch`
-7. Wraps as `GossipBroadcastMessageV2 { key: GossipCacheKey::PdChunkBatch(block_hash), data: GossipDataV2::PdChunkBatch(batch) }`
+7. Wraps as `GossipBroadcastMessageV2` with `data: GossipDataV2::PdChunkBatch(batch)`. The broadcast key uses a synthetic `GossipCacheKey::Block(block_hash)` for the outer broadcast loop's `peers_that_have_seen` filtering — this is a coarse hint only. Per-chunk dedup via `GossipCacheKey::PdChunk` is the authoritative dedup layer, applied on the receiver side and after successful per-peer send
 8. Calls `service.broadcast_data(message, &peer_list)` directly — same inline invocation pattern as the existing `mempool_data_receiver` arm
 
 The chunk assembly and broadcast delivery happen in the same detached task. This avoids feeding back into the `mempool_data_receiver` channel and keeps the two `select!` arms independent.
@@ -343,11 +350,21 @@ If a block is validated, PD chunks are pushed, and then a reorg discards that bl
 - The replacement block on the canonical chain may contain different PD transactions referencing different chunks. Those chunks will be pushed independently after the replacement block validates.
 - Stale cache entries do not affect correctness: `get_chunk_for_pd` returns valid chunk data regardless of which block triggered the push.
 
-## CachedChunks Data Lifetime
+## CachedChunks Data Lifetime and Integrity
 
-Pushed PD chunks land in MDBX `CachedChunks` without `CachedDataRoots` entries (bypassing `cache_chunk_verified`). This means they are not tracked by the `CacheService`'s existing pruning logic, which is keyed on `CachedDataRoots`.
+Pushed PD chunks land in MDBX `CachedChunks` without `CachedDataRoots` entries (bypassing `cache_chunk_verified`). This creates orphan rows not governed by the existing `CacheService` pruning logic (which walks `CachedDataRoots`).
 
-For the initial implementation, this is acceptable — PD chunks are small relative to total cache capacity, and the `CachedChunks` table is already bounded by `max_cache_size_bytes`. A future enhancement could add a separate TTL-based eviction for PD-pushed entries (e.g., a `PdPushedChunks` index table tracking insertion time), but this is not required for the initial implementation.
+### Duplicate suppression
+
+Before writing a chunk, the handler checks if `chunk_path_hash` already exists in `CachedChunks` (a simple `tx.get::<CachedChunks>(chunk_path_hash)` point lookup). If present, the write is skipped. This prevents repeated pushes from creating duplicate `CachedChunksIndex` rows with fresh timestamps. Combined with the `GossipCache` per-chunk seen-state, most duplicates are rejected before reaching the DB.
+
+### Eviction
+
+The existing `CacheService::prune_chunks_without_active_ingress_proofs` scans `CachedDataRoots` and only prunes chunks associated with known data roots. Push-only entries lack a `CachedDataRoots` parent, so they are invisible to this pruner.
+
+To handle eviction, extend the `CacheService` prune cycle to also scan `CachedChunks` for entries whose `data_root` has no `CachedDataRoots` entry — these are push-only orphans. Apply a time-based threshold (e.g., entries older than `min_chunk_age_secs`) for deletion. This piggybacks on the existing `OnBlockMigrated` trigger and reuses the `get_cache_size::<CachedChunks>` capacity check.
+
+Alternatively, a simpler initial approach: the `CachedChunks` table is already bounded by `max_cache_size_bytes`, and the capacity check fires on every `OnBlockMigrated` event. When the cache exceeds `prune_at_capacity_percent`, the existing pruner deletes chunks without active ingress proofs. Push-only entries have no ingress proofs, so they will be pruned first when capacity pressure exists. This provides implicit eviction without new scanning logic.
 
 ## Backward Compatibility
 
@@ -377,4 +394,12 @@ The `GossipCache` dedup ensures each peer receives each chunk at most once per 5
 
 ## Rate Limiting
 
-The `/gossip/v2/pd_chunk_batch` endpoint uses per-peer rate limiting consistent with existing gossip endpoints. A batch with an unknown `block_hash` (not in the receiver's BlockIndex) is rejected early before per-chunk verification, limiting CPU cost of fake batches. The existing `DataRequestTracker` or a similar per-peer mechanism bounds the number of batch requests per peer per time window.
+The `/gossip/v2/pd_chunk_batch` endpoint needs a **dedicated per-peer rate limiter** — the existing `DataRequestTracker` is for pull requests and is per-handler-clone (not shared). The PD batch rate limiter:
+
+- Tracks per-peer batch count within a sliding time window
+- Rejects with `GossipError::RateLimited` when exceeded
+- Applies BEFORE any per-chunk verification to bound CPU cost
+
+**Cross-sender amplification**: `GossipCache` is local per node, so it cannot prevent multiple validators from sending the same batch to the same peer. In practice, validators process blocks sequentially — later validators find most peers already marked "seen" by earlier pushers via per-chunk `PdChunk(u32, u64)` entries. The receiver-side per-chunk dedup (`GossipCache` check before verification) ensures even if multiple batches arrive, each chunk is verified and stored at most once. The bandwidth cost of receiving duplicate batches is bounded by the per-peer rate limiter.
+
+**Request body size limit**: The actix-web `JsonConfig` already limits request bodies to 100MB (`server.rs:1606`). For PD batches, a tighter limit could be enforced based on `max_pd_chunks_per_block * chunk_size` from the hardfork config.
