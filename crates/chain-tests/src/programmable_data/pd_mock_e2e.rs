@@ -42,7 +42,7 @@ async fn heavy_test_pd_mock_e2e_single_node() -> eyre::Result<()> {
     //    - offset_base = 0 (start of the partition)
     //
     // create_and_inject_pd_transaction_with_priority_fee builds a TxEip1559 with a PD
-    // header prepended to the calldata and a ChunkRangeSpecifier access list entry,
+    // header prepended to the calldata and a PdDataRead access list entry,
     // signs it with the provided signer, and injects it via rpc.inject_tx().
     let tx_hash = ctx
         .create_and_inject_pd_transaction_with_priority_fee(

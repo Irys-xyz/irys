@@ -252,7 +252,7 @@ fn decompose_ledger_offset(global_offset: u64, num_chunks_in_partition: u64) -> 
 /// - `offset_4`: 4 padding chunks → test data at local_offset=4
 /// - `offset_3`: 3 padding chunks → test data at local_offset=3
 ///
-/// This exercises different `offset` values in `ChunkRangeSpecifier`.
+/// This exercises different `start` values in `PdDataRead`.
 #[rstest]
 #[case::offset_4(4)] // test data at partition 0, offset 4
 #[case::offset_3(3)] // test data at partition 0, offset 3
