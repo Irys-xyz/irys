@@ -197,6 +197,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
         run: |
+          set -o pipefail
           node <<'NODE_EOF' | npx claude \
             --model claude-sonnet-4-20250514 \
             --allowedTools "Read,Glob,Write"
