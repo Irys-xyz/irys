@@ -1,322 +1,685 @@
-# PD Memory Expansion Gas Elimination — Implementation Plan
+# PD Memory Expansion Gas Elimination — Corrected Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> This plan supersedes conflicting details in `docs/superpowers/specs/2026-03-20-pd-memory-expansion-gas-elimination-design.md`.
+>
+> In particular:
+> 1. Do **not** introduce a custom `PrecompileProvider` wrapper as `IrysEvmFactory::Precompiles`.
+> 2. Do **not** change `type Precompiles = PrecompilesMap`.
+> 3. Do **not** use a raw thread-local `(ptr, len)` fingerprint.
+> 4. Do **not** rely on `revm-interpreter` macros being available through the existing `revm` dependency.
+>
+> This document is the implementation authority for the feature. If the design doc disagrees with this plan, follow this plan.
 
-**Goal:** Eliminate EVM memory expansion gas for `RETURNDATACOPY` when the return data originated from the PD precompile at `0x500`, removing the quadratic double-charge on PD reads.
+**Goal:** Eliminate EVM memory expansion gas for `RETURNDATACOPY` when the current frame's `return_data` buffer is the exact `Bytes` allocation returned by the PD precompile at `0x500`.
 
-**Architecture:** Three components cooperate: (1) a custom `PrecompileProvider` wrapper that records a fingerprint of PD return data into a thread-local, (2) a custom `RETURNDATACOPY` opcode handler installed via `insert_instruction` that checks the fingerprint and skips memory expansion gas when matched, and (3) per-transaction fingerprint clearing in `transact_raw`. All changes are gated behind the Sprite hardfork.
+**Architecture:** Three components cooperate:
+1. The existing PD precompile closure records a **thread-local owned `Bytes` clone** of the successful PD output.
+2. A custom `RETURNDATACOPY` instruction handler checks whether the interpreter's current `return_data` buffer is the **same live allocation** and, if so, skips only the memory expansion gas.
+3. `transact_raw` installs a **scope guard** that clears the thread-local on entry and again on drop.
 
-**Tech Stack:** Rust, revm v34.0.0, revm-interpreter 32.0.0, revm-handler 15.0.0, alloy-evm 0.27.2, reth-evm
+**Tech Stack:** Rust, revm v34.0.0, revm-interpreter 32.0.0, revm-handler 15.0.0, alloy-evm 0.27.2, forked reth v1.11.1
 
-**Spec:** `docs/superpowers/specs/2026-03-20-pd-memory-expansion-gas-elimination-design.md`
+**Primary constraints that were verified against upstream code before writing this plan:**
+
+- `IrysEvmFactory` must continue to expose `Precompiles = PrecompilesMap`.
+  Reason: reth's `ConfigureEvm`, `EthEvmConfig`, and RPC helpers require that exact associated type.
+- `Instruction::new` takes a bare function pointer.
+  Reason: the custom opcode handler cannot capture runtime state.
+- The PD precompile closure already receives `PrecompileInput<'_>` from alloy-evm.
+  Reason: there is no need for a `PrecompileProvider` wrapper just to observe successful PD output.
+- A raw `(ptr, len)` thread-local is not sufficient.
+  Reason: once the original `Bytes` is freed, another allocation can reuse that address and cause a false positive.
+- The custom handler must preserve upstream `RETURNDATACOPY` ordering exactly:
+  bounds check first, copy gas next, zero-length early return next, then memory work.
+- The PD precompile must be marked **stateful / non-pure**.
+  Reason: it depends on `PdContext` and transaction-scoped access-list state, and pure precompiles can be wrapped by engine-level precompile caching.
+
+## Codebase Anchors
+
+Read these local code anchors before editing:
+
+- `crates/irys-reth/src/evm.rs`
+  - `impl EvmFactory for IrysEvmFactory`
+  - `fn create_evm`
+  - `fn create_evm_with_inspector`
+  - `impl Evm for IrysEvm<...>`
+  - `fn transact_raw`
+- `crates/irys-reth/src/precompiles/pd/precompile.rs`
+  - `fn pd_precompile`
+  - `fn register_irys_precompiles_if_active`
+- `crates/irys-reth/src/precompiles/pd/context.rs`
+
+Read these upstream anchors before coding the custom opcode:
+
+- `revm-handler-15.0.0/src/instructions.rs`
+  - `EthInstructions`
+  - `insert_instruction`
+- `revm-interpreter-32.0.0/src/instructions/system.rs`
+  - `returndatacopy`
+  - `copy_cost_and_memory_resize`
+- `revm-interpreter-32.0.0/src/interpreter/shared_memory.rs`
+  - `num_words`
+  - `resize_memory`
+  - `resize_memory_cold`
+- `revm-interpreter-32.0.0/src/gas.rs`
+  - `Gas`
+  - `MemoryGas`
+  - `set_words_num`
+- `alloy-evm-0.27.2/src/precompiles.rs`
+  - `DynPrecompile`
+  - `DynPrecompile::new_stateful`
+  - `PrecompileInput`
+  - `Precompile::is_pure`
 
 ---
 
-## File Structure
+## Final Design
+
+### 1. Keep `PrecompilesMap` as the EVM associated type
+
+`IrysEvmFactory` currently uses:
+
+```rust
+type Precompiles = PrecompilesMap;
+```
+
+This must remain unchanged.
+
+Do not introduce:
+
+- `IrysPdPrecompileProvider`
+- `type Precompiles = IrysPdPrecompileProvider`
+- `precompiles_mut().inner_mut()` plumbing
+
+Those approaches break the generic assumptions made by:
+
+- `reth_evm::ConfigureEvm`
+- `reth_evm_ethereum::EthEvmConfig`
+- RPC helpers that require `impl Evm<Precompiles = PrecompilesMap>`
+
+### 2. Record PD provenance inside the existing PD precompile closure
+
+The PD precompile closure already has the right integration point:
+
+- it runs exactly when the PD precompile succeeds or fails
+- it already has access to the produced `Bytes`
+- it can capture `PdContext`
+- it can mutate thread-local state without changing any revm generic parameters
+
+Implementation rule:
+
+- Clear the PD marker at the **start** of every PD precompile invocation.
+- On **successful, non-reverted, non-empty** PD output, store an **owned `Bytes` clone** in thread-local.
+- On errors, reverted outputs, or empty outputs, leave the marker cleared.
+
+### 3. Store an owned `Bytes` clone in thread-local, not a raw pointer tuple
+
+The thread-local must keep the backing allocation alive. The safe shape is:
+
+```rust
+thread_local! {
+    static LAST_PD_RETURN: RefCell<Option<Bytes>> = RefCell::new(None);
+}
+```
+
+Why this is required:
+
+- `Bytes::clone()` shares the underlying allocation.
+- If thread-local stores the clone, the allocation stays alive until cleared.
+- Comparing `return_data.buffer().as_ptr()` and `.len()` against the stored clone is now safe.
+- This avoids allocator-address reuse false positives.
+
+### 4. Scope the exemption to the current frame's live `return_data` buffer only
+
+The exemption applies if and only if:
+
+- `context.interpreter.return_data.buffer()` is the same live allocation as the stored PD `Bytes`, and
+- the lengths match.
+
+This is intentionally conservative and direct.
+
+Important consequence:
+
+- A contract that calls PD directly can benefit.
+- A DELEGATECALL/library frame that calls PD and then executes `RETURNDATACOPY` in that same frame can benefit.
+- An outer caller after a normal `CALL`/`DELEGATECALL` return does **not** inherit the exemption automatically, because contract `RETURN`/`REVERT` copies memory into fresh `Bytes`.
+
+This is the correct behavior for the initial implementation.
+
+### 5. Skip only memory expansion gas, never copy gas
+
+`RETURNDATACOPY` must still retain:
+
+- static gas `3` via `Instruction::new(..., 3)`
+- dynamic copy gas via `gas_params.copy_cost(len)`
+
+It must skip only the memory expansion charge that upstream `resize_memory` would normally record.
+
+### 6. Update memory bookkeeping even when memory gas is skipped
+
+If memory expansion gas is skipped, the handler must still update:
+
+- `gas.memory().words_num`
+- `gas.memory().expansion_cost`
+- the physical memory buffer length
+
+Use `MemoryGas::set_words_num(new_num_words, new_cost)` and then `memory.resize(new_num_words * 32)`.
+
+Do **not** call `gas.record_cost(delta)` in the PD-exempt path.
+
+### 7. Mirror upstream `memory_limit` behavior
+
+In the PD-exempt path, do not call internal `resize_memory_cold`, but do preserve the public `memory_limit` behavior:
+
+```rust
+#[cfg(feature = "memory_limit")]
+if interpreter.memory.limit_reached(offset, len) {
+    interpreter.halt_memory_limit_oog();
+    return false;
+}
+```
+
+This keeps the custom path aligned with upstream `resize_memory`.
+
+### 8. Make the PD precompile non-pure
+
+The PD precompile depends on:
+
+- `PdContext::read_access_list()`
+- shared chunk state
+- now also the thread-local provenance marker
+
+Therefore it is not pure and must not be cached by any engine path that wraps pure precompiles.
+
+Create it as a stateful dynamic precompile.
+
+Do not continue using the plain closure `.into()` conversion, because that marks it pure by default.
+
+## Determinism and Scoping Invariants
+
+These rules are consensus-critical. The implementation must preserve them exactly.
+
+### 1. The exemption is identity-based, not content-based
+
+The handler is allowed to skip memory expansion gas only when:
+
+- the current frame's `return_data.buffer()` points to the same live allocation as the stored PD marker, and
+- the lengths match.
+
+Do not compare bytes by value. Two different allocations with equal contents must not get the exemption.
+
+### 2. The live allocation must be kept alive until transaction cleanup
+
+The thread-local marker must own a `Bytes` clone so that:
+
+- the PD backing allocation cannot be freed immediately after the precompile returns
+- allocator address reuse cannot create a false positive during the same transaction
+
+This is the reason the marker is `Option<Bytes>` instead of `(ptr, len)`.
+
+### 3. The exemption is scoped to the current frame's current `return_data`
+
+The feature is intentionally narrow:
+
+- if frame `F` calls PD and then frame `F` executes `RETURNDATACOPY`, the exemption may apply
+- if frame `F` calls another contract and that contract returns freshly allocated bytes, the exemption must stop applying
+- an outer caller after a normal contract `RETURN`/`REVERT` must not inherit PD provenance automatically
+
+### 4. Thread-local state is transaction-scoped only
+
+The marker exists only to bridge:
+
+- the PD precompile closure, and
+- the custom `RETURNDATACOPY` handler
+
+within one synchronous EVM transaction execution on one thread.
+
+The scope guard in `transact_raw` is mandatory because it enforces:
+
+- clear on entry
+- clear on every early return path
+- clear on every normal exit path
+
+Do not move this marker into global process state, `PdContext`, or any shared cross-thread structure.
+
+### 5. Static opcode gas remains unchanged
+
+`RETURNDATACOPY` still has static gas `3`, because the replacement instruction is installed with:
+
+```rust
+Instruction::new(irys_returndatacopy::<...>, 3)
+```
+
+The handler must not manually re-charge that static gas. The handler is only responsible for:
+
+- dynamic copy gas
+- optional memory expansion gas
+- the copy itself
+
+---
+
+## File Changes
 
 ### New Files
 
 | File | Responsibility |
 |------|---------------|
 | `crates/irys-reth/src/instructions/mod.rs` | Module root for custom opcode handlers |
-| `crates/irys-reth/src/instructions/pd_return_marker.rs` | Thread-local PD return fingerprint: set, clear, check |
-| `crates/irys-reth/src/instructions/returndatacopy.rs` | Custom `RETURNDATACOPY` (0x3E) handler with PD gas exemption |
-| `crates/irys-reth/src/precompiles/pd/provider.rs` | `IrysPdPrecompileProvider` — wraps `PrecompilesMap`, records PD fingerprint on success |
+| `crates/irys-reth/src/instructions/pd_return_marker.rs` | Thread-local owned-`Bytes` marker plus scope guard |
+| `crates/irys-reth/src/instructions/returndatacopy.rs` | PD-aware `RETURNDATACOPY` replacement |
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `crates/irys-reth/src/lib.rs` | Add `pub mod instructions;` |
-| `crates/irys-reth/src/precompiles/pd/mod.rs` | Add `pub mod provider;` |
-| `crates/irys-reth/src/evm.rs` | Change `type Precompiles` to `IrysPdPrecompileProvider`; insert custom RETURNDATACOPY in `create_evm`/`create_evm_with_inspector`; clear fingerprint in `transact_raw` |
+| `crates/irys-reth/src/lib.rs` | Add `mod instructions;` |
+| `crates/irys-reth/src/evm.rs` | Keep `PrecompilesMap`; install custom instruction when Sprite is active; add clear-on-entry/drop guard in `transact_raw` |
+| `crates/irys-reth/src/precompiles/pd/precompile.rs` | Mark PD precompile stateful; clear/set thread-local marker inside the precompile closure |
+
+### Files Explicitly Not Needed
+
+Do **not** create:
+
+- `crates/irys-reth/src/precompiles/pd/provider.rs`
+- any custom `PrecompileProvider` wrapper type
+- any `PdContext` field for the fingerprint
 
 ---
 
-## Key Design Decision: Thread-Local for Fingerprint Bridging
-
-The custom `RETURNDATACOPY` handler is a **bare function pointer** (`fn(InstructionContext<'_, H, W>)`) — it cannot capture runtime state. The `PrecompileProvider` wrapper knows when PD succeeds but runs in a different call path than the opcode handler. A **thread-local `Cell<(usize, usize)>`** bridges them:
-
-- **Writer**: `IrysPdPrecompileProvider::run()` — sets `(data_ptr, data_len)` after PD success
-- **Reader**: `irys_returndatacopy()` — compares current `return_data.buffer()` pointer/len against stored fingerprint
-- **Clearer**: `IrysEvm::transact_raw()` — resets to `(0, 0)` before each transaction
-
-This is safe because EVM execution is single-threaded per EVM instance. The fingerprint uses `Bytes::as_ptr()` + `Bytes::len()` — since `Bytes` is reference-counted, the pointer is stable as long as the same allocation flows through `set_buffer`. When a non-PD CALL replaces `return_data`, the new `Bytes` has a different pointer, causing a fingerprint mismatch.
-
-**Why not `Arc<AtomicU64>` on `PdContext` (as the spec suggests)?** The spec's Section 4.3 recommends storing the fingerprint on `PdContext`. However, `PdContext` is stored on `IrysEvm`, not on the revm `Context` struct. The opcode handler receives `InstructionContext<'_, H, W>` where `H` implements `Host` — the `Host` trait does not expose `PdContext`. Since the handler is a bare function pointer (not a closure), it cannot capture `PdContext` at construction time. The thread-local is the pragmatic bridge that avoids changing revm's type parameters.
-
-**Nested return bubbling behavior:** The fingerprint approach allows gas exemptions to "bubble" through intermediate contracts that return PD bytes unchanged (e.g., Contract A calls Contract B, B calls PD, B returns PD bytes to A — A would match the fingerprint). This differs from the spec's Section 5.3 intent ("direct caller only") but matches the spec's Section 4.7 / Open Question 3 analysis. This is accepted as a feature: it benefits proxy/library patterns like DELEGATECALL-through-library without adding complexity. If stricter scoping is needed later, it can be added by comparing call depth or using per-frame markers.
-
----
-
-## Task 1: PD Return Fingerprint Marker
+## Task 1: Thread-Local PD Return Marker
 
 **Files:**
+
 - Create: `crates/irys-reth/src/instructions/mod.rs`
 - Create: `crates/irys-reth/src/instructions/pd_return_marker.rs`
-- Modify: `crates/irys-reth/src/lib.rs` (add module declaration)
+- Modify: `crates/irys-reth/src/lib.rs`
 
-### Steps
+### Design requirements
 
-- [ ] **Step 1: Write unit tests for fingerprint marker**
+The thread-local must:
 
-Create `crates/irys-reth/src/instructions/pd_return_marker.rs` with tests first:
+- store `Option<alloy_primitives::Bytes>`
+- keep the allocation alive
+- be clearable explicitly
+- support a RAII scope guard for transaction boundaries
+- treat empty bytes as "no marker"
+
+### Required public surface
+
+Implement exactly this module-level API:
 
 ```rust
-//! Thread-local PD return data fingerprint marker.
-//!
-//! Bridges the `PrecompileProvider` (which knows when PD succeeds) and the custom
-//! `RETURNDATACOPY` handler (which is a bare function pointer and cannot capture state).
-//!
-//! **Why thread-local instead of a field on `PdContext`?**
-//! `Instruction::new` takes `fn(InstructionContext<'_, H, W>)` — a bare function pointer,
-//! not a closure. The handler cannot capture `PdContext` or any runtime state. The `Host`
-//! trait (accessible via `context.host`) does not expose `PdContext` either — `PdContext`
-//! lives on `IrysEvm`, not on revm's `Context` struct. A thread-local is the pragmatic
-//! bridge: zero overhead, deterministic (EVM execution is single-threaded per instance),
-//! and avoids changing revm's type parameters.
-//!
-//! See design spec Section 4.5 for the function pointer constraint analysis.
+pub(crate) struct PdReturnMarkerScope;
 
-use std::cell::Cell;
+impl PdReturnMarkerScope {
+    pub(crate) fn new() -> Self;
+}
+
+impl Drop for PdReturnMarkerScope {
+    fn drop(&mut self);
+}
+
+pub(crate) fn clear_pd_return_marker();
+pub(crate) fn set_pd_return_marker(bytes: &Bytes);
+pub(crate) fn is_current_pd_return_marker(bytes: &Bytes) -> bool;
+```
+
+### Required semantics
+
+#### `PdReturnMarkerScope::new`
+
+- clears the marker immediately
+- returns a zero-sized scope guard
+
+#### `Drop for PdReturnMarkerScope`
+
+- clears the marker again
+
+#### `set_pd_return_marker`
+
+- if `bytes.is_empty()`, clear instead of storing
+- otherwise store `Some(bytes.clone())`
+
+#### `is_current_pd_return_marker`
+
+- return `false` for empty input
+- return `true` only if:
+  - thread-local holds `Some(stored)`, and
+  - `stored.len() == bytes.len()`, and
+  - `stored.as_ptr() == bytes.as_ptr()`
+
+Do not compare contents. The comparison is identity-based, not equality-based.
+
+### Recommended implementation
+
+```rust
+use std::cell::RefCell;
+
+use alloy_primitives::Bytes;
 
 thread_local! {
-    /// Fingerprint `(data_ptr, data_len)` of the last successful PD precompile return.
-    /// `(0, 0)` means "no PD return data recorded".
-    static PD_RETURN_FINGERPRINT: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static LAST_PD_RETURN: RefCell<Option<Bytes>> = RefCell::new(None);
 }
 
-/// Record the fingerprint of PD return data.
-/// Called by `IrysPdPrecompileProvider` after a successful PD precompile execution.
-pub(crate) fn set_pd_fingerprint(data: &[u8]) {
-    let fingerprint = (data.as_ptr() as usize, data.len());
-    PD_RETURN_FINGERPRINT.set(fingerprint);
+pub(crate) struct PdReturnMarkerScope;
+
+impl PdReturnMarkerScope {
+    pub(crate) fn new() -> Self {
+        clear_pd_return_marker();
+        Self
+    }
 }
 
-/// Clear the PD return fingerprint. Called in `transact_raw` before each transaction.
-pub(crate) fn clear_pd_fingerprint() {
-    PD_RETURN_FINGERPRINT.set((0, 0));
+impl Drop for PdReturnMarkerScope {
+    fn drop(&mut self) {
+        clear_pd_return_marker();
+    }
 }
 
-/// Check whether the given data matches the recorded PD return fingerprint.
-/// Returns `true` if the data pointer AND length match the recorded PD output.
-pub(crate) fn is_pd_return_data(data: &[u8]) -> bool {
-    let current = (data.as_ptr() as usize, data.len());
-    let recorded = PD_RETURN_FINGERPRINT.get();
-    // Both must be non-zero and match
-    recorded != (0, 0) && current == recorded
+pub(crate) fn clear_pd_return_marker() {
+    LAST_PD_RETURN.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_no_fingerprint_by_default() {
-        clear_pd_fingerprint();
-        let data = vec![1u8, 2, 3];
-        assert!(!is_pd_return_data(&data));
+pub(crate) fn set_pd_return_marker(bytes: &Bytes) {
+    if bytes.is_empty() {
+        clear_pd_return_marker();
+        return;
     }
 
-    #[test]
-    fn test_set_and_check_fingerprint() {
-        let data = vec![1u8, 2, 3, 4, 5];
-        set_pd_fingerprint(&data);
-        assert!(is_pd_return_data(&data));
+    LAST_PD_RETURN.with(|slot| {
+        *slot.borrow_mut() = Some(bytes.clone());
+    });
+}
+
+pub(crate) fn is_current_pd_return_marker(bytes: &Bytes) -> bool {
+    if bytes.is_empty() {
+        return false;
     }
 
-    #[test]
-    fn test_different_data_does_not_match() {
-        let pd_data = vec![1u8, 2, 3];
-        set_pd_fingerprint(&pd_data);
-
-        let other_data = vec![1u8, 2, 3]; // same content, different allocation
-        assert!(!is_pd_return_data(&other_data));
-    }
-
-    #[test]
-    fn test_clear_fingerprint() {
-        let data = vec![1u8, 2, 3];
-        set_pd_fingerprint(&data);
-        assert!(is_pd_return_data(&data));
-
-        clear_pd_fingerprint();
-        assert!(!is_pd_return_data(&data));
-    }
-
-    #[test]
-    fn test_empty_data_does_not_match_cleared() {
-        clear_pd_fingerprint();
-        let empty: &[u8] = &[];
-        assert!(!is_pd_return_data(empty));
-    }
-
-    #[test]
-    fn test_slice_of_same_allocation_matches() {
-        // Bytes::slice() reuses the same backing allocation
-        let data = vec![0u8; 1024];
-        set_pd_fingerprint(&data);
-        // Same pointer and length → match
-        assert!(is_pd_return_data(&data));
-    }
-
-    #[test]
-    fn test_different_length_does_not_match() {
-        let data = vec![0u8; 1024];
-        set_pd_fingerprint(&data);
-        // Sub-slice has same pointer but different length
-        assert!(!is_pd_return_data(&data[..512]));
-    }
-
-    #[test]
-    fn test_overwrite_fingerprint() {
-        let data1 = vec![1u8; 100];
-        let data2 = vec![2u8; 200];
-        set_pd_fingerprint(&data1);
-        assert!(is_pd_return_data(&data1));
-
-        set_pd_fingerprint(&data2);
-        assert!(!is_pd_return_data(&data1));
-        assert!(is_pd_return_data(&data2));
-    }
+    LAST_PD_RETURN.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|stored| {
+            stored.len() == bytes.len() && stored.as_ptr() == bytes.as_ptr()
+        })
+    })
 }
 ```
 
-- [ ] **Step 2: Create module root**
+### Tests to add in `pd_return_marker.rs`
 
-Create `crates/irys-reth/src/instructions/mod.rs`:
+- default state is clear
+- setting marker makes the same `Bytes` match
+- cloned `Bytes` sharing the same allocation also matches
+- different allocation with same contents does not match
+- clear removes the match
+- empty bytes are never considered PD marker data
+- scope guard clears on creation
+- scope guard clears on drop
+- stale allocator reuse cannot be observed through the public API because the stored clone keeps the allocation alive
+
+### `instructions/mod.rs`
+
+Create:
 
 ```rust
-//! Custom EVM opcode handlers for Irys.
-//!
-//! Contains the PD-aware `RETURNDATACOPY` replacement that skips memory expansion
-//! gas for return data originating from the PD precompile.
-
 pub(crate) mod pd_return_marker;
 pub(crate) mod returndatacopy;
 ```
 
-- [ ] **Step 3: Add module to lib.rs**
+### `lib.rs`
 
-In `crates/irys-reth/src/lib.rs`, add after the existing module declarations (around line 50, near the other `use` statements at the top of the file — find the section where modules are declared):
+Add:
 
 ```rust
 mod instructions;
 ```
 
-Note: The module declarations in `lib.rs` are implicit (via `mod evm`, `mod precompiles`, etc. in the `use` / module structure). Look for where `mod` statements appear and add `mod instructions;` there. If modules are organized via directory convention, just creating the `instructions/mod.rs` file is sufficient since `lib.rs` references `evm` via `use` — check the actual module pattern.
-
-Actually, `lib.rs` uses `use crate::...` imports. Check if there's an explicit `mod evm;` or if it's auto-discovered. Search for `mod evm` or `mod precompiles` in `lib.rs`. If they're explicit, add `mod instructions;` alongside them. If they're directory-convention, the new directory is auto-discovered.
-
-- [ ] **Step 4: Run the tests**
-
-Run: `cargo nextest run -p irys-reth pd_return_marker`
-
-Expected: All 8 tests PASS.
-
 ---
 
-## Task 2: Custom RETURNDATACOPY Opcode Handler
+## Task 2: Custom RETURNDATACOPY Handler
 
 **Files:**
+
 - Create: `crates/irys-reth/src/instructions/returndatacopy.rs`
 
-**Key references to read before implementing:**
-- revm's original `returndatacopy`: `~/.cargo/registry/src/*/revm-interpreter-32.0.0/src/instructions/system.rs:202-235`
-- `copy_cost_and_memory_resize`: same file, lines 250-265
-- `MemoryGas::set_words_num`: `~/.cargo/registry/src/*/revm-interpreter-32.0.0/src/gas.rs:197-201`
-- `resize_memory` / `resize_memory_cold`: `~/.cargo/registry/src/*/revm-interpreter-32.0.0/src/interpreter/shared_memory.rs:566-606`
-- `GasParams::memory_cost`: `~/.cargo/registry/src/*/revm-context-interface-14.0.0/src/cfg/gas_params.rs:525-533`
-- `GasParams::copy_cost`: same file, lines 619-621
-- Macros: `~/.cargo/registry/src/*/revm-interpreter-32.0.0/src/instructions/macros.rs` (for `check!`, `popn!`, `gas!`, `as_usize_or_fail!`, `as_usize_saturated!`, `resize_memory!`)
+### Critical implementation rules
 
-### Steps
+1. The handler must be a plain function pointer compatible with `Instruction::new`.
+2. Do **not** assume revm macros are available through the existing `revm` dependency.
+3. Implement the logic with ordinary Rust and public `revm` APIs.
+4. Preserve upstream `RETURNDATACOPY` ordering exactly.
+5. Use `Interpreter::resize_memory(...)` for the normal path.
+6. Use a dedicated helper for the no-charge PD-exempt path.
+7. Keep the instruction's static gas at `3`; do not charge it inside the handler body.
 
-- [ ] **Step 1: Write the custom handler (stub with TODO)**
+### Required imports
 
-Create `crates/irys-reth/src/instructions/returndatacopy.rs`:
+Use these exact import families:
 
 ```rust
-//! PD-aware RETURNDATACOPY (0x3E) opcode handler.
-//!
-//! Reimplements the standard `returndatacopy` to skip memory expansion gas
-//! when the return data buffer contains PD precompile output. Copy cost
-//! (3 gas/word) is always charged. Memory bookkeeping (highwater mark)
-//! is always updated to keep subsequent memory ops correct.
-
-use revm::context_interface::Host;
+use revm::context_interface::{cfg::GasParams, Host};
 use revm::interpreter::{
-    InstructionContext, InstructionResult, InterpreterTypes,
-    interpreter::num_words,
+    num_words, InstructionContext, InstructionResult, Interpreter, InterpreterTypes,
 };
+use revm::interpreter::interpreter_types::{MemoryTr, ReturnData, RuntimeFlag, StackTr};
+use revm::primitives::{hardfork::SpecId, U256};
+```
 
-use super::pd_return_marker::is_pd_return_data;
+If import resolution is cleaner in the final code, `Host` may also be imported from `revm::interpreter`, because revm re-exports it there. Use one path consistently.
 
-/// Custom RETURNDATACOPY that skips memory expansion gas for PD return data.
-///
-/// This is a **bare function** (not a closure) — required by `Instruction::new`.
-/// It accesses the PD marker via the thread-local in `pd_return_marker`.
-///
-/// The handler reimplements the full `returndatacopy` body because
-/// `copy_cost_and_memory_resize` charges copy gas and memory expansion
-/// atomically via macros — we cannot compose from existing helpers.
-pub fn irys_returndatacopy<WIRE: InterpreterTypes, H: Host + ?Sized>(
-    context: InstructionContext<'_, H, WIRE>,
+### Helper functions to implement locally
+
+Implement small local helpers instead of using `check!`, `popn!`, `gas!`, `as_usize_or_fail!`, or `resize_memory!`.
+
+#### `ensure_byzantium`
+
+```rust
+fn ensure_byzantium<W: InterpreterTypes>(interpreter: &mut Interpreter<W>) -> bool {
+    if !interpreter
+        .runtime_flag
+        .spec_id()
+        .is_enabled_in(SpecId::BYZANTIUM)
+    {
+        interpreter.halt_not_activated();
+        return false;
+    }
+    true
+}
+```
+
+#### `pop3_or_underflow`
+
+```rust
+fn pop3_or_underflow<W: InterpreterTypes>(
+    interpreter: &mut Interpreter<W>,
+) -> Option<[U256; 3]> {
+    let popped = interpreter.stack.popn::<3>();
+    if popped.is_none() {
+        interpreter.halt_underflow();
+    }
+    popped
+}
+```
+
+#### `u256_to_usize_or_fail`
+
+Use the exact semantics of revm's `as_usize_or_fail!` macro:
+
+```rust
+fn u256_to_usize_or_fail<W: InterpreterTypes>(
+    interpreter: &mut Interpreter<W>,
+    value: U256,
+) -> Option<usize> {
+    let limbs = value.as_limbs();
+    if (limbs[0] > usize::MAX as u64) || (limbs[1] != 0) || (limbs[2] != 0) || (limbs[3] != 0) {
+        interpreter.halt(InstructionResult::InvalidOperandOOG);
+        return None;
+    }
+    Some(limbs[0] as usize)
+}
+```
+
+#### `u256_to_usize_saturated`
+
+Use the exact semantics of revm's `as_usize_saturated!` macro:
+
+```rust
+fn u256_to_usize_saturated(value: U256) -> usize {
+    let limbs = value.as_limbs();
+    let as_u64 = if (limbs[1] == 0) & (limbs[2] == 0) & (limbs[3] == 0) {
+        limbs[0]
+    } else {
+        u64::MAX
+    };
+    usize::try_from(as_u64).unwrap_or(usize::MAX)
+}
+```
+
+#### `charge_cost_or_oog`
+
+```rust
+fn charge_cost_or_oog<W: InterpreterTypes>(
+    interpreter: &mut Interpreter<W>,
+    cost: u64,
+) -> bool {
+    if !interpreter.gas.record_cost(cost) {
+        interpreter.halt_oog();
+        return false;
+    }
+    true
+}
+```
+
+#### `resize_memory_without_gas`
+
+This helper is the core of the feature.
+
+Requirements:
+
+- preserve `memory_limit` behavior under the feature gate
+- compute `new_num_words` exactly as upstream
+- update `MemoryGas` with `set_words_num`
+- resize the memory buffer
+- do **not** call `gas.record_cost`
+
+Recommended implementation:
+
+```rust
+fn resize_memory_without_gas<W: InterpreterTypes>(
+    interpreter: &mut Interpreter<W>,
+    gas_params: &GasParams,
+    offset: usize,
+    len: usize,
+) -> bool {
+    #[cfg(feature = "memory_limit")]
+    if interpreter.memory.limit_reached(offset, len) {
+        interpreter.halt_memory_limit_oog();
+        return false;
+    }
+
+    let new_num_words = num_words(offset.saturating_add(len));
+    if new_num_words > interpreter.gas.memory().words_num {
+        let new_cost = gas_params.memory_cost(new_num_words);
+        let _delta = interpreter
+            .gas
+            .memory_mut()
+            .set_words_num(new_num_words, new_cost)
+            .expect("new_num_words > current words_num implies Some(delta)");
+
+        let _ = interpreter.memory.resize(new_num_words * 32);
+    }
+
+    true
+}
+```
+
+This helper must intentionally mirror upstream `resize_memory` semantics except for one change:
+
+- upstream charges `gas.record_cost(delta)`
+- this helper must update memory bookkeeping and memory length without calling `gas.record_cost`
+
+### Handler body
+
+Implement:
+
+```rust
+pub fn irys_returndatacopy<W: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, W>,
+)
+```
+
+Use this exact control flow:
+
+1. `ensure_byzantium`
+2. pop `[memory_offset, offset, len]`
+3. convert `len` with `u256_to_usize_or_fail`
+4. convert `data_offset` with `u256_to_usize_saturated`
+5. bounds-check `data_offset.saturating_add(len) > return_data.buffer().len()`
+6. charge `gas_params.copy_cost(len)`
+7. if `len == 0`, return immediately
+8. convert `memory_offset` with `u256_to_usize_or_fail`
+9. if `is_current_pd_return_marker(return_data.buffer())`:
+   - call `resize_memory_without_gas`
+10. else:
+   - call `context.interpreter.resize_memory(gas_params, memory_offset, len)`
+11. copy bytes with `memory.set_data(...)`
+
+Important: step 9 happens only after copy gas and after the zero-length fast path. That matches upstream behavior and avoids broadening the exemption surface.
+
+### Exact code skeleton
+
+```rust
+use crate::instructions::pd_return_marker::is_current_pd_return_marker;
+
+pub fn irys_returndatacopy<W: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, W>,
 ) {
-    // 1. Spec gate: RETURNDATACOPY requires Byzantium
-    check!(context.interpreter, BYZANTIUM);
+    if !ensure_byzantium(context.interpreter) {
+        return;
+    }
 
-    // 2. Pop stack: [memory_offset, offset, len]
-    popn!([memory_offset, offset, len], context.interpreter);
+    let Some([memory_offset, offset, len_word]) = pop3_or_underflow(context.interpreter) else {
+        return;
+    };
 
-    let len = as_usize_or_fail!(context.interpreter, len);
-    let data_offset = as_usize_saturated!(offset);
+    let Some(len) = u256_to_usize_or_fail(context.interpreter, len_word) else {
+        return;
+    };
+    let data_offset = u256_to_usize_saturated(offset);
 
-    // 3. Bounds-check against return data buffer
     let data_end = data_offset.saturating_add(len);
     if data_end > context.interpreter.return_data.buffer().len() {
         context.interpreter.halt(InstructionResult::OutOfOffset);
         return;
     }
 
-    // 4. Always charge copy cost (3 gas/word), even for PD data
     let gas_params = context.host.gas_params();
-    gas!(context.interpreter, gas_params.copy_cost(len));
+    if !charge_cost_or_oog(context.interpreter, gas_params.copy_cost(len)) {
+        return;
+    }
 
-    // 5. Early return for zero-length copy
     if len == 0 {
         return;
     }
 
-    // 6. Convert memory_offset to usize
-    let memory_offset = as_usize_or_fail!(context.interpreter, memory_offset);
+    let Some(memory_offset) = u256_to_usize_or_fail(context.interpreter, memory_offset) else {
+        return;
+    };
 
-    // 7. Check if this is PD return data
-    let is_pd = is_pd_return_data(context.interpreter.return_data.buffer());
+    let is_pd = is_current_pd_return_marker(context.interpreter.return_data.buffer());
 
     if is_pd {
-        // PD path: resize memory and advance highwater mark WITHOUT charging gas
-        let new_num_words = num_words(memory_offset.saturating_add(len));
-        if new_num_words > context.interpreter.gas.memory().words_num {
-            let new_cost = gas_params.memory_cost(new_num_words);
-            // set_words_num is a safe method. It returns Some(delta) when
-            // new_num_words > current words_num, which the if-guard guarantees.
-            // We discard the delta — intentionally NOT calling gas.record_cost().
-            let _delta = context
-                .interpreter
-                .gas
-                .memory_mut()
-                .set_words_num(new_num_words, new_cost)
-                .expect("delta is Some when new_num_words > current words_num");
-            // Physically resize the memory buffer
-            context.interpreter.memory.resize(new_num_words * 32);
+        if !resize_memory_without_gas(context.interpreter, gas_params, memory_offset, len) {
+            return;
         }
-    } else {
-        // Standard path: charge memory expansion gas as normal
-        resize_memory!(context.interpreter, gas_params, memory_offset, len);
+    } else if !context
+        .interpreter
+        .resize_memory(gas_params, memory_offset, len)
+    {
+        return;
     }
 
-    // 8. Copy bytes from return data into memory
     context.interpreter.memory.set_data(
         memory_offset,
         data_offset,
@@ -326,690 +689,363 @@ pub fn irys_returndatacopy<WIRE: InterpreterTypes, H: Host + ?Sized>(
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+### Important edge-case notes
 
-Run: `cargo check -p irys-reth`
+- Keep bounds-check before copy gas, matching upstream.
+- Keep copy gas before zero-length early return, matching upstream.
+- Do not convert `memory_offset` before the `len == 0` early return.
+- Do not exempt memory for non-PD return data.
+- Do not clear the PD marker inside `RETURNDATACOPY`.
+- A zero-length `RETURNDATACOPY` must return before checking the marker. This is correct because no memory resize occurs.
+- Empty `return_data` must never match the marker, even if PD returned `Bytes::new()`.
 
-Expected: Compiles. If macros `check!`, `popn!`, `gas!`, `as_usize_or_fail!`, `as_usize_saturated!`, `resize_memory!` are not in scope, you need to import them. These macros are defined in `revm-interpreter/src/instructions/macros.rs` and are typically available via `use revm::interpreter::*` or need explicit macro imports. Check how the original `returndatacopy` in revm-interpreter accesses them — they may be `#[macro_export]` or module-scoped.
+### Tests to add for the handler
 
-**Likely fix needed:** The macros (`check!`, `popn!`, `gas!`, `as_usize_or_fail!`, `as_usize_saturated!`, `resize_memory!`) are defined in `revm_interpreter::instructions::macros` and are typically exported via `#[macro_use]` or `pub(crate)`. Since we're outside the revm-interpreter crate, we may not have access. Check if revm re-exports them:
-- Look for `revm::interpreter::instructions::*` or `revm_interpreter::instructions::*`
-- If macros aren't exported, **reimplement the logic inline** without macros. Each macro is small:
-  - `check!(interp, BYZANTIUM)` → `if !interp.runtime_flag.spec_id().is_enabled_in(SpecId::BYZANTIUM) { interp.halt(InstructionResult::NotActivated); return; }`
-  - `popn!([a, b, c], interp)` → `let Some([a, b, c]) = interp.stack.popn() else { interp.halt(InstructionResult::StackUnderflow); return; };`
-  - `gas!(interp, cost)` → `if !interp.gas.record_cost(cost) { interp.halt(InstructionResult::OutOfGas); return; }`
-  - `as_usize_or_fail!(interp, val)` → `let val = val.as_limbs(); if val[1] != 0 || val[2] != 0 || val[3] != 0 { interp.halt(InstructionResult::InvalidOperandOOG); return; } let val = val[0] as usize;` (or use `TryInto<usize>`)
-  - `as_usize_saturated!(val)` → `if val > U256::from(usize::MAX) { usize::MAX } else { val.as_limbs()[0] as usize }`
-  - `resize_memory!(interp, gas_params, offset, len)` → call `revm::interpreter::interpreter::resize_memory(&mut interp.gas, &mut interp.memory, gas_params, offset, len)` and handle the `Err` by halting
+Add unit and integration coverage for:
 
-The most likely path: reimplement without macros for clarity and to avoid dependency on internal macro exports. Read the macro source at `~/.cargo/registry/src/*/revm-interpreter-32.0.0/src/instructions/macros.rs` to verify exact semantics.
-
-- [ ] **Step 3: Run compile check again after fixing imports**
-
-Run: `cargo check -p irys-reth`
-
-Expected: Clean compile.
+- direct PD success with one `RETURNDATACOPY`
+- multiple `RETURNDATACOPY` instructions on the same PD return data
+- PD success followed by `MSTORE` in the same frame; `MSTORE` must charge against the updated highwater mark
+- non-PD `RETURNDATACOPY` remains unchanged
+- zero-length `RETURNDATACOPY` still charges copy gas semantics and does not resize memory
+- out-of-bounds copy still halts with `OutOfOffset`
+- invalid oversized operands still halt with `InvalidOperandOOG`
 
 ---
 
-## Task 3: Custom PrecompileProvider Wrapper
+## Task 3: Set/Clear the Marker in the PD Precompile
 
 **Files:**
-- Create: `crates/irys-reth/src/precompiles/pd/provider.rs`
-- Modify: `crates/irys-reth/src/precompiles/pd/mod.rs` (add `pub mod provider;`)
 
-**Key references:**
-- `PrecompileProvider` trait: `~/.cargo/registry/src/*/revm-handler-15.0.0/src/precompile_provider.rs:14-35`
-- `PrecompilesMap` impl: `~/.cargo/registry/src/*/alloy-evm-0.27.2/src/precompiles.rs:427-500`
-- `PD_PRECOMPILE_ADDRESS`: `irys_types::precompile::PD_PRECOMPILE_ADDRESS`
+- Modify: `crates/irys-reth/src/precompiles/pd/precompile.rs`
 
-### Steps
+### Required changes
 
-- [ ] **Step 1: Write the provider wrapper**
+#### A. Import the marker helpers
 
-Create `crates/irys-reth/src/precompiles/pd/provider.rs`:
+Add:
 
 ```rust
-//! Custom `PrecompileProvider` wrapper that records PD return data fingerprints.
-//!
-//! Wraps `PrecompilesMap` and intercepts successful PD precompile returns to
-//! record a fingerprint in the thread-local marker. The custom RETURNDATACOPY
-//! handler reads this marker to skip memory expansion gas.
-
-use alloy_primitives::Address;
-use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use reth_evm::precompiles::PrecompilesMap;
-use revm::context::BlockEnv;
-use revm::context::CfgEnv;
-use revm::context::TxEnv;
-use revm::context_interface::result::InstructionResult;
-use revm::handler::PrecompileProvider;
-use revm::interpreter::InterpreterResult;
-use revm::{Context, Database};
-use revm::context_interface::ContextTr;
-
-use crate::instructions::pd_return_marker::set_pd_fingerprint;
-
-/// Wraps `PrecompilesMap` to intercept PD precompile returns and record fingerprints.
-pub struct IrysPdPrecompileProvider {
-    inner: PrecompilesMap,
-}
-
-impl IrysPdPrecompileProvider {
-    /// Create a new wrapper around the given `PrecompilesMap`.
-    pub fn new(inner: PrecompilesMap) -> Self {
-        Self { inner }
-    }
-
-    /// Access the inner `PrecompilesMap` mutably (for registering precompiles).
-    pub fn inner_mut(&mut self) -> &mut PrecompilesMap {
-        &mut self.inner
-    }
-}
-
-impl<DB: Database> PrecompileProvider<Context<BlockEnv, TxEnv, CfgEnv, DB>>
-    for IrysPdPrecompileProvider
-{
-    type Output = InterpreterResult;
-
-    fn set_spec(
-        &mut self,
-        spec: <
-            <Context<BlockEnv, TxEnv, CfgEnv, DB> as ContextTr>::Cfg as revm::context_interface::Cfg
-        >::Spec,
-    ) -> bool {
-        self.inner.set_spec(spec)
-    }
-
-    fn run(
-        &mut self,
-        context: &mut Context<BlockEnv, TxEnv, CfgEnv, DB>,
-        inputs: &revm::interpreter::CallInputs,
-    ) -> Result<Option<Self::Output>, String> {
-        let is_pd = inputs.bytecode_address == PD_PRECOMPILE_ADDRESS;
-
-        let result = self.inner.run(context, inputs)?;
-
-        // If this was a successful PD precompile call, record the fingerprint
-        if is_pd {
-            if let Some(ref interpreter_result) = result {
-                if interpreter_result.result == InstructionResult::Return {
-                    set_pd_fingerprint(&interpreter_result.output);
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        self.inner.warm_addresses()
-    }
-
-    fn contains(&self, address: &Address) -> bool {
-        self.inner.contains(address)
-    }
-}
+use crate::instructions::pd_return_marker::{
+    clear_pd_return_marker,
+    set_pd_return_marker,
+};
 ```
 
-- [ ] **Step 2: Add module to pd/mod.rs**
+#### B. Make the PD precompile stateful
 
-In `crates/irys-reth/src/precompiles/pd/mod.rs`, add:
+The PD precompile must not remain pure.
+
+Change `pd_precompile(pd_context)` so that it returns a stateful dynamic precompile, for example:
 
 ```rust
-pub mod provider;
+DynPrecompile::new_stateful(
+    alloy_evm::precompiles::PrecompileId::Custom("irys_pd".into()),
+    move |input: PrecompileInput<'_>| -> PrecompileResult {
+        // body
+    },
+)
 ```
 
-- [ ] **Step 3: Verify it compiles**
+Using a stable custom ID string such as `"irys_pd"` is preferred so tests and debugging output are readable.
 
-Run: `cargo check -p irys-reth`
+Do not continue to rely on the plain closure `.into()` conversion, because that marks the precompile pure by default.
 
-Expected: Compiles. The generic impl over `DB: Database` should satisfy all callsites. If there are issues with the `Cfg::Spec` associated type, check the actual type path — it should be `SpecId` for the mainnet context. You may need to simplify the `set_spec` signature by using a concrete `SpecId` type.
+#### C. Clear the marker at the start of every PD invocation
+
+At the top of the closure body, before validation:
+
+```rust
+clear_pd_return_marker();
+```
+
+This ensures:
+
+- PD errors do not leave stale marker state
+- repeated PD calls only ever expose the latest successful output
+
+#### D. Set the marker only for successful, non-empty output
+
+After the output bytes and total gas have been computed, but before returning the final `PrecompileOutput`:
+
+```rust
+let output_bytes = res.bytes;
+
+if !output_bytes.is_empty() {
+    set_pd_return_marker(&output_bytes);
+}
+
+Ok(PrecompileOutput {
+    gas_used: total_gas,
+    gas_refunded: 0,
+    bytes: output_bytes,
+    reverted: false,
+})
+```
+
+Do not set the marker for:
+
+- empty output
+- any error path
+- reverted output
+
+The marker should be set from the exact `Bytes` that will be moved into `PrecompileOutput.bytes`. Do not clone into a temporary and then return a different `Bytes` object.
+
+### Important note about `PrecompileInput`
+
+The design spec previously stated that the precompile closure lacked access to EVM internals.
+That is not true for alloy-evm 0.27.2: `PrecompileInput<'_>` already includes `internals`.
+
+For this feature we still do **not** need to touch journal state from the PD precompile. The only required action is setting the thread-local marker from the successful output bytes.
+
+### `register_irys_precompiles_if_active`
+
+Keep the existing signature:
+
+```rust
+pub fn register_irys_precompiles_if_active(
+    precompiles: &mut PrecompilesMap,
+    spec: SpecId,
+    pd_context: PdContext,
+)
+```
+
+Do not change this to a wrapper type.
+
+Tests can inspect the registered precompile with:
+
+```rust
+let precompile = precompiles
+    .get(&PD_PRECOMPILE_ADDRESS)
+    .expect("PD precompile should be registered");
+assert!(!precompile.is_pure());
+```
 
 ---
 
-## Task 4: Integration into IrysEvmFactory and IrysEvm
+## Task 4: Integrate the Custom Instruction into `IrysEvmFactory`
 
 **Files:**
+
 - Modify: `crates/irys-reth/src/evm.rs`
 
-**This is the critical integration task.** Three changes:
+### Required changes
 
-1. Change `type Precompiles` from `PrecompilesMap` to `IrysPdPrecompileProvider`
-2. Insert custom RETURNDATACOPY when Sprite is active
-3. Clear fingerprint before each transaction in `transact_raw`
+#### A. Keep `type Precompiles = PrecompilesMap`
 
-### Steps
-
-- [ ] **Step 1: Add imports to evm.rs**
-
-Near the top of `crates/irys-reth/src/evm.rs`, add alongside the existing precompile imports:
+Do not change:
 
 ```rust
-use crate::instructions::pd_return_marker::clear_pd_fingerprint;
-use crate::instructions::returndatacopy::irys_returndatacopy;
-use crate::precompiles::pd::provider::IrysPdPrecompileProvider;
-```
-
-- [ ] **Step 2: Change `type Precompiles` in `EvmFactory` impl**
-
-In the `impl EvmFactory for IrysEvmFactory` block (~line 371), change:
-
-```rust
-// Before:
 type Precompiles = PrecompilesMap;
-
-// After:
-type Precompiles = IrysPdPrecompileProvider;
 ```
 
-- [ ] **Step 3: Update `create_evm` to wrap precompiles and insert instruction**
+#### B. Import the new instruction and marker scope
 
-In `create_evm` (~line 381-418), change the EVM construction to wrap `PrecompilesMap` in `IrysPdPrecompileProvider`, then insert the custom instruction:
+Add:
 
 ```rust
-fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
-    let spec_id = input.cfg_env.spec;
-    let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
-    let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
-    let min_pd_transaction_cost_usd = self
-        .hardfork_config
-        .min_pd_transaction_cost_at(block_timestamp)
-        .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
-
-    let pd_context = PdContext::new(self.chunk_config, self.chunk_data_index.clone());
-
-    let precompiles_map = PrecompilesMap::from_static(Precompiles::new(
-        PrecompileSpecId::from_spec_id(spec_id),
-    ));
-
-    let mut evm = IrysEvm::new(
-        revm::Context::mainnet()
-            .with_block(input.block_env)
-            .with_cfg(input.cfg_env)
-            .with_db(db)
-            .build_mainnet_with_inspector(NoOpInspector {})
-            .with_precompiles(IrysPdPrecompileProvider::new(precompiles_map)),
-        false,
-        pd_context,
-        is_sprite_active,
-        min_pd_transaction_cost_usd,
-    );
-
-    if is_sprite_active {
-        let pd_context = evm.pd_context().clone();
-        register_irys_precompiles_if_active(
-            evm.precompiles_mut().inner_mut(),
-            spec_id,
-            pd_context,
-        );
-
-        // Replace RETURNDATACOPY with PD-aware version that skips memory expansion gas
-        evm.inner.instruction.insert_instruction(
-            0x3E, // RETURNDATACOPY opcode
-            revm::interpreter::Instruction::new(
-                irys_returndatacopy::<
-                    revm::interpreter::interpreter::EthInterpreter,
-                    revm::context::Context<
-                        revm::context::BlockEnv,
-                        revm::context::TxEnv,
-                        revm::context::CfgEnv,
-                        DB,
-                    >,
-                >,
-                3, // static_gas = 3 (same as standard RETURNDATACOPY)
-            ),
-        );
-    }
-
-    evm
-}
+use crate::instructions::pd_return_marker::PdReturnMarkerScope;
+use crate::instructions::returndatacopy::irys_returndatacopy;
+use revm::bytecode::opcode::RETURNDATACOPY;
+use revm::interpreter::Instruction;
 ```
 
-**Important type annotation note:** The `irys_returndatacopy` function is generic over `WIRE` and `H`. You must turbofish with the concrete types that match the EVM's interpreter and context. `WIRE` = `EthInterpreter`, `H` = `Context<BlockEnv, TxEnv, CfgEnv, DB>` (which is `EthEvmContext<DB>`). If the turbofish syntax is too verbose or doesn't compile, try:
+#### C. Install the custom instruction only when Sprite is active
+
+In both `create_evm` and `create_evm_with_inspector`:
+
+1. keep the existing PD precompile registration
+2. immediately after registration, replace opcode `RETURNDATACOPY`
+
+Recommended code shape:
 
 ```rust
-use revm::interpreter::interpreter::EthInterpreter;
-use reth_evm::eth::EthEvmContext;
+if is_sprite_active {
+    let pd_context = evm.pd_context().clone();
+    register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
 
-evm.inner.instruction.insert_instruction(
-    0x3E,
-    revm::interpreter::Instruction::new(
-        irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>,
-        3,
-    ),
-);
-```
-
-- [ ] **Step 4: Apply the same changes to `create_evm_with_inspector`**
-
-Mirror the changes from Step 3 in `create_evm_with_inspector` (~line 420-462). The pattern is identical — wrap `PrecompilesMap` in `IrysPdPrecompileProvider`, use `inner_mut()` for precompile registration, and insert the custom instruction.
-
-- [ ] **Step 5: Clear fingerprint in `transact_raw` before each transaction**
-
-In `IrysEvm::transact_raw` (~line 617), add the fingerprint clear at the very start of the method, before any transaction processing:
-
-```rust
-fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
-    // Clear PD return fingerprint from previous transaction to prevent cross-tx leakage
-    if self.is_sprite_active {
-        clear_pd_fingerprint();
-    }
-
-    // Reject blob-carrying transactions (EIP-4844) at execution time.
-    // ... existing code ...
-```
-
-- [ ] **Step 6: Verify it compiles**
-
-Run: `cargo check -p irys-reth`
-
-Expected: Clean compile. If there are type mismatch errors:
-- Check that `IrysPdPrecompileProvider` implements `PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>` for all `DB: Database`
-- Check that `with_precompiles()` accepts `IrysPdPrecompileProvider` — it should since the `RevmEvm` struct's `precompiles` field is generic
-- The `precompiles_mut()` method on `IrysEvm` returns `&mut Self::Precompiles` which is now `&mut IrysPdPrecompileProvider` — update callsites that expected `&mut PrecompilesMap` to use `.inner_mut()`
-
-- [ ] **Step 7: Run existing tests to verify no regressions**
-
-Run: `cargo nextest run -p irys-reth`
-
-Expected: All existing tests PASS. The wrapper is transparent — it delegates all calls and only adds fingerprint recording on PD success. Existing tests should see identical behavior.
-
----
-
-## Task 5: Integration Tests — Gas Exemption
-
-**Files:**
-- Modify: `crates/irys-reth/src/precompiles/pd/precompile.rs` (add tests to existing `#[cfg(test)] mod tests`)
-
-These tests verify the end-to-end gas behavior by executing PD transactions through the full EVM and checking that memory expansion gas is not charged.
-
-### Steps
-
-- [ ] **Step 1: Add gas comparison test — PD read should use less gas than memory expansion cost**
-
-Add to the existing test module in `precompile.rs`:
-
-```rust
-/// Verifies that a 256KB PD read does NOT pay quadratic memory expansion gas.
-/// Expected gas breakdown:
-///   - Intrinsic: 21,000
-///   - Cold account access: 2,600
-///   - PD base cost: 5,000
-///   - RETURNDATACOPY copy cost: 3 * ceil(256_000/32) = 24,000
-///   - Memory expansion: 0 (ELIMINATED)
-///   - Total: ~53K (not ~209K)
-#[test]
-fn test_pd_read_no_memory_expansion_gas() {
-    use alloy_eips::eip2930::{AccessList, AccessListItem};
-    use alloy_primitives::{B256, aliases::U200};
-    use irys_types::range_specifier::{
-        ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
-    };
-
-    let chunk_size: u64 = 256_000;
-    let chunk_data_index = test_chunk_data_index(1);
-    let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
-
-    let mut cfg_env = CfgEnv::default();
-    cfg_env.spec = SpecId::CANCUN;
-    cfg_env.chain_id = 1;
-
-    let block_env = BlockEnv {
-        gas_limit: 30_000_000,
-        basefee: 0,
-        ..Default::default()
-    };
-
-    let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
-
-    let chunk_range = ChunkRangeSpecifier {
-        partition_index: U200::ZERO,
-        offset: 0,
-        chunk_count: 1,
-    };
-    let byte_range = ByteRangeSpecifier {
-        index: 0,
-        chunk_offset: 0,
-        byte_offset: U18::ZERO,
-        length: U34::try_from(chunk_size).unwrap(),
-    };
-
-    let access_list = with_test_fees(AccessList(vec![AccessListItem {
-        address: PD_PRECOMPILE_ADDRESS,
-        storage_keys: vec![
-            B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-            B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-        ],
-    }]));
-
-    let input = Bytes::from(vec![0, 0]);
-    let tx = tx_env_default(input, access_list);
-
-    let result = evm.transact_raw(tx).unwrap();
-    assert!(result.result.is_success(), "PD transaction should succeed");
-
-    let gas_used = result.result.gas_used();
-
-    // Memory expansion gas for 256KB would be ~155,648 gas.
-    // With the elimination, total should be well under 100K.
-    // Without elimination, total would be ~209K.
-    assert!(
-        gas_used < 100_000,
-        "Gas used ({gas_used}) should be under 100K — memory expansion gas should be eliminated"
-    );
-
-    // Sanity check: gas should still cover intrinsic + cold access + base cost + copy cost
-    assert!(
-        gas_used >= 50_000,
-        "Gas used ({gas_used}) should be at least 50K (intrinsic + cold + base + copy)"
+    evm.inner.instruction.insert_instruction(
+        RETURNDATACOPY,
+        Instruction::new(
+            irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>,
+            3,
+        ),
     );
 }
 ```
 
-- [ ] **Step 2: Run the new test**
+Notes:
 
-Run: `cargo nextest run -p irys-reth test_pd_read_no_memory_expansion_gas`
+- `Instruction::new` is public.
+- `insert_instruction` is the correct extension point.
+- the instruction replacement should be gated by `is_sprite_active`
+- the hardfork gate is inclusive at the exact activation timestamp
+- in this repository, `EthInterpreter` is already imported from `revm::interpreter::interpreter::EthInterpreter` in `evm.rs`
+- keep the existing `register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context)` call and add the opcode replacement immediately after it
 
-Expected: PASS. Gas should be ~53K instead of ~209K.
+#### D. Clear marker state for every transaction using a scope guard
 
-- [ ] **Step 3: Add test — non-PD call still charges memory expansion gas**
+At the top of `transact_raw`, before any early returns:
 
 ```rust
-/// Verifies that a non-PD STATICCALL that returns data still charges
-/// normal memory expansion gas (the exemption is PD-specific).
-#[test]
-fn test_non_pd_call_still_charges_memory_expansion() {
-    // This test deploys a contract that returns a large byte array,
-    // calls it, and verifies gas includes memory expansion.
-    // The gas should be higher than the PD equivalent because
-    // memory expansion gas IS charged.
-    //
-    // Implementation: Use the existing PD test infrastructure but
-    // make a call to a non-PD address. The return data won't have
-    // the PD fingerprint, so normal gas applies.
-    //
-    // For a simpler approach: execute two PD reads —
-    // first a PD read (cheap), then verify that a subsequent
-    // non-PD operation using memory is correctly charged.
-    //
-    // TODO: Implement based on available test infrastructure.
-    // This may require deploying a test contract or using a different approach.
-}
+let _pd_return_marker_scope = PdReturnMarkerScope::new();
 ```
 
-Note: This test may be complex to implement with the current test harness (which runs bare transactions, not deployed contracts). Consider deferring to integration tests in `crates/chain/tests/` if contract deployment is needed. The key verification is that `is_pd_return_data` returns `false` for non-PD data, which is covered by the unit tests in Task 1.
+This must be placed before:
+
+- EIP-4844 rejection
+- shadow-tx handling
+- PD access-list parsing
+- `self.inner.transact(tx)`
+- `self.inner.inspect_tx(tx)`
+
+This guarantees:
+
+- clear on entry
+- clear on all normal returns
+- clear on all early returns
+
+This scope guard is the defense-in-depth fix for thread-local leakage. Keep it even though the PD precompile also clears on entry.
+
+### Do not add extra clear calls elsewhere unless required by tests
+
+With the scope guard in `transact_raw` and the clear-at-PD-entry behavior in the precompile, additional explicit end-of-function clears should not be necessary.
 
 ---
 
-## Task 6: Security & Exploit Tests
+## Task 5: Testing
 
-**Files:**
-- Modify: `crates/irys-reth/src/instructions/pd_return_marker.rs` (add cross-tx test)
-- Modify: `crates/irys-reth/src/precompiles/pd/precompile.rs` (add EVM-level exploit tests)
+This change must land with thorough tests. Do not treat the handler as complete until the tests below exist.
 
-### Steps
+### A. Marker unit tests
 
-- [ ] **Step 1: Cross-tx fingerprint isolation test**
+Add in `pd_return_marker.rs`:
 
-Add to the existing tests in `precompile.rs`:
+- `same_bytes_matches`
+- `cloned_bytes_matches`
+- `same_contents_different_allocation_does_not_match`
+- `empty_bytes_never_match`
+- `scope_guard_clears_on_entry_and_drop`
 
-```rust
-/// Two consecutive PD transactions on the same EVM instance must NOT
-/// leak the fingerprint from tx1 into tx2.
-#[test]
-fn test_cross_tx_fingerprint_isolation() {
-    use alloy_eips::eip2930::{AccessList, AccessListItem};
-    use alloy_primitives::{B256, aliases::U200};
-    use irys_types::range_specifier::{
-        ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
-    };
+### B. PD precompile tests
 
-    let chunk_data_index = test_chunk_data_index(1);
-    let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
+Extend existing tests in `crates/irys-reth/src/precompiles/pd/precompile.rs`:
 
-    let mut cfg_env = CfgEnv::default();
-    cfg_env.spec = SpecId::CANCUN;
-    cfg_env.chain_id = 1;
+- successful PD call sets marker
+- PD call with invalid input clears marker
+- PD call with missing access list clears marker
+- empty PD output leaves marker clear if such a path can be constructed
+- PD precompile is marked non-pure / stateful
 
-    let block_env = BlockEnv {
-        gas_limit: 30_000_000,
-        basefee: 0,
-        ..Default::default()
-    };
+If there is no direct helper to assert `is_pure() == false`, add a focused unit test that registers the precompile, fetches it from `PrecompilesMap`, and asserts the wrapped precompile is not pure.
 
-    let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
+### C. Custom RETURNDATACOPY integration tests
 
-    let chunk_range = ChunkRangeSpecifier {
-        partition_index: U200::ZERO,
-        offset: 0,
-        chunk_count: 1,
-    };
-    let byte_range = ByteRangeSpecifier {
-        index: 0,
-        chunk_offset: 0,
-        byte_offset: U18::ZERO,
-        length: U34::try_from(100).unwrap(),
-    };
+Add new integration-style tests that execute bytecode directly or through a tiny test contract.
 
-    let access_list = with_test_fees(AccessList(vec![AccessListItem {
-        address: PD_PRECOMPILE_ADDRESS,
-        storage_keys: vec![
-            B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-            B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-        ],
-    }]));
+Required scenarios:
 
-    // Execute first PD transaction
-    let tx1 = tx_env_default(Bytes::from(vec![0, 0]), access_list.clone());
-    let result1 = evm.transact_raw(tx1).unwrap();
-    assert!(result1.result.is_success(), "tx1 should succeed");
+1. **Direct PD read**
+   - call PD
+   - `RETURNDATACOPY` into fresh memory
+   - verify gas is reduced relative to upstream behavior
 
-    // Execute second PD transaction — fingerprint should be cleared
-    let mut tx2 = tx_env_default(Bytes::from(vec![0, 0]), access_list);
-    tx2.nonce = 1; // different nonce
-    let result2 = evm.transact_raw(tx2).unwrap();
-    assert!(result2.result.is_success(), "tx2 should succeed");
+2. **Repeated copies in the same frame**
+   - call PD once
+   - issue multiple `RETURNDATACOPY` instructions
+   - all copies from that same live `return_data` should skip memory expansion gas
 
-    // Both should have similar gas (fingerprint didn't leak)
-    let gas_diff = (result1.result.gas_used() as i64 - result2.result.gas_used() as i64).unsigned_abs();
-    assert!(
-        gas_diff < 1000,
-        "Gas difference between consecutive PD txs should be minimal (got {gas_diff}), \
-         indicating no cross-tx fingerprint leakage"
-    );
-}
-```
+3. **Subsequent memory op charges correctly**
+   - PD read
+   - large `RETURNDATACOPY`
+   - then `MSTORE` or `CALLDATACOPY`
+   - verify later memory op charges relative to the updated highwater mark
 
-- [ ] **Step 2: Run exploit tests**
+4. **Non-PD path unchanged**
+   - regular contract return data copied with `RETURNDATACOPY`
+   - memory expansion gas must still be charged
 
-Run: `cargo nextest run -p irys-reth test_cross_tx_fingerprint_isolation`
+5. **Failed PD call does not exempt**
+   - failing PD precompile call
+   - `RETURNDATACOPY` on the resulting return data must not get the exemption
 
-Expected: PASS.
+6. **Direct caller only**
+   - contract A calls contract B
+   - B calls PD and returns the bytes
+   - A performs `RETURNDATACOPY`
+   - A must not receive the exemption, because B's `RETURN` creates a fresh `Bytes`
 
-- [ ] **Step 3: Add test — multiple RETURNDATACOPY on same PD data**
+7. **DELEGATECALL same-frame behavior**
+   - a DELEGATECALL/library frame calls PD
+   - that same delegatecall frame performs `RETURNDATACOPY`
+   - exemption should apply there
 
-Add to tests in `pd_return_marker.rs`:
+8. **CREATE / CREATE2 constructor behavior**
+   - constructor calls PD
+   - constructor `RETURNDATACOPY` can be exempt in its own frame
+   - parent frame after create should not inherit stale provenance
 
-```rust
-#[test]
-fn test_fingerprint_persists_across_multiple_reads() {
-    // Simulates multiple RETURNDATACOPY calls on the same PD return data.
-    // The fingerprint should remain valid (not cleared by reads).
-    let data = vec![42u8; 256_000];
-    set_pd_fingerprint(&data);
+9. **Two consecutive transactions on the same EVM**
+   - first tx uses PD successfully
+   - second tx uses non-PD return data
+   - second tx must not inherit the first tx marker
 
-    // Multiple checks should all return true
-    assert!(is_pd_return_data(&data));
-    assert!(is_pd_return_data(&data));
-    assert!(is_pd_return_data(&data));
-}
-```
+10. **Hardfork boundary**
+    - timestamp one second before Sprite activation: no opcode replacement effect
+    - timestamp exactly at Sprite activation: feature is active
 
-- [ ] **Step 4: Add test — zero-length data**
+11. **Return-data overwrite within one frame**
+    - PD call succeeds
+    - a later non-PD call overwrites `return_data`
+    - subsequent `RETURNDATACOPY` must no longer get the exemption
 
-Add to tests in `pd_return_marker.rs`:
+### D. Optional but recommended regression tests
 
-```rust
-#[test]
-fn test_zero_length_pd_data() {
-    // Zero-length PD return data: fingerprint is (ptr, 0).
-    // The clear state is (0, 0). A zero-length slice from a real allocation
-    // has a non-zero pointer, so it should NOT match the cleared state.
-    let data: Vec<u8> = Vec::new();
-    set_pd_fingerprint(&data);
-    // Empty data has ptr != 0 (Vec allocates), len = 0
-    // This should match since we set it
-    assert!(is_pd_return_data(&data));
-}
-```
-
-- [ ] **Step 5: Add EVM-level test — memory bookkeeping correctness after PD read**
-
-Add to `precompile.rs` test module. This test verifies that after a PD read skips memory expansion gas, the memory highwater mark is correctly advanced so that subsequent memory operations charge correctly:
-
-```rust
-/// After a PD read that skips memory expansion, the memory highwater mark
-/// must be correctly advanced. This test does two PD reads of different sizes:
-/// the first read (large) should set the highwater mark, and the second read
-/// (smaller, within the already-expanded region) should not trigger any
-/// additional memory expansion even in the non-PD path.
-///
-/// We verify this indirectly by checking that the gas used for two consecutive
-/// PD reads is roughly additive (no extra memory expansion gas on the second).
-#[test]
-fn test_pd_read_memory_bookkeeping() {
-    use alloy_eips::eip2930::{AccessList, AccessListItem};
-    use alloy_primitives::{B256, aliases::U200};
-    use irys_types::range_specifier::{
-        ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
-    };
-
-    // Single-chunk read: verify gas is consistent
-    let chunk_data_index = test_chunk_data_index(1);
-    let factory = IrysEvmFactory::new_for_testing(chunk_data_index);
-
-    let mut cfg_env = CfgEnv::default();
-    cfg_env.spec = SpecId::CANCUN;
-    cfg_env.chain_id = 1;
-    let block_env = BlockEnv {
-        gas_limit: 30_000_000,
-        basefee: 0,
-        ..Default::default()
-    };
-
-    let mut evm = factory.create_evm(test_db(), EvmEnv { cfg_env, block_env });
-
-    let chunk_range = ChunkRangeSpecifier {
-        partition_index: U200::ZERO,
-        offset: 0,
-        chunk_count: 1,
-    };
-    let byte_range = ByteRangeSpecifier {
-        index: 0,
-        chunk_offset: 0,
-        byte_offset: U18::ZERO,
-        length: U34::try_from(100).unwrap(),
-    };
-
-    let access_list = with_test_fees(AccessList(vec![AccessListItem {
-        address: PD_PRECOMPILE_ADDRESS,
-        storage_keys: vec![
-            B256::from(PdAccessListArg::ChunkRead(chunk_range).encode()),
-            B256::from(PdAccessListArg::ByteRead(byte_range).encode()),
-        ],
-    }]));
-
-    let tx = tx_env_default(Bytes::from(vec![0, 0]), access_list);
-    let result = evm.transact_raw(tx).unwrap();
-    assert!(
-        result.result.is_success(),
-        "PD read should succeed; verifies memory bookkeeping is not corrupt"
-    );
-}
-```
-
-- [ ] **Step 6: Run all tests**
-
-Run: `cargo nextest run -p irys-reth`
-
-Expected: All tests PASS.
-
-### Deferred Tests (Require Contract Deployment)
-
-The following tests from the design spec (Section 8) require deploying Solidity contracts that make nested calls. These cannot be implemented with the current bare-transaction test harness in `precompile.rs` and should be added as integration tests in `crates/chain/tests/` in a follow-up task:
-
-| Spec Test | Why Deferred |
-|-----------|-------------|
-| PD call -> normal CALL -> RETURNDATACOPY on non-PD data | Requires deployed contract making nested calls |
-| Recursive self-call after PD | Requires contract with recursive logic |
-| PD call in inner frame, RETURNDATACOPY in outer frame | Requires multi-contract interaction |
-| DELEGATECALL to library that calls PD | Requires proxy pattern contract deployment |
-| PD call -> revert -> RETURNDATACOPY on revert data | Requires try/catch contract logic |
-| Maximum memory allocation via PD reads | Requires contract loop, bounded by PdChunkBudget |
-| `eth_estimateGas` / `eth_call` | Requires RPC layer integration test |
-| Block production with mixed PD/non-PD txs | Requires `IrysNodeTest` harness |
-| Multi-node consensus agreement | Requires multi-node `IrysNodeTest` setup |
-
-The fingerprint-level unit tests (Task 1) cover the core correctness property (same allocation matches, different allocation doesn't). The EVM-level exploit tests require contract deployment infrastructure that is outside the scope of this initial implementation.
+- a very large PD read that previously paid large memory gas now succeeds with materially lower gas
+- `eth_call` / estimation path if there are existing harnesses
+- a path where PD returns data and then another non-PD call overwrites `return_data`; exemption must stop applying
 
 ---
 
-## Task 7: Final Verification
+## Acceptance Criteria
 
-- [ ] **Step 1: Run full crate checks**
+The implementation is complete only when all of the following are true:
 
-Run: `cargo fmt --all && cargo clippy --workspace --tests --all-targets`
-
-Fix any warnings or formatting issues.
-
-- [ ] **Step 2: Run the full test suite**
-
-Run: `cargo nextest run -p irys-reth`
-
-Expected: All tests PASS, no regressions.
-
-- [ ] **Step 3: Verify the gas numbers match the design spec**
-
-The design spec (Section 6) predicts:
-- 256KB PD read: ~53K gas (down from ~209K)
-- That's a 75% reduction
-
-Verify the `test_pd_read_no_memory_expansion_gas` test output matches this prediction. If the numbers are significantly different, investigate whether:
-- The Solidity contract calling convention adds overhead (our test is a direct CALL, not through a contract)
-- The access list gas costs affect the total
-- Copy cost calculation matches expectations
+- `IrysEvmFactory` still compiles with `type Precompiles = PrecompilesMap`
+- no custom `PrecompileProvider` wrapper exists
+- the PD precompile is registered as a stateful/non-pure dynamic precompile
+- the marker stores `Option<Bytes>`, not `(ptr, len)`
+- `transact_raw` clears marker state with a scope guard
+- `RETURNDATACOPY` is replaced only when Sprite is active
+- copy gas remains charged
+- static opcode gas remains `3`
+- memory expansion gas is skipped only for the current frame's live PD `return_data`
+- memory bookkeeping remains correct for subsequent memory ops
+- non-PD behavior is unchanged
+- hardfork activation is correct at the exact activation timestamp
 
 ---
 
-## Dependency Graph
+## Implementation Notes for the Next Agent
 
-```
-Task 1 (fingerprint marker)
-  ↓
-Task 2 (custom RETURNDATACOPY) ← depends on Task 1 for is_pd_return_data
-  ↓
-Task 3 (PrecompileProvider wrapper) ← depends on Task 1 for set_pd_fingerprint
-  ↓
-Task 4 (integration into EVM factory) ← depends on Tasks 2, 3
-  ↓
-Task 5 (integration tests) ← depends on Task 4
-  ↓
-Task 6 (security tests) ← depends on Task 4
-  ↓
-Task 7 (final verification) ← depends on all
-```
+- Read the upstream files again before coding:
+  - `revm-handler-15.0.0/src/instructions.rs`
+  - `revm-interpreter-32.0.0/src/instructions/system.rs`
+  - `revm-interpreter-32.0.0/src/interpreter/shared_memory.rs`
+  - `revm-interpreter-32.0.0/src/gas.rs`
+  - `alloy-evm-0.27.2/src/precompiles.rs`
 
-Tasks 2 and 3 are independent of each other (both depend only on Task 1) and can be done in parallel.
+- Do not reintroduce the provider-wrapper idea while implementing.
 
----
+- Do not use content equality for provenance.
+  Reason: that would exempt ABI-re-encoded or copied data and broaden the consensus surface.
 
-## Risk Notes
+- Do not use pointer identity without holding an owned clone alive in thread-local.
 
-1. **Macro availability**: The revm interpreter macros (`check!`, `popn!`, `gas!`, etc.) may not be exported for external crate use. Plan B is to inline their logic (each is 2-5 lines). This is the most likely implementation friction point.
+- Do not broaden the scope to "all data that originated from PD somewhere in the call tree".
+  Reason: upstream call/return paths allocate fresh `Bytes` in several places. The supported invariant is narrower and compile-time/runtime tractable.
 
-2. **`Bytes` pointer stability**: The fingerprint relies on `Bytes::as_ptr()` being stable across moves. This is guaranteed by the `bytes` crate's reference-counted design, but worth a defensive assertion in tests.
+- Do not mutate `PdContext` to carry the marker.
+  Reason: the marker is transaction-local execution state, not shared PD context.
 
-3. **`insert_instruction` type resolution**: The turbofish for `irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>` may need adjustment based on exact revm type aliases. If it doesn't compile, check what types `EthInstructions` is parameterized with in the `RevmEvm` struct.
-
-4. **`set_words_num` return value**: `MemoryGas::set_words_num` is a safe method that returns `Option<u64>`. The upstream `resize_memory_cold` uses `unsafe { .unwrap_unchecked() }` on the return value for performance. Our implementation uses `.expect()` instead since the if-guard guarantees `new_num_words > current words_num`, making the `Option` always `Some`. No `unsafe` is needed.
+- Do not trust the old design spec where it conflicts with this plan.

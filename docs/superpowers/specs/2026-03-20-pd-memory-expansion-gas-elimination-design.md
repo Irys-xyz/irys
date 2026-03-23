@@ -7,6 +7,10 @@
 **Priority**: Low (post-launch)
 **Status**: Design
 
+> Implementation note:
+> The implementation authority for this feature is `docs/superpowers/plans/2026-03-23-pd-memory-expansion-gas-elimination.md`.
+> In particular, the wrapper-based `PrecompileProvider` approach and raw pointer fingerprint described below are superseded by the implementation plan.
+
 ---
 
 ## 1. Problem Statement
