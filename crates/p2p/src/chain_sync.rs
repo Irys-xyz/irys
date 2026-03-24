@@ -2332,19 +2332,7 @@ mod tests {
             IrysAddress, IrysPeerId, NodeInfo, PeerAddress, PeerListItem, PeerScore, U256,
         };
         use irys_utils::circuit_breaker::CircuitBreakerConfig;
-        use rstest::rstest;
         use std::net::SocketAddr;
-
-        /// Scenarios for the three exit paths of `synced_peers_sorted_by_cumulative_diff`.
-        #[derive(Debug, Clone, Copy)]
-        enum Scenario {
-            /// At least one peer returns Ok with is_syncing = false.
-            SuccessNonSyncing,
-            /// All peers return is_syncing = true, exhausting the timeout.
-            AllPeersSyncing,
-            /// Mix of PeerSyncing and a network error triggers immediate failure.
-            MixedFailures,
-        }
 
         fn make_peer(byte: u8, addr: SocketAddr) -> PeerListItem {
             let mining_address = IrysAddress::repeat_byte(byte);
@@ -2364,12 +2352,7 @@ mod tests {
             }
         }
 
-        #[rstest]
-        #[case::success_non_syncing_peer(Scenario::SuccessNonSyncing)]
-        #[case::all_peers_syncing_timeout(Scenario::AllPeersSyncing)]
-        #[case::mixed_failures_immediate_error(Scenario::MixedFailures)]
-        #[tokio::test]
-        async fn exit_paths(#[case] scenario: Scenario) {
+        fn setup() -> (PeerList, GossipClient) {
             let peer_list = PeerList::test_mock().expect("test_mock peer list");
             let gossip_client = GossipClient::with_circuit_breaker_config(
                 Duration::from_secs(5),
@@ -2378,136 +2361,139 @@ mod tests {
                 CircuitBreakerConfig::testing(),
                 tokio::runtime::Handle::current(),
             );
+            (peer_list, gossip_client)
+        }
 
-            match scenario {
-                Scenario::SuccessNonSyncing => {
-                    // Two servers: one syncing, one not. The non-syncing peer
-                    // should appear in the returned BTreeMap.
-                    let server_syncing = FakeGossipServer::new();
-                    server_syncing.set_on_info_request(|| {
-                        GossipResponse::Accepted(NodeInfo {
-                            is_syncing: true,
-                            cumulative_difficulty: U256::from(10),
-                            ..NodeInfo::default()
-                        })
-                    });
+        /// Two servers: one syncing, one not. The non-syncing peer
+        /// should appear in the returned BTreeMap.
+        #[tokio::test]
+        async fn success_non_syncing_peer() {
+            let (peer_list, gossip_client) = setup();
 
-                    let server_ok = FakeGossipServer::new();
-                    server_ok.set_on_info_request(|| {
-                        GossipResponse::Accepted(NodeInfo {
-                            is_syncing: false,
-                            cumulative_difficulty: U256::from(42),
-                            ..NodeInfo::default()
-                        })
-                    });
+            let server_syncing = FakeGossipServer::new();
+            server_syncing.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(10),
+                    ..NodeInfo::default()
+                })
+            });
 
-                    let addr_syncing = server_syncing.spawn();
-                    let addr_ok = server_ok.spawn();
+            let server_ok = FakeGossipServer::new();
+            server_ok.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: false,
+                    cumulative_difficulty: U256::from(42),
+                    ..NodeInfo::default()
+                })
+            });
 
-                    let peer_syncing = make_peer(0x01, addr_syncing);
-                    let peer_ok = make_peer(0x02, addr_ok);
-                    let expected_peer_id = peer_ok.peer_id;
+            let addr_syncing = server_syncing.spawn();
+            let addr_ok = server_ok.spawn();
 
-                    peer_list.add_or_update_peer(peer_syncing, true);
-                    peer_list.add_or_update_peer(peer_ok, true);
+            let peer_syncing = make_peer(0x01, addr_syncing);
+            let peer_ok = make_peer(0x02, addr_ok);
+            let expected_peer_id = peer_ok.peer_id;
 
-                    let result =
-                        synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false)
-                            .await;
+            peer_list.add_or_update_peer(peer_syncing, true);
+            peer_list.add_or_update_peer(peer_ok, true);
 
-                    let map = result.expect("expected Ok(BTreeMap)");
-                    // Only the non-syncing peer should be present.
-                    assert_eq!(map.len(), 1, "expected exactly one difficulty bucket");
-                    let (difficulty, peers) = map.into_iter().next().unwrap();
-                    assert_eq!(difficulty, U256::from(42));
-                    assert_eq!(peers.len(), 1);
-                    assert_eq!(peers[0].0, expected_peer_id);
-                }
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
 
-                Scenario::AllPeersSyncing => {
-                    // Both peers report is_syncing = true. The function should
-                    // retry until SYNCED_PEER_DISCOVERY_TIMEOUT, then return
-                    // the "still syncing after timeout" error.
-                    let server1 = FakeGossipServer::new();
-                    server1.set_on_info_request(|| {
-                        GossipResponse::Accepted(NodeInfo {
-                            is_syncing: true,
-                            cumulative_difficulty: U256::from(5),
-                            ..NodeInfo::default()
-                        })
-                    });
-                    let server2 = FakeGossipServer::new();
-                    server2.set_on_info_request(|| {
-                        GossipResponse::Accepted(NodeInfo {
-                            is_syncing: true,
-                            cumulative_difficulty: U256::from(8),
-                            ..NodeInfo::default()
-                        })
-                    });
+            let map = result.expect("expected Ok(BTreeMap)");
+            assert_eq!(map.len(), 1, "expected exactly one difficulty bucket");
+            let (difficulty, peers) = map.into_iter().next().unwrap();
+            assert_eq!(difficulty, U256::from(42));
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].0, expected_peer_id);
+        }
 
-                    let addr1 = server1.spawn();
-                    let addr2 = server2.spawn();
+        /// Both peers report is_syncing = true. The function should
+        /// retry until SYNCED_PEER_DISCOVERY_TIMEOUT, then return
+        /// the "still syncing after timeout" error.
+        #[tokio::test]
+        async fn all_peers_syncing_timeout() {
+            let (peer_list, gossip_client) = setup();
 
-                    peer_list.add_or_update_peer(make_peer(0x10, addr1), true);
-                    peer_list.add_or_update_peer(make_peer(0x11, addr2), true);
+            let server1 = FakeGossipServer::new();
+            server1.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(5),
+                    ..NodeInfo::default()
+                })
+            });
+            let server2 = FakeGossipServer::new();
+            server2.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(8),
+                    ..NodeInfo::default()
+                })
+            });
 
-                    let result =
-                        synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false)
-                            .await;
+            let addr1 = server1.spawn();
+            let addr2 = server2.spawn();
 
-                    let err = result.expect_err("expected error when all peers are syncing");
-                    let msg = format!("{err}");
-                    assert!(
-                        msg.contains("All peers are still syncing after timeout"),
-                        "unexpected error message: {msg}"
-                    );
-                    assert!(
-                        matches!(err, ChainSyncError::Network(_)),
-                        "expected ChainSyncError::Network, got: {err:?}"
-                    );
-                }
+            peer_list.add_or_update_peer(make_peer(0x10, addr1), true);
+            peer_list.add_or_update_peer(make_peer(0x11, addr2), true);
 
-                Scenario::MixedFailures => {
-                    // One peer returns is_syncing = true, the other causes a
-                    // network error (via Rejected response). The function
-                    // should fail immediately (no retry).
-                    let server_syncing = FakeGossipServer::new();
-                    server_syncing.set_on_info_request(|| {
-                        GossipResponse::Accepted(NodeInfo {
-                            is_syncing: true,
-                            cumulative_difficulty: U256::from(1),
-                            ..NodeInfo::default()
-                        })
-                    });
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
 
-                    let server_error = FakeGossipServer::new();
-                    server_error.set_on_info_request(|| {
-                        GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
-                    });
+            let err = result.expect_err("expected error when all peers are syncing");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("All peers are still syncing after timeout"),
+                "unexpected error message: {msg}"
+            );
+            assert!(
+                matches!(err, ChainSyncError::Network(_)),
+                "expected ChainSyncError::Network, got: {err:?}"
+            );
+        }
 
-                    let addr_syncing = server_syncing.spawn();
-                    let addr_error = server_error.spawn();
+        /// One peer returns is_syncing = true, the other causes a
+        /// network error (via Rejected response). The function
+        /// should fail immediately (no retry).
+        #[tokio::test]
+        async fn mixed_failures_immediate_error() {
+            let (peer_list, gossip_client) = setup();
 
-                    peer_list.add_or_update_peer(make_peer(0x20, addr_syncing), true);
-                    peer_list.add_or_update_peer(make_peer(0x21, addr_error), true);
+            let server_syncing = FakeGossipServer::new();
+            server_syncing.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(1),
+                    ..NodeInfo::default()
+                })
+            });
 
-                    let result =
-                        synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false)
-                            .await;
+            let server_error = FakeGossipServer::new();
+            server_error.set_on_info_request(|| {
+                GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+            });
 
-                    let err =
-                        result.expect_err("expected error when mixed syncing + network failures");
-                    let msg = format!("{err}");
-                    assert!(
-                        msg.contains("No peers available after fetching cumulative difficulties"),
-                        "unexpected error message: {msg}"
-                    );
-                    assert!(
-                        matches!(err, ChainSyncError::Network(_)),
-                        "expected ChainSyncError::Network, got: {err:?}"
-                    );
-                }
-            }
+            let addr_syncing = server_syncing.spawn();
+            let addr_error = server_error.spawn();
+
+            peer_list.add_or_update_peer(make_peer(0x20, addr_syncing), true);
+            peer_list.add_or_update_peer(make_peer(0x21, addr_error), true);
+
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
+
+            let err = result.expect_err("expected error when mixed syncing + network failures");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("No peers available after fetching cumulative difficulties"),
+                "unexpected error message: {msg}"
+            );
+            assert!(
+                matches!(err, ChainSyncError::Network(_)),
+                "expected ChainSyncError::Network, got: {err:?}"
+            );
         }
     }
 }
