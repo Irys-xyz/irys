@@ -210,7 +210,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()> {
+async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources(
+) -> eyre::Result<()> {
     // settings
     let max_seconds = 10;
 

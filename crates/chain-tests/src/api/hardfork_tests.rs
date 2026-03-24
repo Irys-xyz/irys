@@ -900,7 +900,7 @@ mod peer_sync_recovery {
     /// then blocks are mined with V1 commitments before activation and V2 after.
     /// After restart with Aurora enabled, verifies peer syncs correctly through the boundary.
     #[test_log::test(tokio::test)]
-    async fn slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
+    async fn spiky_slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
         initialize_tracing();
 
         // Step 1: Setup Configuration (Aurora disabled initially)

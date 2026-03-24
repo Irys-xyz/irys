@@ -15,7 +15,7 @@ use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
-async fn heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
+async fn spiky_heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unpledge: CommitmentTransaction,

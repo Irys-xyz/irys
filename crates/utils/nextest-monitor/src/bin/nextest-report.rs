@@ -854,6 +854,17 @@ enum Commands {
         root: Option<PathBuf>,
     },
 
+    /// Analyze test scheduling: slot utilization, saturation, and critical-path impact
+    Schedule {
+        /// Available thread count (default: auto-detect from num_cpus)
+        #[arg(long)]
+        threads: Option<u32>,
+
+        /// Show top N tests by slot-seconds wasted during saturation (0 for all)
+        #[arg(long, default_value = "20")]
+        top: usize,
+    },
+
     /// Clear the stats file
     Clear,
 
@@ -935,6 +946,14 @@ fn main() -> std::io::Result<()> {
                 Commands::Apply { dry_run, root } => {
                     let root = root.unwrap_or_else(|| PathBuf::from("."));
                     cmd_apply(&stats, &config, &root, dry_run)?;
+                }
+                Commands::Schedule { threads, top } => {
+                    let available = threads.unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get() as u32)
+                            .unwrap_or(12)
+                    });
+                    cmd_schedule(&stats, &config, available, top);
                 }
                 Commands::Clear | Commands::Config => unreachable!(),
                 #[cfg(feature = "heap-profile")]
@@ -1607,6 +1626,408 @@ fn print_memory_contention_summary(
     }
 }
 
+// ============================================================================
+// Schedule analysis
+// ============================================================================
+
+/// A single test's timeline entry for schedule reconstruction.
+struct ScheduleEntry {
+    test_name: String,
+    start_secs: f64, // seconds since run start
+    end_secs: f64,
+    threads: u32,
+}
+
+/// Detect run boundaries in the raw stats.
+///
+/// Uses a two-phase approach:
+/// 1. Find the largest gaps between consecutive test start times
+/// 2. Use these as run boundaries
+///
+/// Falls back to estimating run count from the number of unique test names
+/// (each test runs once per run) if gap detection doesn't produce clean splits.
+fn split_into_runs(stats: &AggregatedStats) -> Vec<Vec<usize>> {
+    if stats.tests.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort indices by started_at
+    let mut indices: Vec<usize> = (0..stats.tests.len()).collect();
+    indices.sort_by_key(|&i| stats.tests[i].started_at);
+
+    // Estimate run count from unique test names
+    let unique_tests: std::collections::HashSet<&str> = stats
+        .tests
+        .iter()
+        .filter_map(|t| t.test_name.as_deref())
+        .collect();
+    let tests_per_run = unique_tests.len().max(1);
+    let estimated_runs = (stats.tests.len() + tests_per_run / 2) / tests_per_run;
+
+    if estimated_runs <= 1 {
+        return vec![indices];
+    }
+
+    // Find the top N-1 largest gaps as run boundaries
+    let mut gaps: Vec<(f64, usize)> = Vec::new();
+    for i in 1..indices.len() {
+        let prev_ts = stats.tests[indices[i - 1]].started_at.timestamp_millis() as f64 / 1000.0;
+        let curr_ts = stats.tests[indices[i]].started_at.timestamp_millis() as f64 / 1000.0;
+        gaps.push((curr_ts - prev_ts, i));
+    }
+    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n_boundaries = estimated_runs - 1;
+    let mut split_points: Vec<usize> = gaps
+        .iter()
+        .take(n_boundaries)
+        .map(|&(_, idx)| idx)
+        .collect();
+    split_points.sort();
+
+    // Build runs from split points
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for &split in &split_points {
+        runs.push(indices[start..split].to_vec());
+        start = split;
+    }
+    runs.push(indices[start..].to_vec());
+
+    runs
+}
+
+/// Build schedule entries for a run, computing times relative to the first test start.
+fn build_schedule(
+    stats: &AggregatedStats,
+    run_indices: &[usize],
+    config: &ClassificationConfig,
+) -> Vec<ScheduleEntry> {
+    if run_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let first_ts = stats.tests[run_indices[0]].started_at.timestamp_millis() as f64 / 1000.0;
+
+    run_indices
+        .iter()
+        .map(|&idx| {
+            let t = &stats.tests[idx];
+            let name = t.test_name.clone().unwrap_or_else(|| t.binary.clone());
+            let classification = config.classify(&name);
+            let start_secs = t.started_at.timestamp_millis() as f64 / 1000.0 - first_ts;
+            let end_secs = start_secs + t.duration_ms as f64 / 1000.0;
+
+            ScheduleEntry {
+                test_name: name,
+                start_secs,
+                end_secs,
+                threads: classification.effective_threads,
+            }
+        })
+        .collect()
+}
+
+/// Per-test contribution to slot waste during saturation periods.
+struct SaturationBlame {
+    test_name: String,
+    threads: u32,
+    /// Slot-seconds this test consumed while the scheduler was at capacity.
+    slot_secs_during_saturation: f64,
+    /// The "excess" slot-seconds: (threads - 1) * time during saturation.
+    /// This is what would be freed if the test were downgraded to 1T.
+    excess_slot_secs: f64,
+    duration_secs: f64,
+}
+
+fn cmd_schedule(
+    stats: &AggregatedStats,
+    config: &ClassificationConfig,
+    available_threads: u32,
+    top: usize,
+) {
+    // Split raw test entries into runs
+    let runs = split_into_runs(stats);
+
+    if runs.is_empty() {
+        println!("No test data found.");
+        return;
+    }
+
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                        SCHEDULE ANALYSIS                                    ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "Available threads: {} (override with --threads N)",
+        available_threads
+    );
+    println!(
+        "Detected {} run(s) across {} test entries",
+        runs.len(),
+        stats.tests.len()
+    );
+    println!();
+
+    // Aggregate blame across all runs
+    let mut blame_totals: HashMap<String, (u32, f64, f64, f64, usize)> = HashMap::new();
+    // key -> (threads, total_slot_secs_sat, total_excess, total_duration, run_count)
+
+    for (run_idx, run_indices) in runs.iter().enumerate() {
+        let schedule = build_schedule(stats, run_indices, config);
+        if schedule.is_empty() {
+            continue;
+        }
+
+        let wall_clock = schedule.iter().map(|e| e.end_secs).fold(0.0f64, f64::max);
+
+        // Build event timeline
+        let mut events: Vec<(f64, i32)> = Vec::new(); // (time, delta_threads)
+        for entry in &schedule {
+            events.push((entry.start_secs, entry.threads as i32));
+            events.push((entry.end_secs, -(entry.threads as i32)));
+        }
+        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Build saturation intervals: periods where slots >= available_threads
+        let mut current_slots: i32 = 0;
+        let mut saturation_intervals: Vec<(f64, f64)> = Vec::new();
+        let mut sat_start: Option<f64> = None;
+        let mut last_time = 0.0f64;
+
+        // Also compute histogram
+        let mut slot_seconds_by_level = BTreeMap::new();
+
+        for &(time, delta) in &events {
+            let dt = time - last_time;
+            if dt > 0.0 {
+                *slot_seconds_by_level
+                    .entry(current_slots.min(available_threads as i32 + 1) as u32)
+                    .or_insert(0.0f64) += dt;
+            }
+
+            if current_slots >= available_threads as i32 && sat_start.is_none() {
+                sat_start = Some(last_time.max(time - dt).max(0.0));
+                // more precisely, saturation started at last_time if we were already saturated
+            }
+            // Track transitions in/out of saturation
+            let was_saturated = current_slots >= available_threads as i32;
+            last_time = time;
+            current_slots += delta;
+            let is_saturated = current_slots >= available_threads as i32;
+
+            if was_saturated && !is_saturated {
+                if let Some(start) = sat_start.take() {
+                    saturation_intervals.push((start, time));
+                }
+            }
+            if !was_saturated && is_saturated {
+                sat_start = Some(time);
+            }
+        }
+        // Close any open saturation interval
+        if let Some(start) = sat_start {
+            saturation_intervals.push((start, last_time));
+        }
+
+        let total_saturation: f64 = saturation_intervals.iter().map(|(s, e)| e - s).sum();
+
+        // Compute total slot-seconds
+        let total_slot_secs: f64 = schedule
+            .iter()
+            .map(|e| (e.end_secs - e.start_secs) * e.threads as f64)
+            .sum();
+        let total_cpu_secs: f64 = schedule.iter().map(|e| e.end_secs - e.start_secs).sum();
+        let total_possible = wall_clock * available_threads as f64;
+
+        // Blame: for each test, compute how much of its runtime overlaps saturation
+        for entry in &schedule {
+            let mut sat_overlap = 0.0f64;
+            for &(sat_s, sat_e) in &saturation_intervals {
+                let overlap_start = entry.start_secs.max(sat_s);
+                let overlap_end = entry.end_secs.min(sat_e);
+                if overlap_end > overlap_start {
+                    sat_overlap += overlap_end - overlap_start;
+                }
+            }
+
+            if sat_overlap > 0.0 {
+                let slot_secs_sat = sat_overlap * entry.threads as f64;
+                let excess = sat_overlap * (entry.threads.saturating_sub(1)) as f64;
+
+                let e = blame_totals.entry(entry.test_name.clone()).or_insert((
+                    entry.threads,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                ));
+                e.1 += slot_secs_sat;
+                e.2 += excess;
+                e.3 += entry.end_secs - entry.start_secs;
+                e.4 += 1;
+            }
+        }
+
+        // Per-run summary
+        println!(
+            "Run {}: {} tests, wall={:.0}s",
+            run_idx + 1,
+            schedule.len(),
+            wall_clock
+        );
+        println!(
+            "  Slot utilization: {:.0}/{:.0} slot-seconds ({:.0}%)",
+            total_slot_secs,
+            total_possible,
+            total_slot_secs / total_possible * 100.0
+        );
+        println!(
+            "  CPU utilization:  {:.0}/{:.0} ({:.0}%)",
+            total_cpu_secs,
+            total_possible,
+            total_cpu_secs / total_possible * 100.0
+        );
+        println!(
+            "  Saturation (>={} slots): {:.1}s ({:.0}% of run)",
+            available_threads,
+            total_saturation,
+            total_saturation / wall_clock * 100.0
+        );
+
+        // Histogram
+        println!("  Slot usage:");
+        let max_secs = slot_seconds_by_level
+            .values()
+            .copied()
+            .fold(0.0f64, f64::max);
+        for (&slots, &secs) in &slot_seconds_by_level {
+            if secs < 0.5 {
+                continue;
+            }
+            let bar_len = if max_secs > 0.0 {
+                (secs / max_secs * 30.0) as usize
+            } else {
+                0
+            };
+            let marker = if slots >= available_threads { ">" } else { " " };
+            println!(
+                "   {}{:>2} slots: {:>6.1}s ({:>4.0}%) {}",
+                marker,
+                slots,
+                secs,
+                secs / wall_clock * 100.0,
+                "#".repeat(bar_len),
+            );
+        }
+        println!();
+    }
+
+    // Aggregate blame across runs
+    let mut blame_list: Vec<SaturationBlame> = blame_totals
+        .into_iter()
+        .map(
+            |(name, (threads, sat, excess, dur, count))| SaturationBlame {
+                test_name: name,
+                threads,
+                slot_secs_during_saturation: sat / runs.len() as f64,
+                excess_slot_secs: excess / runs.len() as f64,
+                duration_secs: dur / count as f64,
+            },
+        )
+        .collect();
+
+    // Sort by excess slot-seconds (what would be freed by downgrading to 1T)
+    blame_list.sort_by(|a, b| {
+        b.excess_slot_secs
+            .partial_cmp(&a.excess_slot_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_excess: f64 = blame_list.iter().map(|b| b.excess_slot_secs).sum();
+
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                 SATURATION BLAME (averaged across runs)                      ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "Tests holding excess slots during saturation — these block other tests from starting."
+    );
+    println!(
+        "\"Excess\" = (threads - 1) * time_during_saturation — slot-seconds freed by downgrading to 1T."
+    );
+    println!();
+    println!(
+        "{:<45} {:>5} {:>8} {:>8} {:>8}",
+        "Test", "Alloc", "Duration", "SatTime", "Excess"
+    );
+    println!("{}", "-".repeat(80));
+
+    let to_show = if top > 0 {
+        top.min(blame_list.len())
+    } else {
+        blame_list.len()
+    };
+
+    for blame in blame_list.iter().take(to_show) {
+        let name = if blame.test_name.len() > 43 {
+            format!("...{}", &blame.test_name[blame.test_name.len() - 40..])
+        } else {
+            blame.test_name.clone()
+        };
+        println!(
+            "{:<45} {:>4}T {:>7.1}s {:>7.1}s {:>7.1}s",
+            name,
+            blame.threads,
+            blame.duration_secs,
+            blame.slot_secs_during_saturation / blame.threads as f64,
+            blame.excess_slot_secs,
+        );
+    }
+
+    if blame_list.len() > to_show {
+        println!("  ... and {} more", blame_list.len() - to_show);
+    }
+
+    println!();
+    println!(
+        "Total excess slot-seconds during saturation: {:.0}s (avg per run)",
+        total_excess
+    );
+    println!(
+        "Potential wall-clock savings if all excess freed: ~{:.0}s (= {:.0}s / {} threads)",
+        total_excess / available_threads as f64,
+        total_excess,
+        available_threads,
+    );
+
+    // Show breakdown: how much comes from each allocation tier
+    let mut by_tier: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
+    for blame in &blame_list {
+        let e = by_tier.entry(blame.threads).or_insert((0.0, 0));
+        e.0 += blame.excess_slot_secs;
+        e.1 += 1;
+    }
+    println!();
+    println!("Excess by allocation tier:");
+    for (&threads, &(excess, count)) in &by_tier {
+        if threads <= 1 {
+            continue; // 1T tests have no excess
+        }
+        println!(
+            "  {}T: {:.0}s excess from {} tests ({:.0}% of total)",
+            threads,
+            excess,
+            count,
+            if total_excess > 0.0 {
+                excess / total_excess * 100.0
+            } else {
+                0.0
+            }
+        );
+    }
+}
+
 fn cmd_detail(stats: &AggregatedStats, config: &ClassificationConfig, pattern: &str) {
     let matching: Vec<_> = stats
         .tests
@@ -2060,7 +2481,7 @@ fn parse_capacity_prefix(func_name: &str, classes: &[CapacityClass]) -> (Vec<Str
     let mut pos = 0;
     // Sort class names longest-first so "heavy3" is tried before "heavy".
     let mut sorted_names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
-    sorted_names.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted_names.sort_by_key(|b| std::cmp::Reverse(b.len()));
     loop {
         let remaining = &func_name[pos..];
         let mut found = false;
@@ -2092,8 +2513,8 @@ fn classes_to_prefix(matched: &[String], all_classes: &[CapacityClass]) -> Strin
     let mut other_parts = Vec::new();
     for name in matched {
         if let Some(cls) = all_classes.iter().find(|c| c.name == *name) {
-            if cls.threads.is_some() {
-                thread_parts.push((cls.threads.unwrap(), name.as_str()));
+            if let Some(threads) = cls.threads {
+                thread_parts.push((threads, name.as_str()));
             } else if cls.timeout_ms.is_some() {
                 timeout_parts.push(name.as_str());
             } else {

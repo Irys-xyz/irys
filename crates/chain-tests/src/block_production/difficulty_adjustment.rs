@@ -70,7 +70,7 @@ async fn heavy_difficulty_adjusts_and_timestamp_updates() -> eyre::Result<()> {
 /// - we only mark the tip for the blocks that are actually the newest validated "highest cumulative diff" block.
 /// (regression protection: `mark_tip` used to be called on every single validated block, even if it had a lesser cumulative diff)
 #[test_log::test(tokio::test)]
-async fn slow_heavy4_tip_updated_correctly_in_forks_with_variying_cumulative_difficulties(
+async fn spiky_slow_heavy4_tip_updated_correctly_in_forks_with_variying_cumulative_difficulties(
 ) -> eyre::Result<()> {
     // max time to wait for block validations
     let max_seconds = 10;

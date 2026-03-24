@@ -406,7 +406,7 @@ async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
 // The evil block swaps the order (low fee before high fee), violating the
 // canonical fee-descending ordering.
 #[test_log::test(tokio::test)]
-async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
+async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,

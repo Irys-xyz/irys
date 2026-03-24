@@ -1321,7 +1321,7 @@ async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
+async fn spiky_heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let mut config = NodeConfig::testing_with_epochs(2);
     config.consensus.get_mut().chunk_size = 32;
     let signer = config.new_random_signer();

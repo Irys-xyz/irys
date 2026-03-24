@@ -423,7 +423,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
+async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(

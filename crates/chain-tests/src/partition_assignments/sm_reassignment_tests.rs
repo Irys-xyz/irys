@@ -12,7 +12,7 @@ use crate::utils::IrysNodeTest;
 // 5. Mine enough epochs to expire the first slot out of the submit ledger
 // 6. Verify the partition_hash is assigned to capacity and that the storage module matches
 #[tokio::test]
-async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
+async fn spiky_heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
