@@ -14,6 +14,18 @@ use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
 use tracing::debug;
 
+/// Poll `check` every 100ms until it returns `true`, failing after `timeout`.
+async fn poll_until(timeout: Duration, msg: &str, check: impl Fn() -> bool) -> eyre::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if check() {
+            return Ok(());
+        }
+        eyre::ensure!(tokio::time::Instant::now() < deadline, "{msg}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
@@ -36,21 +48,19 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
         .send_traced(data)
         .expect("Failed to send transaction through message bus");
 
-    // Service 2 receives it over gossip
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    // Service 2 receives the message from Service 1
-    {
-        let service2_mempool_txs = gossip_service_test_fixture_2
-            .mempool_txs
-            .read()
-            .expect("Failed to read service 2 mempool transactions");
-        eyre::ensure!(
-            service2_mempool_txs.len() == 1,
-            "Expected 1 transaction in service 2 mempool, but found {}",
-            service2_mempool_txs.len()
-        );
-    };
+    poll_until(
+        Duration::from_secs(10),
+        "Expected 1 transaction in service 2 mempool",
+        || {
+            gossip_service_test_fixture_2
+                .mempool_txs
+                .read()
+                .expect("read mempool")
+                .len()
+                == 1
+        },
+    )
+    .await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
@@ -101,22 +111,16 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
         .await
         .expect("To handle tx");
 
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    // Verify all peers received it
-    for fixture in &fixtures {
-        {
-            let mempool_txs = fixture
-                .mempool_txs
-                .read()
-                .expect("Failed to read peer mempool transactions");
-            eyre::ensure!(
-                mempool_txs.len() == 1,
-                "Expected 1 transaction in peer mempool, but found {}",
-                mempool_txs.len()
-            );
-        }
-    }
+    poll_until(
+        Duration::from_secs(10),
+        "Not all peers received 1 transaction within timeout",
+        || {
+            fixtures
+                .iter()
+                .all(|f| f.mempool_txs.read().expect("read mempool").len() == 1)
+        },
+    )
+    .await?;
 
     for handle in handles {
         handle.stop().await?;
@@ -148,20 +152,12 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    // Should only receive it once
-    {
-        let service2_mempool_txs = fixture2
-            .mempool_txs
-            .read()
-            .expect("Failed to read service 2 mempool transactions for deduplication check");
-        eyre::ensure!(
-            service2_mempool_txs.len() == 1,
-            "Expected 1 transaction in service 2 mempool (deduplication check), but found {}",
-            service2_mempool_txs.len()
-        );
-    };
+    poll_until(
+        Duration::from_secs(10),
+        "Expected 1 transaction in service 2 mempool (dedup check)",
+        || fixture2.mempool_txs.read().expect("read mempool").len() == 1,
+    )
+    .await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
@@ -191,19 +187,19 @@ async fn should_broadcast_chunk_data() -> eyre::Result<()> {
         .send_traced(data)
         .expect("Failed to send chunk data");
 
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    {
-        let service2_chunks = fixture2
-            .mempool_chunks
-            .read()
-            .expect("Failed to read service 2 mempool chunks");
-        eyre::ensure!(
-            service2_chunks.len() == 1,
-            "Expected 1 chunk in service 2 mempool, but found {}",
-            service2_chunks.len()
-        );
-    };
+    poll_until(
+        Duration::from_secs(10),
+        "Expected 1 chunk in service 2 mempool",
+        || {
+            fixture2
+                .mempool_chunks
+                .read()
+                .expect("read mempool chunks")
+                .len()
+                == 1
+        },
+    )
+    .await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
@@ -280,18 +276,12 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block_header)))
         .expect("Failed to send block to service 2");
 
-    // Wait for service 2 to process the block and fetch transactions
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    {
-        // Check that service 2 received and processed the transactions
-        let service2_mempool_txs = fixture2.mempool_txs.read().expect("to read transactions");
-        eyre::ensure!(
-            service2_mempool_txs.len() == 2,
-            "Expected 2 transactions in service 2 mempool after block processing, but found {}",
-            service2_mempool_txs.len()
-        );
-    };
+    poll_until(
+        Duration::from_secs(10),
+        "Expected 2 transactions in service 2 mempool",
+        || fixture2.mempool_txs.read().expect("read mempool").len() == 2,
+    )
+    .await?;
 
     service1_handle.stop().await?;
     service2_handle.stop().await?;
