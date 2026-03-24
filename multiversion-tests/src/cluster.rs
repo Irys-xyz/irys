@@ -88,10 +88,10 @@ impl Cluster {
         // Write initial status marker — stays RUNNING if the test panics,
         // overwritten with PASSED in shutdown(). The xtask aggregates these
         // into a summary status.txt after the run.
-        let _ = std::fs::write(
+         std::fs::write(
             run_dir.join(".status"),
             format_status("RUNNING", spec.old_ref.as_deref(), spec.new_ref.as_deref()),
-        );
+        )?;
 
         let probe = HttpProbe::new().map_err(ClusterError::ProbeInit)?;
 
