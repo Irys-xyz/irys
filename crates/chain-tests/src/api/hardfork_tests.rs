@@ -886,8 +886,6 @@ mod borealis_hardfork {
 
 #[cfg(test)]
 mod peer_sync_recovery {
-    use std::time::Duration;
-
     use super::*;
     use irys_database::db::IrysDatabaseExt as _;
 
@@ -1028,8 +1026,6 @@ mod peer_sync_recovery {
 
         // Step 4: Stop Both Nodes, Activate Aurora, Restart
         let mut stopped_genesis = genesis_node.stop().await;
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Set activation in the past so all new blocks are post-activation
         let activation_timestamp = now_secs();

@@ -1,4 +1,7 @@
-use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
+use super::util::{
+    create_test_chunks, generate_test_tx, poll_until, wait_until_listening,
+    GossipServiceTestFixture,
+};
 use crate::SyncChainServiceMessage;
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
@@ -14,18 +17,6 @@ use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
 use tracing::debug;
 
-/// Poll `check` every 100ms until it returns `true`, failing after `timeout`.
-async fn poll_until(timeout: Duration, msg: &str, check: impl Fn() -> bool) -> eyre::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if check() {
-            return Ok(());
-        }
-        eyre::ensure!(tokio::time::Instant::now() < deadline, "{msg}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 #[tokio::test]
 async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
@@ -39,8 +30,8 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
     let (service2_handle, _gossip_service2_message_bus) =
         gossip_service_test_fixture_2.run_service();
 
-    // Waiting a little for the service to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(gossip_service_test_fixture_1.gossip_addr()).await;
+    wait_until_listening(gossip_service_test_fixture_2.gossip_addr()).await;
     let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
 
     // Service 1 receives a message through the message bus from a system's component
@@ -100,7 +91,9 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
         message_buses.push(bus);
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    for fixture in &fixtures {
+        wait_until_listening(fixture.gossip_addr()).await;
+    }
 
     // Send data from the first peer
     fixtures
@@ -140,11 +133,12 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
+    wait_until_listening(fixture2.gossip_addr()).await;
 
     let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
 
-    // Send same data multiple times
+    // Send same data multiple times with pacing to test dedup
     for _ in 0_i32..3_i32 {
         gossip_service1_message_bus
             .send_traced(data.clone()) // clone: test loop sends the same data multiple times
@@ -176,7 +170,8 @@ async fn should_broadcast_chunk_data() -> eyre::Result<()> {
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _) = fixture2.run_service();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
+    wait_until_listening(fixture2.gossip_addr()).await;
 
     // Create and send chunk data
     let chunks = create_test_chunks(&generate_test_tx());
@@ -217,16 +212,17 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
 
     let data = GossipBroadcastMessageV2::from(generate_test_tx().header);
 
-    // Should not panic when peer is offline
+    // Should not panic when peer is offline — connection refused resolves quickly
     gossip_service1_message_bus
         .send_traced(data)
         .expect("Failed to send transaction to offline peer");
 
-    tokio::time::sleep(Duration::from_millis(3000)).await;
+    // Give the gossip client time to attempt the connection and handle the error
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     service1_handle.stop().await?;
 
@@ -268,8 +264,8 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
-    // Waiting a little for the service to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
+    wait_until_listening(fixture2.gossip_addr()).await;
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
@@ -300,8 +296,8 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
-    // Waiting a little for the service to initialize
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
+    wait_until_listening(fixture2.gossip_addr()).await;
 
     // Create a test block with transactions
     let mut block = IrysBlockHeader::new_mock_header();
@@ -324,8 +320,9 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
-    // Wait for service 2 to process the block and attempt to fetch transactions
-    tokio::time::sleep(Duration::from_millis(3000)).await;
+    // Give service 2 time to process the block and fail to fetch missing transactions.
+    // Negative assertion: mempool should remain empty because tx2 is unavailable.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     {
         // Check that service 2 rejected the block due to missing transactions
@@ -418,8 +415,8 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
-    // Waiting a little for the service to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_until_listening(fixture1.gossip_addr()).await;
+    wait_until_listening(fixture2.gossip_addr()).await;
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus

@@ -216,9 +216,6 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
         .sync_state
         .set_gossip_reception_enabled(true);
 
-    // Give a moment for network to stabilize
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // Send peer2's fork to genesis to trigger reorg
     // Since we used regular mining, blocks should be in provider and can be sent
     error!("Gossiping peer2's fork to trigger reorg");
@@ -233,10 +230,7 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     error!("All blocks gossiped, waiting for reorg");
 
-    // Give genesis time to process the reorg
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Check what genesis has at height 5
+    // wait_until_height polls until the node reaches the expected height
     let genesis_hash = genesis_node.wait_until_height(5, seconds_to_wait).await?;
     let genesis_head = genesis_node.get_block_by_hash(&genesis_hash)?;
 

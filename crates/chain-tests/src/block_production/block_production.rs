@@ -30,8 +30,6 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
@@ -310,7 +308,6 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-    tokio::time::sleep(Duration::from_secs(3)).await;
     node.stop().await;
 
     Ok(())
@@ -492,10 +489,8 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
         let new_ts = reth_block.header.timestamp as u128;
 
-        // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
         _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
-        sleep(Duration::from_millis(1_500)).await;
     }
 
     assert!(prev_ts.is_some());
