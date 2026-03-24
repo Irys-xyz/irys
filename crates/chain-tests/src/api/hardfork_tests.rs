@@ -325,7 +325,7 @@ mod boundary_crossing {
     use super::*;
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
+    async fn test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -627,7 +627,7 @@ mod epoch_block_filtering {
     /// Epoch block at hardfork boundary: V1 commitments accepted pre-activation
     /// should NOT be filtered out when the epoch block falls post-activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
+    async fn test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
         // Hardfork activates slightly in the future

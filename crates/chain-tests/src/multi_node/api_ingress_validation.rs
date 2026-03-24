@@ -7,7 +7,7 @@ use irys_types::{BoundedFee, DataLedger, NodeConfig};
 /// Test that API rejects data transactions with insufficient term fee
 /// This validates the EMA pricing check that uses `ema_for_public_pricing()`
 #[test_log::test(tokio::test)]
-async fn test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
+async fn heavy_test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -84,7 +84,7 @@ async fn test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
 /// Test that API rejects data transactions with insufficient perm fee
 /// This validates the EMA pricing check for permanent storage fees
 #[test_log::test(tokio::test)]
-async fn test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
+async fn heavy_test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -160,7 +160,7 @@ async fn test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
 
 /// Test that API rejects data transactions when user has insufficient funds
 #[test_log::test(tokio::test)]
-async fn test_api_rejects_insufficient_funds() -> eyre::Result<()> {
+async fn heavy_test_api_rejects_insufficient_funds() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
 
     // Create a signer but fund it with INSUFFICIENT amount
@@ -249,7 +249,7 @@ async fn test_api_rejects_insufficient_funds() -> eyre::Result<()> {
 /// Test that API rejects when user has zero balance
 /// Edge case test for the balance validation
 #[test_log::test(tokio::test)]
-async fn test_api_rejects_zero_balance() -> eyre::Result<()> {
+async fn heavy_test_api_rejects_zero_balance() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
 
     // Create a signer with ZERO balance
@@ -322,7 +322,7 @@ async fn test_api_rejects_zero_balance() -> eyre::Result<()> {
 /// Test that API accepts transactions with EXACT required fees
 /// Validates that the boundary condition works correctly
 #[test_log::test(tokio::test)]
-async fn test_api_accepts_exact_fees() -> eyre::Result<()> {
+async fn heavy_test_api_accepts_exact_fees() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -385,7 +385,7 @@ async fn test_api_accepts_exact_fees() -> eyre::Result<()> {
 /// Test that API accepts transactions with HIGHER than required fees
 /// Users should be able to pay more if they want to
 #[test_log::test(tokio::test)]
-async fn test_api_accepts_higher_fees() -> eyre::Result<()> {
+async fn heavy_test_api_accepts_higher_fees() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);

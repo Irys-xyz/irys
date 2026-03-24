@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 #[tokio::test]
-async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
+async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
 
@@ -160,7 +160,7 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 

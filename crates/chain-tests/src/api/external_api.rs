@@ -13,7 +13,7 @@ use reqwest::StatusCode;
 use tracing::info;
 
 #[tokio::test]
-async fn heavy_external_api() -> eyre::Result<()> {
+async fn external_api() -> eyre::Result<()> {
     initialize_tracing();
 
     let ctx = IrysNodeTest::default_async().start().await;

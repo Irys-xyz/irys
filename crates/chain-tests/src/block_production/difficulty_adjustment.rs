@@ -13,7 +13,7 @@ use crate::{
 /// number of blocks and that the `last_diff_timestamp` metadata is updated to
 /// the timestamp of the block that triggered the adjustment.
 #[test_log::test(tokio::test)]
-async fn heavy3_difficulty_adjusts_and_timestamp_updates() -> eyre::Result<()> {
+async fn heavy_difficulty_adjusts_and_timestamp_updates() -> eyre::Result<()> {
     // max time to wait for block validations
     let max_seconds = 10;
 

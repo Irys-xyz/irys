@@ -90,7 +90,7 @@ fn send_block_to_block_validation(
 // The assertion will fail (block will be discarded) because stake commitments must have exact stake_value
 // from the consensus config.
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
+async fn block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
@@ -188,7 +188,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because pledge commitments must have value
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
+async fn block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
@@ -287,7 +287,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 // This test creates a malicious block producer that includes commitments in wrong order.
 // The assertion will fail (block will be discarded) because stake commitments must come before pledge commitments.
 #[test_log::test(tokio::test)]
-async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
+async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -566,7 +566,7 @@ async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because epoch blocks must contain exactly
 // the commitments from the parent's snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
+async fn block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub wrong_commitment: CommitmentTransaction,
@@ -663,7 +663,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 // Firstly verify rejection of malformed/incorrect last_epoch_hash
 // Secondly verify the first-after-epoch rule
 #[test_log::test(tokio::test)]
-async fn heavy_block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
+async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -809,7 +809,7 @@ async fn heavy_block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Resul
 // This test creates a malicious block producer that includes duplicate ingress proof signers for the same data root.
 // The assertion will fail (block will be discarded) because each address can only provide one proof per data root.
 #[test_log::test(tokio::test)]
-async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
+async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
     use irys_types::{
         ingress::{generate_ingress_proof, CachedIngressProof},
@@ -1028,7 +1028,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 // The assertion will fail (block will be discarded) because epoch blocks must contain all
 // commitments from the parent's snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
+async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -1125,7 +1125,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 ///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
-async fn heavy3_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);

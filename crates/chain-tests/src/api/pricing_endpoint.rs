@@ -65,7 +65,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_small_data() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -158,7 +158,7 @@ async fn pricing_endpoint_small_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -180,7 +180,7 @@ async fn pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(

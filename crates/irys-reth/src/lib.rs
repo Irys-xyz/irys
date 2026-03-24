@@ -423,7 +423,7 @@ mod tests {
     /// - Action: Inject shadow tx with invalid origin.
     /// - Assertion: Tx is rejected with pool error.
     #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
-    async fn external_users_cannot_submit_shadow_txs() -> eyre::Result<()> {
+    async fn heavy_external_users_cannot_submit_shadow_txs() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
         let (node, ctx) = ctx.get_single_node()?;
@@ -449,7 +449,7 @@ mod tests {
     /// We keep Cancun active but disable blobs. Any EIP-4844 envelope should be rejected
     /// via the mempool validator before deeper validation occurs.
     #[test_log::test(tokio::test)]
-    async fn eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
+    async fn heavy_eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
         let (node, _ctx) = ctx.get_single_node()?;
@@ -485,7 +485,7 @@ mod tests {
     /// - The shadow tx from node b is not included in the block.
     /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
-    async fn stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
+    async fn heavy_stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node_a, mut node_b), ctx) = ctx.get_two_nodes()?;
 
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn block_with_shadow_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
+    async fn heavy_block_with_shadow_txs_gets_broadcasted_between_peers() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node_a, mut node_b), ctx) = ctx.get_two_nodes()?;
 
@@ -606,7 +606,7 @@ mod tests {
     #[rstest::rstest]
     #[case::unstake(unstake, signer_b())]
     #[case::unstake_init_no_balance(unstake, signer_c())]
-    async fn incr_shadow_txs(
+    async fn heavy_incr_shadow_txs(
         #[case] shadow_tx: impl Fn(Address) -> ShadowTransaction,
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
@@ -668,7 +668,7 @@ mod tests {
     #[rstest::rstest]
     #[case::stake(stake, signer_b())]
     #[case::storage_fees(storage_fees, signer_b())]
-    async fn decr_shadow_txs(
+    async fn heavy_decr_shadow_txs(
         #[case] shadow_tx: impl Fn(Address) -> ShadowTransaction,
         #[case] target_signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
     ) -> eyre::Result<()> {
@@ -734,7 +734,7 @@ mod tests {
 
     // expect that shadow txs get executed first, no matter what. Normal txs get executed only afterwards
     #[test_log::test(tokio::test)]
-    async fn test_shadow_tx_ordering() -> eyre::Result<()> {
+    async fn heavy_test_shadow_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -768,7 +768,7 @@ mod tests {
 
     // test decrementing when account does not exist (expect that even receipt not created)
     #[test_log::test(tokio::test)]
-    async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
+    async fn heavy_test_decrement_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -851,7 +851,7 @@ mod tests {
 
     // test decrementing when account exists but not enough balance (expect block production failure)
     #[test_log::test(tokio::test)]
-    async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
+    async fn heavy_test_decrement_insufficient_balance() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -946,7 +946,7 @@ mod tests {
     /// Verifies sequential block production and tx inclusion.
     /// Expects latest block number to be 5 at the end.
     #[test_log::test(tokio::test)]
-    async fn mine_5_blocks_with_shadow_and_normal_tx() -> eyre::Result<()> {
+    async fn heavy_mine_5_blocks_with_shadow_and_normal_tx() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
+    async fn heavy_rollback_state_revert_on_fork_switch() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node_a, mut node_b), ctx) = ctx.get_two_nodes()?;
         // Use the producer B address for checking rewards (it's the beneficiary for node B's blocks)
@@ -1090,7 +1090,7 @@ mod tests {
     /// 4. Build a new fork block (block 2) on top of the rolled-back state
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
     #[test_log::test(tokio::test)]
-    async fn rollback_state_on_safe_blocks() -> eyre::Result<()> {
+    async fn heavy_rollback_state_on_safe_blocks() -> eyre::Result<()> {
         // Setup custom parent tracker for forkchoice updates
         let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
 
@@ -1269,7 +1269,7 @@ mod tests {
     /// 4. Build a new fork block (block 2) on top of the rolled-back state
     /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
     #[test_log::test(tokio::test)]
-    async fn rollback_state_on_confirmed_blocks() -> eyre::Result<()> {
+    async fn heavy_rollback_state_on_confirmed_blocks() -> eyre::Result<()> {
         // Setup custom parent tracker for forkchoice updates
         let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
 
@@ -1447,7 +1447,7 @@ mod tests {
     /// 3. Rollback the state to a past block
     /// 4. Verify that shadow transactions are never in the transaction pool past
     #[test_log::test(tokio::test)]
-    async fn shadow_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
+    async fn heavy_shadow_txs_never_in_pool_during_rollback() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1580,7 +1580,7 @@ mod tests {
     /// 3. Mine a block containing these transactions
     /// 4. Verify the receipts contain the transactions in the same order as submitted
     #[test_log::test(tokio::test)]
-    async fn test_shadow_tx_execution_order_via_receipts() -> eyre::Result<()> {
+    async fn heavy_test_shadow_tx_execution_order_via_receipts() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1694,7 +1694,7 @@ mod tests {
 
     /// Test pledge transaction (balance decrement)
     #[test_log::test(tokio::test)]
-    async fn test_pledge_balance_decrement() -> eyre::Result<()> {
+    async fn heavy_test_pledge_balance_decrement() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1739,7 +1739,7 @@ mod tests {
 
     /// Test unpledge transaction (priority-fee-only at inclusion)
     #[test_log::test(tokio::test)]
-    async fn test_unpledge_fee_only() -> eyre::Result<()> {
+    async fn heavy_test_unpledge_fee_only() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1779,7 +1779,7 @@ mod tests {
 
     /// Test unstake-debit transaction (priority-fee-only at inclusion)
     #[test_log::test(tokio::test)]
-    async fn test_unstake_debit_fee_only() -> eyre::Result<()> {
+    async fn heavy_test_unstake_debit_fee_only() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1827,7 +1827,7 @@ mod tests {
 
     /// Test pledge and unpledge transaction ordering
     #[test_log::test(tokio::test)]
-    async fn test_pledge_unpledge_ordering() -> eyre::Result<()> {
+    async fn heavy_test_pledge_unpledge_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1906,7 +1906,7 @@ mod tests {
 
     /// Test pledge + unpledge_refund balances with zero-priority-fee refund
     #[test_log::test(tokio::test)]
-    async fn test_pledge_unpledge_refund_balances() -> eyre::Result<()> {
+    async fn heavy_test_pledge_unpledge_refund_balances() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -1954,7 +1954,7 @@ mod tests {
 
     /// Test unpledge on non-existent account fails block production
     #[test_log::test(tokio::test)]
-    async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
+    async fn heavy_test_unpledge_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2021,7 +2021,7 @@ mod tests {
 
     /// Test pledge on non-existent account fails
     #[test_log::test(tokio::test)]
-    async fn test_pledge_nonexistent_account() -> eyre::Result<()> {
+    async fn heavy_test_pledge_nonexistent_account() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2106,7 +2106,7 @@ mod tests {
 
     /// Test that shadow transactions with priority fees distribute fees to beneficiary
     #[test_log::test(tokio::test)]
-    async fn test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
+    async fn heavy_test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2168,7 +2168,7 @@ mod tests {
 
     /// Test multiple shadow transactions accumulate priority fees correctly
     #[test_log::test(tokio::test)]
-    async fn test_multiple_shadow_tx_priority_fees() -> eyre::Result<()> {
+    async fn heavy_test_multiple_shadow_tx_priority_fees() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2252,7 +2252,7 @@ mod tests {
     /// (This is to enable mining pools in the future, where a beneficiary
     /// of a block may be a different entity that actually mined the block)
     #[test_log::test(tokio::test)]
-    async fn test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
+    async fn heavy_test_shadow_tx_priority_fee_different_miner() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         // Get node 1 (second node) which has producer B as beneficiary
         let ((mut _node_a, mut node), ctx) = ctx.get_two_nodes()?;
@@ -2305,7 +2305,7 @@ mod tests {
 
     /// Test that block reward transactions with non-zero priority fees are rejected
     #[test_log::test(tokio::test)]
-    async fn test_block_reward_rejects_priority_fee() -> eyre::Result<()> {
+    async fn heavy_test_block_reward_rejects_priority_fee() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2393,7 +2393,7 @@ mod tests {
 
     /// Test that all shadow transaction types (except block rewards) properly distribute priority fees
     #[test_log::test(tokio::test)]
-    async fn test_all_shadow_tx_types_priority_fees() -> eyre::Result<()> {
+    async fn heavy_test_all_shadow_tx_types_priority_fees() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
@@ -2485,7 +2485,7 @@ mod tests {
     }
 
     #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
-    async fn can_trace_normal_tx() -> eyre::Result<()> {
+    async fn heavy_can_trace_normal_tx() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;

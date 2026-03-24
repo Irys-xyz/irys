@@ -16,7 +16,7 @@ use tracing::info;
 // Test 0: Complete slot expiry with 0 transactions
 
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
+async fn ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
     info!("Testing ledger expiry with no transactions at all");
 
     ledger_expiry_test(LedgerExpiryTestParams {
@@ -128,7 +128,7 @@ async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
 // Tx2 and Tx3 start in later partitions, don't expire
 //
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
+async fn ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
     info!("Testing ledger expiry with large transactions spanning partitions");
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,

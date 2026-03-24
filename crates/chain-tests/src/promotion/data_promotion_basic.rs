@@ -287,7 +287,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
 
 // This test simulates a case encountered on testnet, where a submit tx was not able to be included in a block, but it was a promotion candidate.
 #[actix_web::test]
-async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
+async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
@@ -406,7 +406,7 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
+async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
@@ -537,13 +537,13 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
 
 /// This test is a regression test that ensures that ingress proofs with edge-case invalid anchors (miss the expiry by one block height, but are valid at ingest) are not accepted by the node as part of validation, and are also not selected as part of the block building process.
 #[tokio::test]
-async fn heavy_promotion_validates_ingress_proof_anchor_edge_doesnt_promote() -> eyre::Result<()> {
+async fn promotion_validates_ingress_proof_anchor_edge_doesnt_promote() -> eyre::Result<()> {
     test_ingress_proof_anchor_edge_case(0, false).await
 }
 
 /// This test is a regression test that ensures that ingress proofs with edge-case valid anchors (exactly at the minimum expiry height, valid at ingest) are accepted by the node as part of validation, and are also selected as part of the block building process.
 #[tokio::test]
-async fn heavy_promotion_validates_ingress_proof_anchor_edge_does_promote() -> eyre::Result<()> {
+async fn promotion_validates_ingress_proof_anchor_edge_does_promote() -> eyre::Result<()> {
     test_ingress_proof_anchor_edge_case(1, true).await
 }
 

@@ -137,7 +137,7 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
 
 /// Test that UnpledgeRefund goes to miner_address, not custom reward_address.
 #[test_log::test(tokio::test)]
-async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
+async fn test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
     let num_blocks_in_epoch: usize = 5;
 
     let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);

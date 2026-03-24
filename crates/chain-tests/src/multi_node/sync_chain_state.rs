@@ -17,7 +17,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info};
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_p2p_reth_gossip() -> eyre::Result<()> {
+async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
     let mut genesis_config = NodeConfig::testing();
@@ -87,7 +87,7 @@ async fn heavy3_test_p2p_reth_gossip() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
     let peer_account = genesis_config.new_random_signer();
