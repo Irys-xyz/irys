@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774264207050,
+  "lastUpdate": 1774357891704,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1153,6 +1153,90 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.547763,
             "range": "± 1.846593",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "33699735+roberts-pumpurs@users.noreply.github.com",
+            "name": "Roberts Pumpurs",
+            "username": "roberts-pumpurs"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0ca706c6b69ac4193a981f1b26b75652fa554a7d",
+          "message": "feat: perm ledger expiry for testnet (#1201)\n\n* feat: add publish_ledger_epoch_length to EpochConfig\n* feat: add validation for publish_ledger_epoch_length\n* feat: store publish_ledger_epoch_length on Ledgers\n* feat: implement perm slot expiry in Ledgers::expire_partitions()\n\nRename expire_term_partitions() to expire_partitions() and add publish\nledger expiry logic. When publish_ledger_epoch_length is configured,\nperm slots whose last_height is older than (epoch_height - epoch_length\n* num_blocks_in_epoch) are expired, with the last slot always protected.\nIncludes 4 unit tests covering disabled, enabled, last-slot-protection,\nand not-enough-blocks scenarios.\n* feat: include perm slots in get_expiring_partitions() read-only path\nRename get_expiring_term_partitions() to get_expiring_partitions() and\nadd perm ledger slot expiry logic that mirrors expire_partitions() but\nwithout mutation. This ensures the read-only path used by EpochSnapshot\nreports the same expiring partitions as the mutating path.\n* refactor: rename expire_term_* methods to expire_* (now handles perm too)\n\nUpdate callers in epoch_snapshot.rs to use the renamed methods:\n- expire_term_ledger_slots() -> expire_ledger_slots()\n- expire_term_partitions() -> expire_partitions()\n- get_expiring_term_partitions() -> get_expiring_partitions()\n\n* fix: filter expired slots from PermanentLedger::get_slot_needs()\n\nAdd !slot.is_expired check to PermanentLedger::get_slot_needs(),\nmatching the existing behavior in TermLedger::get_slot_needs().\nThis prevents expired permanent ledger slots from being offered\nfor new partition assignments.\n\nIncludes a test that verifies expired slots are excluded.\n\n* docs: update bail comment in collect_expired_partitions for perm expiry\n\nClarify that the DataLedger::Publish bail prevents accidental fee\ncalculation, not that publish ledger cannot expire at all.\n\n* fix: add publish_ledger_epoch_length to EpochConfig constructors in tests\n\n* test: add integration test for publish ledger expiry\n\n* style: fix formatting in collect_expired_partitions bail message\n* fix: filter by ledger type before partition lookup in collect_expired_partitions\n\nPrevents a Publish partition state inconsistency from blocking Submit fee\ndistribution. Previously, get_assignment() was called for ALL expired\npartitions before the ledger type check — a missing Publish partition would\nbail the entire function.\n\nFixes security review Finding 1 (Medium-High).\n\n* fix: add debug_assert preventing Publish fee distribution\n\nMoves the unreachable bail guard from collect_expired_partitions to a\ndebug_assert at the calculate_expired_ledger_fees entry point. This\ncatches misuse during development without runtime overhead in release.\n\nFixes security review Finding 4 (Low).\n\n* fix: use checked_mul for expiry height arithmetic\n\nAll 3 locations computing epoch_length * num_blocks_in_epoch now use\nchecked_mul with a descriptive panic. This prevents silent overflow\nin release builds with extreme config values.\n\nApplied to TermLedger::get_expired_slot_indexes, Ledgers::expire_partitions,\nand Ledgers::get_expiring_partitions for consistency.\n\nFixes security review Finding 3 (Low).\n\n* test: add expiry state assertions to perm_ledger_expiry integration test\n\nVerifies:\n- Perm slots are marked is_expired after expiry height\n- No TermFeeReward shadow txs in the expiry epoch block\n- Expired partitions are returned to capacity pool",
+          "timestamp": "2026-03-24T13:53:48+01:00",
+          "tree_id": "0ad5182f1377b3f1d91b1055c223856b259fa6a7",
+          "url": "https://github.com/Irys-xyz/irys/commit/0ca706c6b69ac4193a981f1b26b75652fa554a7d"
+        },
+        "date": 1774357890949,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.237144,
+            "range": "± 0.082601",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 773.935617,
+            "range": "± 35.291638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1097.067108,
+            "range": "± 7.00349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 10.46178,
+            "range": "± 0.212274",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1337.175249,
+            "range": "± 101.804692",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1735.270906,
+            "range": "± 177.707016",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.101878,
+            "range": "± 0.118998",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 221.7978,
+            "range": "± 5.208315",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.583896,
+            "range": "± 2.237352",
             "unit": "ms/iter"
           },
           {
