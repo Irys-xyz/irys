@@ -16,12 +16,28 @@ fn make_chain_name() -> String {
     format!("IRYS_T_{pid}_{seq}")
 }
 
+/// Simulates network partitions between nodes by installing iptables DROP rules.
+///
+/// Each `NetworkPartitioner` manages its own iptables chain (e.g. `IRYS_T_12345_0`)
+/// to isolate its rules from the system and from other partitioner instances. When
+/// [`FaultInjector::inject`] is called with a [`FaultTarget::Network`], bidirectional
+/// TCP DROP rules are added for the given port pair, blocking traffic in both
+/// directions. The returned [`FaultGuard`] removes those rules when dropped or when
+/// [`FaultGuard::undo`] is called explicitly.
+///
+/// Reference counting (`active_injections`) tracks how many injections are live.
+/// The iptables chain is only flushed and deleted once the last injection is undone,
+/// so multiple concurrent partitions can safely share one partitioner instance.
 pub struct NetworkPartitioner {
+    /// Unique iptables chain name scoped to this instance (e.g. `IRYS_T_<pid>_<seq>`).
     chain_name: String,
+    /// Number of currently active DROP rule pairs. The chain is cleaned up when this
+    /// reaches zero.
     active_injections: Arc<AtomicUsize>,
 }
 
 impl NetworkPartitioner {
+    /// Creates a new partitioner with a unique iptables chain name and no active injections.
     pub fn new() -> Self {
         Self {
             chain_name: make_chain_name(),
@@ -29,6 +45,9 @@ impl NetworkPartitioner {
         }
     }
 
+    /// Returns `true` if passwordless `sudo iptables` is available on this host.
+    /// Used as a precondition check — tests that need network partitioning can skip
+    /// early if iptables isn't usable (e.g. non-root CI, containers without NET_ADMIN).
     pub async fn is_available() -> bool {
         Command::new("sudo")
             .args(["-n", "iptables", "-L"])
@@ -64,6 +83,16 @@ fn decrement_and_maybe_cleanup(active: &AtomicUsize, chain: &str) {
 }
 
 impl FaultInjector for NetworkPartitioner {
+    /// Installs bidirectional TCP DROP rules for the given port pair.
+    ///
+    /// Steps:
+    /// 1. Ensure the iptables chain exists (create it + jump from INPUT if needed).
+    /// 2. Increment the active injection counter.
+    /// 3. Add `sport→dport` DROP rule; on failure, decrement and clean up.
+    /// 4. Add the reverse `dport→sport` DROP rule; on failure, remove the first
+    ///    rule, decrement, and clean up.
+    /// 5. Return a [`FaultGuard`] whose undo closure removes both rules and
+    ///    triggers chain cleanup when the last injection is undone.
     async fn inject(&self, target: &FaultTarget) -> Result<FaultGuard, FaultError> {
         let (source_port, dest_port) = extract_ports(target)?;
 
