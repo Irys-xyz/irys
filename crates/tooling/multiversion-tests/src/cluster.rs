@@ -536,9 +536,9 @@ async fn wait_for_node_ready(
 
 fn format_log_tail(proc: &mut NodeProcess) -> String {
     let lines = proc.drain_logs();
-    let tail: Vec<&String> = lines.iter().rev().take(50).collect();
-    let mut out: Vec<&str> = tail.iter().rev().map(|s| s.as_str()).collect();
-    if lines.len() > 50 {
+    let start = lines.len().saturating_sub(50);
+    let mut out: Vec<&str> = lines.iter().skip(start).map(|s| s.as_str()).collect();
+    if start > 0 {
         out.insert(0, "... (truncated)");
     }
     let joined = out.join("\n");
