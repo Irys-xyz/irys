@@ -26,6 +26,20 @@ const DEFAULT_EXCEEDANCE_PCT: f64 = 0.20;
 /// a comfortable margin for run-to-run variance and parallel load.
 const DEFAULT_TIMEOUT_HEADROOM: f64 = 0.50;
 
+/// Short test threshold for I/O-bound downgrade decisions.
+/// Tests under this duration finish quickly and free their slot — they are
+/// less sensitive to contention and cheaper to over-allocate, so we can be
+/// more confident about downgrading them.
+const SHORT_TEST_DURATION_MS: u64 = 5_000; // 5 seconds
+
+/// Long test threshold: tests above this duration that are over-allocated
+/// represent the biggest performance opportunity. Each one holds a slot
+/// for a long time, blocking other tests from running.
+const LONG_TEST_DURATION_MS: u64 = 15_000; // 15 seconds
+
+/// RSS threshold for the memory contention analysis summary (observability).
+const MEMORY_PRESSURE_RSS_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
+
 // ============================================================================
 // Nextest config parsing
 // ============================================================================
@@ -523,11 +537,20 @@ pub struct Reclassification {
     pub current: TestClassification,
     pub suggested: SuggestedClassification,
     pub issues: Vec<String>,
+    /// When false, the reclassification should be shown in `analyze` but NOT
+    /// auto-applied by `apply`. This is set for tests where CPU spikes justify
+    /// the current allocation tier — the operator should verify manually.
+    pub safe_to_apply: bool,
 }
 
 impl Reclassification {
     pub fn needs_change(&self) -> bool {
         !self.issues.is_empty()
+    }
+
+    /// Whether this reclassification can be auto-applied without manual review.
+    pub fn is_auto_applicable(&self) -> bool {
+        self.needs_change() && self.safe_to_apply
     }
 }
 
@@ -553,6 +576,7 @@ fn analyze_reclassifications(
         );
 
         let mut issues = Vec::new();
+        let mut safe_to_apply = true;
 
         // Determine time above current allocation
         let (time_above_allocation_ms, allocation_threshold) = match current.effective_threads {
@@ -600,32 +624,79 @@ fn analyze_reclassifications(
                 // Check async-wait ratio: if the test spends >70% of its time
                 // below 1T CPU, it's I/O/coordination-bound (async waits for
                 // block migration, chunk sync, etc.) rather than compute-bound.
-                // These tests are sensitive to system contention — the slot
-                // reservation protects them from noisy neighbors, not because
-                // they need the CPU themselves.
+                //
+                // However, not all I/O-bound tests equally need their slot
+                // reservation. We differentiate by:
+                //
+                //  1. **Peak CPU vs allocation**: if peak CPU never reaches
+                //     the current allocation, the slots weren't needed for CPU.
+                //  2. **Duration**: short tests (<5s) finish quickly, so
+                //     over-allocation wastes little parallelism and they're
+                //     less fragile. Long tests (>15s) waste the most
+                //     parallelism and represent the biggest perf opportunity.
+                //  3. **Slot cost**: thread-seconds wasted = duration × (current - suggested)
                 let pct_above_1t = test
                     .avg_time_above_1t_ms
                     .map(|t| t as f64 / test.avg_duration_ms.max(1) as f64)
                     .unwrap_or(0.0);
                 let high_idle = pct_above_1t < 0.30;
+                let peak_cpu = test.avg_peak_cpu.unwrap_or(0.0);
+                let duration = test.avg_duration_ms;
+                let wasted_thread_secs = (duration as f64 / 1000.0)
+                    * (current.effective_threads - suggested.threads_required) as f64;
 
-                if high_idle {
+                if !high_idle {
+                    // Not I/O-bound: CPU is active, safe to downgrade
                     issues.push(format!(
-                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T \
-                         — WARNING: test is {:.0}% idle (I/O/coordination-bound), slot reservation may protect against contention. Verify manually",
+                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T — could downgrade (saves {:.0}s thread-time)",
                         test.avg_avg_cpu.unwrap_or(0.0),
                         allocation_threshold as u32,
                         pct_above_allocation,
                         current.effective_threads,
-                        (1.0 - pct_above_1t) * 100.0,
+                        wasted_thread_secs,
+                    ));
+                } else if peak_cpu >= allocation_threshold {
+                    // I/O-bound but peak CPU actually hits the allocation
+                    // during spikes — the reservation covers real CPU bursts.
+                    // Do NOT auto-apply: operator must verify.
+                    safe_to_apply = false;
+                    issues.push(format!(
+                        "CPU over-allocated on average ({:.2}x), but peak {:.2}x reaches {}T allocation — CPU spikes justify current tier. Verify contention sensitivity before downgrading",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                    ));
+                } else if duration < SHORT_TEST_DURATION_MS {
+                    // Short I/O test: finishes fast, slot cost is low, and
+                    // short tests are less timing-sensitive
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — short test, low slot cost ({:.0}s thread-time). Safe to step down",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
+                    ));
+                } else if duration >= LONG_TEST_DURATION_MS {
+                    // Long I/O test: biggest performance opportunity, but also
+                    // most sensitive to contention
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — long-running I/O test, wastes {:.0}s thread-time. High perf impact, but verify contention sensitivity",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
                     ));
                 } else {
+                    // Medium-duration I/O test
                     issues.push(format!(
-                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — I/O-bound, {:.0}s thread-time wasted. Verify contention sensitivity before downgrading",
                         test.avg_avg_cpu.unwrap_or(0.0),
-                        allocation_threshold as u32,
-                        pct_above_allocation,
+                        peak_cpu,
                         current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
                     ));
                 }
 
@@ -676,15 +747,32 @@ fn analyze_reclassifications(
             current,
             suggested,
             issues,
+            safe_to_apply,
         });
     }
 
-    // Sort by number of issues (most issues first), then by severity
+    // Sort by: (1) under-allocated before over-allocated (upgrades are more
+    // critical for stability), (2) within each group by wasted thread-seconds
+    // descending (biggest performance wins first), (3) by issue count.
     results.sort_by(|a, b| {
-        b.issues.len().cmp(&a.issues.len()).then_with(|| {
-            let a_cpu_issue = a.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
-            let b_cpu_issue = b.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
-            b_cpu_issue.cmp(&a_cpu_issue)
+        let a_under = a.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
+        let b_under = b.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
+
+        // Under-allocated tests first (stability risk)
+        b_under.cmp(&a_under).then_with(|| {
+            // Within each group, sort by wasted thread-seconds (perf impact)
+            let a_waste = a.stats.avg_duration_ms as f64 / 1000.0
+                * (a.current
+                    .effective_threads
+                    .saturating_sub(a.suggested.threads_required)) as f64;
+            let b_waste = b.stats.avg_duration_ms as f64 / 1000.0
+                * (b.current
+                    .effective_threads
+                    .saturating_sub(b.suggested.threads_required)) as f64;
+            b_waste
+                .partial_cmp(&a_waste)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.issues.len().cmp(&a.issues.len()))
         })
     });
 
@@ -1271,11 +1359,17 @@ fn cmd_analyze(
                     } else {
                         r.suggested.rule_names.join(" + ")
                     };
+                    let apply_tag = if r.safe_to_apply {
+                        ""
+                    } else {
+                        " [manual review — skipped by apply]"
+                    };
                     println!(
-                        "│  → Suggested: {} ({}T, {:.0}s timeout)",
+                        "│  → Suggested: {} ({}T, {:.0}s timeout){}",
                         suggested_rules,
                         r.suggested.threads_required,
-                        r.suggested.timeout_ms as f64 / 1000.0
+                        r.suggested.timeout_ms as f64 / 1000.0,
+                        apply_tag
                     );
                     println!(
                         "└────────────────────────────────────────────────────────────────────────────────"
@@ -1283,13 +1377,47 @@ fn cmd_analyze(
                     println!();
                 }
 
+                // Print thread-time waste summary
+                let total_waste: f64 = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required < r.current.effective_threads)
+                    .map(|r| {
+                        (r.stats.avg_duration_ms as f64 / 1000.0)
+                            * (r.current.effective_threads - r.suggested.threads_required) as f64
+                    })
+                    .sum();
+
+                let upgrade_count = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required > r.current.effective_threads)
+                    .count();
+                let downgrade_count = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required < r.current.effective_threads)
+                    .count();
+                let timeout_only_count = needs_change.len() - upgrade_count - downgrade_count;
+
                 println!(
                     "Summary: {} tests need reclassification",
                     needs_change.len()
                 );
+                println!(
+                    "  Upgrades: {} (stability risk — tests exceeding CPU allocation)",
+                    upgrade_count
+                );
+                println!(
+                    "  Downgrades: {} (performance opportunity — {:.0}s total wasted thread-time per run)",
+                    downgrade_count, total_waste
+                );
+                if timeout_only_count > 0 {
+                    println!("  Timeout-only: {}", timeout_only_count);
+                }
             } else {
                 println!("All tests are correctly classified!");
             }
+
+            // Memory contention analysis across all tests
+            print_memory_contention_summary(&reclassifications, config);
 
             if show_all && !ok.is_empty() {
                 println!();
@@ -1321,6 +1449,159 @@ fn cmd_analyze(
                         r.stats.avg_duration_ms as f64 / 1000.0
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Print a memory contention summary showing which allocation tiers have the
+/// most memory pressure risk and which specific tests dominate.
+fn print_memory_contention_summary(
+    reclassifications: &[Reclassification],
+    config: &ClassificationConfig,
+) {
+    // Group tests by current thread allocation and compute memory stats
+    let mut by_tier: BTreeMap<u32, Vec<&Reclassification>> = BTreeMap::new();
+    let mut has_memory = false;
+
+    for r in reclassifications {
+        if r.stats.avg_peak_rss_bytes.is_some() {
+            has_memory = true;
+        }
+        by_tier
+            .entry(r.current.effective_threads)
+            .or_default()
+            .push(r);
+    }
+
+    if !has_memory {
+        return;
+    }
+
+    // Determine test-threads from config (assume 12 as default nextest thread count)
+    let test_threads: u32 = 12;
+
+    println!();
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                       MEMORY CONTENTION ANALYSIS                            ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "{:<6} {:>6} {:>8} {:>10} {:>12} {:>12}  Top memory consumer",
+        "Tier", "Tests", "MaxConc", "AvgPeakRSS", "TopTestRSS", "WorstCase"
+    );
+    println!("{}", "-".repeat(90));
+
+    for (&threads, tests) in &by_tier {
+        let max_concurrent = test_threads / threads;
+
+        // Collect tests with memory data, sorted by peak RSS descending
+        let mut with_memory: Vec<_> = tests
+            .iter()
+            .filter_map(|r| {
+                r.stats
+                    .avg_peak_rss_bytes
+                    .map(|rss| (r.test_name.as_str(), rss))
+            })
+            .collect();
+        with_memory.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if with_memory.is_empty() {
+            continue;
+        }
+
+        // Average peak RSS across all tests in this tier
+        let avg_peak_rss: u64 =
+            with_memory.iter().map(|(_, rss)| *rss).sum::<u64>() / with_memory.len() as u64;
+
+        // Worst case: top N tests by RSS running simultaneously
+        let worst_case_rss: u64 = with_memory
+            .iter()
+            .take(max_concurrent as usize)
+            .map(|(_, rss)| *rss)
+            .sum();
+
+        let (top_name, top_rss) = with_memory[0];
+        let short_name = if top_name.len() > 30 {
+            format!("...{}", &top_name[top_name.len() - 27..])
+        } else {
+            top_name.to_string()
+        };
+
+        println!(
+            "{:>4}T {:>6} {:>8} {:>10} {:>12} {:>12}  {}",
+            threads,
+            tests.len(),
+            max_concurrent,
+            format_rss(avg_peak_rss),
+            format_rss(top_rss),
+            format_rss(worst_case_rss),
+            short_name,
+        );
+    }
+
+    // Highlight the most dangerous tier
+    let most_dangerous = by_tier
+        .iter()
+        .filter_map(|(&threads, tests)| {
+            let max_concurrent = test_threads / threads;
+            let mut with_memory: Vec<u64> = tests
+                .iter()
+                .filter_map(|r| r.stats.avg_peak_rss_bytes)
+                .collect();
+            with_memory.sort_unstable_by(|a, b| b.cmp(a));
+
+            if with_memory.is_empty() {
+                return None;
+            }
+
+            let worst_case: u64 = with_memory.iter().take(max_concurrent as usize).sum();
+            Some((threads, worst_case, with_memory.len(), max_concurrent))
+        })
+        .max_by_key(|&(_, worst_case, _, _)| worst_case);
+
+    if let Some((threads, worst_case, count, max_conc)) = most_dangerous {
+        if worst_case >= 8 * 1024 * 1024 * 1024 {
+            // 8 GB
+            println!();
+            println!(
+                "  Highest contention risk: {}T tier ({} tests, {} max concurrent, {} worst-case RSS)",
+                threads,
+                count,
+                max_conc,
+                format_rss(worst_case),
+            );
+        }
+    }
+
+    // Show specific high-RSS 1T tests that are the biggest risk
+    if let Some(default_tests) = by_tier.get(&config.default_threads) {
+        let mut high_rss: Vec<_> = default_tests
+            .iter()
+            .filter_map(|r| {
+                r.stats
+                    .avg_peak_rss_bytes
+                    .filter(|&rss| rss >= MEMORY_PRESSURE_RSS_BYTES)
+                    .map(|rss| (&r.test_name, rss))
+            })
+            .collect();
+        high_rss.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if !high_rss.is_empty() {
+            println!();
+            println!(
+                "  {} tests at {}T with peak RSS >= {} (top 10):",
+                high_rss.len(),
+                config.default_threads,
+                format_rss(MEMORY_PRESSURE_RSS_BYTES),
+            );
+            for (name, rss) in high_rss.iter().take(10) {
+                let short = if name.len() > 60 {
+                    format!("...{}", &name[name.len() - 57..])
+                } else {
+                    name.to_string()
+                };
+                println!("    {} {}", format_rss(*rss), short);
             }
         }
     }
@@ -2056,14 +2337,35 @@ fn cmd_apply(
 ) -> std::io::Result<()> {
     let all_classes = capacity_classes_from_config(config);
     let reclassifications = analyze_reclassifications(stats, config);
+
+    let skipped_count = reclassifications
+        .iter()
+        .filter(|r| r.needs_change() && !r.safe_to_apply)
+        .count();
+
     let needs_change: Vec<_> = reclassifications
         .iter()
-        .filter(|r| r.needs_change())
+        .filter(|r| r.is_auto_applicable())
         .collect();
 
     if needs_change.is_empty() {
-        println!("All tests are correctly classified. Nothing to apply.");
+        if skipped_count > 0 {
+            println!(
+                "No auto-applicable changes. {} tests have spike-justified allocations (use `analyze` to review).",
+                skipped_count
+            );
+        } else {
+            println!("All tests are correctly classified. Nothing to apply.");
+        }
         return Ok(());
+    }
+
+    if skipped_count > 0 {
+        println!(
+            "Skipping {} tests where CPU spikes justify current allocation (use `analyze` to review).",
+            skipped_count
+        );
+        println!();
     }
 
     // Group by function name (stripping case suffixes) and take max tier across all cases
