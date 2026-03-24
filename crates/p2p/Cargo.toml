@@ -46,6 +46,11 @@ irys-storage.workspace = true
 async-trait = "0.1"
 rstest.workspace = true
 syn.workspace = true
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "p2p_bench"
+harness = false

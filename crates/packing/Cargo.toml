@@ -22,9 +22,14 @@ eyre.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
+criterion.workspace = true
 
 [features]
 nvidia = ["irys-c/nvidia"]
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "packing_bench"
+harness = false

@@ -162,11 +162,39 @@ fn bench_apply_reset_seed(c: &mut Criterion) {
     });
 }
 
+/// Benchmarks vdf_sha with a single checkpoint to isolate the inner
+/// compress_n_rounds loop from checkpoint bookkeeping overhead.
+fn bench_vdf_sha_inner_loop(c: &mut Criterion) {
+    let tiers = build_tiers();
+    let mut group = c.benchmark_group("vdf_sha_inner_loop");
+
+    for tier in &tiers {
+        let total_iters = u64::try_from(tier.config.num_checkpoints_in_vdf_step).unwrap()
+            * tier.config.num_iterations_per_checkpoint();
+
+        group.sample_size(tier.sample_size);
+        group.measurement_time(tier.measurement_time);
+        group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
+            let mut checkpoints = vec![H256::default(); 1];
+            b.iter(|| {
+                let salt = U256::from(0);
+                let mut seed = fixed_seed();
+                vdf_sha(salt, &mut seed, 1, total_iters, &mut checkpoints);
+                std::hint::black_box(&checkpoints);
+                seed
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_vdf_sha,
     bench_vdf_sha_verification,
     bench_parallel_verification,
     bench_apply_reset_seed,
+    bench_vdf_sha_inner_loop,
 );
 criterion_main!(benches);
