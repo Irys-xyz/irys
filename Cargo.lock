@@ -5519,7 +5519,6 @@ dependencies = [
  "reth-primitives-traits",
  "reth-transaction-pool",
  "rstest",
- "ruint",
  "rust_decimal",
  "rust_decimal_macros",
  "semver 1.0.27",
