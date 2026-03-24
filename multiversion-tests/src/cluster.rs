@@ -115,6 +115,8 @@ impl Cluster {
             .ok_or_else(|| ClusterError::NodeNotFound(name.into()))
     }
 
+    /// Returns API URLs for all running nodes, silently skipping stopped ones.
+    /// Use `checked_api_urls` instead when crashed nodes should be treated as errors.
     pub fn api_urls(&mut self) -> Vec<String> {
         self.nodes
             .values_mut()
@@ -128,6 +130,23 @@ impl Cluster {
             .collect()
     }
 
+    /// Returns API URLs for all nodes, returning an error if any node has crashed.
+    pub fn checked_api_urls(&mut self) -> Result<Vec<String>, ClusterError> {
+        let mut urls = Vec::with_capacity(self.nodes.len());
+        for (name, node) in &mut self.nodes {
+            if !node.is_running() {
+                let raw_logs = node.drain_logs().join("\n");
+                let logs = strip_ansi_codes(&raw_logs);
+                return Err(ClusterError::NodeCrashed {
+                    name: name.clone(),
+                    logs,
+                });
+            }
+            urls.push(node.api_url());
+        }
+        Ok(urls)
+    }
+
     pub fn port_map(&self) -> &HashMap<String, NodePorts> {
         &self.port_map
     }
@@ -136,9 +155,10 @@ impl Cluster {
         &self.run_dir
     }
 
-    /// Returns the maximum tip height across all running nodes.
+    /// Returns the maximum tip height across all nodes.
+    /// Returns an error if any node has crashed.
     pub async fn get_max_height(&mut self) -> Result<u64, ClusterError> {
-        let urls = self.api_urls();
+        let urls = self.checked_api_urls()?;
         let mut max_height = 0u64;
         for url in &urls {
             let info = self.probe.get_info(url).await?;
@@ -147,13 +167,14 @@ impl Cluster {
         Ok(max_height)
     }
 
-    /// Polls until all running nodes report a height strictly above `baseline`.
+    /// Polls until all nodes report a height strictly above `baseline`.
+    /// Returns an error if any node has crashed.
     pub async fn wait_for_height_above(
         &mut self,
         baseline: u64,
         timeout: Duration,
     ) -> Result<(), ClusterError> {
-        let urls = self.api_urls();
+        let urls = self.checked_api_urls()?;
         let target = baseline + 1;
         for url in &urls {
             self.probe.wait_for_height(url, target, timeout).await?;
@@ -162,18 +183,7 @@ impl Cluster {
     }
 
     pub async fn wait_for_convergence(&mut self, timeout: Duration) -> Result<(), ClusterError> {
-        for (name, node) in &mut self.nodes {
-            if !node.is_running() {
-                let raw_logs = node.drain_logs().join("\n");
-                let logs = strip_ansi_codes(&raw_logs);
-                eprintln!("\n--- node '{name}' crashed ---\n{logs}\n---");
-                return Err(ClusterError::NodeCrashed {
-                    name: name.clone(), // clone: used in error construction
-                    logs,
-                });
-            }
-        }
-        let urls = self.api_urls();
+        let urls = self.checked_api_urls()?;
         self.probe
             .wait_for_convergence(&urls, self.height_tolerance, timeout)
             .await?;
@@ -194,20 +204,20 @@ impl Cluster {
             node.shutdown(SHUTDOWN_TIMEOUT).await?;
         }
 
-        let current_role = read_node_role(node.config_path())?;
+        let current_role = read_node_role(&node.config.config_path)?;
 
-        node.set_binary(new_binary.path.clone()); // clone: stored as new binary path
-        node.set_version_label(new_binary.label.clone()); // clone: stored as new label
+        node.config.binary_path = new_binary.path.clone(); // clone: stored as new binary path
+        node.config.version_label = new_binary.label.clone(); // clone: stored as new label
 
         // Preserve the node's original role. Only strip the GENESIS env var
         // and switch to Peer mode when the node was already a peer.
         match current_role {
             NodeRole::Genesis => {
-                patch_node_mode(node.config_path(), NodeRole::Genesis)?;
+                patch_node_mode(&node.config.config_path, NodeRole::Genesis)?;
             }
             NodeRole::Peer => {
-                node.remove_env_var("GENESIS");
-                patch_node_mode(node.config_path(), NodeRole::Peer)?;
+                node.config.env_vars.retain(|(k, _)| k != "GENESIS");
+                patch_node_mode(&node.config.config_path, NodeRole::Peer)?;
             }
         }
         node.respawn().await?;
@@ -486,12 +496,12 @@ async fn wait_for_node_ready(
     timeout: Duration,
 ) -> Result<(), ClusterError> {
     let start = tokio::time::Instant::now();
-    let name = proc.name().to_owned();
+    let name = proc.config.name.clone();
 
     loop {
         if !proc.is_running() {
             let logs = format_log_tail(proc);
-            let log_path = proc.log_file().display();
+            let log_path = proc.config.log_file.display();
             eprintln!(
                 "\n--- node '{name}' crashed during startup (full logs: {log_path}) ---\n{logs}\n---"
             );
@@ -508,7 +518,7 @@ async fn wait_for_node_ready(
         let elapsed = start.elapsed();
         if elapsed >= timeout {
             let logs = format_log_tail(proc);
-            let log_path = proc.log_file().display();
+            let log_path = proc.config.log_file.display();
             eprintln!(
                 "\n--- node '{name}' startup timeout after {elapsed:?} at {api_url} (full logs: {log_path}) ---\n{logs}\n---"
             );

@@ -59,7 +59,9 @@ async fn same_version_two_node_convergence() {
         .await
         .expect("two-node cluster did not converge");
 
-    let urls = cluster.api_urls();
+    let urls = cluster
+        .checked_api_urls()
+        .expect("all nodes should be running");
     for url in &urls {
         let info = cluster
             .probe
@@ -98,7 +100,9 @@ async fn three_node_cluster_convergence() {
         .await
         .expect("three-node cluster did not converge");
 
-    let urls = cluster.api_urls();
+    let urls = cluster
+        .checked_api_urls()
+        .expect("all nodes should be running");
     assert_eq!(urls.len(), 3, "expected 3 running nodes");
 
     cluster.shutdown().await;

@@ -43,7 +43,7 @@ pub struct NodeProcessConfig {
 }
 
 pub struct NodeProcess {
-    config: NodeProcessConfig,
+    pub config: NodeProcessConfig,
     child: Option<Child>,
     log_rx: mpsc::UnboundedReceiver<String>,
     /// Logs preserved from previous process incarnations across respawns.
@@ -51,34 +51,6 @@ pub struct NodeProcess {
 }
 
 impl NodeProcess {
-    pub fn name(&self) -> &str {
-        &self.config.name
-    }
-
-    pub fn version_label(&self) -> &str {
-        &self.config.version_label
-    }
-
-    pub fn api_port(&self) -> u16 {
-        self.config.api_port
-    }
-
-    pub fn gossip_port(&self) -> u16 {
-        self.config.gossip_port
-    }
-
-    pub fn data_dir(&self) -> &Path {
-        &self.config.data_dir
-    }
-
-    pub fn config_path(&self) -> &Path {
-        &self.config.config_path
-    }
-
-    pub fn log_file(&self) -> &Path {
-        &self.config.log_file
-    }
-
     pub fn api_url(&self) -> String {
         crate::node_api_base(self.config.api_port)
     }
@@ -88,18 +60,6 @@ impl NodeProcess {
     pub fn runtime_binary_path(&self) -> Result<PathBuf, ProcessError> {
         let pid = self.pid()?;
         std::fs::read_link(format!("/proc/{}/exe", pid.as_raw())).map_err(ProcessError::ProcInfo)
-    }
-
-    pub fn set_binary(&mut self, path: PathBuf) {
-        self.config.binary_path = path;
-    }
-
-    pub fn set_version_label(&mut self, label: String) {
-        self.config.version_label = label;
-    }
-
-    pub fn remove_env_var(&mut self, key: &str) {
-        self.config.env_vars.retain(|(k, _)| k != key);
     }
 
     pub fn spawn(config: NodeProcessConfig) -> Result<Self, ProcessError> {
