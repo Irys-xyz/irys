@@ -264,7 +264,11 @@ impl StorageModule {
 
             let submodule_db_path = sub_base_path.join("db");
             debug!("submodule_db_path: {:?}", submodule_db_path);
-            let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
+            let submodule_db = create_or_open_submodule_db(
+                &submodule_db_path,
+                config.node_config.database.sync_mode,
+            )
+            .map_err(|e| {
                 eyre!(
                     "Failed to create or open submodule database: {} - {}",
                     submodule_db_path.display(),
@@ -1891,7 +1895,7 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_testing_utils::{chunk_bytes_gen, utils::setup_tracing_and_temp_dir};
+    use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
     use irys_types::{
         ConsensusConfig, DataTransactionHeaderV1, H256, NodeConfig, SimpleRNG, StorageSyncConfig,
         TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii,
@@ -1910,7 +1914,10 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("data_path_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -2121,7 +2128,10 @@ mod tests {
 
         // SAFETY: test is single-threaded; setting env var before any tracing init.
         unsafe { std::env::set_var("RUST_LOG", "debug") };
-        let tmp_dir = setup_tracing_and_temp_dir(Some("pending_writes_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_writes_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -2333,7 +2343,10 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("data_path_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -2404,7 +2417,10 @@ mod tests {
         // This test verifies the interruption flow by checking the interval
         // files that are written during the write_chunk_internal process
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("write_interruption_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("write_interruption_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
 
         let infos = [StorageModuleInfo {
@@ -2469,7 +2485,10 @@ mod tests {
 
     #[test]
     fn test_successful_write_updates_from_interrupted_to_actual_type() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("successful_write_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("successful_write_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
 
         let infos = [StorageModuleInfo {
@@ -2548,7 +2567,10 @@ mod tests {
 
     #[test]
     fn test_interrupted_chunks_reset_on_load() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("interrupted_load_test"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("interrupted_load_test")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
 
         let infos = [StorageModuleInfo {
@@ -2631,7 +2653,11 @@ mod tests {
     fn mdbx_metadata_size_test() -> eyre::Result<()> {
         // SAFETY: test is single-threaded; setting env var before any tracing init.
         unsafe { std::env::set_var("RUST_LOG", "info") };
-        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), true);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("data_path_test")
+            .keep()
+            .with_tracing()
+            .build();
 
         let base_path = tmp_dir.path().to_path_buf();
         let chunk_size = 1;

@@ -1,9 +1,11 @@
+use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::{
-    commitment_tx_by_txid, open_or_create_db,
+    IrysDatabaseArgs as _, commitment_tx_by_txid, open_or_create_db,
     reth_db::{Database as _, DatabaseEnv},
     tables::{IngressProofs, IrysDataTxHeaders, IrysTables},
     walk_all,
 };
+use irys_types::DbSyncMode;
 
 use irys_database::reth_db::DatabaseEnvKind;
 use irys_types::NodeConfig;
@@ -16,7 +18,12 @@ use tracing_subscriber::{EnvFilter, Layer as _, Registry, layer::SubscriberExt a
 
 pub fn load_db() -> DatabaseEnv {
     let path = "/workspaces/irys-rs/.irys/1/reth/db";
-    open_or_create_db(path, IrysTables::ALL, None).unwrap()
+    open_or_create_db(
+        path,
+        IrysTables::ALL,
+        DatabaseArguments::irys_default(DbSyncMode::Durable).unwrap(),
+    )
+    .unwrap()
 }
 
 fn _promotion_debug() -> eyre::Result<()> {

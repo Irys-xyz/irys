@@ -7,47 +7,104 @@ use irys_types::{H256, H256List, U256, VDFLimiterInfo, VdfConfig};
 use openssl::sha;
 pub use rayon;
 use rayon::prelude::*;
-use sha2::{Digest as _, Sha256};
+use sha2::compress256;
+use sha2::digest::generic_array::GenericArray;
+use sha2::digest::typenum::U64;
 use std::time::Duration;
 
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;
 
+const SHA256_IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+const SHA256_64B_PADDING: [u8; 64] = {
+    let mut block = [0_u8; 64];
+    block[0] = 0x80;
+    block[62] = 0x02;
+    block
+};
+
+#[inline]
+fn state_to_bytes(state: &[u32; 8], out: &mut [u8]) {
+    for (chunk, word) in out.chunks_exact_mut(4).zip(state.iter()) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+}
+
+#[inline]
+fn increment_le_salt(salt: &mut [u8]) {
+    for byte in salt.iter_mut() {
+        let (new, overflow) = byte.overflowing_add(1);
+        *byte = new;
+        if !overflow {
+            return;
+        }
+    }
+}
+
+/// Casts a `&[[u8; 64]]` slice to `&[GenericArray<u8, U64>]`.
+///
+/// # Safety
+/// `GenericArray<u8, U64>` is `#[repr(transparent)]` over `[u8; 64]`,
+/// so this cast is layout-compatible.
+#[inline]
+fn as_generic_array_slice(blocks: &[[u8; 64]]) -> &[GenericArray<u8, U64>] {
+    const {
+        assert!(core::mem::size_of::<GenericArray<u8, U64>>() == 64);
+        assert!(core::mem::align_of::<GenericArray<u8, U64>>() == 1);
+    }
+    // SAFETY: GenericArray<u8, U64> is #[repr(transparent)] over [u8; 64],
+    // verified by the const assertions above.
+    unsafe { core::slice::from_raw_parts(blocks.as_ptr().cast(), blocks.len()) }
+}
+
+#[inline]
+fn compress_n_rounds(blocks: &mut [[u8; 64]; 2], iterations: u64) {
+    for _ in 0..iterations {
+        let ga_blocks = as_generic_array_slice(blocks);
+        let mut state = SHA256_IV;
+        compress256(&mut state, ga_blocks);
+        state_to_bytes(&state, &mut blocks[0][32..64]);
+    }
+}
+
 #[inline]
 pub fn vdf_sha(
-    hasher: &mut Sha256,
-    salt: &mut U256,
+    start_salt: U256,
     seed: &mut H256,
     num_checkpoints: usize,
     num_iterations_per_checkpoint: u64,
     checkpoints: &mut [H256],
 ) {
-    let mut local_salt: [u8; 32] = [0; 32];
+    assert!(
+        num_checkpoints <= checkpoints.len(),
+        "num_checkpoints ({num_checkpoints}) exceeds checkpoints length ({})",
+        checkpoints.len(),
+    );
 
-    for checkpoint_idx in 0..num_checkpoints {
-        salt.to_little_endian(&mut local_salt);
+    let mut blocks = [[0_u8; 64]; 2];
+    start_salt.to_little_endian(&mut blocks[0][..32]);
+    blocks[1] = SHA256_64B_PADDING;
+    blocks[0][32..64].copy_from_slice(seed.as_bytes());
 
-        for _ in 0..num_iterations_per_checkpoint {
-            hasher.update(local_salt);
-            hasher.update(seed.as_bytes());
-            *seed = H256(hasher.finalize_reset().into());
+    for (checkpoint_idx, slot) in checkpoints[..num_checkpoints].iter_mut().enumerate() {
+        if checkpoint_idx > 0 {
+            increment_le_salt(&mut blocks[0][..32]);
         }
-
-        // Store the result at the correct checkpoint index
-        checkpoints[checkpoint_idx] = *seed;
-
-        // Increment the salt for the next checkpoint calculation
-        *salt = *salt + 1;
+        compress_n_rounds(&mut blocks, num_iterations_per_checkpoint);
+        seed.as_mut().copy_from_slice(&blocks[0][32..64]);
+        *slot = *seed;
     }
 }
 
-/// Vdf verification code
 pub fn vdf_sha_verification(
     salt: U256,
     seed: H256,
     num_checkpoints: usize,
-    num_iterations_per_checkpoint: usize,
+    num_iterations_per_checkpoint: u64,
 ) -> Vec<H256> {
     let mut local_salt: U256 = salt;
     let mut local_seed: H256 = seed;
@@ -55,34 +112,20 @@ pub fn vdf_sha_verification(
     let mut checkpoints: Vec<H256> = vec![H256::default(); num_checkpoints];
 
     for checkpoint_idx in 0..num_checkpoints {
-        //  initial checkpoint hash
-        // -----------------------------------------------------------------
         if checkpoint_idx != 0 {
-            // If the index is > 0, use the previous checkpoint as the seed
             local_seed = checkpoints[checkpoint_idx - 1];
         }
 
         local_salt.to_little_endian(salt_bytes.as_mut());
 
-        // Hash salt+seed
-        let mut hasher = sha::Sha256::new();
-        hasher.update(salt_bytes.as_bytes());
-        hasher.update(local_seed.as_bytes());
-        let mut hash_bytes = H256::from(hasher.finish());
-
-        // subsequent hash iterations (if needed)
-        // -----------------------------------------------------------------
-        for _ in 1..num_iterations_per_checkpoint {
+        for _ in 0..num_iterations_per_checkpoint {
             let mut hasher = sha::Sha256::new();
             hasher.update(salt_bytes.as_bytes());
-            hasher.update(hash_bytes.as_bytes());
-            hash_bytes = H256::from(hasher.finish());
+            hasher.update(local_seed.as_bytes());
+            local_seed = H256::from(hasher.finish());
         }
 
-        // Store the result at the correct checkpoint index
-        checkpoints[checkpoint_idx] = hash_bytes;
-
-        // Increment the salt for the next checkpoint calculation
+        checkpoints[checkpoint_idx] = local_seed;
         local_salt = local_salt + 1;
     }
     checkpoints
@@ -172,6 +215,14 @@ pub async fn last_step_checkpoints_is_valid(
     } else {
         vdf_info.prev_output
     };
+    if vdf_info.last_step_checkpoints.len() != config.num_checkpoints_in_vdf_step {
+        return Err(eyre::eyre!(
+            "Invalid checkpoint count: expected {}, got {}",
+            config.num_checkpoints_in_vdf_step,
+            vdf_info.last_step_checkpoints.len()
+        ));
+    }
+
     let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
 
     let global_step_number: usize = vdf_info
@@ -218,17 +269,15 @@ pub async fn last_step_checkpoints_is_valid(
             (0..config.num_checkpoints_in_vdf_step)
                 .into_par_iter()
                 .map(|i| {
-                    let mut salt_buff: [u8; 32] = [0; 32];
-                    (start_salt + i).to_little_endian(&mut salt_buff);
-                    let mut seed = cp[i];
-                    let mut hasher = Sha256::new();
+                    let mut blocks = [[0_u8; 64]; 2];
+                    (start_salt + i).to_little_endian(&mut blocks[0][..32]);
+                    blocks[1] = SHA256_64B_PADDING;
+                    blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
 
-                    for _ in 0..num_iterations {
-                        hasher.update(salt_buff);
-                        hasher.update(seed.as_bytes());
-                        seed = H256(hasher.finalize_reset().into());
-                    }
-                    seed
+                    compress_n_rounds(&mut blocks, num_iterations);
+                    let mut result = H256::zero();
+                    result.as_mut().copy_from_slice(&blocks[0][32..64]);
+                    result
                 })
                 .collect::<Vec<H256>>()
         });
@@ -245,6 +294,31 @@ pub async fn last_step_checkpoints_is_valid(
     } else {
         Ok(())
     }
+}
+
+/// Computes VDF checkpoints for a given step, applying reset-seed entropy when at a reset boundary.
+///
+/// Returns `(final_seed, checkpoints)`.
+pub fn compute_step_checkpoints(
+    config: &VdfConfig,
+    step: u64,
+    input_seed: H256,
+    reset_seed: H256,
+) -> (H256, Vec<H256>) {
+    let salt = U256::from(step_number_to_salt_number(config, step.saturating_sub(1)));
+    let mut seed = input_seed;
+    if step > 1 && (step - 1).is_multiple_of(config.reset_frequency as u64) {
+        seed = apply_reset_seed(seed, reset_seed);
+    }
+    let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        salt,
+        &mut seed,
+        config.num_checkpoints_in_vdf_step,
+        config.num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+    (seed, checkpoints)
 }
 
 /// Derives a salt value from the `step_number` for checkpoint hashing
@@ -285,13 +359,11 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 
     // we don't early return once we have a precise value - this is to allow the calibration to accurately reflect the sustained performance
     for attempt in 0..runs {
-        let mut hasher = Sha256::new();
-        let mut salt = U256::from(0);
+        let salt = U256::from(0);
 
         let start = std::time::Instant::now();
         vdf_sha(
-            &mut hasher,
-            &mut salt,
+            salt,
             &mut seed,
             config.num_checkpoints_in_vdf_step,
             config.num_iterations_per_checkpoint(),
@@ -342,6 +414,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 mod tests {
     use super::*;
     use base58::FromBase58 as _;
+    use proptest::prelude::*;
 
     use tracing::debug;
 
@@ -618,5 +691,32 @@ mod tests {
             vdf_info.prev_output
         );
         println!("x: {:?}", x);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_vdf_sha_matches_verification(
+            salt_u64 in any::<u64>(),
+            seed_bytes in any::<[u8; 32]>(),
+            num_checkpoints in 1..=4_usize,
+            num_iterations in 0..=8_u64,
+        ) {
+            let salt = U256::from(salt_u64);
+            let original_seed = H256::from(seed_bytes);
+            let mut seed = original_seed;
+            let mut checkpoints = vec![H256::default(); num_checkpoints];
+
+            vdf_sha(salt, &mut seed, num_checkpoints, num_iterations, &mut checkpoints);
+
+            let verification = vdf_sha_verification(
+                salt,
+                original_seed,
+                num_checkpoints,
+                num_iterations,
+            );
+
+            prop_assert_eq!(seed, *verification.last().unwrap());
+            prop_assert_eq!(checkpoints, verification);
+        }
     }
 }

@@ -146,6 +146,22 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
+        // publish_ledger_epoch_length must be > 0 if set, and must not overflow when multiplied
+        if let Some(n) = self.consensus.epoch.publish_ledger_epoch_length {
+            ensure!(
+                n > 0,
+                "publish_ledger_epoch_length must be > 0 when set (got {})",
+                n
+            );
+            ensure!(
+                n.checked_mul(self.consensus.epoch.num_blocks_in_epoch)
+                    .is_some(),
+                "publish_ledger_epoch_length ({}) * num_blocks_in_epoch ({}) overflows u64",
+                n,
+                self.consensus.epoch.num_blocks_in_epoch
+            );
+        }
+
         Ok(())
     }
 }
@@ -761,6 +777,13 @@ mod tests {
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
+        // TOML doesn't include these fields, so they default to production values
+        expected_config.run_mode = RunMode::default();
+        expected_config.database = DatabaseConfig::default();
+        expected_config.reth.db_sync_mode = DbSyncMode::Durable;
+        expected_config.reth.cross_block_cache_size_megabytes = None;
+        expected_config.reth.additional_validation_tasks = 2;
+        expected_config.vdf.core_pinning = CorePinning::default();
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
@@ -830,6 +853,49 @@ mod tests {
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
+    }
+
+    #[test]
+    fn test_publish_ledger_epoch_length_validation() {
+        // Some(0) should fail
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(0);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
+
+        // Some(1) should pass
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(1);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // None should pass
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = None;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // u64::MAX should fail (overflow with num_blocks_in_epoch)
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
     }
 
     #[test]

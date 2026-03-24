@@ -328,6 +328,13 @@ pub struct EpochConfig {
 
     /// Optional configuration for capacity provisioning at genesis
     pub num_capacity_partitions: Option<u64>,
+
+    /// Number of epochs before a publish ledger partition expires.
+    /// `None` = never expire (mainnet). `Some(n)` = expire after n epochs (testnet).
+    /// `skip_serializing_if` ensures `None` is omitted from canonical JSON,
+    /// keeping the consensus hash unchanged for mainnet nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_ledger_epoch_length: Option<u64>,
 }
 
 /// # EMA (Exponential Moving Average) Configuration
@@ -624,6 +631,8 @@ impl ConsensusConfig {
                 submit_ledger_epoch_length: 5,
                 // Optional configuration for capacity provisioning at genesis
                 num_capacity_partitions: None,
+                // Publish ledger never expires on mainnet
+                publish_ledger_epoch_length: None,
             },
             // Number of blocks between EMA price recalculations Lower values make prices more responsive, higher values provide more stability
             ema: EmaConfig {
@@ -745,6 +754,8 @@ impl ConsensusConfig {
                 num_blocks_in_epoch: 100,
                 submit_ledger_epoch_length: 5,
                 num_capacity_partitions: None,
+                // Publish ledger never expires in testing config
+                publish_ledger_epoch_length: None,
             },
 
             difficulty_adjustment: DifficultyAdjustmentConfig {
@@ -882,6 +893,8 @@ impl ConsensusConfig {
                 num_blocks_in_epoch: 360,
                 submit_ledger_epoch_length: 5,
                 num_capacity_partitions: None,
+                // 168 epochs * ~1hr/epoch = ~7 days
+                publish_ledger_epoch_length: Some(168),
             },
 
             difficulty_adjustment: DifficultyAdjustmentConfig {

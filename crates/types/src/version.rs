@@ -1,6 +1,7 @@
+pub use crate::versions::ProtocolVersion;
 use crate::{
-    decode_address, encode_address, serialization::string_u64, serialization::string_usize,
-    Arbitrary, IrysPeerId, IrysSignature, RethPeerInfo, H256,
+    decode_address, encode_address, serialization::string_u64, Arbitrary, IrysPeerId,
+    IrysSignature, RethPeerInfo, H256,
 };
 use crate::{IrysAddress, U256};
 use alloy_primitives::keccak256;
@@ -20,68 +21,6 @@ pub enum PeerResponse {
     Accepted(HandshakeResponse),
     #[serde(rename = "rejected")]
     Rejected(RejectedResponse),
-}
-
-// Explicit integer protocol versions
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
-)]
-#[repr(u32)]
-pub enum ProtocolVersion {
-    V1 = 1,
-    V2 = 2,
-}
-
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        Self::current()
-    }
-}
-
-impl From<u32> for ProtocolVersion {
-    fn from(v: u32) -> Self {
-        match v {
-            1 => Self::V1,
-            2 => Self::V2,
-            _ => Self::default(),
-        }
-    }
-}
-
-impl ProtocolVersion {
-    pub const fn current() -> Self {
-        Self::V2
-    }
-
-    pub fn supported_versions() -> &'static [Self] {
-        &[Self::V1, Self::V2]
-    }
-
-    pub fn supported_versions_u32() -> &'static [u32] {
-        &[Self::V1 as u32, Self::V2 as u32]
-    }
-}
-
-/// We can't derive these impls directly due to the RLP not supporting repr structs/enums
-impl alloy_rlp::Encodable for ProtocolVersion {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        (*self as u32).encode(out);
-    }
-
-    fn length(&self) -> usize {
-        (*self as u32).length()
-    }
-}
-
-impl alloy_rlp::Decodable for ProtocolVersion {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let value = u32::decode(buf)?;
-        match value {
-            1 => Ok(Self::V1),
-            2 => Ok(Self::V2),
-            _ => Err(alloy_rlp::Error::Custom("unknown protocol version")),
-        }
-    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.
@@ -169,7 +108,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 ///   "user_agent": "my-node/1.2.0"   // Optional identification string
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -182,7 +121,7 @@ pub struct HandshakeRequestV1 {
 }
 
 /// V2 HandshakeRequest - includes peer_id for P2P identification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -393,7 +332,7 @@ impl Compact for PeerAddress {
 ///   "message": "Welcome to the network"  // or null if None
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -435,7 +374,7 @@ impl Default for HandshakeResponseV1 {
 ///   "consensus_config_hash": "0x..."  // Hash of consensus config
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -510,11 +449,11 @@ pub enum RejectionReason {
     InternalError,      // Unable to complete request
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
-    pub peer_count: usize,
+    pub peer_count: u64,
     #[serde(with = "string_u64")]
     pub chain_id: u64,
     #[serde(with = "string_u64")]
@@ -526,8 +465,8 @@ pub struct NodeInfo {
     #[serde(with = "string_u64")]
     pub pending_blocks: u64,
     pub is_syncing: bool,
-    #[serde(with = "string_usize")]
-    pub current_sync_height: usize,
+    #[serde(with = "string_u64")]
+    pub current_sync_height: u64,
     #[serde(with = "string_u64")]
     pub uptime_secs: u64,
     // #[serde(with = "address_base58_stringify")]
@@ -761,17 +700,45 @@ mod tests {
     }
 
     #[test]
+    fn test_node_info_numeric_json_deserialization() {
+        // Verify that string_u64 fields accept numeric JSON values (not just strings).
+        // This exercises the string_or_number_to_int compatibility branch.
+        let json = r#"{
+            "version": "1.0.0",
+            "peerCount": 5,
+            "chainId": 1270,
+            "height": 100,
+            "blockHash": "11111111111111111111111111111111",
+            "blockIndexHeight": 50,
+            "blockIndexHash": "11111111111111111111111111111111",
+            "pendingBlocks": 3,
+            "isSyncing": true,
+            "currentSyncHeight": 0,
+            "uptimeSecs": 9999,
+            "miningAddress": "11111111111111111111",
+            "cumulativeDifficulty": "0"
+        }"#;
+        let node_info: NodeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(node_info.current_sync_height, 0);
+        assert_eq!(node_info.chain_id, 1270);
+        assert_eq!(node_info.height, 100);
+        assert_eq!(node_info.block_index_height, 50);
+        assert_eq!(node_info.pending_blocks, 3);
+        assert_eq!(node_info.uptime_secs, 9999);
+    }
+
+    #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
-        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
-        // Test that we can still deserialize old numeric format for small values
-        // TODO: remove this at some point?
-        let node_info: NodeInfo = serde_json::from_str(old_json)?;
+        let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
+        let node_info: NodeInfo = serde_json::from_str(canonical_json)?;
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);
+        assert_eq!(node_info.peer_count, 10);
+        assert_eq!(node_info.current_sync_height, 0);
 
-        // this should ensure that we don't break U64 as string serialisation
+        // Ensure round-trip preserves all-strings format
         let reenc_node_info = serde_json::to_string(&node_info)?;
-        assert_eq!(old_json, reenc_node_info.as_str());
+        assert_eq!(canonical_json, reenc_node_info.as_str());
         Ok(())
     }
 

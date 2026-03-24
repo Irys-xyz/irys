@@ -1,10 +1,7 @@
-use std::time::Duration;
-
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
-use tokio::time::sleep;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -24,8 +21,7 @@ async fn main() -> eyre::Result<()> {
     let _ = dotenvy::dotenv();
 
     if cfg!(debug_assertions) {
-        eprintln!("WARNING: cfg!(debug_assertions) is TRUE. this setting toggles certain performance and durability settings to improve test performance, which is detrimental to production usecases. RECOMPILE WITH --release, or wait 5 seconds.");
-        sleep(Duration::from_secs(5)).await;
+        eprintln!("WARNING: Running a debug build. Performance will be degraded. RECOMPILE WITH --release for production use.");
     }
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -59,6 +55,10 @@ async fn main() -> eyre::Result<()> {
     reth_cli_util::sigsegv_handler::install();
     // load the config
     let config = load_config()?;
+
+    if config.run_mode.is_test() {
+        eprintln!("WARNING: run_mode is set to Test. Durability and performance settings are optimized for testing, not production. If this is unintentional, check your node configuration.");
+    }
 
     // start the node
     info!("starting the node, mode: {:?}", &config.node_mode);

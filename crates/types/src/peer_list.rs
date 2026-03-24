@@ -434,7 +434,17 @@ impl Compact for PeerListItemInner {
                 .try_into()
                 .expect("slice with incorrect length");
             let version_u32 = u32::from_be_bytes(version_bytes);
-            protocol_version = ProtocolVersion::from(version_u32);
+            protocol_version = match ProtocolVersion::try_from(version_u32) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!(
+                        version_u32,
+                        peer = %address.gossip,
+                        "Unknown protocol version in peer record, defaulting to V1"
+                    );
+                    ProtocolVersion::V1
+                }
+            };
             total_consumed += 4;
         }
 

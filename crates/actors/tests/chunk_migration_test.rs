@@ -20,7 +20,7 @@
 // use irys_config::IrysNodeConfig;
 // use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
 // use irys_storage::*;
-// use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+// use irys_testing_utils::utils::TempDirBuilder;
 // use irys_types::{
 //     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
 //     IrysBlockHeader, DataTransaction, DataTransactionHeader, PoaData, Signature, StorageConfig,
@@ -77,7 +77,7 @@
 //         },
 //     ];
 
-//     let tmp_dir = setup_tracing_and_temp_dir(Some("chunk_migration_test"), false);
+//     let tmp_dir = TempDirBuilder::new().prefix("chunk_migration_test").with_tracing().build();
 //     let base_path = tmp_dir.path().to_path_buf();
 //     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
 

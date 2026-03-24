@@ -421,18 +421,26 @@ impl BlockTreeServiceInner {
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            let height = cache.get_block(&block_hash).map(|x| x.height).unwrap_or(0);
+            let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
+            let height = maybe_height.unwrap_or(0);
             let state = cache
                 .get_block_and_status(&block_hash)
                 .map(|(_, state)| *state)
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-            // Remove the block
-            if let Err(err) = cache.remove_block(&block_hash) {
-                tracing::error!(
+            // The block may already be gone if an invalid ancestor was removed recursively.
+            if maybe_height.is_some() {
+                if let Err(err) = cache.remove_block(&block_hash) {
+                    tracing::error!(
+                        block.hash = %block_hash,
+                        ?err,
+                        "Failed to remove block from cache"
+                    );
+                }
+            } else {
+                tracing::debug!(
                     block.hash = %block_hash,
-                    ?err,
-                    "Failed to remove block from cache"
+                    "Ignoring invalid validation result for block already removed from cache"
                 );
             }
 

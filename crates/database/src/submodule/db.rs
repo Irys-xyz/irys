@@ -1,17 +1,17 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, MEGABYTE, PartitionChunkOffset, TERABYTE, TxPath,
+    ChunkDataPath, ChunkPathHash, DataRoot, DbSyncMode, PartitionChunkOffset, TERABYTE, TxPath,
     TxPathHash,
 };
 use reth_db::{
-    ClientVersion, DatabaseEnv,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
+    DatabaseEnv,
+    mdbx::DatabaseArguments,
     transaction::{DbTx, DbTxMut},
 };
 
 use crate::{
-    open_or_create_db,
+    IrysDatabaseArgs as _, open_or_create_db,
     submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
 };
 
@@ -21,18 +21,14 @@ use super::tables::{
 };
 
 /// Creates or opens a *submodule* MDBX database
-pub fn create_or_open_submodule_db<P: AsRef<Path>>(path: P) -> eyre::Result<DatabaseEnv> {
+pub fn create_or_open_submodule_db<P: AsRef<Path>>(
+    path: P,
+    sync_mode: DbSyncMode,
+) -> eyre::Result<DatabaseEnv> {
     open_or_create_db(
         path,
         SubmoduleTables::ALL,
-        Some(
-            DatabaseArguments::new(ClientVersion::default())
-                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-                // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-                .with_growth_step((10 * MEGABYTE).into())
-                .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-                .with_geometry_max_size(Some(2 * TERABYTE)),
-        ),
+        DatabaseArguments::irys_default(sync_mode)?.with_geometry_max_size(Some(2 * TERABYTE)),
     )
 }
 
@@ -177,25 +173,27 @@ mod tests {
         add_data_root_info, get_data_root_infos_for_data_root, set_data_root_infos_for_data_root,
     };
     use crate::{
-        open_or_create_db,
+        IrysDatabaseArgs as _, open_or_create_db,
         submodule::tables::{DataRootInfo, SubmoduleTables},
     };
     use irys_types::H256;
     use irys_types::RelativeChunkOffset;
     use reth_db::Database as _;
+    use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::DbTx as _;
 
     #[test]
     fn db_compact_dataroot_info() -> eyre::Result<()> {
-        let builder = tempfile::Builder::new()
+        let tmpdir = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("irys-datarootinfo-")
-            .rand_bytes(8)
-            .tempdir();
-        let tmpdir = builder
-            .expect("Not able to create a temporary directory.")
-            .keep();
+            .keep()
+            .build();
 
-        let db = open_or_create_db(tmpdir, SubmoduleTables::ALL, None)?;
+        let db = open_or_create_db(
+            tmpdir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
         let write_tx = db.tx_mut()?;
         let infos = vec![
             DataRootInfo {

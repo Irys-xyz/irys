@@ -325,7 +325,7 @@ impl EpochSnapshot {
 
         self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
 
-        self.expire_term_ledger_slots(new_epoch_block);
+        self.expire_ledger_slots(new_epoch_block);
 
         self.apply_unpledges(&new_epoch_commitments)?;
 
@@ -488,13 +488,13 @@ impl EpochSnapshot {
         }
     }
 
-    /// Loops though all of the term ledgers and looks for slots that are older
-    /// than the `epoch_length` (term length) of the ledger.
-    /// Stores a vec of expired partition hashes in the epoch snapshot
-    fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    /// Loops through all ledgers and looks for slots that are older
+    /// than their configured epoch length. Marks them expired and stores
+    /// the expired partition hashes in the epoch snapshot.
+    fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_partitions: Vec<ExpiringPartitionInfo> =
-            self.ledgers.expire_term_partitions(epoch_height);
+            self.ledgers.expire_partitions(epoch_height);
 
         // Return early if there's no more work to do
         if expired_partitions.is_empty() {
@@ -1245,8 +1245,7 @@ impl EpochSnapshot {
     /// Used during block production to produce epoch blocks with the correct term fee distributions.
     pub fn get_expiring_partition_info(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
         // expiring at next next block
-        let ledgers = self.ledgers.clone();
-        ledgers.get_expiring_term_partitions(epoch_height)
+        self.ledgers.get_expiring_partitions(epoch_height)
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {

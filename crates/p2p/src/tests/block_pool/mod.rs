@@ -14,12 +14,12 @@ use irys_actors::services::ServiceSenders;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
-    SealedBlock,
+    BlockBody, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, MempoolConfig,
+    NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
+    RethPeerInfo, SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -29,12 +29,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
-fn create_test_config() -> Config {
-    let temp_dir = setup_tracing_and_temp_dir(None, false);
+fn create_test_config() -> (irys_testing_utils::tempfile::TempDir, Config) {
+    let temp_dir = TempDirBuilder::new().with_tracing().build();
     let mut node_config = NodeConfig::testing();
     node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
-    Config::new_with_random_peer_id(node_config)
+    (temp_dir, Config::new_with_random_peer_id(node_config))
 }
 
 fn create_test_block_body(block_hash: irys_types::BlockHash) -> BlockBody {
@@ -65,8 +65,11 @@ struct MockedServices {
 impl MockedServices {
     fn new(config: &Config) -> Self {
         let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
-                .expect("can't open temp dir"),
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("can't open temp dir"),
         ));
 
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
@@ -151,7 +154,7 @@ impl MockedServices {
 
 #[tokio::test]
 async fn should_process_block() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -213,7 +216,7 @@ async fn should_process_block() {
 
 #[tokio::test]
 async fn should_process_block_with_intermediate_block_in_api() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -385,7 +388,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
 #[tokio::test]
 async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -593,7 +596,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
 #[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -677,7 +680,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
 
 #[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -855,7 +858,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
 #[tokio::test]
 async fn should_not_fast_track_block_already_in_index() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,

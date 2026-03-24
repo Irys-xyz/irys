@@ -1,4 +1,4 @@
-use crate::types::{GossipResponse, RejectionReason};
+use crate::wire_types::{GossipResponse, RejectionReason};
 use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use eyre::{Report, Result as EyreResult};
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
@@ -972,7 +972,13 @@ impl PeerNetworkService {
             our_supported_versions
         );
 
-        let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
+        let protocol_version: irys_types::ProtocolVersion =
+            negotiated_protocol_version.try_into().map_err(|e| {
+                PeerListServiceError::PostVersionError(format!(
+                    "negotiated unknown protocol version with {}: {}",
+                    gossip_address, e
+                ))
+            })?;
 
         // Create the appropriate handshake based on a negotiated version
         let peer_response_result = match protocol_version {
@@ -1141,10 +1147,11 @@ mod tests {
     use futures::FutureExt as _;
     use irys_database::{tables::PeerListItems, walk_all};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
+        Config, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage,
+        RethPeerInfo,
     };
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
@@ -1186,7 +1193,8 @@ mod tests {
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
         DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&path.to_path_buf()).expect("open test database"),
+            open_or_create_irys_consensus_data_db(path, DbSyncMode::UtterlyNoSync)
+                .expect("open test database"),
         ))
     }
 
@@ -1232,7 +1240,7 @@ mod tests {
 
     #[test]
     async fn test_add_peer() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1261,7 +1269,7 @@ mod tests {
 
     #[test]
     async fn test_active_peers_request() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1376,7 +1384,7 @@ mod tests {
 
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let harness = TestHarness::new(temp_dir.path(), config);
         let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
@@ -1404,7 +1412,7 @@ mod tests {
 
     // #[test]
     // async fn should_prevent_infinite_handshake_loop() {
-    //     let temp_dir = setup_tracing_and_temp_dir(None, false);
+    //     let temp_dir = TempDirBuilder::new().with_tracing().build();
     //     let mut node_config = NodeConfig::testing();
     //     node_config.trusted_peers = vec![];
     //     let config = Config::new_with_random_peer_id(node_config);
@@ -1462,7 +1470,7 @@ mod tests {
     //
     // #[test]
     // async fn test_reth_sender_receives_reth_peer_info() {
-    //     let temp_dir = setup_tracing_and_temp_dir(None, false);
+    //     let temp_dir = TempDirBuilder::new().with_tracing().build();
     //     let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
     //     let harness = TestHarness::new(temp_dir.path(), config);
     //     harness
@@ -1486,7 +1494,7 @@ mod tests {
 
     #[test]
     async fn test_periodic_flush() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
@@ -1538,7 +1546,7 @@ mod tests {
 
     #[test]
     async fn test_load_from_database() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
@@ -1602,7 +1610,7 @@ mod tests {
 
     #[test]
     async fn test_wait_for_active_peer() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1633,7 +1641,7 @@ mod tests {
 
     #[test]
     async fn test_wait_for_active_peer_no_peers() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1654,7 +1662,7 @@ mod tests {
 
     #[test]
     async fn test_staked_unstaked_peer_flush_behavior() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new_with_random_peer_id(node_config);
@@ -1695,7 +1703,7 @@ mod tests {
 
     #[test]
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();

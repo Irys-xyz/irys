@@ -10,7 +10,6 @@ use irys_types::{
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
 use reth_db::Database as _;
-use sha2::{Digest as _, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::{
     collections::VecDeque,
@@ -360,8 +359,7 @@ pub fn vdf_steps_are_valid(
                 _ => {}
             }
 
-            let mut hasher = Sha256::new();
-            let mut salt = U256::from(step_number_to_salt_number(
+            let salt = U256::from(step_number_to_salt_number(
                 config,
                 start_step_number + i as u64,
             ));
@@ -379,8 +377,7 @@ pub fn vdf_steps_are_valid(
                 seed = apply_reset_seed(seed, reset_seed);
             }
             vdf_sha(
-                &mut hasher,
-                &mut salt,
+                salt,
                 &mut seed,
                 config.num_checkpoints_in_vdf_step,
                 config.num_iterations_per_checkpoint(),
@@ -485,13 +482,11 @@ mod tests {
             }
 
             // Calculate next step
-            let mut hasher = Sha256::new();
-            let mut salt = U256::from(step_number_to_salt_number(&vdf_config, i as u64));
+            let salt = U256::from(step_number_to_salt_number(&vdf_config, i as u64));
             let mut checkpoints = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
 
             vdf_sha(
-                &mut hasher,
-                &mut salt,
+                salt,
                 &mut seed,
                 vdf_config.num_checkpoints_in_vdf_step,
                 vdf_config.num_iterations_per_checkpoint(),
