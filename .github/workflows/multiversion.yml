@@ -40,7 +40,6 @@ jobs:
         with:
           workspaces: |
             . -> target
-            multiversion-tests -> multiversion-tests/target
 
       - name: Run multiversion tests
         run: cargo xtask multiversion-test --profile dev --old-ref ${{ github.event_name == 'push' && github.event.before || 'origin/master' }} --new-ref HEAD --clean

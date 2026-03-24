@@ -601,7 +601,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 now.timestamp_subsec_millis(),
                 std::process::id()
             );
-            let _dir = sh.push_dir("multiversion-tests");
+            let _dir = sh.push_dir("crates/tooling/multiversion-tests");
             if let Some(ref path) = binary_new {
                 sh.set_var("IRYS_BINARY_NEW", path);
             }
@@ -653,9 +653,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
             let test_data_dir = sh
                 .current_dir()
-                .join("../target/multiversion/test-data")
+                .join("../../../target/multiversion/test-data")
                 .join(&run_id);
-            let worktree_base = sh.current_dir().join("../target/multiversion");
+            let worktree_base = sh.current_dir().join("../../../target/multiversion");
 
             // Aggregate per-test .status marker files into a summary.
             write_status_summary(&test_data_dir);

@@ -5296,6 +5296,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-multiversion-tests"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "irys-testing-utils",
+ "nix",
+ "proptest",
+ "reqwest 0.12.28",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-log",
+ "thiserror 2.0.17",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [

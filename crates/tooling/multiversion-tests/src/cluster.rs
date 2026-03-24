@@ -88,7 +88,7 @@ impl Cluster {
         // Write initial status marker — stays RUNNING if the test panics,
         // overwritten with PASSED in shutdown(). The xtask aggregates these
         // into a summary status.txt after the run.
-         std::fs::write(
+        std::fs::write(
             run_dir.join(".status"),
             format_status("RUNNING", spec.old_ref.as_deref(), spec.new_ref.as_deref()),
         )?;
@@ -264,12 +264,12 @@ fn allocate_ports(nodes: &[NodeSpec]) -> Result<HashMap<String, NodePorts>, Clus
 
 async fn cleanup_nodes(nodes: &mut HashMap<String, NodeProcess>) {
     for (name, node) in nodes.iter_mut() {
-        if node.is_running() {
-            if let Err(e) = node.shutdown(SHUTDOWN_TIMEOUT).await {
-                tracing::warn!(node = %name, error = %e, "cleanup: graceful shutdown failed, sending SIGKILL");
-                if let Err(kill_err) = node.kill().await {
-                    tracing::error!(node = %name, error = %kill_err, "cleanup: SIGKILL also failed");
-                }
+        if node.is_running()
+            && let Err(e) = node.shutdown(SHUTDOWN_TIMEOUT).await
+        {
+            tracing::warn!(node = %name, error = %e, "cleanup: graceful shutdown failed, sending SIGKILL");
+            if let Err(kill_err) = node.kill().await {
+                tracing::error!(node = %name, error = %kill_err, "cleanup: SIGKILL also failed");
             }
         }
     }

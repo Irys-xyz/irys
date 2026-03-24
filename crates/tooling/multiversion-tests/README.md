@@ -17,10 +17,9 @@ cargo xtask multiversion-test --filter rolling_upgrade_all_nodes
 # Combine: specific file + name filter
 cargo xtask multiversion-test --test upgrade --filter rolling
 
-# Run directly with cargo (from the multiversion-tests directory)
-cd multiversion-tests
-cargo test --test '*' -- --ignored --test-threads=1 --nocapture
-cargo test --test upgrade -- --ignored rolling_upgrade_all_nodes --nocapture
+# Run directly with cargo
+cargo test -p irys-multiversion-tests --test '*' -- --ignored --test-threads=1 --nocapture
+cargo test -p irys-multiversion-tests --test upgrade -- --ignored rolling_upgrade_all_nodes --nocapture
 ```
 
 Tests are marked `#[ignore]` because they build full `irys` binaries from source, which takes several minutes on first run. The xtask handles `--ignored` automatically; when running directly via `cargo test` you must pass it yourself.
@@ -304,7 +303,7 @@ The multiversion tests run in GitHub Actions (`.github/workflows/multiversion.ym
 ## Architecture
 
 ```text
-multiversion-tests/
+crates/tooling/multiversion-tests/
 ├── fixtures/
 │   └── base-config.toml     # Node config template (ports, peers, consensus)
 ├── src/
@@ -325,7 +324,7 @@ multiversion-tests/
     └── upgrade.rs            # Cross-version upgrade/rollback tests
 ```
 
-This is a **standalone workspace** — it is not part of the main `Cargo.toml` workspace. It has its own `Cargo.lock` and `rust-toolchain.toml`.
+This is a workspace crate at `crates/tooling/multiversion-tests/`, part of the main Cargo workspace.
 
 ## Timeouts Reference
 

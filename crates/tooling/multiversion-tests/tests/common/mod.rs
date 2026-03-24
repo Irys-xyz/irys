@@ -44,8 +44,9 @@ const REWARD_ADDRESSES: &[&str] = &[
 pub fn repo_root() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
-        .parent()
-        .expect("multiversion-tests should be one level below repo root")
+        .ancestors()
+        .nth(3)
+        .expect("multiversion-tests should be at crates/tooling/multiversion-tests")
         .to_path_buf()
 }
 

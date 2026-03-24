@@ -1,10 +1,8 @@
-[workspace]
-
 [package]
 name = "irys-multiversion-tests"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.93.0"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
@@ -35,4 +33,4 @@ test-log = { version = "0.2", features = ["trace"] }
 tempfile = "3"
 proptest = "1"
 rstest = "0.25"
-irys-testing-utils = { path = "../crates/utils/testing-utils" }
+irys-testing-utils = { path = "../../utils/testing-utils" }

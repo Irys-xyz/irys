@@ -321,9 +321,7 @@ impl BinaryResolver {
                 Err(BinaryError::BuildFailed { ref stderr, .. })
                     if stderr.contains("is not defined") =>
                 {
-                    tracing::info!(
-                        "debug-release profile unavailable, falling back to --release"
-                    );
+                    tracing::info!("debug-release profile unavailable, falling back to --release");
                     self.try_cargo_build(work_dir, &["--release"], "release")
                         .await
                 }

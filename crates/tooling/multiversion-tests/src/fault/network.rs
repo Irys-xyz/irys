@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{FaultError, FaultGuard, FaultInjector};
 use super::FaultTarget;
+use super::{FaultError, FaultGuard, FaultInjector};
 use tokio::process::Command;
 
 /// Global counter to ensure unique chain names even within the same process.
@@ -148,7 +148,10 @@ async fn setup_chain(chain: &str) -> Result<(), FaultError> {
         Err(FaultError::InjectionFailed(ref msg)) if msg.contains("Chain already exists") => {
             // Chain exists (e.g. from a prior inject call on this instance).
             // Only add the jump if it isn't already present.
-            if run_raw_iptables(&["-C", "INPUT", "-j", chain]).await.is_err() {
+            if run_raw_iptables(&["-C", "INPUT", "-j", chain])
+                .await
+                .is_err()
+            {
                 run_raw_iptables(&["-I", "INPUT", "-j", chain]).await?;
             }
         }
@@ -241,10 +244,7 @@ mod tests {
         FaultTarget::Process { pid: Pid::from_raw(1) },
         Err(())
     )]
-    fn extract_ports_cases(
-        #[case] target: FaultTarget,
-        #[case] expected: Result<(u16, u16), ()>,
-    ) {
+    fn extract_ports_cases(#[case] target: FaultTarget, #[case] expected: Result<(u16, u16), ()>) {
         let result = extract_ports(&target).map_err(|_| ());
         assert_eq!(result, expected);
     }
