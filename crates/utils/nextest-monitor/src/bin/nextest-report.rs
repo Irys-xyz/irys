@@ -4,10 +4,10 @@
 //! reports to help categorize tests by CPU consumption and timeout requirements.
 //! It reads classification rules directly from your .config/nextest.toml.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use regex::Regex;
@@ -19,6 +19,12 @@ use nextest_monitor::types::{AggregatedStats, CpuSample, MemorySample, TestStats
 /// exceeds N threads for more than this fraction of its runtime.
 /// 0.20 = 20% — brief spikes up to 20% of runtime are tolerated.
 const DEFAULT_EXCEEDANCE_PCT: f64 = 0.20;
+
+/// Default timeout headroom: a test is bumped to the next timeout tier when its
+/// duration exceeds this fraction of the current tier's timeout.
+/// 0.50 = 50% — a test using more than half its timeout gets bumped up, leaving
+/// a comfortable margin for run-to-run variance and parallel load.
+const DEFAULT_TIMEOUT_HEADROOM: f64 = 0.50;
 
 // ============================================================================
 // Nextest config parsing
@@ -202,6 +208,7 @@ impl ClassificationConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
+        _test_name: &str,
         avg_cpu: Option<f64>,
         duration_ms: u64,
         time_above_1t_ms: Option<u64>,
@@ -209,6 +216,7 @@ impl ClassificationConfig {
         time_above_3t_ms: Option<u64>,
         time_above_4t_ms: Option<u64>,
         exceedance_pct: f64,
+        timeout_headroom: f64,
     ) -> SuggestedClassification {
         let mut thread_options: Vec<u32> = vec![self.default_threads];
         thread_options.extend(self.rules.iter().filter_map(|r| r.threads_required));
@@ -254,9 +262,12 @@ impl ClassificationConfig {
         timeout_options.sort();
         timeout_options.dedup();
 
+        // Apply headroom: bump to the next tier when duration exceeds
+        // `timeout * headroom`. E.g., with 0.50 headroom a test taking 31s
+        // exceeds 50% of the 60s default and gets bumped to the slow tier.
         let suggested_timeout = timeout_options
             .iter()
-            .find(|&&t| t >= duration_ms)
+            .find(|&&t| duration_ms as f64 <= t as f64 * timeout_headroom)
             .copied()
             .unwrap_or_else(|| *timeout_options.last().unwrap_or(&self.default_timeout_ms));
 
@@ -356,7 +367,7 @@ fn extract_test_pattern(filter: &str) -> Option<String> {
 fn extract_rule_name(filter: &str) -> String {
     let pattern = extract_test_pattern(filter).unwrap_or_else(|| filter.to_string());
 
-    for prefix in &["slow_", "heavy_", "2xheavy_", "serial_"] {
+    for prefix in &["slow_", "heavy4_", "heavy3_", "heavy_", "serial_"] {
         if pattern.contains(prefix) {
             return prefix.trim_end_matches('_').to_string();
         }
@@ -530,6 +541,7 @@ fn analyze_reclassifications(
     for test in aggregated {
         let current = config.classify(&test.test_name);
         let suggested = config.suggest_classification(
+            &test.test_name,
             test.avg_avg_cpu,
             test.avg_duration_ms,
             test.avg_time_above_1t_ms,
@@ -537,6 +549,7 @@ fn analyze_reclassifications(
             test.avg_time_above_3t_ms,
             test.avg_time_above_4t_ms,
             DEFAULT_EXCEEDANCE_PCT,
+            DEFAULT_TIMEOUT_HEADROOM,
         );
 
         let mut issues = Vec::new();
@@ -584,13 +597,53 @@ fn analyze_reclassifications(
             } else if suggested.threads_required < current.effective_threads
                 && current.effective_threads > config.default_threads
             {
-                issues.push(format!(
-                    "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
-                    test.avg_avg_cpu.unwrap_or(0.0),
-                    allocation_threshold as u32,
-                    pct_above_allocation,
-                    current.effective_threads,
-                ));
+                // Check async-wait ratio: if the test spends >70% of its time
+                // below 1T CPU, it's I/O/coordination-bound (async waits for
+                // block migration, chunk sync, etc.) rather than compute-bound.
+                // These tests are sensitive to system contention — the slot
+                // reservation protects them from noisy neighbors, not because
+                // they need the CPU themselves.
+                let pct_above_1t = test
+                    .avg_time_above_1t_ms
+                    .map(|t| t as f64 / test.avg_duration_ms.max(1) as f64)
+                    .unwrap_or(0.0);
+                let high_idle = pct_above_1t < 0.30;
+
+                if high_idle {
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T \
+                         — WARNING: test is {:.0}% idle (I/O/coordination-bound), slot reservation may protect against contention. Verify manually",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        allocation_threshold as u32,
+                        pct_above_allocation,
+                        current.effective_threads,
+                        (1.0 - pct_above_1t) * 100.0,
+                    ));
+                } else {
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        allocation_threshold as u32,
+                        pct_above_allocation,
+                        current.effective_threads,
+                    ));
+                }
+
+                // Warn when the suggestion drops more than one tier (e.g.
+                // heavy4→default). The raw suggestion is still surfaced so the
+                // operator can see the target, but large jumps have historically
+                // introduced flakiness and should be verified incrementally.
+                let tier_drop = current
+                    .effective_threads
+                    .saturating_sub(suggested.threads_required);
+                if tier_drop > 1 {
+                    issues.push(format!(
+                        "NOTE: suggestion drops {}T→{}T ({} tiers). Consider stepping down one tier at a time and verifying stability at each level",
+                        current.effective_threads,
+                        suggested.threads_required,
+                        tier_drop,
+                    ));
+                }
             }
         }
 
@@ -702,6 +755,17 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Apply suggested reclassifications by renaming test functions in source files
+    Apply {
+        /// Dry run: show what would be changed without modifying files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Root directory to search for source files (default: current directory)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+
     /// Clear the stats file
     Clear,
 
@@ -779,6 +843,10 @@ fn main() -> std::io::Result<()> {
                 Commands::Detail { pattern } => cmd_detail(&stats, &config, &pattern),
                 Commands::Export { format, output } => {
                     cmd_export(&stats, &format, output.as_ref())?
+                }
+                Commands::Apply { dry_run, root } => {
+                    let root = root.unwrap_or_else(|| PathBuf::from("."));
+                    cmd_apply(&stats, &config, &root, dry_run)?;
                 }
                 Commands::Clear | Commands::Config => unreachable!(),
                 #[cfg(feature = "heap-profile")]
@@ -1112,9 +1180,15 @@ fn cmd_analyze(
             let ok: Vec<_> = to_show.iter().filter(|r| !r.needs_change()).collect();
 
             if !needs_change.is_empty() {
-                println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-                println!("║                     TESTS NEEDING RECLASSIFICATION                          ║");
-                println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+                println!(
+                    "╔══════════════════════════════════════════════════════════════════════════════╗"
+                );
+                println!(
+                    "║                     TESTS NEEDING RECLASSIFICATION                          ║"
+                );
+                println!(
+                    "╚══════════════════════════════════════════════════════════════════════════════╝"
+                );
                 println!();
 
                 for r in &needs_change {
@@ -1203,7 +1277,9 @@ fn cmd_analyze(
                         r.suggested.threads_required,
                         r.suggested.timeout_ms as f64 / 1000.0
                     );
-                    println!("└────────────────────────────────────────────────────────────────────────────────");
+                    println!(
+                        "└────────────────────────────────────────────────────────────────────────────────"
+                    );
                     println!();
                 }
 
@@ -1217,9 +1293,15 @@ fn cmd_analyze(
 
             if show_all && !ok.is_empty() {
                 println!();
-                println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-                println!("║                        CORRECTLY CLASSIFIED TESTS                           ║");
-                println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+                println!(
+                    "╔══════════════════════════════════════════════════════════════════════════════╗"
+                );
+                println!(
+                    "║                        CORRECTLY CLASSIFIED TESTS                           ║"
+                );
+                println!(
+                    "╚══════════════════════════════════════════════════════════════════════════════╝"
+                );
                 println!();
 
                 for r in &ok {
@@ -1648,6 +1730,479 @@ fn cmd_export(
         None => {
             println!("{}", content);
         }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Apply reclassifications
+// ============================================================================
+
+/// Metadata for one capacity class derived from the nextest config.
+#[derive(Debug, Clone)]
+struct CapacityClass {
+    name: String,
+    threads: Option<u32>,
+    timeout_ms: Option<u64>,
+}
+
+/// Collect the set of known capacity-class names from the loaded config rules.
+fn capacity_classes_from_config(config: &ClassificationConfig) -> Vec<CapacityClass> {
+    config
+        .rules
+        .iter()
+        .map(|r| CapacityClass {
+            name: r.name.clone(),
+            threads: r.threads_required,
+            timeout_ms: r.timeout_ms,
+        })
+        .collect()
+}
+
+/// Parse the leading capacity-class prefix from a function name.
+///
+/// Greedily consumes segments (`"<class>_"`) from the start of the name as
+/// long as each segment is a recognised capacity class. Returns the list of
+/// matched class names and the byte length of the prefix consumed.
+///
+/// A segment only "counts" if every segment before it is also a capacity
+/// class — i.e. they must form a contiguous leading prefix.
+///
+/// Examples (given classes = ["slow", "heavy", "heavy3", "heavy4", "serial"]):
+///   `"slow_heavy_foo"`  → (["slow","heavy"], 11)
+///   `"heavy_slow_foo"`  → (["heavy","slow"], 11) — any order
+///   `"test_slow_foo"`   → ([], 0)                — `test` is not a class
+///   `"heavy3_bar"`      → (["heavy3"], 7)
+fn parse_capacity_prefix(func_name: &str, classes: &[CapacityClass]) -> (Vec<String>, usize) {
+    let mut matched = Vec::new();
+    let mut pos = 0;
+    // Sort class names longest-first so "heavy3" is tried before "heavy".
+    let mut sorted_names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+    sorted_names.sort_by(|a, b| b.len().cmp(&a.len()));
+    loop {
+        let remaining = &func_name[pos..];
+        let mut found = false;
+        for &name in &sorted_names {
+            let token = format!("{name}_");
+            if remaining.starts_with(&token) {
+                matched.push(name.to_string());
+                pos += token.len();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            break;
+        }
+    }
+    (matched, pos)
+}
+
+/// Build the canonical prefix string for a set of capacity classes.
+///
+/// The canonical order is: timeout classes first (e.g. `slow_`), then thread
+/// classes in ascending order (`heavy_`, `heavy3_`, `heavy4_`), then others
+/// (e.g. `serial_`).
+fn classes_to_prefix(matched: &[String], all_classes: &[CapacityClass]) -> String {
+    // Partition into timeout-only, thread, and other classes
+    let mut timeout_parts = Vec::new();
+    let mut thread_parts: Vec<(u32, &str)> = Vec::new();
+    let mut other_parts = Vec::new();
+    for name in matched {
+        if let Some(cls) = all_classes.iter().find(|c| c.name == *name) {
+            if cls.threads.is_some() {
+                thread_parts.push((cls.threads.unwrap(), name.as_str()));
+            } else if cls.timeout_ms.is_some() {
+                timeout_parts.push(name.as_str());
+            } else {
+                other_parts.push(name.as_str());
+            }
+        } else {
+            other_parts.push(name.as_str());
+        }
+    }
+    // Only keep the highest thread class (don't emit both heavy_ and heavy3_)
+    thread_parts.sort_by(|a, b| b.0.cmp(&a.0));
+    thread_parts.truncate(1);
+
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(timeout_parts);
+    parts.extend(thread_parts.iter().map(|(_, n)| *n));
+    parts.extend(other_parts);
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}_", parts.join("_"))
+    }
+}
+
+/// Convert a suggested classification (threads, timeout) into the canonical
+/// function-name prefix, using the class names from the loaded config.
+fn classification_to_prefix(
+    threads: u32,
+    timeout_ms: u64,
+    config: &ClassificationConfig,
+    all_classes: &[CapacityClass],
+) -> String {
+    let mut matched = Vec::new();
+
+    // Find the timeout class (if any)
+    if timeout_ms > config.default_timeout_ms {
+        if let Some(cls) = all_classes
+            .iter()
+            .find(|c| c.timeout_ms == Some(timeout_ms))
+        {
+            matched.push(cls.name.clone());
+        }
+    }
+
+    // Find the thread class (if any)
+    if threads > config.default_threads {
+        if let Some(cls) = all_classes.iter().find(|c| c.threads == Some(threads)) {
+            matched.push(cls.name.clone());
+        }
+    }
+
+    classes_to_prefix(&matched, all_classes)
+}
+
+/// Map a thread class name to its thread count for step-down comparison.
+fn thread_class_tier(name: &str, all_classes: &[CapacityClass]) -> u32 {
+    all_classes
+        .iter()
+        .find(|c| c.name == name)
+        .and_then(|c| c.threads)
+        .unwrap_or(1)
+}
+
+/// Clamp a suggested thread count so it drops at most one tier from the
+/// current thread class. Up-allocations are never clamped.
+fn clamp_thread_downsize(
+    current_thread_class: Option<&str>,
+    suggested_threads: u32,
+    all_classes: &[CapacityClass],
+) -> u32 {
+    let current_tier = current_thread_class
+        .map(|n| thread_class_tier(n, all_classes))
+        .unwrap_or(1);
+    if suggested_threads >= current_tier {
+        return suggested_threads;
+    }
+    // Build sorted list of available thread tiers
+    let mut tiers: Vec<u32> = vec![1]; // default
+    tiers.extend(all_classes.iter().filter_map(|c| c.threads));
+    tiers.sort();
+    tiers.dedup();
+    // Find the tier one step below current
+    let current_idx = tiers.iter().position(|&t| t == current_tier).unwrap_or(0);
+    let min_tier = if current_idx > 0 {
+        tiers[current_idx - 1]
+    } else {
+        1
+    };
+    suggested_threads.max(min_tier)
+}
+
+/// Format a prefix string for display (showing "(default)" for empty prefix).
+fn display_prefix(prefix: &str) -> &str {
+    if prefix.is_empty() {
+        "(default)"
+    } else {
+        prefix.trim_end_matches('_')
+    }
+}
+
+/// Extract the function name from a test path (strips module path and case suffixes).
+fn extract_func_from_path(test_path: &str) -> &str {
+    // Strip ::case_N suffixes
+    let base = if let Some(idx) = test_path.find("::case_") {
+        &test_path[..idx]
+    } else {
+        test_path
+    };
+    // Function name is the last :: segment
+    base.rsplit("::").next().unwrap_or(base)
+}
+
+/// A rename action: old function name → new function name, with the file it was found in.
+#[derive(Debug, Clone)]
+struct RenameAction {
+    old_name: String,
+    new_name: String,
+    file_path: PathBuf,
+    line_number: usize,
+}
+
+/// Recursively find all .rs files under `root`, skipping target/ and hidden directories.
+fn find_rs_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip hidden dirs, target/, .worktrees/
+                if name.starts_with('.') || name == "target" {
+                    continue;
+                }
+            }
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+    walk(root, &mut files);
+    files
+}
+
+/// Find the file and line where `fn <func_name>` is defined.
+fn find_function_def(func_name: &str, rs_files: &[PathBuf]) -> Option<(PathBuf, usize)> {
+    // Match patterns like: `fn func_name(`, `fn func_name (`, `async fn func_name(`
+    let pattern = format!("fn {func_name}");
+    for file_path in rs_files {
+        let Ok(content) = fs::read_to_string(file_path) else {
+            continue;
+        };
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.contains(&pattern) {
+                // Verify it's actually a function definition, not just a comment or string
+                let before_fn = trimmed.split("fn ").next().unwrap_or("");
+                // Should be empty, start with pub/async/unsafe, or be a #[test] etc.
+                if before_fn.is_empty()
+                    || before_fn.ends_with("pub ")
+                    || before_fn.ends_with("async ")
+                    || before_fn.ends_with("pub async ")
+                    || before_fn.ends_with("pub(crate) ")
+                    || before_fn.ends_with("pub(crate) async ")
+                    || before_fn.ends_with("unsafe ")
+                    || before_fn.ends_with("pub unsafe ")
+                    || before_fn.ends_with("const ")
+                    || before_fn.ends_with("pub const ")
+                {
+                    // Confirm the character after the name is `(` or `<` or whitespace
+                    let after_name_start = trimmed.find(&pattern).unwrap() + pattern.len();
+                    if let Some(ch) = trimmed[after_name_start..].chars().next() {
+                        if ch == '(' || ch == '<' || ch == ' ' {
+                            return Some((file_path.clone(), line_idx + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cmd_apply(
+    stats: &AggregatedStats,
+    config: &ClassificationConfig,
+    root: &Path,
+    dry_run: bool,
+) -> std::io::Result<()> {
+    let all_classes = capacity_classes_from_config(config);
+    let reclassifications = analyze_reclassifications(stats, config);
+    let needs_change: Vec<_> = reclassifications
+        .iter()
+        .filter(|r| r.needs_change())
+        .collect();
+
+    if needs_change.is_empty() {
+        println!("All tests are correctly classified. Nothing to apply.");
+        return Ok(());
+    }
+
+    // Group by function name (stripping case suffixes) and take max tier across all cases
+    let mut func_suggestions: BTreeMap<String, (u32, u64)> = BTreeMap::new();
+    for r in &needs_change {
+        let func = extract_func_from_path(&r.test_name).to_string();
+        let entry = func_suggestions
+            .entry(func)
+            .or_insert((r.suggested.threads_required, r.suggested.timeout_ms));
+        entry.0 = entry.0.max(r.suggested.threads_required);
+        entry.1 = entry.1.max(r.suggested.timeout_ms);
+    }
+
+    // Compute rename pairs: old_func_name → new_func_name
+    let mut rename_pairs: Vec<(String, String)> = Vec::new();
+    let mut clamped_count = 0;
+    for (func_name, (suggested_threads, timeout_ms)) in &func_suggestions {
+        let (old_classes, prefix_len) = parse_capacity_prefix(func_name, &all_classes);
+        let base_name = &func_name[prefix_len..];
+
+        // Find the current thread class (the one with threads_required set)
+        let current_thread_class = old_classes.iter().find_map(|c| {
+            let cls = all_classes.iter().find(|ac| ac.name == *c)?;
+            cls.threads.map(|_| c.as_str())
+        });
+
+        // Clamp downsize: drop at most one thread tier per apply run
+        let clamped_threads =
+            clamp_thread_downsize(current_thread_class, *suggested_threads, &all_classes);
+        if clamped_threads != *suggested_threads {
+            clamped_count += 1;
+        }
+
+        let new_prefix =
+            classification_to_prefix(clamped_threads, *timeout_ms, config, &all_classes);
+        // Compare canonical forms so ordering differences don't cause spurious renames
+        let old_canonical = classes_to_prefix(&old_classes, &all_classes);
+        if old_canonical == new_prefix {
+            continue;
+        }
+        let new_name = format!("{new_prefix}{base_name}");
+        rename_pairs.push((func_name.clone(), new_name));
+    }
+
+    if rename_pairs.is_empty() {
+        println!("Analysis found issues but no renames are needed.");
+        return Ok(());
+    }
+
+    if clamped_count > 0 {
+        println!(
+            "Note: {} tests had their downsize clamped to one tier step.",
+            clamped_count
+        );
+        println!("Run `apply` again after verifying stability to continue stepping down.\n");
+    }
+
+    println!("Finding {} test functions to rename...", rename_pairs.len());
+
+    // Collect all .rs files once
+    let rs_files = find_rs_files(root);
+    println!("Scanning {} source files...", rs_files.len());
+
+    // Find each function definition
+    let mut actions: Vec<RenameAction> = Vec::new();
+    let mut not_found: Vec<String> = Vec::new();
+
+    for (old_name, new_name) in &rename_pairs {
+        match find_function_def(old_name, &rs_files) {
+            Some((file_path, line_number)) => {
+                actions.push(RenameAction {
+                    old_name: old_name.clone(),
+                    new_name: new_name.clone(),
+                    file_path,
+                    line_number,
+                });
+            }
+            None => {
+                not_found.push(old_name.clone());
+            }
+        }
+    }
+
+    // Group actions by file for efficient batch editing
+    let mut by_file: BTreeMap<PathBuf, Vec<&RenameAction>> = BTreeMap::new();
+    for action in &actions {
+        by_file
+            .entry(action.file_path.clone())
+            .or_default()
+            .push(action);
+    }
+
+    // Print summary
+    println!();
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                         APPLY RECLASSIFICATIONS                             ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Group by change direction for display
+    let mut by_change: BTreeMap<String, Vec<&RenameAction>> = BTreeMap::new();
+    for action in &actions {
+        let (old_classes, _) = parse_capacity_prefix(&action.old_name, &all_classes);
+        let old_pfx = classes_to_prefix(&old_classes, &all_classes);
+        let (new_classes, _) = parse_capacity_prefix(&action.new_name, &all_classes);
+        let new_pfx = classes_to_prefix(&new_classes, &all_classes);
+        let key = format!(
+            "'{}' → '{}'",
+            display_prefix(&old_pfx),
+            display_prefix(&new_pfx),
+        );
+        by_change.entry(key).or_default().push(action);
+    }
+
+    for (change, items) in &by_change {
+        println!("{} ({} functions):", change, items.len());
+        for action in items {
+            println!("  {} → {}", action.old_name, action.new_name);
+            println!(
+                "    in {}:{}",
+                action.file_path.display(),
+                action.line_number
+            );
+        }
+        println!();
+    }
+
+    if !not_found.is_empty() {
+        println!(
+            "⚠️  {} functions not found in source (skipped):",
+            not_found.len()
+        );
+        for name in &not_found {
+            println!("  {}", name);
+        }
+        println!();
+    }
+
+    if dry_run {
+        println!(
+            "DRY RUN: {} renames across {} files would be applied.",
+            actions.len(),
+            by_file.len()
+        );
+        if clamped_count > 0 {
+            println!(
+                "({} downsizes were clamped to one tier step)",
+                clamped_count
+            );
+        }
+        return Ok(());
+    }
+
+    // Apply renames
+    let mut files_modified = 0;
+    let mut renames_applied = 0;
+
+    for (file_path, file_actions) in &by_file {
+        let content = fs::read_to_string(file_path)?;
+        let mut new_content = content.clone();
+
+        for action in file_actions {
+            // Replace `fn old_name` with `fn new_name` — the fn keyword anchors the match
+            // to avoid renaming unrelated occurrences of the same identifier
+            let old_pattern = format!("fn {}", action.old_name);
+            let new_pattern = format!("fn {}", action.new_name);
+            new_content = new_content.replace(&old_pattern, &new_pattern);
+        }
+
+        if new_content != content {
+            fs::write(file_path, &new_content)?;
+            files_modified += 1;
+            renames_applied += file_actions.len();
+        }
+    }
+
+    println!(
+        "Applied {} renames across {} files.",
+        renames_applied, files_modified
+    );
+    println!();
+    println!("Next steps:");
+    println!("  1. Run `cargo fmt --all` to format changed files");
+    println!("  2. Run `cargo xtask check` to verify compilation");
+    println!("  3. Run `cargo xtask test --monitor` to verify with updated classifications");
+    if clamped_count > 0 {
+        println!("  4. Run `apply` again to continue stepping down clamped tests");
     }
 
     Ok(())

@@ -615,7 +615,7 @@ mod tests {
         min_difficulty_adjustment_factor = 0.25
 
         [vdf]
-        reset_frequency = 600
+        reset_frequency = 1200
         max_allowed_vdf_fork_steps = 60000
         num_checkpoints_in_vdf_step = 25
         sha_1s_difficulty = 1000

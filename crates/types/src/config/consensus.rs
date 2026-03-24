@@ -701,7 +701,7 @@ impl ConsensusConfig {
             vdf: VdfConsensusConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
                 // With 12s target block time, this resets approximately every 10 minutes
-                reset_frequency: 50 * 12,
+                reset_frequency: 100 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: SHA1_DIFFICULTY,
@@ -956,7 +956,7 @@ mod tests {
         // - The canonical JSON serialization implementation
         // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("9LcmU6zEjaeDXWjHJs6hMop3KRqqpZKtjCiCYKmJ56xS");
+        let expected_hash = H256::from_base58("PGh7Dunjx4xjNTLbx48G8DdKuozbsZ3nYCLm6AvRjUN");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

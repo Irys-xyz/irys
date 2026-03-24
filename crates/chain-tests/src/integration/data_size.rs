@@ -110,8 +110,8 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
         assert_eq!(status, reqwest::StatusCode::OK);
     }
 
-    // Mine a block (to migrate the wrong_data_size_tx)
-    genesis_node.mine_block().await?;
+    // Mine a block containing valid_tx
+    let _valid_tx_block = genesis_node.mine_block().await?;
 
     let price_info = genesis_node
         .get_data_price(DataLedger::Publish, bad_data_size)
@@ -134,6 +134,22 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
 
     genesis_node.mine_block().await?;
 
+    // Wait for chunk migration to complete for valid_tx's block before posting
+    // chunks 0-2. We wait for submit offset 8 (the last valid_tx chunk posted
+    // earlier at tx_offsets 3-5) to appear in storage. This proves that:
+    // 1) valid_tx's DataRootInfo has been indexed in the storage module
+    // 2) data sync has written cached chunks to the correct positions
+    // Without this wait, chunks 0-2 posted during ingress would be written to
+    // wrong_data_size_tx's storage slots (same data_root) and consumed from cache,
+    // leaving valid_tx's submit offset 3 permanently empty.
+    genesis_node
+        .wait_for_chunk_in_storage(
+            DataLedger::Submit,
+            LedgerChunkOffset::from(8),
+            seconds_to_wait,
+        )
+        .await?;
+
     // Validate the chunks do not appear in the ledger
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
 
@@ -151,7 +167,15 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
 
-    // Get the first chunk from publish ledger to determine promotion order
+    // Get the first chunk from publish ledger to determine promotion order.
+    // wait_for_chunk_in_storage handles async migration delay after mine_blocks.
+    genesis_node
+        .wait_for_chunk_in_storage(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(0),
+            seconds_to_wait,
+        )
+        .await?;
     let first_chunk = genesis_node
         .get_chunk(DataLedger::Publish, LedgerChunkOffset::from(0))
         .await
