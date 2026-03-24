@@ -252,12 +252,42 @@ fn allocate_ports(nodes: &[NodeSpec]) -> Result<HashMap<String, NodePorts>, Clus
     Ok(port_map)
 }
 
+async fn cleanup_nodes(nodes: &mut HashMap<String, NodeProcess>) {
+    for (name, node) in nodes.iter_mut() {
+        if node.is_running() {
+            if let Err(e) = node.shutdown(SHUTDOWN_TIMEOUT).await {
+                tracing::warn!(node = %name, error = %e, "cleanup: graceful shutdown failed, sending SIGKILL");
+                if let Err(kill_err) = node.kill().await {
+                    tracing::error!(node = %name, error = %kill_err, "cleanup: SIGKILL also failed");
+                }
+            }
+        }
+    }
+}
+
 async fn spawn_and_wait_for_nodes(
     spec: &ClusterSpec,
     port_map: &mut HashMap<String, NodePorts>,
     run_dir: &Path,
     probe: &HttpProbe,
 ) -> Result<HashMap<String, NodeProcess>, ClusterError> {
+    let mut nodes = HashMap::new();
+    match spawn_and_wait_for_nodes_inner(spec, port_map, run_dir, probe, &mut nodes).await {
+        Ok(()) => Ok(nodes),
+        Err(e) => {
+            cleanup_nodes(&mut nodes).await;
+            Err(e)
+        }
+    }
+}
+
+async fn spawn_and_wait_for_nodes_inner(
+    spec: &ClusterSpec,
+    port_map: &mut HashMap<String, NodePorts>,
+    run_dir: &Path,
+    probe: &HttpProbe,
+    nodes: &mut HashMap<String, NodeProcess>,
+) -> Result<(), ClusterError> {
     let log_dir = run_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
@@ -270,7 +300,6 @@ async fn spawn_and_wait_for_nodes(
         return Err(ClusterError::MultipleGenesis(genesis_count));
     }
 
-    let mut nodes = HashMap::new();
     let mut genesis_api_url: Option<String> = None;
 
     for node_spec in spec
@@ -320,7 +349,7 @@ async fn spawn_and_wait_for_nodes(
         tracing::info!(node = %node_spec.name, "peer node ready");
     }
 
-    Ok(nodes)
+    Ok(())
 }
 
 /// Fetches the consensus config and genesis hash from the running genesis node,
