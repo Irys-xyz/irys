@@ -6,6 +6,7 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_evm::Evm as _;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy_sol_types::SolCall as _;
 use dashmap::DashMap;
 use irys_reth::evm::IrysEvmFactory;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
@@ -16,6 +17,11 @@ use revm::context::{BlockEnv, CfgEnv, TxEnv};
 use revm::database::EmptyDB;
 use revm::primitives::hardfork::SpecId;
 use std::sync::Arc;
+
+// Re-use the sol! generated types for ABI-encoded calldata
+alloy_sol_types::sol! {
+    function readData(uint8 index) external view returns (bytes memory data);
+}
 
 fn create_access_list_with_chunks(num_chunks: u64) -> AccessList {
     // chunk_size=32 in ConsensusConfig::testing()
@@ -55,7 +61,7 @@ fn create_pd_transaction(access_list: AccessList) -> TxEnv {
         nonce: 0,
         gas_limit: 30_000_000,
         value: U256::ZERO,
-        data: Bytes::from(vec![0, 0]), // Function ID 0, index 0
+        data: Bytes::from(readDataCall { index: 0 }.abi_encode()),
         gas_price: 0,
         chain_id: Some(1),
         gas_priority_fee: None,

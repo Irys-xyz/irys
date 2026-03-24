@@ -60,3 +60,49 @@ impl From<PdPrecompileError> for PrecompileError {
         Self::Other(Cow::Owned(format!("PD precompile: {}", e)))
     }
 }
+
+/// Convert a user-facing [`PdPrecompileError`] into a reverted [`PrecompileOutput`]
+/// with ABI-encoded custom error data.
+///
+/// Returns `None` for internal errors (e.g. `GasOverflow`, `OffsetOutOfRange`,
+/// `InvalidAccessList`) that should remain as `PrecompileError::Other`.
+pub fn try_encode_as_revert(
+    e: &PdPrecompileError,
+    gas_used: u64,
+) -> Option<revm::precompile::PrecompileOutput> {
+    use alloy_primitives::U256;
+    use alloy_sol_types::SolError as _;
+    use revm::precompile::PrecompileOutput;
+
+    use super::functions::{
+        ByteRangeOutOfBounds, ChunkFetchFailed, ChunkNotFound, MissingAccessList, SpecifierNotFound,
+    };
+
+    let revert_data: Vec<u8> = match e {
+        PdPrecompileError::MissingAccessList => MissingAccessList {}.abi_encode(),
+        PdPrecompileError::SpecifierNotFound { index, available } => SpecifierNotFound {
+            index: *index,
+            available: U256::from(*available),
+        }
+        .abi_encode(),
+        PdPrecompileError::ByteRangeOutOfBounds {
+            start,
+            end,
+            available,
+        } => ByteRangeOutOfBounds {
+            start: U256::from(*start),
+            end: U256::from(*end),
+            available: U256::from(*available),
+        }
+        .abi_encode(),
+        PdPrecompileError::ChunkNotFound { offset } => {
+            ChunkNotFound { offset: *offset }.abi_encode()
+        }
+        PdPrecompileError::ChunkFetchFailed { offset, .. } => {
+            ChunkFetchFailed { offset: *offset }.abi_encode()
+        }
+        // Internal errors stay as PrecompileError::Other
+        _ => return None,
+    };
+    Some(PrecompileOutput::new_reverted(gas_used, revert_data.into()))
+}

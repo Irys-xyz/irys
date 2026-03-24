@@ -64,6 +64,7 @@ thiserror.workspace = true
 either = "1.15"
 sha2.workspace = true
 alloy-rlp.workspace = true
+alloy-sol-types.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
