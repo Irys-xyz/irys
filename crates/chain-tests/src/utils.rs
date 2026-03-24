@@ -2870,10 +2870,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
         max_seconds: usize,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<PackedChunk> {
         for _attempt in 1..=max_seconds {
-            if self.get_chunk(ledger, chunk_offset).await.is_some() {
-                return Ok(());
+            if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
+                return Ok(chunk);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -2892,24 +2892,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_bytes: &[u8; 32],
         expected_data_size: u64,
     ) {
-        // Retry up to 10 seconds: chunk migration to storage is async after
-        // blocks reach the canonical chain, so chunks may not be immediately
-        // available after mine_blocks returns.
-        let mut packed_chunk = None;
-        for _attempt in 1..=10 {
-            if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
-                packed_chunk = Some(chunk);
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        let packed_chunk = packed_chunk.unwrap_or_else(|| {
-            panic!(
-                "Chunk not found after 10s! {} ledger chunk_offset: {}",
-                ledger, chunk_offset
-            )
-        });
+        let packed_chunk = self
+            .wait_for_chunk_in_storage(ledger, chunk_offset, 10)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Chunk not found after 10s! {} ledger chunk_offset: {}: {e}",
+                    ledger, chunk_offset
+                )
+            });
 
         let unpacked_chunk = unpack(
             &packed_chunk,

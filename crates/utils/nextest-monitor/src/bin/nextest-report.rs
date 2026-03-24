@@ -1845,8 +1845,18 @@ fn classification_to_prefix(
     timeout_ms: u64,
     config: &ClassificationConfig,
     all_classes: &[CapacityClass],
+    old_classes: &[String],
 ) -> String {
     let mut matched = Vec::new();
+
+    // Preserve non-resource classes (e.g. "serial") from the old prefix.
+    // These have neither threads nor timeout_ms set, so they would otherwise
+    // be dropped when rebuilding the prefix from resource requirements alone.
+    for cls in all_classes {
+        if cls.threads.is_none() && cls.timeout_ms.is_none() && old_classes.contains(&cls.name) {
+            matched.push(cls.name.clone());
+        }
+    }
 
     // Find the timeout class (if any)
     if timeout_ms > config.default_timeout_ms {
@@ -1914,16 +1924,22 @@ fn display_prefix(prefix: &str) -> &str {
     }
 }
 
-/// Extract the function name from a test path (strips module path and case suffixes).
+/// Extract the full module::function path from a test path (strips only case suffixes).
+///
+/// Preserves the module segments so that tests with the same bare function name
+/// in different modules are kept distinct when used as grouping keys.
 fn extract_func_from_path(test_path: &str) -> &str {
     // Strip ::case_N suffixes
-    let base = if let Some(idx) = test_path.find("::case_") {
+    if let Some(idx) = test_path.find("::case_") {
         &test_path[..idx]
     } else {
         test_path
-    };
-    // Function name is the last :: segment
-    base.rsplit("::").next().unwrap_or(base)
+    }
+}
+
+/// Extract just the bare function name (last `::` segment) from a test path.
+fn bare_func_name(test_path: &str) -> &str {
+    test_path.rsplit("::").next().unwrap_or(test_path)
 }
 
 /// A rename action: old function name → new function name, with the file it was found in.
@@ -1962,9 +1978,26 @@ fn find_rs_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Find the file and line where `fn <func_name>` is defined.
-fn find_function_def(func_name: &str, rs_files: &[PathBuf]) -> Option<(PathBuf, usize)> {
+///
+/// `module_hint` contains `::` separated module segments from the test path
+/// (e.g. `"crate_name::module::submod::func"`). When multiple files contain a
+/// matching definition the hint is used to pick the best match — files whose
+/// path contains more of the module segments are preferred.
+fn find_function_def(
+    func_name: &str,
+    rs_files: &[PathBuf],
+    module_hint: &str,
+) -> Option<(PathBuf, usize)> {
     // Match patterns like: `fn func_name(`, `fn func_name (`, `async fn func_name(`
     let pattern = format!("fn {func_name}");
+    let mut candidates: Vec<(PathBuf, usize, usize)> = Vec::new();
+
+    // Collect module segments from the hint for scoring (exclude the func name itself)
+    let hint_segments: Vec<&str> = module_hint
+        .rsplit("::")
+        .skip(1) // skip the bare function name
+        .collect();
+
     for file_path in rs_files {
         let Ok(content) = fs::read_to_string(file_path) else {
             continue;
@@ -1990,14 +2023,29 @@ fn find_function_def(func_name: &str, rs_files: &[PathBuf]) -> Option<(PathBuf, 
                     let after_name_start = trimmed.find(&pattern).unwrap() + pattern.len();
                     if let Some(ch) = trimmed[after_name_start..].chars().next() {
                         if ch == '(' || ch == '<' || ch == ' ' {
-                            return Some((file_path.clone(), line_idx + 1));
+                            // Score: how many module hint segments appear in the file path
+                            let path_str = file_path.to_string_lossy();
+                            let score = hint_segments
+                                .iter()
+                                .filter(|seg| path_str.contains(**seg))
+                                .count();
+                            candidates.push((file_path.clone(), line_idx + 1, score));
                         }
                     }
                 }
             }
         }
     }
-    None
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Pick the candidate with the highest module-hint score (first found on ties)
+    candidates
+        .into_iter()
+        .max_by_key(|(_, _, score)| *score)
+        .map(|(path, line, _)| (path, line))
 }
 
 fn cmd_apply(
@@ -2029,10 +2077,11 @@ fn cmd_apply(
         entry.1 = entry.1.max(r.suggested.timeout_ms);
     }
 
-    // Compute rename pairs: old_func_name → new_func_name
-    let mut rename_pairs: Vec<(String, String)> = Vec::new();
+    // Compute rename pairs: (full_path, old_bare_func_name, new_bare_func_name)
+    let mut rename_pairs: Vec<(String, String, String)> = Vec::new();
     let mut clamped_count = 0;
-    for (func_name, (suggested_threads, timeout_ms)) in &func_suggestions {
+    for (full_path, (suggested_threads, timeout_ms)) in &func_suggestions {
+        let func_name = bare_func_name(full_path);
         let (old_classes, prefix_len) = parse_capacity_prefix(func_name, &all_classes);
         let base_name = &func_name[prefix_len..];
 
@@ -2049,15 +2098,20 @@ fn cmd_apply(
             clamped_count += 1;
         }
 
-        let new_prefix =
-            classification_to_prefix(clamped_threads, *timeout_ms, config, &all_classes);
+        let new_prefix = classification_to_prefix(
+            clamped_threads,
+            *timeout_ms,
+            config,
+            &all_classes,
+            &old_classes,
+        );
         // Compare canonical forms so ordering differences don't cause spurious renames
         let old_canonical = classes_to_prefix(&old_classes, &all_classes);
         if old_canonical == new_prefix {
             continue;
         }
         let new_name = format!("{new_prefix}{base_name}");
-        rename_pairs.push((func_name.clone(), new_name));
+        rename_pairs.push((full_path.clone(), func_name.to_string(), new_name));
     }
 
     if rename_pairs.is_empty() {
@@ -2083,8 +2137,8 @@ fn cmd_apply(
     let mut actions: Vec<RenameAction> = Vec::new();
     let mut not_found: Vec<String> = Vec::new();
 
-    for (old_name, new_name) in &rename_pairs {
-        match find_function_def(old_name, &rs_files) {
+    for (full_path, old_name, new_name) in &rename_pairs {
+        match find_function_def(old_name, &rs_files, full_path) {
             Some((file_path, line_number)) => {
                 actions.push(RenameAction {
                     old_name: old_name.clone(),
@@ -2175,16 +2229,24 @@ fn cmd_apply(
 
     for (file_path, file_actions) in &by_file {
         let content = fs::read_to_string(file_path)?;
-        let mut new_content = content.clone();
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
 
         for action in file_actions {
-            // Replace `fn old_name` with `fn new_name` — the fn keyword anchors the match
-            // to avoid renaming unrelated occurrences of the same identifier
-            let old_pattern = format!("fn {}", action.old_name);
-            let new_pattern = format!("fn {}", action.new_name);
-            new_content = new_content.replace(&old_pattern, &new_pattern);
+            // line_number is 1-based; only replace on the exact line to avoid
+            // renaming unrelated occurrences of the same identifier elsewhere
+            let idx = action.line_number.saturating_sub(1);
+            if idx < lines.len() {
+                let old_pattern = format!("fn {}", action.old_name);
+                let new_pattern = format!("fn {}", action.new_name);
+                lines[idx] = lines[idx].replace(&old_pattern, &new_pattern);
+            }
         }
 
+        let mut new_content = lines.join("\n");
+        // Preserve trailing newline if the original file had one
+        if content.ends_with('\n') && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
         if new_content != content {
             fs::write(file_path, &new_content)?;
             files_modified += 1;
