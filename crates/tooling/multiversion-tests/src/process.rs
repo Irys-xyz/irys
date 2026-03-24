@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -62,8 +63,17 @@ impl NodeProcess {
         std::fs::read_link(format!("/proc/{}/exe", pid.as_raw())).map_err(ProcessError::ProcInfo)
     }
 
-    pub fn spawn(config: NodeProcessConfig) -> Result<Self, ProcessError> {
-        let (child, log_rx) = spawn_child_with_logs(&config)?;
+    /// Spawn the node process.
+    ///
+    /// `port_guards` holds the [`TcpListener`]s that reserve the ports this
+    /// node will bind.  They are kept alive until immediately before the
+    /// child process is exec'd, closing the TOCTOU window where another
+    /// process could steal the ports.
+    pub fn spawn(
+        config: NodeProcessConfig,
+        port_guards: Vec<TcpListener>,
+    ) -> Result<Self, ProcessError> {
+        let (child, log_rx) = spawn_child_with_logs(&config, port_guards)?;
         Ok(Self {
             config,
             child: Some(child),
@@ -145,7 +155,7 @@ impl NodeProcess {
             self.buffered_logs.push(line);
         }
 
-        let (child, log_rx) = spawn_child_with_logs(&self.config)?;
+        let (child, log_rx) = spawn_child_with_logs(&self.config, Vec::new())?;
         self.child = Some(child);
         self.log_rx = log_rx;
         Ok(())
@@ -179,6 +189,7 @@ impl Drop for NodeProcess {
 
 fn spawn_child_with_logs(
     config: &NodeProcessConfig,
+    port_guards: Vec<TcpListener>,
 ) -> Result<(Child, mpsc::UnboundedReceiver<String>), ProcessError> {
     let mut cmd = Command::new(&config.binary_path);
     cmd.env("CONFIG", &config.config_path)
@@ -193,6 +204,11 @@ fn spawn_child_with_logs(
     // Open the log file before spawning so that a failure here cannot orphan
     // the child process (kill_on_drop is false).
     let log_writer = open_log_file(&config.log_file).map_err(ProcessError::LogFile)?;
+
+    // Release the port-reservation listeners immediately before exec so the
+    // child can bind to the same ports.  Doing this here — rather than
+    // earlier in the call chain — minimises the TOCTOU window.
+    drop(port_guards);
 
     let mut child = cmd.spawn().map_err(ProcessError::Spawn)?;
     let (tx, rx) = mpsc::unbounded_channel();
@@ -327,14 +343,14 @@ mod tests {
             version_label: "test".to_owned(),
             env_vars: vec![],
         };
-        let result = NodeProcess::spawn(config);
+        let result = NodeProcess::spawn(config, Vec::new());
         assert!(matches!(result, Err(ProcessError::Spawn(_))));
     }
 
     #[tokio::test]
     async fn spawn_and_kill() {
         let (config, _dir) = stub_config("kill-test", stub_path());
-        let mut proc = NodeProcess::spawn(config).unwrap();
+        let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         assert!(proc.is_running());
         assert!(proc.pid().is_ok());
         proc.kill().await.unwrap();
@@ -344,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn pid_after_kill_returns_no_pid() {
         let (config, _dir) = stub_config("no-pid-test", stub_path());
-        let mut proc = NodeProcess::spawn(config).unwrap();
+        let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         proc.kill().await.unwrap();
         assert!(matches!(proc.pid(), Err(ProcessError::NoPid)));
     }
@@ -352,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn respawn_replaces_child_process() {
         let (config, _dir) = stub_config("respawn-test", stub_path());
-        let mut proc = NodeProcess::spawn(config).unwrap();
+        let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         let first_pid = proc.pid().unwrap();
         proc.respawn().await.unwrap();
         let second_pid = proc.pid().unwrap();
@@ -363,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn freeze_and_unfreeze() {
         let (config, _dir) = stub_config("freeze-test", stub_path());
-        let mut proc = NodeProcess::spawn(config).unwrap();
+        let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         proc.freeze().unwrap();
         proc.unfreeze().unwrap();
         assert!(proc.is_running());
@@ -373,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_terminates_process() {
         let (config, _dir) = stub_config("shutdown-test", stub_path());
-        let mut proc = NodeProcess::spawn(config).unwrap();
+        let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         let result = proc.shutdown(Duration::from_secs(5)).await;
         assert!(result.is_ok());
         assert!(!proc.is_running());

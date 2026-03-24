@@ -27,10 +27,11 @@ impl NodePorts {
         })
     }
 
-    /// Drop the bound listeners so the child process can bind to these ports.
-    /// Call this immediately before spawning the child process.
-    pub fn release_guards(&mut self) {
-        self.guards.take();
+    /// Remove the bound listeners so they can be held until the last moment
+    /// before the child process spawns — minimising the TOCTOU window where
+    /// another process could grab the same ports.
+    pub fn take_guards(&mut self) -> Vec<TcpListener> {
+        self.guards.take().map(|arr| arr.into()).unwrap_or_default()
     }
 }
 

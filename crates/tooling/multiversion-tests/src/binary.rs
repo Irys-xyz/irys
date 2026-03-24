@@ -362,7 +362,7 @@ impl BinaryResolver {
         profile_args: &[&str],
         target_dir_name: &str,
     ) -> Result<PathBuf, BinaryError> {
-        let mut args = vec!["build"];
+        let mut args = vec!["build", "--locked"];
         args.extend(profile_args);
         args.extend(["--bin", "irys", "-p", "irys-chain"]);
 

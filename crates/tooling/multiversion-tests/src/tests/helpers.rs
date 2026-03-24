@@ -14,11 +14,11 @@ pub const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Falls back to a timestamp generated at process start for standalone runs.
 static RUN_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     let run_id = std::env::var("IRYS_RUN_ID").unwrap_or_else(|_| {
-        let secs = std::time::SystemTime::now()
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before epoch")
-            .as_secs();
-        format!("{secs}")
+            .as_nanos();
+        format!("{nanos}-{}", std::process::id())
     });
     let dir = repo_root()
         .join("target/multiversion/test-data")
@@ -87,6 +87,34 @@ pub fn peer_spec(
         mining_key: MINING_KEYS[key_index].to_owned(),
         reward_address: REWARD_ADDRESSES[key_index].to_owned(),
     }
+}
+
+/// Asserts that a node is running the expected binary and responds to `/v1/info`.
+pub async fn assert_node_running_binary(
+    cluster: &mut crate::cluster::Cluster,
+    node_name: &str,
+    expected_binary_path: &Path,
+) {
+    let node = cluster
+        .nodes
+        .get_mut(node_name)
+        .unwrap_or_else(|| panic!("{node_name} missing from cluster"));
+    assert!(node.is_running(), "{node_name} should be running");
+    let api_url = node.api_url();
+    let actual_binary = node
+        .runtime_binary_path()
+        .unwrap_or_else(|e| panic!("{node_name}: failed to read runtime binary: {e}"));
+    let expected = std::fs::canonicalize(expected_binary_path)
+        .unwrap_or_else(|_| expected_binary_path.to_path_buf());
+    assert_eq!(
+        actual_binary, expected,
+        "{node_name} should be running the expected binary"
+    );
+    cluster
+        .probe
+        .get_info(&api_url)
+        .await
+        .unwrap_or_else(|e| panic!("{node_name} should respond to /v1/info: {e}"));
 }
 
 pub fn cluster_spec(test_name: &str, nodes: Vec<NodeSpec>) -> ClusterSpec {

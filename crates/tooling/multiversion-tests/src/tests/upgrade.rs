@@ -3,6 +3,12 @@ use crate::binary::{BinaryResolver, CURRENT_REF, ResolvedBinary};
 
 async fn resolve_binaries() -> (ResolvedBinary, ResolvedBinary) {
     let old_ref = std::env::var("IRYS_OLD_REF").unwrap_or_else(|_| CURRENT_REF.to_owned());
+    if old_ref == CURRENT_REF {
+        panic!(
+            "IRYS_OLD_REF is unset or resolves to {CURRENT_REF}; upgrade/rollback tests require \
+             a different revision for the old binary (e.g. IRYS_OLD_REF=master)"
+        );
+    }
 
     let resolver = BinaryResolver::new(&common::repo_root());
     let old = resolver
@@ -60,26 +66,7 @@ async fn upgrade_one_node_in_running_cluster() {
         .await
         .expect("chain did not advance after upgrading peer-1");
 
-    let upgraded = cluster
-        .nodes
-        .get_mut("peer-1")
-        .expect("peer-1 missing after upgrade");
-    assert!(upgraded.is_running());
-    let api_url = upgraded.api_url();
-    let actual_binary = upgraded
-        .runtime_binary_path()
-        .expect("should read running binary path");
-    let expected_binary =
-        std::fs::canonicalize(&new_binary.path).unwrap_or_else(|_| new_binary.path.clone());
-    assert_eq!(
-        actual_binary, expected_binary,
-        "peer-1 should be running the new binary"
-    );
-    cluster
-        .probe
-        .get_info(&api_url)
-        .await
-        .expect("peer-1 should respond to /v1/info after upgrade");
+    common::assert_node_running_binary(&mut cluster, "peer-1", &new_binary.path).await;
 
     cluster.shutdown().await;
 }
@@ -131,26 +118,9 @@ async fn rolling_upgrade_all_nodes() {
             .unwrap_or_else(|e| panic!("chain did not advance after upgrading {name}: {e}"));
     }
 
-    let expected_binary =
-        std::fs::canonicalize(&new_binary.path).unwrap_or_else(|_| new_binary.path.clone());
-    let mut api_urls = Vec::new();
-    for (name, node) in &mut cluster.nodes {
-        assert!(node.is_running(), "node {name} should be running");
-        let actual = node
-            .runtime_binary_path()
-            .unwrap_or_else(|e| panic!("node {name}: failed to read runtime binary: {e}"));
-        assert_eq!(
-            actual, expected_binary,
-            "node {name} should be running the new binary"
-        );
-        api_urls.push((name.clone(), node.api_url()));
-    }
-    for (name, url) in &api_urls {
-        cluster
-            .probe
-            .get_info(url)
-            .await
-            .unwrap_or_else(|e| panic!("node {name} should respond to /v1/info: {e}"));
+    let node_names: Vec<String> = cluster.nodes.keys().cloned().collect();
+    for name in &node_names {
+        common::assert_node_running_binary(&mut cluster, name, &new_binary.path).await;
     }
 
     cluster.shutdown().await;
@@ -219,26 +189,7 @@ async fn rollback_after_upgrade() {
         .await
         .expect("chain did not advance after rollback");
 
-    let rolled_back = cluster
-        .nodes
-        .get_mut("peer-1")
-        .expect("peer-1 missing after rollback");
-    assert!(rolled_back.is_running());
-    let api_url = rolled_back.api_url();
-    let actual_binary = rolled_back
-        .runtime_binary_path()
-        .expect("should read running binary path");
-    let expected_binary =
-        std::fs::canonicalize(&old_binary.path).unwrap_or_else(|_| old_binary.path.clone());
-    assert_eq!(
-        actual_binary, expected_binary,
-        "peer-1 should be running the old binary after rollback"
-    );
-    cluster
-        .probe
-        .get_info(&api_url)
-        .await
-        .expect("peer-1 should respond to /v1/info after rollback");
+    common::assert_node_running_binary(&mut cluster, "peer-1", &old_binary.path).await;
 
     cluster.shutdown().await;
 }
@@ -293,26 +244,7 @@ async fn crash_during_upgrade() {
         .await
         .expect("chain did not advance after crash-upgrade");
 
-    let recovered = cluster
-        .nodes
-        .get_mut("peer-1")
-        .expect("peer-1 missing after crash-upgrade");
-    assert!(recovered.is_running());
-    let api_url = recovered.api_url();
-    let actual_binary = recovered
-        .runtime_binary_path()
-        .expect("should read running binary path");
-    let expected_binary =
-        std::fs::canonicalize(&new_binary.path).unwrap_or_else(|_| new_binary.path.clone());
-    assert_eq!(
-        actual_binary, expected_binary,
-        "peer-1 should be running the new binary after crash-upgrade"
-    );
-    cluster
-        .probe
-        .get_info(&api_url)
-        .await
-        .expect("peer-1 should respond to /v1/info after crash-upgrade");
+    common::assert_node_running_binary(&mut cluster, "peer-1", &new_binary.path).await;
 
     cluster.shutdown().await;
 }

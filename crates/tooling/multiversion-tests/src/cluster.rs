@@ -447,32 +447,36 @@ fn spawn_node(
     data_dir: PathBuf,
     log_dir: &Path,
 ) -> Result<NodeProcess, ClusterError> {
-    // Release the bound listeners so the child process can bind to these ports.
-    port_map
+    // Take the port-reservation listeners — they will be held alive and
+    // threaded into `NodeProcess::spawn` so they are only dropped
+    // immediately before the child process is exec'd, minimising the TOCTOU
+    // window where another process could steal the ports.
+    let entry = port_map
         .get_mut(&node_spec.name)
-        .ok_or_else(|| ClusterError::NodeNotFound(node_spec.name.clone()))?
-        .release_guards();
-    let ports = port_map
-        .get(&node_spec.name)
         .ok_or_else(|| ClusterError::NodeNotFound(node_spec.name.clone()))?;
+    let port_guards = entry.take_guards();
+    let ports = &*entry;
     let mut env_vars = vec![("RUST_LOG".to_owned(), "debug".to_owned())];
     if matches!(node_spec.role, NodeRole::Genesis) {
         env_vars.push(("GENESIS".to_owned(), "true".to_owned()));
     }
 
     let log_file = log_dir.join(format!("{}.log", node_spec.name));
-    let proc = NodeProcess::spawn(NodeProcessConfig {
-        name: node_spec.name.clone(), // clone: stored in NodeProcess
-        binary_path: node_spec.binary.path.clone(), // clone: stored in NodeProcess
-        config_path,
-        data_dir,
-        log_file,
-        api_port: ports.api,
-        gossip_port: ports.gossip,
-        reth_port: ports.reth_network,
-        version_label: node_spec.binary.label.clone(), // clone: stored in NodeProcess
-        env_vars,
-    })?;
+    let proc = NodeProcess::spawn(
+        NodeProcessConfig {
+            name: node_spec.name.clone(), // clone: stored in NodeProcess
+            binary_path: node_spec.binary.path.clone(), // clone: stored in NodeProcess
+            config_path,
+            data_dir,
+            log_file,
+            api_port: ports.api,
+            gossip_port: ports.gossip,
+            reth_port: ports.reth_network,
+            version_label: node_spec.binary.label.clone(), // clone: stored in NodeProcess
+            env_vars,
+        },
+        port_guards,
+    )?;
 
     Ok(proc)
 }
