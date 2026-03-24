@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use irys_multiversion_tests::binary::ResolvedBinary;
-use irys_multiversion_tests::cluster::{ClusterSpec, NodeSpec};
-use irys_multiversion_tests::config::NodeRole;
+use crate::binary::ResolvedBinary;
+use crate::cluster::{ClusterSpec, NodeSpec};
+use crate::config::NodeRole;
 
 pub const HEIGHT_TIMEOUT: Duration = Duration::from_secs(120);
 pub const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -53,7 +53,7 @@ pub fn repo_root() -> PathBuf {
 pub fn genesis_spec(name: &str, binary: &ResolvedBinary, peers: Vec<String>) -> NodeSpec {
     NodeSpec {
         name: name.to_owned(),
-        binary: binary.clone(), // clone: building owned NodeSpec from shared reference
+        binary: binary.clone(),
         role: NodeRole::Genesis,
         peers,
         mining_key: MINING_KEYS[0].to_owned(),
@@ -81,7 +81,7 @@ pub fn peer_spec(
     );
     NodeSpec {
         name: name.to_owned(),
-        binary: binary.clone(), // clone: building owned NodeSpec from shared reference
+        binary: binary.clone(),
         role: NodeRole::Peer,
         peers,
         mining_key: MINING_KEYS[key_index].to_owned(),

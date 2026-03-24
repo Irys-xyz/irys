@@ -1,6 +1,5 @@
-mod common;
-
-use irys_multiversion_tests::binary::{BinaryResolver, CURRENT_REF, ResolvedBinary};
+use super::helpers as common;
+use crate::binary::{BinaryResolver, CURRENT_REF, ResolvedBinary};
 
 async fn resolve_binaries() -> (ResolvedBinary, ResolvedBinary) {
     let old_ref = std::env::var("IRYS_OLD_REF").unwrap_or_else(|_| CURRENT_REF.to_owned());
@@ -32,7 +31,7 @@ async fn upgrade_one_node_in_running_cluster() {
         Some(old_binary.git_rev.clone()),
         Some(new_binary.git_rev.clone()),
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
@@ -100,7 +99,7 @@ async fn rolling_upgrade_all_nodes() {
         Some(old_binary.git_rev.clone()),
         Some(new_binary.git_rev.clone()),
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
@@ -171,7 +170,7 @@ async fn rollback_after_upgrade() {
         Some(old_binary.git_rev.clone()),
         Some(new_binary.git_rev.clone()),
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
@@ -258,7 +257,7 @@ async fn crash_during_upgrade() {
         Some(old_binary.git_rev.clone()),
         Some(new_binary.git_rev.clone()),
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 

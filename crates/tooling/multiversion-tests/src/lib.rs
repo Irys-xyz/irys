@@ -6,6 +6,10 @@ pub mod ports;
 pub mod probe;
 pub mod process;
 
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod multiversion_tests;
+
 pub fn node_api_base(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }

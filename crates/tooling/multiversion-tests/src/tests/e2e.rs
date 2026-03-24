@@ -1,6 +1,5 @@
-mod common;
-
-use irys_multiversion_tests::binary::BinaryResolver;
+use super::helpers as common;
+use crate::binary::BinaryResolver;
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[ignore = "requires building irys binary from HEAD"]
@@ -15,7 +14,7 @@ async fn single_genesis_produces_blocks() {
         "single_genesis_produces_blocks",
         vec![common::genesis_spec("genesis", &binary, vec![])],
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
@@ -50,7 +49,7 @@ async fn same_version_two_node_convergence() {
             common::peer_spec("peer-1", &binary, 0, vec!["genesis".to_owned()]),
         ],
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
@@ -91,7 +90,7 @@ async fn three_node_cluster_convergence() {
             common::peer_spec("peer-2", &binary, 1, vec!["genesis".to_owned()]),
         ],
     );
-    let mut cluster = irys_multiversion_tests::cluster::Cluster::start(spec)
+    let mut cluster = crate::cluster::Cluster::start(spec)
         .await
         .expect("failed to start cluster");
 
