@@ -119,8 +119,9 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(resp) = client.get(&info_url).send().await {
-            assert_eq!(resp.status(), reqwest::StatusCode::OK);
-            break;
+            if resp.status() == reqwest::StatusCode::OK {
+                break;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,

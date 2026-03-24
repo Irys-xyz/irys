@@ -19,7 +19,7 @@ test-group = 'serial'
 [[profile.default.overrides]]
 filter = 'test(/.*slow_.*/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
-# priority = 100
+priority = 100
 
 # heavy tests
 [[profile.default.overrides]]
