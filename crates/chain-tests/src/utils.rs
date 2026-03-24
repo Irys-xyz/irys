@@ -2562,6 +2562,52 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    /// Build synthetic `PdDataRead` entries that pass `PdDataRead::decode` validation.
+    ///
+    /// Splits `total_chunks` into one or more entries, each fitting within the partition
+    /// boundary (`start + chunks_needed <= num_chunks_in_partition`). Uses descending
+    /// sentinel `partition_index` values (`u64::MAX`, `u64::MAX - 1`, ...) so that each
+    /// encoded key is unique (avoiding duplicate-key rejection) and each overflows in
+    /// `specs_to_keys()`, producing an empty chunk key set — PdService marks the tx as
+    /// Ready without needing real data uploaded.
+    pub fn build_synthetic_pd_data_reads(
+        total_chunks: u64,
+        offset_base: u32,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        assert!(total_chunks > 0, "total_chunks must be > 0");
+        assert!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = total_chunks;
+        let mut global_offset = u64::from(offset_base);
+        let mut sentinel_ix = 0_u64;
+
+        while remaining > 0 {
+            let start = global_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index: u64::MAX - sentinel_ix,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            global_offset += chunks_in_read;
+            sentinel_ix += 1;
+        }
+
+        Ok(reads)
+    }
+
     /// Creates and injects a single PD transaction with a custom priority fee.
     ///
     /// # Returns
@@ -2613,21 +2659,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         let base_fee: U256 = base_fee_per_chunk.into();
 
         let local_signer = LocalSigner::from(signer.signer.clone());
-        let chain_id = self.node_ctx.config.consensus.chain_id;
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
 
-        // Build data reads for the specified number of chunks.
-        // Use u64::MAX as a sentinel partition_index: it overflows in specs_to_keys(),
-        // producing an empty chunk key set. This means PdService marks the tx as Ready
-        // (0 required chunks) without needing real data uploaded. Tests that need real
-        // chunk data should use inject_pd_contract_call() with explicit PdDataRead specs.
-        let data_reads: Vec<PdDataRead> = (0..chunks_per_tx)
-            .map(|i| PdDataRead {
-                partition_index: u64::MAX,
-                start: offset_base + i as u32,
-                len: 256_000,
-                byte_off: 0,
-            })
-            .collect();
+        // Build PdDataRead entries covering the requested number of chunks.
+        // Uses sentinel partition_index values (u64::MAX, u64::MAX-1, ...) that
+        // overflow in specs_to_keys(), producing an empty chunk key set. This means
+        // PdService marks the tx as Ready (0 required chunks) without needing real
+        // data uploaded. Tests that need real chunk data should use
+        // inject_pd_contract_call() with explicit PdDataRead specs.
+        let data_reads = Self::build_synthetic_pd_data_reads(
+            u64::from(chunks_per_tx),
+            offset_base,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
         let access_list =
             build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee.into())?;
 

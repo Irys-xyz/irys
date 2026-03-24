@@ -709,7 +709,8 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             .abi_encode()
             .into();
 
-    // Reference a non-existent chunk (partition 0, offset 9999)
+    // Reference a non-existent chunk at a valid partition offset.
+    // start=9 is within num_chunks_in_partition(10) but no data was uploaded there.
     let tx_hash = node
         .inject_pd_contract_call(
             &data_account,
@@ -717,7 +718,7 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             abi_calldata,
             vec![PdDataRead {
                 partition_index: 0,
-                start: 9999,
+                start: 9,
                 len: 32,
                 byte_off: 0,
             }],

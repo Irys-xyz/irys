@@ -4,9 +4,10 @@ use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
 use alloy_primitives::{TxKind, U256};
 use alloy_signer_local::LocalSigner;
+use irys_chain::IrysNodeCtx;
 use irys_reth::pd_tx::{build_pd_access_list_with_fees, sum_pd_chunks_in_access_list};
 use irys_types::chunk_provider::ChunkConfig;
-use irys_types::{range_specifier::PdDataRead, NodeConfig};
+use irys_types::NodeConfig;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result<()> {
@@ -54,18 +55,15 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
 
     // Build a PD transaction with 80 chunks (exceeds peer's limit of 10, but within genesis limit of 100)
     let chain_id = genesis_node.node_ctx.config.consensus.chain_id;
+    let consensus = &genesis_node.node_ctx.config.consensus;
 
-    // Build access list with 80 chunks (4 data reads * 20 chunks each).
-    // chunk_size=32, so 20 chunks = 640 bytes per read.
-    let chunk_size = 32_u32;
-    let data_reads: Vec<PdDataRead> = (0..4_u32)
-        .map(|i| PdDataRead {
-            partition_index: u64::MAX,
-            start: i * 20, // distinct offsets to avoid duplicate key rejection
-            len: 20 * chunk_size,
-            byte_off: 0,
-        })
-        .collect();
+    // Build access list with 80 chunks, split into partition-fitting PdDataRead entries.
+    let data_reads = IrysNodeTest::<IrysNodeCtx>::build_synthetic_pd_data_reads(
+        80,
+        0,
+        consensus.chunk_size,
+        consensus.num_chunks_in_partition,
+    )?;
     // Build access list with 80 chunks AND fee parameters.
     // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
     // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
