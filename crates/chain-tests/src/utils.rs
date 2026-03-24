@@ -2587,10 +2587,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut global_offset = u64::from(offset_base);
         let mut sentinel_ix = 0_u64;
 
+        // Cap each read so `chunks_in_read * chunk_size` fits in u32 (PdDataRead.len).
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+
         while remaining > 0 {
             let start = global_offset % num_chunks_in_partition;
             let fit = num_chunks_in_partition - start;
-            let chunks_in_read = remaining.min(fit);
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
             let len = chunks_in_read * chunk_size;
 
             reads.push(PdDataRead {

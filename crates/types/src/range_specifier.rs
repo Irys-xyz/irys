@@ -144,10 +144,11 @@ impl PdDataRead {
     /// Encode this `PdDataRead` into a 32-byte access list storage key.
     #[must_use]
     pub fn encode(&self) -> [u8; 32] {
-        debug_assert!(
+        assert!(
             self.byte_off <= BYTE_OFF_MAX,
-            "byte_off {:#010X} exceeds u24 max",
-            self.byte_off
+            "byte_off {:#010X} exceeds u24 max ({:#010X})",
+            self.byte_off,
+            BYTE_OFF_MAX
         );
         let mut buf = [0_u8; 32];
         buf[0] = PdAccessListArgsTypeId::DataRead as u8;

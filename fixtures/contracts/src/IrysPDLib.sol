@@ -34,6 +34,8 @@ library IrysPDLib {
         );
         if (success) {
             data = abi.decode(data, (bytes));
+        } else {
+            data = "";
         }
     }
 
@@ -50,6 +52,8 @@ library IrysPDLib {
         );
         if (success) {
             data = abi.decode(data, (bytes));
+        } else {
+            data = "";
         }
     }
 
