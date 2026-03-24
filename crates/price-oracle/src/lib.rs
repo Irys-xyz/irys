@@ -13,6 +13,13 @@ use irys_types::storage_pricing::{
 use std::sync::{Arc, RwLock};
 use tokio::time::{Duration, interval};
 use tracing::Instrument as _;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PriceOracleError {
+    #[error("no oracles configured")]
+    NoOraclesConfigured,
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -113,12 +120,9 @@ impl SingleOracle {
     }
 
     /// Returns the last cached price of IRYS in USD.
-    pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
-        let guard = self
-            .cache
-            .read()
-            .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
-        Ok(guard.value)
+    pub fn current_price(&self) -> Amount<(IrysPrice, Usd)> {
+        let guard = self.cache.read().expect("oracle price cache lock poisoned");
+        guard.value
     }
 
     /// Spawn periodic polling task when the oracle has a configured update cadence. Returns a service handle.
@@ -177,20 +181,16 @@ impl SingleOracle {
                 self.update_cache(amount, last_updated)
             }
         }
+        Ok(())
     }
 
-    fn update_cache(
-        &self,
-        amount: Amount<(IrysPrice, Usd)>,
-        timestamp: UnixTimestamp,
-    ) -> eyre::Result<()> {
+    fn update_cache(&self, amount: Amount<(IrysPrice, Usd)>, timestamp: UnixTimestamp) {
         let mut guard = self
             .cache
             .write()
-            .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
+            .expect("oracle price cache lock poisoned");
         guard.value = amount;
         guard.last_updated = timestamp;
-        Ok(())
     }
 }
 
@@ -209,14 +209,13 @@ impl IrysPriceOracle {
     ///
     /// Returns `Err` when no oracles are configured — callers should fall back
     /// to the parent block's oracle price in that case.
-    pub fn current_snapshot(&self) -> eyre::Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp)> {
+    pub fn current_snapshot(
+        &self,
+    ) -> Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp), PriceOracleError> {
         let mut best_ts: Option<UnixTimestamp> = None;
         let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
         for o in &self.oracles {
-            let guard = o
-                .cache
-                .read()
-                .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
+            let guard = o.cache.read().expect("oracle price cache lock poisoned");
             if best_ts.map(|t| guard.last_updated > t).unwrap_or(true) {
                 best_ts = Some(guard.last_updated);
                 best_val = Some(guard.value);
@@ -224,7 +223,7 @@ impl IrysPriceOracle {
         }
         match (best_val, best_ts) {
             (Some(v), Some(ts)) => Ok((v, ts)),
-            _ => eyre::bail!("no oracles configured"),
+            _ => Err(PriceOracleError::NoOraclesConfigured),
         }
     }
 }
@@ -237,13 +236,9 @@ mod tests {
     fn empty_oracle_returns_error() {
         let oracle = IrysPriceOracle::new(vec![]);
         let result = oracle.current_snapshot();
-        assert!(result.is_err(), "expected error when no oracles configured");
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no oracles configured"),
-            "error message should mention no oracles"
+            matches!(result, Err(PriceOracleError::NoOraclesConfigured)),
+            "expected NoOraclesConfigured error"
         );
     }
 }

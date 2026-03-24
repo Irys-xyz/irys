@@ -1323,21 +1323,13 @@ pub trait BlockProdStrategy {
                 fresh_price,
                 oracle_updated_at,
             ),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("poisoned") {
-                    tracing::error!(
-                        error = %e,
-                        parent_price = %parent_block.oracle_irys_price,
-                        "oracle price cache lock poisoned, falling back to parent block price"
-                    );
-                } else {
-                    // No oracles configured — carry forward the parent block's price.
-                    tracing::debug!(
-                        parent_price = %parent_block.oracle_irys_price,
-                        "no oracle available, reusing parent block price"
-                    );
-                }
+
+            Err(irys_price_oracle::PriceOracleError::NoOraclesConfigured) => {
+                // No oracles configured — carry forward the parent block's price.
+                tracing::debug!(
+                    parent_price = %parent_block.oracle_irys_price,
+                    "no oracle available, reusing parent block price"
+                );
                 parent_block.oracle_irys_price
             }
         };
