@@ -100,7 +100,7 @@ impl BinaryResolver {
         label: &str,
         git_ref: &str,
     ) -> Result<ResolvedBinary, BinaryError> {
-        if let Some(binary) = self.try_env_override(env_binary_var, label).await? {
+        if let Some(binary) = self.try_env_override(env_binary_var, label)? {
             return Ok(binary);
         }
         if git_ref == CURRENT_REF {
@@ -203,7 +203,7 @@ impl BinaryResolver {
         Ok(())
     }
 
-    async fn try_env_override(
+    fn try_env_override(
         &self,
         env_var: &str,
         label: &str,
@@ -372,9 +372,11 @@ impl BinaryResolver {
             "starting cargo build"
         );
 
+        let target_dir = work_dir.join("target");
         let mut child = Command::new("cargo")
             .args(&args)
             .current_dir(work_dir)
+            .env("CARGO_TARGET_DIR", &target_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -386,7 +388,7 @@ impl BinaryResolver {
         let stderr_task = tokio::spawn(async move {
             let mut collected = String::new();
             if let Some(stderr) = stderr_handle {
-                use tokio::io::{AsyncBufReadExt, BufReader};
+                use tokio::io::{AsyncBufReadExt as _, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!("[cargo] {line}");

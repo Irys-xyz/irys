@@ -29,19 +29,19 @@ mod tests {
 
     proptest! {
         #[test]
-        fn api_base_starts_with_prefix(port in 1u16..=65535) {
+        fn api_base_starts_with_prefix(port in 1_u16..=65535) {
             let url = node_api_base(port);
             prop_assert!(url.starts_with("http://127.0.0.1:"));
         }
 
         #[test]
-        fn api_base_ends_with_port(port in 1u16..=65535) {
+        fn api_base_ends_with_port(port in 1_u16..=65535) {
             let url = node_api_base(port);
             prop_assert!(url.ends_with(&port.to_string()));
         }
 
         #[test]
-        fn api_endpoint_no_double_slashes(port in 1u16..=65535) {
+        fn api_endpoint_no_double_slashes(port in 1_u16..=65535) {
             let base = node_api_base(port);
             for path in ["v1/info", "/v1/info", "v1/info/", "/v1/info/"] {
                 let result = api_endpoint(&base, path);
@@ -54,7 +54,7 @@ mod tests {
         }
 
         #[test]
-        fn api_endpoint_slash_idempotence(port in 1u16..=65535) {
+        fn api_endpoint_slash_idempotence(port in 1_u16..=65535) {
             let base = node_api_base(port);
             let a = api_endpoint(&base, "v1/info");
             let b = api_endpoint(&format!("{base}/"), "/v1/info");
@@ -67,7 +67,7 @@ mod tests {
 
         #[test]
         fn api_endpoint_preserves_path_segments(
-            port in 1u16..=65535,
+            port in 1_u16..=65535,
             seg1 in "[a-z]{1,8}",
             seg2 in "[a-z]{1,8}",
         ) {

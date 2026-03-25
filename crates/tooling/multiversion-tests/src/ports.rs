@@ -31,7 +31,10 @@ impl NodePorts {
     /// before the child process spawns — minimising the TOCTOU window where
     /// another process could grab the same ports.
     pub fn take_guards(&mut self) -> Vec<TcpListener> {
-        self.guards.take().map(|arr| arr.into()).unwrap_or_default()
+        self.guards
+            .take()
+            .map(std::convert::Into::into)
+            .unwrap_or_default()
     }
 }
 

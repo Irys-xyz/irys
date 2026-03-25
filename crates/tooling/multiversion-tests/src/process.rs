@@ -8,7 +8,7 @@ use std::time::Duration;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
@@ -86,7 +86,7 @@ impl NodeProcess {
         let raw = self
             .child
             .as_ref()
-            .and_then(|c| c.id())
+            .and_then(tokio::process::Child::id)
             .ok_or(ProcessError::NoPid)?;
         let raw_i32 =
             i32::try_from(raw).map_err(|_| ProcessError::PidOutOfRange { raw_pid: raw })?;

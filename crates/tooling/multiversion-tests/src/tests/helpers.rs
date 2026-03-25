@@ -6,8 +6,8 @@ use crate::binary::ResolvedBinary;
 use crate::cluster::{ClusterSpec, NodeSpec};
 use crate::config::NodeRole;
 
-pub const HEIGHT_TIMEOUT: Duration = Duration::from_secs(120);
-pub const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const HEIGHT_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Shared run directory for all tests in this invocation.
 /// Set via `IRYS_RUN_ID` env var (xtask sets this to a timestamp).
@@ -27,7 +27,7 @@ static RUN_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     dir
 });
 
-pub const BASE_CONFIG: &str = include_str!("../../fixtures/base-config.toml");
+pub(super) const BASE_CONFIG: &str = include_str!("../../fixtures/base-config.toml");
 
 const MINING_KEYS: &[&str] = &[
     "aaaa000000000000000000000000000000000000000000000000000000000001",
@@ -41,7 +41,7 @@ const REWARD_ADDRESSES: &[&str] = &[
     "0x0000000000000000000000000000000000000003",
 ];
 
-pub fn repo_root() -> PathBuf {
+pub(super) fn repo_root() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .ancestors()
@@ -50,7 +50,7 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-pub fn genesis_spec(name: &str, binary: &ResolvedBinary, peers: Vec<String>) -> NodeSpec {
+pub(super) fn genesis_spec(name: &str, binary: &ResolvedBinary, peers: Vec<String>) -> NodeSpec {
     NodeSpec {
         name: name.to_owned(),
         binary: binary.clone(),
@@ -61,7 +61,7 @@ pub fn genesis_spec(name: &str, binary: &ResolvedBinary, peers: Vec<String>) -> 
     }
 }
 
-pub fn peer_spec(
+pub(super) fn peer_spec(
     name: &str,
     binary: &ResolvedBinary,
     index: usize,
@@ -90,7 +90,7 @@ pub fn peer_spec(
 }
 
 /// Asserts that a node is running the expected binary and responds to `/v1/info`.
-pub async fn assert_node_running_binary(
+pub(super) async fn assert_node_running_binary(
     cluster: &mut crate::cluster::Cluster,
     node_name: &str,
     expected_binary_path: &Path,
@@ -117,11 +117,11 @@ pub async fn assert_node_running_binary(
         .unwrap_or_else(|e| panic!("{node_name} should respond to /v1/info: {e}"));
 }
 
-pub fn cluster_spec(test_name: &str, nodes: Vec<NodeSpec>) -> ClusterSpec {
+pub(super) fn cluster_spec(test_name: &str, nodes: Vec<NodeSpec>) -> ClusterSpec {
     cluster_spec_with_refs(test_name, nodes, None, None)
 }
 
-pub fn cluster_spec_with_refs(
+pub(super) fn cluster_spec_with_refs(
     test_name: &str,
     nodes: Vec<NodeSpec>,
     old_ref: Option<String>,

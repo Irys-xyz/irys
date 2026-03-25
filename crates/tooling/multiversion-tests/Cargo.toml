@@ -34,3 +34,6 @@ tempfile = "3"
 proptest = "1"
 rstest = "0.25"
 irys-testing-utils = { path = "../../utils/testing-utils" }
+
+[lints]
+workspace = true

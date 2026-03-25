@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::Write as _;
 use std::path::Path;
 use thiserror::Error;
 use toml::Value;
@@ -315,9 +315,9 @@ mod tests {
     proptest! {
         #[test]
         fn config_roundtrip(
-            api_port in 1024u16..65535,
-            gossip_port in 1024u16..65535,
-            reth_port in 1024u16..65535,
+            api_port in 1024_u16..65535,
+            gossip_port in 1024_u16..65535,
+            reth_port in 1024_u16..65535,
             is_genesis in proptest::bool::ANY,
         ) {
             let role = if is_genesis { NodeRole::Genesis } else { NodeRole::Peer };
@@ -366,9 +366,9 @@ mod tests {
 
         #[test]
         fn generated_config_is_valid_toml(
-            api_port in 1024u16..65535,
-            gossip_port in 1024u16..65535,
-            reth_port in 1024u16..65535,
+            api_port in 1024_u16..65535,
+            gossip_port in 1024_u16..65535,
+            reth_port in 1024_u16..65535,
         ) {
             let workspace = test_tmp_dir();
             let output_path = workspace.path().join("config.toml");
@@ -513,7 +513,7 @@ mod tests {
         }
 
         #[test]
-        fn json_to_toml_recovers_integers_from_strings(n in 0i64..i64::MAX) {
+        fn json_to_toml_recovers_integers_from_strings(n in 0_i64..i64::MAX) {
             let json = serde_json::Value::String(n.to_string());
             let toml_val = json_to_toml(&json).unwrap();
             prop_assert_eq!(toml_val.as_integer().unwrap(), n);

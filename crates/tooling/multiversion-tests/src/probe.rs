@@ -101,7 +101,7 @@ impl HttpProbe {
         let body: serde_json::Value = resp.json().await?;
         body["genesis_block_hash"]
             .as_str()
-            .map(|s| s.to_owned())
+            .map(std::borrow::ToOwned::to_owned)
             .ok_or_else(|| {
                 ProbeError::Unexpected("missing genesis_block_hash in /v1/genesis".to_owned())
             })
@@ -189,6 +189,10 @@ fn is_converged(infos: &[NodeInfo], tolerance: u64) -> bool {
     if infos.is_empty() {
         return false;
     }
+    // A node that is still syncing is not converged.
+    if infos.iter().any(|n| n.is_syncing == Some(true)) {
+        return false;
+    }
     let max = infos.iter().map(|i| i.height).max().unwrap_or(0);
     let min = infos.iter().map(|i| i.height).min().unwrap_or(0);
     if max.saturating_sub(min) > tolerance || min == 0 {
@@ -217,16 +221,16 @@ mod tests {
 
     proptest! {
         #[test]
-        fn single_node_above_zero_is_converged(height in 1u64..1000) {
+        fn single_node_above_zero_is_converged(height in 1_u64..1000) {
             let infos = vec![NodeInfo { height, block_hash: None, version: None, peer_count: None, is_syncing: None }];
             prop_assert!(is_converged(&infos, 0));
         }
 
         #[test]
         fn identical_heights_above_zero_are_converged(
-            height in 1u64..1000,
-            count in 2usize..10,
-            tolerance in 0u64..5,
+            height in 1_u64..1000,
+            count in 2_usize..10,
+            tolerance in 0_u64..5,
         ) {
             let infos: Vec<NodeInfo> = (0..count)
                 .map(|_| NodeInfo { height, block_hash: None, version: None, peer_count: None, is_syncing: None })
@@ -236,9 +240,9 @@ mod tests {
 
         #[test]
         fn spread_exceeding_tolerance_is_not_converged(
-            min_height in 1u64..500,
-            extra in 1u64..100,
-            tolerance in 0u64..10,
+            min_height in 1_u64..500,
+            extra in 1_u64..100,
+            tolerance in 0_u64..10,
         ) {
             let max_height = min_height + tolerance + extra;
             let infos = vec![
@@ -250,8 +254,8 @@ mod tests {
 
         #[test]
         fn zero_min_is_not_converged(
-            max_height in 0u64..100,
-            tolerance in 0u64..200,
+            max_height in 0_u64..100,
+            tolerance in 0_u64..200,
         ) {
             let infos = vec![
                 NodeInfo { height: 0, block_hash: None, version: None, peer_count: None, is_syncing: None },
@@ -262,9 +266,9 @@ mod tests {
 
         #[test]
         fn within_tolerance_is_converged(
-            base in 1u64..500,
-            tolerance in 1u64..10,
-            offset in 0u64..10,
+            base in 1_u64..500,
+            tolerance in 1_u64..10,
+            offset in 0_u64..10,
         ) {
             let actual_offset = offset % (tolerance + 1);
             let infos = vec![
@@ -278,6 +282,48 @@ mod tests {
     #[test]
     fn empty_is_not_converged() {
         assert!(!is_converged(&[], 0));
+    }
+
+    #[test]
+    fn syncing_node_is_not_converged() {
+        let infos = vec![
+            NodeInfo {
+                height: 5,
+                block_hash: Some("0xabc".to_owned()),
+                version: None,
+                peer_count: None,
+                is_syncing: Some(true),
+            },
+            NodeInfo {
+                height: 5,
+                block_hash: Some("0xabc".to_owned()),
+                version: None,
+                peer_count: None,
+                is_syncing: Some(false),
+            },
+        ];
+        assert!(!is_converged(&infos, 0));
+    }
+
+    #[test]
+    fn not_syncing_nodes_are_converged() {
+        let infos = vec![
+            NodeInfo {
+                height: 5,
+                block_hash: Some("0xabc".to_owned()),
+                version: None,
+                peer_count: None,
+                is_syncing: Some(false),
+            },
+            NodeInfo {
+                height: 5,
+                block_hash: Some("0xabc".to_owned()),
+                version: None,
+                peer_count: None,
+                is_syncing: Some(false),
+            },
+        ];
+        assert!(is_converged(&infos, 0));
     }
 
     #[test]

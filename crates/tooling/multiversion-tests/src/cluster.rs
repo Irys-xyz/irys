@@ -159,7 +159,7 @@ impl Cluster {
     /// Returns an error if any node has crashed.
     pub async fn get_max_height(&mut self) -> Result<u64, ClusterError> {
         let urls = self.checked_api_urls()?;
-        let mut max_height = 0u64;
+        let mut max_height = 0_u64;
         for url in &urls {
             let info = self.probe.get_info(url).await?;
             max_height = max_height.max(info.height);
@@ -169,6 +169,8 @@ impl Cluster {
 
     /// Polls until all nodes report a height strictly above `baseline`.
     /// Returns an error if any node has crashed.
+    ///
+    /// The timeout is applied once across the whole cluster — not per node.
     pub async fn wait_for_height_above(
         &mut self,
         baseline: u64,
@@ -176,8 +178,19 @@ impl Cluster {
     ) -> Result<(), ClusterError> {
         let urls = self.checked_api_urls()?;
         let target = baseline + 1;
+        let start = tokio::time::Instant::now();
         for url in &urls {
-            self.probe.wait_for_height(url, target, timeout).await?;
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(crate::probe::ProbeError::Timeout {
+                    condition: format!("cluster height >= {target}"),
+                    elapsed: timeout,
+                }
+                .into());
+            }
+            self.probe
+                .wait_for_height(url, target, timeout.checked_sub(elapsed).unwrap())
+                .await?;
         }
         Ok(())
     }
@@ -541,7 +554,11 @@ async fn wait_for_node_ready(
 fn format_log_tail(proc: &mut NodeProcess) -> String {
     let lines = proc.drain_logs();
     let start = lines.len().saturating_sub(50);
-    let mut out: Vec<&str> = lines.iter().skip(start).map(|s| s.as_str()).collect();
+    let mut out: Vec<&str> = lines
+        .iter()
+        .skip(start)
+        .map(std::string::String::as_str)
+        .collect();
     if start > 0 {
         out.insert(0, "... (truncated)");
     }
