@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774357891704,
+  "lastUpdate": 1774449358715,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1243,6 +1243,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "46f66118cf598324172c37524c24523c76263930",
+          "message": "feat(multiversion-tests): add cross-version integration test harness (#1207)\n\n* fix: node compatibility for multi-version clusters\n\n- Allow block production without configured price oracles\n- Add synced peer discovery timeout and retry logic in chain sync\n- Add block index wire type backwards compatibility\n- Handle oracle config gracefully in chain startup\n\n* fix: VDF reset seed test and EMA pricing test improvements\n\n- Fix VDF reset seed test for updated block production flow\n- Add oracle-less block production test coverage for EMA pricing\n\n* feat: add multiversion integration test harness\n\nAdd a standalone test harness for cross-version integration testing.\nSupports building and running multiple versions of the node binary,\nmanaging multi-node clusters, and injecting network/crash faults.\n\nKey components:\n- Binary builder with git ref resolution and caching\n- Cluster orchestration with configurable node topologies\n- Health/block-height probes for convergence checks\n- Fault injection (network partitions, process crashes)\n- Port allocation to avoid conflicts in parallel runs\n\nCo-Authored-By: JesseTheRobot <jesse.cruz.wright@gmail.com>\n\n* test: add multiversion E2E and upgrade/rollback tests\n\n- E2E smoke tests: homogeneous cluster block production, mixed-version\n  cluster convergence\n- Upgrade tests: rolling upgrade with block continuity verification,\n  rollback scenario testing\n- Common test utilities for cluster setup and assertions\n\nCo-Authored-By: JesseTheRobot <jesse.cruz.wright@gmail.com>\n\n* feat: add multiversion xtask commands and CI workflow\n\n- Add `cargo xtask multiversion-test` for running cross-version tests\n- Add `cargo xtask clean-data` for cleaning test data directories\n- Add CI workflow triggered on master push, PR approval, and manual dispatch\n\nCo-Authored-By: jason <jason@ridgway-taylor.co.uk>\n\n* fix: improve node cleanup on error\n\n* feat: explicit PriceOracleError\n\n* fix: propagate status file write errors\n\n* fix: remove accessors, add checked_api_urls helper\n\n* feat: split tests\n\n* docs: add explainer comments to NetworkPartitioner\n\n* chore: move multiversion utility to tooling workspace member crate\n\n* chore: move tests\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: update multiversion testing action\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* chore: unify thiserror\n\n* deat: deduplicate deps, remove libc, address feedback\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-03-25T14:17:34Z",
+          "tree_id": "93384e882b7df20219fbac31aaaa5e122a7fd659",
+          "url": "https://github.com/Irys-xyz/irys/commit/46f66118cf598324172c37524c24523c76263930"
+        },
+        "date": 1774449357905,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.770966,
+            "range": "± 0.076406",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 829.18182,
+            "range": "± 38.865371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.317084,
+            "range": "± 8.295616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.976595,
+            "range": "± 0.23818",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1286.960408,
+            "range": "± 64.296505",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1602.778626,
+            "range": "± 168.066319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 3.320966,
+            "range": "± 0.85488",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 285.408838,
+            "range": "± 27.687894",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 396.954631,
+            "range": "± 48.117973",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000007",
             "unit": "ms/iter"
           }
         ]
