@@ -1034,6 +1034,7 @@ impl NodeConfig {
     pub fn testing_with_signer(signer: &IrysSigner) -> Self {
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
+        let default_workers = default_thread_count(4);
         let mut consensus = ConsensusConfig::testing();
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
@@ -1096,8 +1097,7 @@ impl NodeConfig {
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
-                    cpu_packing_concurrency: u16::try_from(default_thread_count(4))
-                        .unwrap_or(u16::MAX),
+                    cpu_packing_concurrency: u16::try_from(default_workers).unwrap_or(u16::MAX),
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1134,7 +1134,7 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: default_thread_count(4),
+                parallel_verification_thread_limit: default_workers,
                 core_pinning: CorePinning::Disabled,
                 throttle: true,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
@@ -1210,6 +1210,7 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         consensus.expected_genesis_hash = Some(H256::zero());
+        let default_workers = default_thread_count(4);
         Self {
             node_mode: NodeMode::Peer,
             sync_mode: SyncMode::Full,
@@ -1270,8 +1271,7 @@ impl NodeConfig {
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
-                    cpu_packing_concurrency: u16::try_from(default_thread_count(4))
-                        .unwrap_or(u16::MAX),
+                    cpu_packing_concurrency: u16::try_from(default_workers).unwrap_or(u16::MAX),
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1309,7 +1309,7 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: default_thread_count(4),
+                parallel_verification_thread_limit: default_workers,
                 core_pinning: CorePinning::Auto,
                 throttle: false,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
