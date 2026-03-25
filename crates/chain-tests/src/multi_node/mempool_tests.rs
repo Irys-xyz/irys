@@ -701,7 +701,7 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .post_data_tx(
             genesis_node.get_anchor().await?,
             data3,
-            &genesis_node.node_ctx.config.irys_signer(),
+            genesis_node.node_ctx.config.irys_signer(),
         )
         .await;
 
@@ -1110,7 +1110,7 @@ async fn heavy4_mempool_publish_fork_recovery_test(
         .post_data_tx(
             a_node.get_anchor().await?,
             [[1; 32], [1; 32], [1; 32]].concat(),
-            &a_signer,
+            a_signer,
         )
         .await;
 

@@ -66,7 +66,7 @@ async fn slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()
     let data: Vec<u8> = chunks.concat();
 
     let data_tx = genesis_node
-        .post_publish_data_tx(&genesis_signer, data)
+        .post_publish_data_tx(genesis_signer, data)
         .await?;
 
     stake_and_pledge_signer(&genesis_node, &signer1, 3).await?;

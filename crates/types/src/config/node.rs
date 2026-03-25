@@ -912,11 +912,11 @@ impl NodeConfig {
     }
 
     pub fn signer(&self) -> IrysSigner {
-        IrysSigner {
-            signer: self.mining_key.clone(),
-            chain_id: self.consensus_config().chain_id,
-            chunk_size: self.consensus_config().chunk_size,
-        }
+        IrysSigner::new(
+            self.mining_key.clone(), // clone: NodeConfig retains ownership of mining_key
+            self.consensus_config().chain_id,
+            self.consensus_config().chunk_size,
+        )
     }
 
     pub fn local_api_url(&self) -> String {
@@ -1081,11 +1081,7 @@ impl NodeConfig {
                 .expect("valid hex"),
         )
         .expect("valid key");
-        let signer = IrysSigner {
-            signer: mining_key,
-            chain_id: 0,
-            chunk_size: 0,
-        };
+        let signer = IrysSigner::new(mining_key, 0, 0);
 
         Self::testing_with_signer(&signer)
     }
@@ -1098,11 +1094,7 @@ impl NodeConfig {
         )
         .expect("valid key");
         let mut consensus = ConsensusConfig::testnet();
-        let signer = IrysSigner {
-            signer: mining_key,
-            chain_id: consensus.chain_id,
-            chunk_size: consensus.chunk_size,
-        };
+        let signer = IrysSigner::new(mining_key, consensus.chain_id, consensus.chunk_size);
 
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();

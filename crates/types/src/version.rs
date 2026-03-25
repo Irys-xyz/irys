@@ -991,11 +991,7 @@ mod tests {
                 .expect("valid hex"),
         )
         .expect("valid key");
-        let testing_signer = IrysSigner {
-            signer: testing_key,
-            chain_id: 0,
-            chunk_size: 0,
-        };
+        let testing_signer = IrysSigner::new(testing_key, 0, 0);
         config.genesis.miner_address = testing_signer.address();
         config.genesis.reward_address = testing_signer.address();
 
@@ -1015,11 +1011,8 @@ mod tests {
         ];
         let genesis_signing_key =
             k256::ecdsa::SigningKey::from_bytes((&genesis_key_bytes).into()).unwrap();
-        let genesis_signer = IrysSigner {
-            signer: genesis_signing_key,
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let genesis_signer =
+            IrysSigner::new(genesis_signing_key, config.chain_id, config.chunk_size);
 
         // Add genesis account to match test
         use alloy_core::primitives::U256;
@@ -1040,11 +1033,7 @@ mod tests {
             0xc3, 0xd2, 0xe1, 0xf0,
         ];
         let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
-        let signer = IrysSigner {
-            signer: signing_key,
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let signer = IrysSigner::new(signing_key, config.chain_id, config.chunk_size);
 
         let mining_addr = signer.address();
 

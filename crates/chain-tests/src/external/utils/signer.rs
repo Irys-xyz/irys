@@ -18,11 +18,7 @@ impl TestSigner {
         let key_bytes = hex::decode(private_key_hex.trim_start_matches("0x"))?;
         let signing_key = SigningKey::from_slice(&key_bytes)?;
 
-        let irys_signer = IrysSigner {
-            signer: signing_key,
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let irys_signer = IrysSigner::new(signing_key, config.chain_id, config.chunk_size);
 
         let address = irys_signer.address();
 

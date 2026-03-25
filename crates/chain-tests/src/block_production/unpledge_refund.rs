@@ -689,7 +689,7 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         &genesis_node,
         &peer_node,
         consensus,
-        &genesis_signer,
+        genesis_signer,
         assigned_partitions,
     )
     .await?;

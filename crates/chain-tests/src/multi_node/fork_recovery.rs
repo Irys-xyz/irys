@@ -115,7 +115,7 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
         .post_data_tx(
             genesis_node.get_anchor().await?,
             data3,
-            &genesis_node.node_ctx.config.irys_signer(),
+            genesis_node.node_ctx.config.irys_signer(),
         )
         .await;
 

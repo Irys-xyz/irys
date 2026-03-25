@@ -225,12 +225,11 @@ mod tests {
         // spellchecker:on
 
         let testing_config = ConsensusConfig::testing();
-        let irys_signer = IrysSigner {
-            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
-                .unwrap(),
-            chain_id: testing_config.chain_id,
-            chunk_size: testing_config.chunk_size,
-        };
+        let irys_signer = IrysSigner::new(
+            SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice()).unwrap(),
+            testing_config.chain_id,
+            testing_config.chunk_size,
+        );
 
         let original_header =
             DataTransactionHeader::V1(crate::DataTransactionHeaderV1WithMetadata {
@@ -311,12 +310,11 @@ mod tests {
         const SIG_BS58: &str = "AwxMVRKDEnExepqnuCuFBXkiEWkg59whzZGnrGTCsYo2TQhVUUWe4ufescKiLxGVTdndCjVixGAXUvVAjEhid3nEe";
         // spellchecker:on
         let testing_config = ConsensusConfig::testing();
-        let irys_signer = IrysSigner {
-            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
-                .unwrap(),
-            chain_id: testing_config.chain_id,
-            chunk_size: testing_config.chunk_size,
-        };
+        let irys_signer = IrysSigner::new(
+            SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice()).unwrap(),
+            testing_config.chain_id,
+            testing_config.chunk_size,
+        );
 
         let mut transaction = CommitmentTransaction::V2(crate::CommitmentV2WithMetadata {
             tx: crate::CommitmentTransactionV2 {

@@ -589,7 +589,7 @@ async fn heavy3_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         &genesis_node,
         &peer_node,
         consensus.clone(),
-        &peer_signer,
+        peer_signer,
         {
             let sms = peer_node.node_ctx.storage_modules_guard.read();
             sms.iter().cloned().collect::<Vec<_>>()
