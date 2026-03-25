@@ -39,12 +39,12 @@ async fn check_transaction_endpoints(
     let _header = ctx.mine_block().await.expect("expected mined block");
 
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
         .await
         .unwrap();
     let tx_id = tx.header.id;
     let tx_2 = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![4, 5, 6])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![4, 5, 6])
         .await
         .unwrap();
     let tx_2_id = tx_2.header.id;
@@ -153,7 +153,7 @@ async fn api_client_wait_for_promotion_errors_for_missing_tx() {
 
     // Create a tx but do NOT post it; waiting for promotion should error out
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![7, 8, 9])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![7, 8, 9])
         .await
         .unwrap();
 
@@ -186,7 +186,7 @@ async fn api_client_wait_for_promotion_happy_path() {
     // Create a full data tx, upload chunks, and post header
     let tx = ctx
         .create_signed_data_tx(
-            &ctx.node_ctx.config.irys_signer(),
+            ctx.node_ctx.config.irys_signer(),
             vec![1, 2, 3, 4, 5, 6, 7, 8],
         )
         .await
@@ -240,7 +240,7 @@ async fn api_tx_status_lifecycle() {
 
     // Create and post a transaction
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
         .await
         .unwrap();
     let tx_id = tx.header.id;
@@ -346,7 +346,7 @@ async fn api_tx_status_finalized_survives_restart() {
 
     // Create and post a transaction
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
         .await
         .unwrap();
     let tx_id = tx.header.id;
@@ -453,7 +453,7 @@ async fn api_tx_status_confirmed_survives_restart() {
 
     // Create and post a transaction
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .create_signed_data_tx(ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
         .await
         .unwrap();
     let tx_id = tx.header.id;
@@ -618,7 +618,7 @@ async fn api_double_promotion_after_restart() {
     // Create a Publish-eligible data tx (with fees), upload chunks, and post header
     let tx = ctx
         .create_signed_data_tx(
-            &ctx.node_ctx.config.irys_signer(),
+            ctx.node_ctx.config.irys_signer(),
             vec![1, 2, 3, 4, 5, 6, 7, 8],
         )
         .await

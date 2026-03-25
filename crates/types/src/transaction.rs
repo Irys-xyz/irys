@@ -1083,11 +1083,11 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         let config = ConsensusConfig::testing();
-        let signer = IrysSigner {
-            signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let signer = IrysSigner::new(
+            SigningKey::random(&mut rand::thread_rng()),
+            config.chain_id,
+            config.chunk_size,
+        );
 
         // Test signing the header directly using the outer versioned type
         let header = mock_header(&config);
@@ -1107,11 +1107,11 @@ mod tests {
     #[test]
     fn test_commitment_tx_encode_and_signing() {
         let config = ConsensusConfig::testing();
-        let signer = IrysSigner {
-            signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let signer = IrysSigner::new(
+            SigningKey::random(&mut rand::thread_rng()),
+            config.chain_id,
+            config.chunk_size,
+        );
 
         // Test signing the outer versioned type directly
         let tx = mock_commitment_tx(&config);
@@ -1129,11 +1129,11 @@ mod tests {
     fn test_data_transaction_signature_validation() {
         // setup
         let config = ConsensusConfig::testing();
-        let signer = IrysSigner {
-            signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let signer = IrysSigner::new(
+            SigningKey::random(&mut rand::thread_rng()),
+            config.chain_id,
+            config.chunk_size,
+        );
 
         let tx = DataTransaction {
             header: mock_header(&config),
@@ -1158,11 +1158,11 @@ mod tests {
     fn test_commitment_transaction_signature_validation() {
         // setup
         let config = ConsensusConfig::testing();
-        let signer = IrysSigner {
-            signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        };
+        let signer = IrysSigner::new(
+            SigningKey::random(&mut rand::thread_rng()),
+            config.chain_id,
+            config.chunk_size,
+        );
 
         let tx = mock_commitment_tx(&config);
 

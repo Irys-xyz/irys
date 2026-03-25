@@ -319,7 +319,7 @@ pub fn generate_and_store_ingress_proof(
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     cache_sender: &CacheServiceSender,
 ) -> Result<IngressProof, IngressProofGenerationError> {
-    let signer: IrysSigner = config.irys_signer();
+    let signer = config.irys_signer();
 
     // Only staked nodes should generate ingress proofs
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
