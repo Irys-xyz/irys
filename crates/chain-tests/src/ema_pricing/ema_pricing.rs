@@ -5,6 +5,33 @@ use irys_domain::{get_canonical_chain, BlockTreeReadGuard};
 use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
 
+/// When no oracles are configured, block production should still succeed by
+/// carrying forward the genesis/parent block's oracle price.
+#[test_log::test(tokio::test)]
+async fn heavy_test_block_production_without_oracles_uses_parent_price() -> eyre::Result<()> {
+    let mut config = NodeConfig::testing();
+    config.oracles = vec![];
+
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+
+    let genesis_price = ctx.node_ctx.config.consensus.genesis.genesis_price;
+
+    // Mine 3 blocks — each should carry forward the genesis price since there
+    // are no oracles to provide a fresh one.
+    for expected_height in 1..=3 {
+        ctx.mine_block().await?;
+        ctx.wait_until_height(expected_height, 10).await?;
+        let header = ctx.get_block_by_height(expected_height).await?;
+        assert_eq!(
+            header.oracle_irys_price, genesis_price,
+            "block {expected_height} should carry forward genesis oracle price when no oracles configured"
+        );
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
