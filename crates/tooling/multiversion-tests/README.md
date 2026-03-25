@@ -219,7 +219,7 @@ let node = cluster.node_mut("peer-1")?;
 assert!(node.is_running());
 assert_eq!(node.version_label(), "new");
 
-// Get all running node API URLs
+// Get all node API URLs (includes stopped nodes)
 let urls = cluster.api_urls();
 
 // Probe a specific node

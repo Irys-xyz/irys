@@ -115,22 +115,26 @@ impl Cluster {
             .ok_or_else(|| ClusterError::NodeNotFound(name.into()))
     }
 
-    /// Returns API URLs for all running nodes, silently skipping stopped ones.
-    /// Use `checked_api_urls` instead when crashed nodes should be treated as errors.
-    pub fn api_urls(&mut self) -> Vec<String> {
+    /// Returns API URLs for **every** node in the cluster, regardless of
+    /// whether the node is still running. Use this when you need all configured
+    /// endpoints (e.g. to verify that a stopped node is truly unreachable).
+    ///
+    /// If you need to guarantee that every node is healthy, call
+    /// [`checked_api_urls`](Self::checked_api_urls) instead — it returns an
+    /// error when any node has crashed.
+    pub fn api_urls(&self) -> Vec<String> {
         self.nodes
-            .values_mut()
-            .filter_map(|n| {
-                if n.is_running() {
-                    Some(n.api_url())
-                } else {
-                    None
-                }
-            })
+            .values()
+            .map(super::process::NodeProcess::api_url)
             .collect()
     }
 
-    /// Returns API URLs for all nodes, returning an error if any node has crashed.
+    /// Returns API URLs for all nodes, returning an error if any node has
+    /// crashed. Use this when your test requires every node to be healthy;
+    /// a single crashed node will short-circuit with [`ClusterError::NodeCrashed`].
+    ///
+    /// For a best-effort list that includes stopped nodes, use
+    /// [`api_urls`](Self::api_urls).
     pub fn checked_api_urls(&mut self) -> Result<Vec<String>, ClusterError> {
         let mut urls = Vec::with_capacity(self.nodes.len());
         for (name, node) in &mut self.nodes {

@@ -29,16 +29,20 @@ static RUN_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub(super) const BASE_CONFIG: &str = include_str!("../../fixtures/base-config.toml");
 
-const MINING_KEYS: &[&str] = &[
-    "aaaa000000000000000000000000000000000000000000000000000000000001",
-    "bbbb000000000000000000000000000000000000000000000000000000000002",
-    "cccc000000000000000000000000000000000000000000000000000000000003",
-];
-
-const REWARD_ADDRESSES: &[&str] = &[
-    "0x0000000000000000000000000000000000000001",
-    "0x0000000000000000000000000000000000000002",
-    "0x0000000000000000000000000000000000000003",
+/// (mining_key, reward_address) tuples. Index 0 is reserved for the genesis node.
+const NODE_IDENTITIES: &[(&str, &str)] = &[
+    (
+        "aaaa000000000000000000000000000000000000000000000000000000000001",
+        "0x0000000000000000000000000000000000000001",
+    ),
+    (
+        "bbbb000000000000000000000000000000000000000000000000000000000002",
+        "0x0000000000000000000000000000000000000002",
+    ),
+    (
+        "cccc000000000000000000000000000000000000000000000000000000000003",
+        "0x0000000000000000000000000000000000000003",
+    ),
 ];
 
 pub(super) fn repo_root() -> PathBuf {
@@ -51,13 +55,14 @@ pub(super) fn repo_root() -> PathBuf {
 }
 
 pub(super) fn genesis_spec(name: &str, binary: &ResolvedBinary, peers: Vec<String>) -> NodeSpec {
+    let (mining_key, reward_address) = NODE_IDENTITIES[0];
     NodeSpec {
         name: name.to_owned(),
         binary: binary.clone(),
         role: NodeRole::Genesis,
         peers,
-        mining_key: MINING_KEYS[0].to_owned(),
-        reward_address: REWARD_ADDRESSES[0].to_owned(),
+        mining_key: mining_key.to_owned(),
+        reward_address: reward_address.to_owned(),
     }
 }
 
@@ -67,25 +72,21 @@ pub(super) fn peer_spec(
     index: usize,
     peers: Vec<String>,
 ) -> NodeSpec {
-    // Offset by 1: index 0 in MINING_KEYS/REWARD_ADDRESSES is reserved for genesis.
+    // Offset by 1: index 0 in NODE_IDENTITIES is reserved for genesis.
     let key_index = index + 1;
     assert!(
-        key_index < MINING_KEYS.len(),
+        key_index < NODE_IDENTITIES.len(),
         "peer_spec: index {index} out of range (max peer index {})",
-        MINING_KEYS.len() - 2
+        NODE_IDENTITIES.len() - 2
     );
-    assert!(
-        key_index < REWARD_ADDRESSES.len(),
-        "peer_spec: index {index} out of range (max peer index {})",
-        REWARD_ADDRESSES.len() - 2
-    );
+    let (mining_key, reward_address) = NODE_IDENTITIES[key_index];
     NodeSpec {
         name: name.to_owned(),
         binary: binary.clone(),
         role: NodeRole::Peer,
         peers,
-        mining_key: MINING_KEYS[key_index].to_owned(),
-        reward_address: REWARD_ADDRESSES[key_index].to_owned(),
+        mining_key: mining_key.to_owned(),
+        reward_address: reward_address.to_owned(),
     }
 }
 

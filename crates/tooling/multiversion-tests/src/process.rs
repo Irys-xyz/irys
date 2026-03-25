@@ -22,6 +22,8 @@ pub enum ProcessError {
     Signal(#[from] nix::Error),
     #[error("process spawn failed: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error("port reservation failed (port {port}): {source}")]
+    PortReservation { port: u16, source: std::io::Error },
     #[error("failed to open log file: {0}")]
     LogFile(#[source] std::io::Error),
     #[error("shutdown timed out after {timeout:?}")]
@@ -149,13 +151,19 @@ impl NodeProcess {
             let _ = old.wait().await;
         }
 
-        // Preserve unread logs from the previous process so drain_logs()
-        // can still return them after the receiver is replaced.
-        while let Ok(line) = self.log_rx.try_recv() {
+        // The child has exited so its stdout/stderr pipes are closed; the
+        // forwarder tasks will finish shortly.  Drain the receiver to
+        // completion (recv returns None once all senders are dropped) so
+        // every line — including late sends still in flight — is captured.
+        while let Some(line) = self.log_rx.recv().await {
             self.buffered_logs.push(line);
         }
 
-        let (child, log_rx) = spawn_child_with_logs(&self.config, Vec::new())?;
+        // Re-reserve the ports that were freed when the old process exited.
+        // This closes the TOCTOU window where another process could steal them.
+        let port_guards = reserve_ports(&self.config)?;
+
+        let (child, log_rx) = spawn_child_with_logs(&self.config, port_guards)?;
         self.child = Some(child);
         self.log_rx = log_rx;
         Ok(())
@@ -185,6 +193,21 @@ impl Drop for NodeProcess {
             tracing::warn!(error = %e, "failed to kill child process on drop");
         }
     }
+}
+
+/// Re-bind [`TcpListener`]s on the configured ports so they stay reserved
+/// until the child process is exec'd.  Ports set to `0` (OS-assigned) are
+/// skipped because they cannot be meaningfully re-reserved.
+fn reserve_ports(config: &NodeProcessConfig) -> Result<Vec<TcpListener>, ProcessError> {
+    let mut guards = Vec::new();
+    for port in [config.api_port, config.gossip_port, config.reth_port] {
+        if port != 0 {
+            let listener = TcpListener::bind(("127.0.0.1", port))
+                .map_err(|source| ProcessError::PortReservation { port, source })?;
+            guards.push(listener);
+        }
+    }
+    Ok(guards)
 }
 
 fn spawn_child_with_logs(

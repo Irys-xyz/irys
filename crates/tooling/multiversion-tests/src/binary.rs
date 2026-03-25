@@ -28,8 +28,9 @@ pub struct ResolvedBinary {
     pub label: String,
     pub git_rev: String,
     /// Path to the git worktree used to build this binary, if one was created.
-    /// Cleanup is deferred to [`crate::cluster::Cluster::shutdown`] so the
-    /// source tree is preserved on test failure for debugging.
+    /// The worktree directory is intentionally preserved (never removed) for
+    /// post-failure debugging. [`crate::cluster::Cluster::shutdown`] only stops
+    /// node processes — it does not perform worktree cleanup.
     pub worktree_path: Option<PathBuf>,
 }
 
