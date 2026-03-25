@@ -5531,7 +5531,7 @@ dependencies = [
  "color-eyre",
  "irys-types",
  "irys-utils",
- "libc",
+ "nix",
  "rand 0.8.5",
  "tempfile",
  "tracing",
@@ -6577,7 +6577,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "libc",
+ "nix",
  "regex",
  "serde",
  "serde_json",

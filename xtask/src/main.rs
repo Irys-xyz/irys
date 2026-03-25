@@ -622,6 +622,18 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             sh.set_var("IRYS_RUN_ID", &run_id);
 
+            // Pre-flight: when running *all* test targets, an explicit old version
+            // must be specified to avoid testing CURRENT against itself.
+            if test_targets.is_empty()
+                && binary_old.is_none()
+                && old_ref.as_deref().is_none_or(|r| r == "CURRENT")
+            {
+                return Err(eyre::eyre!(
+                    "multiversion-test: running all tests requires an old version.\n\
+                     Provide --binary-old <path> or --old-ref <git-ref> (not CURRENT)."
+                ));
+            }
+
             // Build cargo test invocation.
             // cargo test [--test <target>...] [--tests] <passthrough_cargo>
             //   -- --ignored --test-threads=1 --nocapture [<filter>] <passthrough_runner>

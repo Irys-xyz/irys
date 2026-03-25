@@ -146,6 +146,7 @@ moka = "0.12.10"
 socket2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+nix = { version = "0.29", features = ["signal", "process", "feature"] }
 
 
 # Reth & Alloy deps
@@ -398,8 +399,8 @@ debug = true
 
 [profile.heap-profile]
 inherits = "dev"
-debug = 2                  # Full DWARF debug info for meaningful heaptrack backtraces
-split-debuginfo = "off"    # Keep debug info in binary for heaptrack
+debug = 2               # Full DWARF debug info for meaningful heaptrack backtraces
+split-debuginfo = "off" # Keep debug info in binary for heaptrack
 
 [profile.dev]
 panic = "unwind"

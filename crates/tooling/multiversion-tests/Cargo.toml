@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-tokio = { version = "1", features = [
+tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
     "process",
@@ -16,24 +16,24 @@ tokio = { version = "1", features = [
     "io-util",
     "sync",
 ] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { workspace = true, features = [
     "json",
     "rustls-tls",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-tracing = "0.1"
-futures = "0.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
 thiserror = { workspace = true }
-nix = { version = "0.29", features = ["signal", "process"] }
+nix = { workspace = true }
 
 [dev-dependencies]
-test-log = { version = "0.2", features = ["trace"] }
-tempfile = "3"
-proptest = "1"
-rstest = "0.25"
-irys-testing-utils = { path = "../../utils/testing-utils" }
+test-log = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+rstest = { workspace = true }
+irys-testing-utils = { workspace = true }
 
 [lints]
 workspace = true
