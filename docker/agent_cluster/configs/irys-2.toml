@@ -58,6 +58,7 @@ max_pending_chunk_requests = 100
 
 [packing]
 [packing.local]
+cpu_packing_concurrency = 2
 gpu_packing_batch_size = 1024
 
 [cache]
