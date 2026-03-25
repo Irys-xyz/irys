@@ -993,8 +993,6 @@ pub struct BlockIndexQuery {
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
-    /// The number of ledgers this block tracks
-    pub num_ledgers: u8, // 1 byte
     /// The metadata about each of the blocks ledgers
     pub ledgers: Vec<LedgerIndexItem>, // Vec of 40 byte items
 }
@@ -1058,7 +1056,9 @@ impl BlockIndexItem {
 
         // Write fixed fields
         bytes.extend_from_slice(self.block_hash.as_bytes()); // 32 bytes
-        bytes.push(self.num_ledgers); // 1 byte
+        let num_ledgers = u8::try_from(self.ledgers.len())
+            .expect("BlockIndexItem: ledger count exceeds u8::MAX (255)");
+        bytes.push(num_ledgers);
 
         // Write each ledger item
         for ledger_index_item in &self.ledgers {
@@ -1070,23 +1070,20 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self {
-            block_hash: H256::from_slice(&bytes[0..32]),
-            num_ledgers: bytes[32],
-            ..Default::default()
-        };
+        let block_hash = H256::from_slice(&bytes[0..32]);
+        let num_ledgers = bytes[32] as usize;
 
-        // Read ledger items
-        let num_ledgers = item.num_ledgers as usize;
-        item.ledgers = Vec::with_capacity(num_ledgers);
-
+        let mut ledgers = Vec::with_capacity(num_ledgers);
         for i in 0..num_ledgers {
             let start = 33 + (i * 40);
             let ledger_bytes = &bytes[start..start + 40];
-            item.ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
+            ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
         }
 
-        item
+        Self {
+            block_hash,
+            ledgers,
+        }
     }
 }
 

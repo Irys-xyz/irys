@@ -1848,13 +1848,11 @@ mod tests {
                 if calls_len == 0 {
                     GossipResponse::Accepted(vec![BlockIndexItem {
                         block_hash: BlockHash::repeat_byte(1),
-                        num_ledgers: 0,
                         ledgers: vec![],
                     }])
                 } else if calls_len == 1 {
                     GossipResponse::Accepted(vec![BlockIndexItem {
                         block_hash: BlockHash::repeat_byte(2),
-                        num_ledgers: 0,
                         ledgers: vec![],
                     }])
                 } else {

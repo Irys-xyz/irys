@@ -1270,24 +1270,6 @@ where
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
     )]
-    async fn handle_block_index(
-        server: Data<Self>,
-        query: web::Query<BlockIndexQuery>,
-    ) -> HttpResponse {
-        match Self::query_block_index(&server, &query) {
-            Ok(blocks) => {
-                let wire_blocks: Vec<wire_types::BlockIndexItemV1> =
-                    blocks.into_iter().map(Into::into).collect();
-                HttpResponse::Ok().json(GossipResponse::Accepted(wire_blocks))
-            }
-            Err(resp) => resp,
-        }
-    }
-
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
     async fn handle_block_index_v2(
         server: Data<Self>,
         query: web::Query<BlockIndexQuery>,
@@ -1635,7 +1617,7 @@ where
             )
             .route(
                 GossipRoutes::BlockIndex.as_str(),
-                web::get().to(Self::handle_block_index),
+                web::get().to(Self::handle_block_index_v2),
             )
             .route(
                 GossipRoutes::ProtocolVersion.as_str(),

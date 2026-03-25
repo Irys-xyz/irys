@@ -711,9 +711,7 @@ pub fn block_index_item_by_height<T: DbTx>(
     }
 
     // Step 4: Build and return the BlockIndexItem
-    let num_ledgers: u8 = ledger_index_items.len().try_into()?;
     let block_index_item = BlockIndexItem {
-        num_ledgers,
         block_hash,
         ledgers,
     };
