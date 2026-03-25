@@ -327,6 +327,15 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     fixture1.add_tx_to_mempool(tx1.clone()).await;
     // Don't add tx2 to expected transactions, so it will be missing
 
+    // Capture the baseline reputation score *before* sending, so the poll_until
+    // detects a change from the true initial value.
+    let fixture1_peer_id = fixture1.config.peer_id();
+    let initial_score = fixture2
+        .peer_list
+        .get_peer(&fixture1_peer_id)
+        .expect("fixture1 should be a known peer")
+        .reputation_score;
+
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
@@ -337,12 +346,6 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     // providing a concrete observable that the block processing path was invoked.
     // Without a successful block body fetch, process_block is never called and the mempool
     // remains empty.
-    let fixture1_peer_id = fixture1.config.peer_id();
-    let initial_score = fixture2
-        .peer_list
-        .get_peer(&fixture1_peer_id)
-        .expect("fixture1 should be a known peer")
-        .reputation_score;
     poll_until(
         Duration::from_secs(10),
         "Expected fixture1's peer score to change in fixture2's peer list after block body fetch attempts",

@@ -948,6 +948,10 @@ fn main() -> std::io::Result<()> {
                     cmd_apply(&stats, &config, &root, dry_run)?;
                 }
                 Commands::Schedule { threads, top } => {
+                    if threads == Some(0) {
+                        eprintln!("Error: --threads must be at least 1");
+                        std::process::exit(1);
+                    }
                     let available = threads.unwrap_or_else(|| {
                         std::thread::available_parallelism()
                             .map(|n| n.get() as u32)

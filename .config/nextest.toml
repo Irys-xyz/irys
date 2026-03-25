@@ -21,7 +21,7 @@ test-group = 'serial'
 
 # slow tests
 [[profile.default.overrides]]
-filter = 'test(/.*slow_.*/) - test(/.*spiky_.*/)'
+filter = 'test(/.*slow_.*/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
 priority = 100
 
