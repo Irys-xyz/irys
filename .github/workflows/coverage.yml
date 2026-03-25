@@ -44,9 +44,11 @@ jobs:
         run: cargo xtask test --coverage
 
       - name: Build coverage summary
+        env:
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           python3 << 'PYEOF'
-          import json, datetime
+          import json, datetime, os
 
           total_lines = 0
           hit_lines = 0
@@ -65,7 +67,7 @@ jobs:
 
           history.append({
               "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "commit": "${{ github.sha }}"[:12],
+              "commit": os.environ["COMMIT_SHA"][:12],
               "total_lines": total_lines,
               "covered_lines": hit_lines,
               "percentage": round(percentage, 2),

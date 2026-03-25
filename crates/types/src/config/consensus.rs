@@ -952,21 +952,31 @@ mod tests {
     mod sort_json_keys_tests {
         use super::*;
         use proptest::prelude::*;
-        use serde_json::json;
+        use serde_json::{Map, Value};
+
+        fn arb_json() -> impl Strategy<Value = Value> {
+            let leaf = prop_oneof![
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::Number(n.into())),
+                ".*".prop_map(Value::String),
+                Just(Value::Null),
+            ];
+
+            leaf.prop_recursive(4, 64, 8, |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                    proptest::collection::btree_map("[a-z]{1,8}", inner, 0..8).prop_map(|m| {
+                        Value::Object(m.into_iter().collect::<Map<String, Value>>())
+                    }),
+                ]
+            })
+        }
 
         proptest! {
             #[test]
-            fn sort_json_keys_is_idempotent(
-                keys in proptest::collection::vec("[a-z]{1,8}", 1..10),
-                vals in proptest::collection::vec(0_i64..1000, 1..10),
-            ) {
-                let obj: serde_json::Value = keys.iter().zip(vals.iter())
-                    .map(|(k, v)| (k.clone(), json!(v)))
-                    .collect::<serde_json::Map<String, serde_json::Value>>()
-                    .into();
-
-                let sorted_once = sort_json_keys(obj);
-                let sorted_twice = sort_json_keys(sorted_once.clone());
+            fn sort_json_keys_is_idempotent(value in arb_json()) {
+                let sorted_once = sort_json_keys(value);
+                let sorted_twice = sort_json_keys(sorted_once.clone()); // clone: proptest comparison requires both values
                 prop_assert_eq!(sorted_once, sorted_twice);
             }
         }

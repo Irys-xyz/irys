@@ -973,4 +973,33 @@ mod tests {
         assert_eq!(consumed, 19);
         assert_eq!(decoded, addr);
     }
+
+    mod prop_address_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+        proptest! {
+            #[test]
+            fn address_encode_decode_roundtrip(
+                ip_v4 in any::<[u8; 4]>(),
+                ip_v6 in any::<[u8; 16]>(),
+                port in any::<u16>(),
+                use_v6 in any::<bool>(),
+            ) {
+                let addr = if use_v6 {
+                    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_v6), port, 0, 0))
+                } else {
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_v4), port))
+                };
+
+                let mut buf = Vec::new();
+                let size = encode_address(&addr, &mut buf);
+                let (decoded, consumed) = decode_address(&buf);
+
+                prop_assert_eq!(decoded, addr);
+                prop_assert_eq!(consumed, size);
+            }
+        }
+    }
 }
