@@ -1497,8 +1497,9 @@ fn print_memory_contention_summary(
         return;
     }
 
-    // Determine test-threads from config (assume 12 as default nextest thread count)
-    let test_threads: u32 = 12;
+    let test_threads: u32 = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
 
     println!();
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");

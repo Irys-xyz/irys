@@ -699,8 +699,7 @@ impl ConsensusConfig {
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
-                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
-                // With 12s target block time, this resets approximately every 10 minutes
+                // Reset VDF every ~100 blocks. This is not tied to real-world time due to the low sha1_difficulty for this testing config.
                 reset_frequency: 100 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,

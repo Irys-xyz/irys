@@ -221,8 +221,20 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
         .send_traced(data)
         .expect("Failed to send transaction to offline peer");
 
-    // Give the gossip client time to attempt the connection and handle the error
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for the gossip client to attempt the connection and handle the error.
+    // When the connection to the offline peer fails, it is marked offline in the peer list.
+    let fixture2_peer_id = fixture2.config.peer_id();
+    poll_until(
+        Duration::from_secs(10),
+        "Expected offline peer to be marked as not online after failed connection attempt",
+        || {
+            fixture1
+                .peer_list
+                .get_peer(&fixture2_peer_id)
+                .is_some_and(|p| !p.is_online)
+        },
+    )
+    .await?;
 
     service1_handle.stop().await?;
 
@@ -320,9 +332,28 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
-    // Give service 2 time to process the block and fail to fetch missing transactions.
-    // Negative assertion: mempool should remain empty because tx2 is unavailable.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for service 2 to attempt the block body fetch (which will fail because tx2 is
+    // unavailable). The pull attempts update fixture1's peer score in fixture2's peer list,
+    // providing a concrete observable that the block processing path was invoked.
+    // Without a successful block body fetch, process_block is never called and the mempool
+    // remains empty.
+    let fixture1_peer_id = fixture1.config.peer_id();
+    let initial_score = fixture2
+        .peer_list
+        .get_peer(&fixture1_peer_id)
+        .expect("fixture1 should be a known peer")
+        .reputation_score;
+    poll_until(
+        Duration::from_secs(10),
+        "Expected fixture1's peer score to change in fixture2's peer list after block body fetch attempts",
+        || {
+            fixture2
+                .peer_list
+                .get_peer(&fixture1_peer_id)
+                .is_some_and(|p| p.reputation_score != initial_score)
+        },
+    )
+    .await?;
 
     {
         // Check that service 2 rejected the block due to missing transactions

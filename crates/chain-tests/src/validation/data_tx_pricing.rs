@@ -463,7 +463,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
 // This is done by crafting a tx with invalid price fields -
 // if we skip validation then the block won't be rejected.
 #[test_log::test(tokio::test)]
-async fn same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
