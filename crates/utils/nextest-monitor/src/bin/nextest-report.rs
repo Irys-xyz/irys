@@ -79,6 +79,9 @@ struct Override {
 pub struct ClassificationRule {
     pub name: String,
     pub pattern: Regex,
+    /// Optional exclusion pattern — if a test matches `pattern` but also matches `exclude`,
+    /// this rule does not apply. Implements nextest's set-difference (`-`) operator.
+    pub exclude: Option<Regex>,
     pub threads_required: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub priority: i32,
@@ -117,14 +120,23 @@ impl ClassificationConfig {
         if let Some(overrides) = default_profile.overrides {
             for ov in overrides.iter() {
                 if let Some(ref filter) = ov.filter {
-                    // Extract regex pattern from filter like 'test(/.*slow_.*/)'
-                    if let Some(pattern) = extract_test_pattern(filter) {
-                        let regex = Regex::new(&pattern)
+                    // Extract regex pattern(s) from filter like 'test(/.*slow_.*/)'
+                    // or compound filters like 'test(/.*heavy_.*/) - test(/.*spiky_.*/)'
+                    if let Some(parsed) = extract_test_pattern(filter) {
+                        let regex = Regex::new(&parsed.include)
                             .map_err(|e| format!("Invalid regex in filter '{}': {}", filter, e))?;
+                        let exclude = parsed
+                            .exclude
+                            .map(|ex| Regex::new(&ex))
+                            .transpose()
+                            .map_err(|e| {
+                                format!("Invalid exclude regex in filter '{}': {}", filter, e)
+                            })?;
 
                         rules.push(ClassificationRule {
                             name: extract_rule_name(filter),
                             pattern: regex,
+                            exclude,
                             threads_required: ov.threads_required,
                             timeout_ms: ov
                                 .slow_timeout
@@ -156,6 +168,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "slow".to_string(),
                     pattern: Regex::new(r".*slow_.*").unwrap(),
+                    exclude: None,
                     threads_required: None,
                     timeout_ms: Some(180_000),
                     priority: 100,
@@ -163,6 +176,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy".to_string(),
                     pattern: Regex::new(r".*heavy_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(2),
                     timeout_ms: None,
                     priority: 90,
@@ -170,6 +184,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy3".to_string(),
                     pattern: Regex::new(r".*heavy3_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(3),
                     timeout_ms: None,
                     priority: 80,
@@ -177,6 +192,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy4".to_string(),
                     pattern: Regex::new(r".*heavy4_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(4),
                     timeout_ms: None,
                     priority: 70,
@@ -193,7 +209,12 @@ impl ClassificationConfig {
 
         // Find all matching rules (already sorted by priority)
         for rule in &self.rules {
-            if rule.pattern.is_match(test_name) {
+            if rule.pattern.is_match(test_name)
+                && !rule
+                    .exclude
+                    .as_ref()
+                    .is_some_and(|ex| ex.is_match(test_name))
+            {
                 matching_rules.push(rule.clone());
             }
         }
@@ -356,32 +377,84 @@ fn parse_timeout(slow_timeout: &Option<SlowTimeout>, default: u64) -> u64 {
     }
 }
 
-/// Extract regex pattern from nextest filter like 'test(/.*slow_.*/)'
-fn extract_test_pattern(filter: &str) -> Option<String> {
-    if let Some(start) = filter.find("test(") {
-        let rest = &filter[start + 5..];
-        if let Some(end) = rest.rfind(')') {
-            let inner = &rest[..end];
-            let pattern = inner.trim_matches('/');
-            if let Some(stripped) = pattern.strip_prefix('~') {
-                return Some(format!(".*{}.*", stripped));
+/// Parsed include/exclude patterns from a nextest filter expression.
+struct ParsedFilter {
+    /// The include pattern (alternation of all positive `test(/.../)`  clauses).
+    include: String,
+    /// The exclude pattern, if any (alternation of all `- test(/.../)`  clauses).
+    exclude: Option<String>,
+}
+
+fn extract_test_pattern(filter: &str) -> Option<ParsedFilter> {
+    // Parse all test(/.../) tokens from a nextest filter expression.
+    // Tokens preceded by `-` are excludes (set difference), others are includes.
+    // Example: "test(/.*heavy_.*/) - test(/.*spiky_.*/)" → includes heavy, excludes spiky.
+    let mut includes = Vec::new();
+    let mut excludes = Vec::new();
+    let mut remaining = filter;
+
+    while let Some(idx) = remaining.find("test(") {
+        // Check if this token is preceded by `-` (set difference operator)
+        let prefix = remaining[..idx].trim_end();
+        let is_exclude = prefix.ends_with('-');
+
+        let after_test = &remaining[idx + 5..];
+        // Find the matching `)` — the pattern is wrapped in `/.../)` so find the first `)`
+        if let Some(close) = after_test.find(')') {
+            let inner = after_test[..close].trim_matches('/');
+            let pattern = if let Some(stripped) = inner.strip_prefix('~') {
+                format!(".*{}.*", stripped)
+            } else {
+                inner.to_string()
+            };
+
+            if is_exclude {
+                excludes.push(pattern);
+            } else {
+                includes.push(pattern);
             }
-            return Some(pattern.to_string());
+
+            remaining = &after_test[close + 1..];
+        } else {
+            break;
         }
     }
 
-    if filter.starts_with('/') && filter.ends_with('/') {
-        return Some(filter[1..filter.len() - 1].to_string());
+    if includes.is_empty() {
+        // Fallback: bare regex like /pattern/
+        if filter.starts_with('/') && filter.ends_with('/') {
+            return Some(ParsedFilter {
+                include: filter[1..filter.len() - 1].to_string(),
+                exclude: None,
+            });
+        }
+        return None;
     }
 
-    None
+    let include = if includes.len() == 1 {
+        includes.into_iter().next().unwrap()
+    } else {
+        format!("({})", includes.join("|"))
+    };
+
+    let exclude = if excludes.is_empty() {
+        None
+    } else if excludes.len() == 1 {
+        Some(excludes.into_iter().next().unwrap())
+    } else {
+        Some(format!("({})", excludes.join("|")))
+    };
+
+    Some(ParsedFilter { include, exclude })
 }
 
 /// Extract a human-readable name from a filter pattern
 fn extract_rule_name(filter: &str) -> String {
-    let pattern = extract_test_pattern(filter).unwrap_or_else(|| filter.to_string());
+    let pattern = extract_test_pattern(filter)
+        .map(|p| p.include)
+        .unwrap_or_else(|| filter.to_string());
 
-    for prefix in &["slow_", "heavy4_", "heavy3_", "heavy_", "serial_"] {
+    for prefix in &["slow_", "heavy4_", "heavy3_", "heavy_", "serial_", "spiky_"] {
         if pattern.contains(prefix) {
             return prefix.trim_end_matches('_').to_string();
         }
@@ -1517,7 +1590,7 @@ fn print_memory_contention_summary(
     println!("{}", "-".repeat(90));
 
     for (&threads, tests) in &by_tier {
-        let max_concurrent = test_threads / threads;
+        let max_concurrent = (test_threads / threads).max(1);
 
         // Collect tests with memory data, sorted by peak RSS descending
         let mut with_memory: Vec<_> = tests
@@ -1568,7 +1641,7 @@ fn print_memory_contention_summary(
     let most_dangerous = by_tier
         .iter()
         .filter_map(|(&threads, tests)| {
-            let max_concurrent = test_threads / threads;
+            let max_concurrent = (test_threads / threads).max(1);
             let mut with_memory: Vec<u64> = tests
                 .iter()
                 .filter_map(|r| r.stats.avg_peak_rss_bytes)
@@ -2452,6 +2525,11 @@ struct CapacityClass {
     name: String,
     threads: Option<u32>,
     timeout_ms: Option<u64>,
+    /// True when this class represents a semantic grouping (e.g. "spiky", "serial")
+    /// rather than a resource requirement beyond defaults. Semantic classes are
+    /// preserved from existing prefixes even when their thread/timeout values
+    /// match or don't exceed the defaults.
+    is_semantic: bool,
 }
 
 /// Collect the set of known capacity-class names from the loaded config rules.
@@ -2459,10 +2537,18 @@ fn capacity_classes_from_config(config: &ClassificationConfig) -> Vec<CapacityCl
     config
         .rules
         .iter()
-        .map(|r| CapacityClass {
-            name: r.name.clone(),
-            threads: r.threads_required,
-            timeout_ms: r.timeout_ms,
+        .map(|r| {
+            let is_semantic = r
+                .threads_required
+                .is_none_or(|t| t <= config.default_threads)
+                && r.timeout_ms
+                    .is_none_or(|t| t <= config.default_timeout_ms);
+            CapacityClass {
+                name: r.name.clone(),
+                threads: r.threads_required,
+                timeout_ms: r.timeout_ms,
+                is_semantic,
+            }
         })
         .collect()
 }
@@ -2518,7 +2604,12 @@ fn classes_to_prefix(matched: &[String], all_classes: &[CapacityClass]) -> Strin
     let mut other_parts = Vec::new();
     for name in matched {
         if let Some(cls) = all_classes.iter().find(|c| c.name == *name) {
-            if let Some(threads) = cls.threads {
+            // Semantic classes (e.g. "spiky", "serial") go in other_parts
+            // even if they have threads/timeout values, since those values
+            // just match defaults and shouldn't compete with resource classes.
+            if cls.is_semantic {
+                other_parts.push(name.as_str());
+            } else if let Some(threads) = cls.threads {
                 thread_parts.push((threads, name.as_str()));
             } else if cls.timeout_ms.is_some() {
                 timeout_parts.push(name.as_str());
@@ -2556,11 +2647,11 @@ fn classification_to_prefix(
 ) -> String {
     let mut matched = Vec::new();
 
-    // Preserve non-resource classes (e.g. "serial") from the old prefix.
-    // These have neither threads nor timeout_ms set, so they would otherwise
-    // be dropped when rebuilding the prefix from resource requirements alone.
+    // Preserve semantic classes (e.g. "serial", "spiky") from the old prefix.
+    // These don't imply resource requirements beyond defaults, so they would
+    // otherwise be dropped when rebuilding the prefix from resource values alone.
     for cls in all_classes {
-        if cls.threads.is_none() && cls.timeout_ms.is_none() && old_classes.contains(&cls.name) {
+        if cls.is_semantic && old_classes.contains(&cls.name) {
             matched.push(cls.name.clone());
         }
     }
