@@ -406,11 +406,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_signature_returns_false_for_wrong_address() {
+    fn validate_signature_returns_false_when_recovery_fails() {
         let default_sig = IrysSignature::default();
         let prehash = [0_u8; 32];
-        let wrong_address = IrysAddress::from([1_u8; 20]);
-        assert!(!default_sig.validate_signature(prehash, wrong_address));
+        let any_address = IrysAddress::from([1_u8; 20]);
+        assert!(default_sig.recover_signer(prehash).is_err());
+        assert!(!default_sig.validate_signature(prehash, any_address));
     }
 
     #[test]

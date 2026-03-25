@@ -947,6 +947,7 @@ mod tests {
 
         #[rstest]
         #[case::within_height_and_migrated(10, true, true)]
+        #[case::height_equals_max(5, true, true)]
         #[case::height_exceeds_max(3, true, false)]
         #[case::unmigrated_height(10, false, false)]
         fn canonical_lookup(

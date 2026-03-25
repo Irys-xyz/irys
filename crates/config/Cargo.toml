@@ -16,10 +16,10 @@ toml.workspace = true
 alloy-primitives.workspace = true
 
 [dev-dependencies]
+irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 proptest.workspace = true
 rstest.workspace = true
-tempfile.workspace = true
 test-log.workspace = true
 
 [lints]

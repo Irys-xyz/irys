@@ -156,9 +156,9 @@ impl StorageSubmodulesConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_testing_utils::utils::TempDirBuilder;
     use proptest::prelude::*;
     use rstest::rstest;
-    use tempfile::tempdir;
 
     fn arb_storage_submodules_config() -> impl Strategy<Value = StorageSubmodulesConfig> {
         (
@@ -185,7 +185,7 @@ mod tests {
     proptest! {
         #[test]
         fn from_toml_never_panics_on_arbitrary_input(input in "\\PC{0,200}") {
-            let dir = tempdir()?;
+            let dir = TempDirBuilder::new().build();
             let path = dir.path().join("test.toml");
             fs::write(&path, &input)?;
             let _result = StorageSubmodulesConfig::from_toml(&path);
@@ -214,7 +214,7 @@ mod tests {
         #[case] count: usize,
         #[case] should_err: bool,
     ) -> eyre::Result<()> {
-        let dir = tempdir()?;
+        let dir = TempDirBuilder::new().build();
         let path = write_config_toml(dir.path(), count)?;
         let result = StorageSubmodulesConfig::from_toml(&path);
         assert_eq!(result.is_err(), should_err);
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn load_creates_default_config_when_none_exists() -> eyre::Result<()> {
-        let dir = tempdir()?;
+        let dir = TempDirBuilder::new().build();
         let config = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
         assert_eq!(config.submodule_paths.len(), 3);
         assert!(config.is_using_hardcoded_paths);
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn load_reads_existing_config() -> eyre::Result<()> {
-        let dir = tempdir()?;
+        let dir = TempDirBuilder::new().build();
         let first = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
         let second = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
         assert_eq!(first, second);

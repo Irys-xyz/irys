@@ -437,9 +437,27 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 println!("Generating coverage reports...");
                 fs::create_dir_all("target/llvm-cov")?;
 
+                // Forward the same package/workspace scope used for the test run
+                let mut scope_args: Vec<String> = Vec::new();
+                if user_has_package {
+                    let mut iter = args.iter().peekable();
+                    while let Some(arg) = iter.next() {
+                        if arg.starts_with("--package=") || arg.starts_with("-p=") {
+                            scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                        } else if (arg == "-p" || arg == "--package") {
+                            scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                            if let Some(val) = iter.next() {
+                                scope_args.push(val.clone()); // clone: collecting user args for reuse
+                            }
+                        }
+                    }
+                } else {
+                    scope_args.push("--workspace".to_string());
+                }
+
                 let html_result = cmd!(
                     sh,
-                    "cargo llvm-cov report --html --output-dir target/llvm-cov/html"
+                    "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
                 )
                 .remove_and_run();
 
@@ -449,7 +467,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 let lcov_result = cmd!(
                     sh,
-                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info"
+                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args...}"
                 )
                 .remove_and_run();
 

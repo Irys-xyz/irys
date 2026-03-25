@@ -24,7 +24,11 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
             .json(node_info),
         Err(e) => {
             tracing::error!(error = %e, "Failed to retrieve node info");
-            ApiError::from((e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)).error_response()
+            ApiError::from((
+                "Failed to retrieve node info",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+            .error_response()
         }
     }
 }

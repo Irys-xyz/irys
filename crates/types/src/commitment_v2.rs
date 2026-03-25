@@ -751,6 +751,10 @@ mod tests {
             signature: IrysSignature::default(),
         };
         let config = ConsensusConfig::testing();
-        assert!(tx.validate_value(&config).is_err());
+        assert!(matches!(
+            tx.validate_value(&config),
+            Err(CommitmentValidationError::InvalidUpdateRewardAddressValue { provided })
+                if provided == U256::from(1_u8)
+        ));
     }
 }

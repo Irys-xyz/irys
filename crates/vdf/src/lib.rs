@@ -725,10 +725,11 @@ mod tests {
         use rstest::rstest;
 
         #[rstest]
-        #[case::zero_step_number(0, vec![H256::random()], vec![H256::random()], "must be greater than 0")]
-        #[case::empty_steps(1, vec![], vec![H256::random()], "No steps")]
-        #[case::empty_checkpoints(1, vec![H256::random()], vec![], "No last checkpoints")]
-        fn last_step_checkpoints_rejects_invalid_input(
+        #[case::zero_step_number(0, vec![H256::from_low_u64_be(1)], vec![H256::from_low_u64_be(2)], "must be greater than 0")]
+        #[case::empty_steps(1, vec![], vec![H256::from_low_u64_be(3)], "No steps")]
+        #[case::empty_checkpoints(1, vec![H256::from_low_u64_be(4)], vec![], "No last checkpoints")]
+        #[tokio::test]
+        async fn last_step_checkpoints_rejects_invalid_input(
             #[case] global_step_number: u64,
             #[case] steps: Vec<H256>,
             #[case] checkpoints: Vec<H256>,
@@ -742,9 +743,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(last_step_checkpoints_is_valid(&vdf_info, &config));
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
             assert!(result.is_err());
             assert!(
                 result.unwrap_err().to_string().contains(expected_error),
@@ -752,10 +751,10 @@ mod tests {
             );
         }
 
-        #[test]
-        fn last_step_output_mismatch_rejected() {
-            let step_hash = H256::random();
-            let different_hash = H256::random();
+        #[tokio::test]
+        async fn last_step_output_mismatch_rejected() {
+            let step_hash = H256::from_low_u64_be(1);
+            let different_hash = H256::from_low_u64_be(2);
             let vdf_info = VDFLimiterInfo {
                 global_step_number: 1,
                 output: different_hash,
@@ -764,9 +763,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(last_step_checkpoints_is_valid(&vdf_info, &config));
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
             assert!(result.is_err());
             assert!(
                 result
@@ -776,10 +773,10 @@ mod tests {
             );
         }
 
-        #[test]
-        fn last_step_checkpoint_mismatch_rejected() {
-            let step_hash = H256::random();
-            let different_checkpoint = H256::random();
+        #[tokio::test]
+        async fn last_step_checkpoint_mismatch_rejected() {
+            let step_hash = H256::from_low_u64_be(3);
+            let different_checkpoint = H256::from_low_u64_be(4);
             let vdf_info = VDFLimiterInfo {
                 global_step_number: 1,
                 output: step_hash,
@@ -788,9 +785,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(last_step_checkpoints_is_valid(&vdf_info, &config));
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
             assert!(result.is_err());
             assert!(
                 result

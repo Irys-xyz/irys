@@ -317,13 +317,7 @@ mod tests {
 
                 let sum = r_ab.checked_add(r_bc).expect("sum should not overflow U256");
 
-                // Two intermediate truncations can accumulate up to 2 units of rounding error
-                let diff = if sum >= r_ac { sum - r_ac } else { r_ac - sum };
-                prop_assert!(
-                    diff <= U256::from(2_u64),
-                    "additivity violated: r(a,b)={} + r(b,c)={} = {}, but r(a,c)={}, diff={}",
-                    r_ab, r_bc, sum, r_ac, diff
-                );
+                prop_assert_eq!(sum, r_ac);
             }
 
             #[test]
