@@ -157,19 +157,22 @@ async fn my_single_version_test() {
 
 ### Cross-Version Upgrade Test
 
-By default, `resolve_binaries()` in `tests/upgrade.rs` resolves both old and new from `CURRENT` (the working tree). To test actual cross-version upgrades, set `IRYS_OLD_REF`:
+`resolve_binaries()` in `src/tests/upgrade.rs` **panics** if `IRYS_OLD_REF` is unset or equals `CURRENT_REF` — upgrade tests always require a distinct old revision. Set `IRYS_OLD_REF` before running:
 
 ```sh
 cargo xtask multiversion-test --old-ref master --test upgrade
+# or: export IRYS_OLD_REF=master
 ```
 
 ```rust
 use irys_multiversion_tests::binary::{BinaryResolver, CURRENT_REF};
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
-#[ignore = "requires building irys binaries"]
+#[ignore = "requires building irys binaries from HEAD and master"]
 async fn my_upgrade_test() {
+    // Panics if IRYS_OLD_REF is unset or == CURRENT_REF
     let old_ref = std::env::var("IRYS_OLD_REF").unwrap_or_else(|_| CURRENT_REF.to_owned());
+    assert_ne!(old_ref, CURRENT_REF, "IRYS_OLD_REF must differ from CURRENT_REF");
 
     let resolver = BinaryResolver::new(&common::repo_root());
     let old = resolver.resolve_old(&old_ref).await.expect("old build failed");
@@ -200,7 +203,7 @@ async fn my_upgrade_test() {
 }
 ```
 
-### Test Helpers (`tests/common/mod.rs`)
+### Test Helpers (`src/tests/helpers.rs`)
 
 | Helper | Purpose |
 |--------|---------|

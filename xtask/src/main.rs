@@ -562,8 +562,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             args,
         } => {
             println!("multiversion integration tests");
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("xtask CARGO_MANIFEST_DIR must have a parent");
+            let multiversion_dir = workspace_root.join("target/multiversion");
             if clean {
-                let multiversion_dir = sh.current_dir().join("target/multiversion");
                 if multiversion_dir.exists() {
                     println!("Cleaning {}...", multiversion_dir.display());
                     fs::remove_dir_all(&multiversion_dir)?;
@@ -572,7 +575,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     println!("Nothing to clean (target/multiversion does not exist).");
                 }
             } else if clean_data {
-                let test_data_dir = sh.current_dir().join("target/multiversion/test-data");
+                let test_data_dir = multiversion_dir.join("test-data");
                 if test_data_dir.exists() {
                     println!("Cleaning {}...", test_data_dir.display());
                     fs::remove_dir_all(&test_data_dir)?;
@@ -601,7 +604,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 now.timestamp_subsec_millis(),
                 std::process::id()
             );
-            let _dir = sh.push_dir("crates/tooling/multiversion-tests");
+            let _dir = sh.push_dir(workspace_root.join("crates/tooling/multiversion-tests"));
             if let Some(ref path) = binary_new {
                 sh.set_var("IRYS_BINARY_NEW", path);
             }
@@ -651,11 +654,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             test_args.extend(runner_passthrough);
             let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
-            let test_data_dir = sh
-                .current_dir()
-                .join("../../../target/multiversion/test-data")
-                .join(&run_id);
-            let worktree_base = sh.current_dir().join("../../../target/multiversion");
+            let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
 
             // Aggregate per-test .status marker files into a summary.
             write_status_summary(&test_data_dir);
@@ -664,7 +663,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 if test_data_dir.exists() {
                     eprintln!("test artifacts preserved at: {}", test_data_dir.display());
                 }
-                if let Ok(entries) = std::fs::read_dir(&worktree_base) {
+                if let Ok(entries) = std::fs::read_dir(&multiversion_dir) {
                     for entry in entries.flatten() {
                         if entry.file_name().to_string_lossy().starts_with("worktree-") {
                             eprintln!("worktree preserved at: {}", entry.path().display());
