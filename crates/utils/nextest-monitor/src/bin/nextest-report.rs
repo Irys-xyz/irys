@@ -2541,8 +2541,7 @@ fn capacity_classes_from_config(config: &ClassificationConfig) -> Vec<CapacityCl
             let is_semantic = r
                 .threads_required
                 .is_none_or(|t| t <= config.default_threads)
-                && r.timeout_ms
-                    .is_none_or(|t| t <= config.default_timeout_ms);
+                && r.timeout_ms.is_none_or(|t| t <= config.default_timeout_ms);
             CapacityClass {
                 name: r.name.clone(),
                 threads: r.threads_required,
