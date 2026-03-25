@@ -7,9 +7,13 @@ use irys_database::{
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
+use proptest::prelude::*;
 use reth_db::mdbx::DatabaseArguments;
 
-use super::get_anchor_height;
+use super::{
+    get_anchor_height, min_ingress_proof_anchor_height, min_tx_anchor_height,
+    tx_inclusion_anchor_range,
+};
 
 fn signed_genesis() -> IrysBlockHeader {
     let mut header = IrysBlockHeader::new_mock_header();
@@ -154,4 +158,128 @@ fn orphan_block_in_db_returns_height_when_canonical_false() {
 
     let result = get_anchor_height(&block_tree, &db, orphan_hash, false).unwrap();
     assert_eq!(result, Some(5));
+}
+
+fn arbitrary_consensus() -> impl Strategy<Value = ConsensusConfig> {
+    (1_u8..=255, 1_u16..=10000)
+        .prop_flat_map(
+            |(tx_anchor_expiry_depth, ingress_proof_anchor_expiry_depth)| {
+                let max_migration = u32::from(tx_anchor_expiry_depth);
+                (
+                    Just(tx_anchor_expiry_depth),
+                    1_u32..=max_migration,
+                    Just(ingress_proof_anchor_expiry_depth),
+                )
+            },
+        )
+        .prop_map(
+            |(tx_anchor_expiry_depth, block_migration_depth, ingress_proof_anchor_expiry_depth)| {
+                let mut config = ConsensusConfig::testing();
+                config.mempool.tx_anchor_expiry_depth = tx_anchor_expiry_depth;
+                config.block_migration_depth = block_migration_depth;
+                config.mempool.ingress_proof_anchor_expiry_depth =
+                    ingress_proof_anchor_expiry_depth;
+                config
+            },
+        )
+}
+
+proptest! {
+    #[test]
+    fn tx_inclusion_range_min_le_max(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let (min, max) = tx_inclusion_anchor_range(&consensus, height);
+        let migration = u64::from(consensus.block_migration_depth);
+        let expiry = u64::from(consensus.mempool.tx_anchor_expiry_depth);
+        // min <= max holds when effective window (expiry - migration) >= migration
+        if expiry >= 2 * migration {
+            prop_assert!(min <= max, "min {min} > max {max}");
+        }
+    }
+
+    #[test]
+    fn tx_inclusion_range_max_le_height(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let (_, max) = tx_inclusion_anchor_range(&consensus, height);
+        prop_assert!(max <= height, "max {max} > height {height}");
+    }
+
+    #[test]
+    fn tx_inclusion_range_saturates_at_zero(
+        consensus in arbitrary_consensus(),
+    ) {
+        let (min, max) = tx_inclusion_anchor_range(&consensus, 0);
+        prop_assert_eq!(min, 0);
+        prop_assert_eq!(max, 0);
+    }
+
+    #[test]
+    fn min_tx_anchor_height_le_height(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let min = min_tx_anchor_height(&consensus, height);
+        prop_assert!(min <= height, "min {min} > height {height}");
+    }
+
+    #[test]
+    fn min_tx_anchor_height_saturates_at_zero(
+        consensus in arbitrary_consensus(),
+    ) {
+        prop_assert_eq!(min_tx_anchor_height(&consensus, 0), 0);
+    }
+
+    #[test]
+    fn min_ingress_proof_anchor_height_le_height(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let min = min_ingress_proof_anchor_height(&consensus, height);
+        prop_assert!(min <= height, "min {min} > height {height}");
+    }
+
+    #[test]
+    fn min_ingress_proof_anchor_height_saturates_at_zero(
+        consensus in arbitrary_consensus(),
+    ) {
+        prop_assert_eq!(min_ingress_proof_anchor_height(&consensus, 0), 0);
+    }
+
+    #[test]
+    fn tx_inclusion_range_matches_original_formula(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let (min, max) = tx_inclusion_anchor_range(&consensus, height);
+        let expiry = u64::from(consensus.mempool.tx_anchor_expiry_depth);
+        let migration = u64::from(consensus.block_migration_depth);
+        let expected_min = height.saturating_sub(expiry.saturating_sub(migration));
+        let expected_max = height.saturating_sub(migration);
+        prop_assert_eq!(min, expected_min);
+        prop_assert_eq!(max, expected_max);
+    }
+
+    #[test]
+    fn min_tx_anchor_height_matches_original_formula(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let result = min_tx_anchor_height(&consensus, height);
+        let expected = height.saturating_sub(u64::from(consensus.mempool.tx_anchor_expiry_depth));
+        prop_assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn min_ingress_proof_anchor_height_matches_original_formula(
+        consensus in arbitrary_consensus(),
+        height in 0_u64..=u64::MAX / 2,
+    ) {
+        let result = min_ingress_proof_anchor_height(&consensus, height);
+        let expected = height.saturating_sub(u64::from(consensus.mempool.ingress_proof_anchor_expiry_depth));
+        prop_assert_eq!(result, expected);
+    }
 }
