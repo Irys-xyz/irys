@@ -287,11 +287,11 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     println!("\nreorg_tx: {:?}", reorg_tx.header.id);
     println!("canonical_before:");
-    for entry in &canon_before.0 {
+    for entry in &canon_before.entries {
         println!("  {:?}", entry)
     }
     println!("canonical_after:");
-    for entry in &canon.0 {
+    for entry in &canon.entries {
         println!("  {:?}", entry)
     }
 
@@ -326,12 +326,15 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     println!("old_fork:\n  {:?}", old_fork);
     println!("new_fork:\n  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash()]);
+    assert_eq!(
+        old_fork,
+        vec![canon_before.entries.last().unwrap().block_hash()]
+    );
     assert_eq!(
         new_fork,
         vec![
-            canon.0[canon.0.len() - 2].block_hash(),
-            canon.0.last().unwrap().block_hash()
+            canon.entries[canon.entries.len() - 2].block_hash(),
+            canon.entries.last().unwrap().block_hash()
         ]
     );
 
@@ -539,7 +542,7 @@ async fn heavy3_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<
         // Stage 7: block tree does not contain pruned block
         {
             let block_tree_guard = node.node_ctx.block_tree_guard.read();
-            let (canonical_entries, _) = block_tree_guard.get_canonical_chain();
+            let canonical_entries = block_tree_guard.get_canonical_chain().entries;
             let last_entry = canonical_entries.first().unwrap();
             let last_entry = block_tree_guard
                 .get_block(&last_entry.block_hash())

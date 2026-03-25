@@ -322,7 +322,7 @@ impl ValidationCoordinator {
     /// Check if block extends canonical tip
     #[instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
-        let (canonical_chain, _) = block_tree.get_canonical_chain();
+        let canonical_chain = block_tree.get_canonical_chain().entries;
         let canonical_tip = canonical_chain.last().unwrap().block_hash();
 
         let mut current = *block_hash;
@@ -684,7 +684,7 @@ mod tests {
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
             let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
+            let canonical_chain = tree.get_canonical_chain().entries;
             let tip = canonical_chain.last().unwrap();
 
             let mut blocks = Vec::new();
@@ -741,7 +741,7 @@ mod tests {
         // These will compete with the canonical block at height 3
         let fork_blocks = {
             let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
+            let canonical_chain = tree.get_canonical_chain().entries;
             let fork_parent = canonical_chain.iter().find(|e| e.height() == 2).unwrap();
 
             let mut blocks = Vec::new();

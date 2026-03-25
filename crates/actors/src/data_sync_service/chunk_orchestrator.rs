@@ -256,7 +256,7 @@ impl ChunkOrchestrator {
         // We only want to download migrated chunks from other peers
         let max_chunk_offset: Option<u64> = {
             let tree = self.block_tree.read();
-            let (canonical, _) = tree.get_canonical_chain();
+            let canonical = tree.get_canonical_chain().entries;
             let block_migration_depth =
                 self.config.consensus_config().block_migration_depth as usize;
 

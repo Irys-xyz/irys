@@ -1180,7 +1180,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .block_tree_guard
         .read()
         .get_max_cumulative_difficulty_block()
-        .1;
+        .block_hash;
     let new_block_state = *node
         .node_ctx
         .block_tree_guard
@@ -1377,11 +1377,12 @@ async fn heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> 
     );
 
     // Sanity check: canonical tip should now be the newly produced block.
-    let (_, tip_hash) = peer_node
+    let tip_hash = peer_node
         .node_ctx
         .block_tree_guard
         .read()
-        .get_max_cumulative_difficulty_block();
+        .get_max_cumulative_difficulty_block()
+        .block_hash;
     assert_eq!(tip_hash, normal_block.block_hash);
 
     // Cleanup nodes.

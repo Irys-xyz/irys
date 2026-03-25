@@ -59,9 +59,10 @@ async fn test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<(
         let header = ctx.get_block_by_height(expected_height).await?;
 
         // Get the current EMA price from the block tree
-        let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+        let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .entries;
         let tip_hash = chain.last().unwrap().block_hash();
         let ema_snapshot = ctx
             .node_ctx
@@ -177,9 +178,10 @@ async fn heavy3_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     ctx.wait_until_height(header_3.height, 10).await?;
 
     // assert that all of the prices are the max allowed ones (guaranteed by the mock oracle reporting inflated values)
-    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+    let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
     let genesis_block =
         get_block(ctx.node_ctx.block_tree_guard.clone(), chain[0].block_hash()).unwrap();

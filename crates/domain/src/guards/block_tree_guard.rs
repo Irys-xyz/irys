@@ -28,8 +28,9 @@ impl BlockTreeReadGuard {
     /// Returns the height of the latest block on the canonical chain.
     pub fn latest_canonical_block_height(&self) -> Option<u64> {
         let tree = self.read();
-        let (canonical, _) = tree.get_canonical_chain();
+        let canonical = tree.get_canonical_chain();
         canonical
+            .entries
             .last()
             .map(super::super::models::block_tree::BlockTreeEntry::height)
     }
@@ -37,17 +38,18 @@ impl BlockTreeReadGuard {
     /// Gets the total number of chunks in a ledger at a given block height
     pub fn get_total_chunks(&self, block_height: u64, ledger_id: u32) -> Option<LedgerChunkOffset> {
         let tree = self.read();
-        let (canonical, _) = tree.get_canonical_chain();
+        let canonical = tree.get_canonical_chain();
 
         let depth = canonical
+            .entries
             .last()
             .unwrap()
             .height()
             .saturating_sub(block_height) as usize;
 
-        if canonical.len() > depth {
-            let idx = canonical.len() - 1 - depth;
-            let block_entry = &canonical[idx];
+        if canonical.entries.len() > depth {
+            let idx = canonical.entries.len() - 1 - depth;
+            let block_entry = &canonical.entries[idx];
 
             let block = tree
                 .get_block(&block_entry.block_hash())

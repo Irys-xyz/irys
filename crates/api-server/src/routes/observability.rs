@@ -121,7 +121,7 @@ pub async fn get_chain_height(app_state: Data<ApiState>) -> Result<Json<ChainHei
         .map_err(ApiError::canonical_chain_error)?;
 
     let height = canonical_chain
-        .0
+        .entries
         .last()
         .map(|block| block.height)
         .ok_or(ApiError::EmptyCanonicalChain)?;
