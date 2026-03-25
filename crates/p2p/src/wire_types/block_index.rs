@@ -303,22 +303,31 @@ mod tests {
     /// `DataLedger::ALL.len()` must produce a custom deserialization error.
     #[test]
     fn deserialize_oversized_legacy_payload_errors() {
-        // DataLedger::ALL has 2 entries. Build a legacy payload with 3 ledgers
-        // (no `ledger` field), so the third entry triggers the out-of-range error.
-        let json = r#"{
+        // DataLedger::ALL has 4 entries (Publish, Submit, OneYear, ThirtyDay).
+        // Build a legacy payload with 5 ledgers (no `ledger` field), so the
+        // fifth entry triggers the out-of-range error.
+        let count = DataLedger::ALL.len() + 1;
+        let ledger_entries: Vec<String> = (0..count)
+            .map(|i| {
+                format!(
+                    r#"{{ "total_chunks": "{}", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN" }}"#,
+                    (i + 1) * 100
+                )
+            })
+            .collect();
+        let json = format!(
+            r#"{{
             "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-            "num_ledgers": 3,
-            "ledgers": [
-                { "total_chunks": "100", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN" },
-                { "total_chunks": "200", "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45" },
-                { "total_chunks": "300", "tx_root": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC" }
-            ]
-        }"#;
+            "num_ledgers": {count},
+            "ledgers": [{}]
+        }}"#,
+            ledger_entries.join(", ")
+        );
 
-        let err = serde_json::from_str::<BlockIndexItemV1>(json).unwrap_err();
+        let err = serde_json::from_str::<BlockIndexItemV1>(&json).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("legacy payload has 3 ledgers")
+            msg.contains(&format!("legacy payload has {count} ledgers"))
                 && msg.contains(&format!("only has {} entries", DataLedger::ALL.len())),
             "expected malformed-legacy error, got: {msg}"
         );
