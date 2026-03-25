@@ -472,7 +472,8 @@ mod tests {
 
             let mut txs_before = vec![TestTx(1), TestTx(2)];
             config.retain_valid_commitment_versions(&mut txs_before, UnixTimestamp::from_secs(999));
-            assert_eq!(txs_before.len(), 2);
+            let versions_before: Vec<u8> = txs_before.iter().map(|t| t.0).collect();
+            assert_eq!(versions_before, vec![1, 2]);
         }
     }
 }

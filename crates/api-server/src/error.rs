@@ -148,6 +148,7 @@ mod tests {
     #[case(ApiError::BalanceUnavailable { reason: "x".into() }, StatusCode::SERVICE_UNAVAILABLE)]
     #[case(ApiError::InvalidBlockParameter { parameter: "x".into() }, StatusCode::BAD_REQUEST)]
     #[case(ApiError::InvalidTransactionVersion { version: 0, minimum: 1 }, StatusCode::BAD_REQUEST)]
+    #[case(ApiError::InvalidAddress(AddressParseError::InvalidFormat("bad".into())), StatusCode::BAD_REQUEST)]
     #[case(ApiError::Custom("x".into()), StatusCode::BAD_REQUEST)]
     #[case(ApiError::CustomWithStatus("x".into(), StatusCode::CONFLICT), StatusCode::CONFLICT)]
     fn status_code_mapping(#[case] error: ApiError, #[case] expected: StatusCode) {

@@ -248,7 +248,7 @@ mod tests {
         assert!(!mempool_dir.exists());
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_remove_files_loads_data_then_removes() {
         let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
