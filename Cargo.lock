@@ -5309,7 +5309,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-log",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
  "tracing",
