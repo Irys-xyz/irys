@@ -34,7 +34,7 @@ use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, instrument, warn, Instrument as _};
+use tracing::{debug, error, warn, Instrument as _};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
 
@@ -397,15 +397,11 @@ where
             "Pulled block {} from peer {}, sending for processing",
             block_hash, source_peer_id
         );
-        // Get miner_address from the peer item
         let miner_address = peer_info.mining_address;
         self.handle_block_header(
-            GossipRequestV2 {
-                peer_id: source_peer_id,
-                miner_address,
-
-                data: Arc::unwrap_or_clone(irys_block),
-            },
+            source_peer_id,
+            miner_address,
+            irys_block,
             peer_info.address.gossip,
         )
         .in_current_span()
@@ -444,34 +440,28 @@ where
             return Err(GossipError::InvalidPeer(error_msg));
         };
 
-        // Get miner_address from the peer item
         let miner_address = peer_info.mining_address;
         self.handle_block_header(
-            GossipRequestV2 {
-                peer_id: source_peer_id,
-                miner_address,
-
-                data: Arc::unwrap_or_clone(irys_block),
-            },
+            source_peer_id,
+            miner_address,
+            irys_block,
             peer_info.address.gossip,
         )
         .in_current_span()
         .await
     }
 
-    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
-        block_header_request: GossipRequestV2<IrysBlockHeader>,
+        source_peer_id: IrysPeerId,
+        source_miner_address: IrysAddress,
+        block_header: Arc<IrysBlockHeader>,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
-        if block_header_request.data.poa.chunk.is_none() {
+        let block_hash = block_header.block_hash;
+        if block_header.poa.chunk.is_none() {
             error!("received a block without a POA chunk");
         }
-        let source_peer_id = block_header_request.peer_id;
-        let source_miner_address = block_header_request.miner_address;
-        let block_header = block_header_request.data;
-        let block_hash = block_header.block_hash;
         debug!(
             "Node {}: Gossip block received from peer {}: {} height: {}",
             self.gossip_client.mining_address,
@@ -564,7 +554,6 @@ where
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
 
-        // Pull block body, trying the sender first before falling back to network
         let sealed_block = self
             .pull_block_body(&block_header, use_trusted_peers_only, source_peer_id)
             .await?;
@@ -1091,7 +1080,7 @@ where
 
     pub async fn pull_block_body(
         &self,
-        header: &IrysBlockHeader,
+        header: &Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         source_peer_id: IrysPeerId,
     ) -> GossipResult<SealedBlock> {
@@ -1116,7 +1105,7 @@ where
     /// Returns `Some(sealed_block)` on success, `None` on any failure.
     async fn try_fetch_body_from_source(
         &self,
-        header: &IrysBlockHeader,
+        header: &Arc<IrysBlockHeader>,
         source_peer_id: IrysPeerId,
     ) -> Option<SealedBlock> {
         let block_hash = header.block_hash;
@@ -1163,18 +1152,17 @@ where
     /// Fetches a block body from the network with retries, validating tx IDs on each attempt.
     async fn fetch_block_body_from_network_with_retries(
         &self,
-        header: &IrysBlockHeader,
+        header: &Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
     ) -> GossipResult<SealedBlock> {
         let block_hash = header.block_hash;
-        let header_arc = Arc::new(header.clone());
         let mut failed_attempts: Vec<(Option<IrysPeerId>, GossipError)> = Vec::new();
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
                 .gossip_client
                 .pull_block_body_from_network(
-                    Arc::clone(&header_arc),
+                    Arc::clone(header),
                     use_trusted_peers_only,
                     &self.peer_list,
                 )
