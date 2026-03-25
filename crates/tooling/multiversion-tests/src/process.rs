@@ -265,7 +265,7 @@ fn open_log_file(path: &Path) -> Result<SharedLogWriter, std::io::Error> {
     // Open synchronously so we fail fast if the path is bad. The file is then
     // wrapped in an async-friendly handle for the forwarder tasks.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent)?;
     }
     let std_file = std::fs::OpenOptions::new()
         .create(true)
