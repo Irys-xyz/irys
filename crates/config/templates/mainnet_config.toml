@@ -70,7 +70,6 @@ chunk_request_timeout = "15s"
 max_pending_chunk_requests = 100
 
 [packing.local]
-cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
 
 [cache]
@@ -116,6 +115,3 @@ max_valid_chunks = 10000
 max_valid_submit_txs = 3000
 max_valid_commitment_addresses = 300
 max_commitments_per_address = 20
-
-[vdf]
-parallel_verification_thread_limit = 4
