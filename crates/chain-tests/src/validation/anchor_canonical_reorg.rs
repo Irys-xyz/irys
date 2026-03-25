@@ -2,7 +2,7 @@
 //! blocks after a reorg by using `MigratedBlockHashes` as canonical authority.
 
 use crate::utils::IrysNodeTest;
-use irys_actors::anchor_validation::get_anchor_height;
+use irys_actors::anchor_validation::{get_anchor_height, get_canonical_anchor_height};
 use irys_types::{H256, NodeConfig};
 use std::sync::Arc;
 use tracing::debug;
@@ -11,8 +11,8 @@ use tracing::debug;
 /// canonical anchors. This test:
 /// 1. Starts two mining peers that build competing forks
 /// 2. Triggers a reorg by extending the losing peer's chain
-/// 3. Phase 1 (in-tree): verifies that the orphan is rejected for canonical=true
-///    but still findable with canonical=false while in the block tree
+/// 3. Phase 1 (in-tree): verifies that the orphan is rejected by `get_canonical_anchor_height`
+///    but still findable with `get_anchor_height` while in the block tree
 /// 4. Phase 2 (DB fallback): mines extra blocks to prune height 3 from the tree,
 ///    then verifies the orphan is rejected via DB cross-check and the canonical
 ///    block is found via MigratedBlockHashes
@@ -22,7 +22,7 @@ async fn heavy_test_anchor_rejects_orphan_after_reorg() -> eyre::Result<()> {
     let seconds_to_wait = 15;
     let block_migration_depth = 1;
     // Small tree depth forces blocks at height 3 to be pruned once tip reaches ~7,
-    // ensuring the assertions exercise the DB fallback path in get_anchor_height.
+    // ensuring the assertions exercise the DB fallback path in get_canonical_anchor_height.
     let block_tree_depth = 3;
 
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -178,18 +178,18 @@ async fn heavy_test_anchor_rejects_orphan_after_reorg() -> eyre::Result<()> {
     let db = &genesis_node.node_ctx.db;
 
     // Phase 1: while the orphan is still in the block tree (pre-prune).
-    // canonical=true should reject it (block tree filters by canonical chain).
-    let orphan_result = get_anchor_height(block_tree, db, orphaned_hash, true)?;
+    // get_canonical_anchor_height should reject it (filters by canonical chain).
+    let orphan_result = get_canonical_anchor_height(block_tree, db, orphaned_hash)?;
     assert_eq!(
         orphan_result, None,
         "orphaned fork block should not be accepted as canonical anchor"
     );
 
-    // canonical=false finds the orphan via get_block() while it's still in the tree.
-    let non_canonical_result = get_anchor_height(block_tree, db, orphaned_hash, false)?;
+    // get_anchor_height finds the orphan via get_block() while it's still in the tree.
+    let non_canonical_result = get_anchor_height(block_tree, db, orphaned_hash)?;
     assert!(
         non_canonical_result.is_some(),
-        "orphaned block should still be found with canonical=false (in-tree)"
+        "orphaned block should still be found with get_anchor_height (in-tree)"
     );
 
     // Phase 2: mine extra blocks to prune height 3 from the tree (block_tree_depth=3
@@ -200,16 +200,16 @@ async fn heavy_test_anchor_rejects_orphan_after_reorg() -> eyre::Result<()> {
         .wait_for_block_at_height(8, seconds_to_wait)
         .await?;
 
-    // canonical=true: orphan was never migrated to MigratedBlockHashes, so the
-    // DB cross-check correctly rejects it.
-    let orphan_after_prune = get_anchor_height(block_tree, db, orphaned_hash, true)?;
+    // get_canonical_anchor_height: orphan was never migrated to MigratedBlockHashes,
+    // so the DB cross-check correctly rejects it.
+    let orphan_after_prune = get_canonical_anchor_height(block_tree, db, orphaned_hash)?;
     assert_eq!(
         orphan_after_prune, None,
         "orphaned block should be rejected via DB fallback after pruning"
     );
 
-    // canonical=true: the winning fork's block was migrated and should be found via DB.
-    let canonical_result = get_anchor_height(block_tree, db, canonical_hash, true)?;
+    // get_canonical_anchor_height: the winning fork's block was migrated and should be found via DB.
+    let canonical_result = get_canonical_anchor_height(block_tree, db, canonical_hash)?;
     assert!(
         canonical_result.is_some(),
         "canonical block should be accepted as anchor via DB fallback"
