@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774449358715,
+  "lastUpdate": 1774473310809,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1327,6 +1327,86 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "3aba7cf53f925f1353fd58e52883c76dd45d61d4",
+          "message": "refactor(actors): centralise anchor height calculations in anchor_validation",
+          "timestamp": "2026-03-25T14:17:41Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1250/commits/3aba7cf53f925f1353fd58e52883c76dd45d61d4"
+        },
+        "date": 1774473310034,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 5.223871,
+            "range": "± 0.031217",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.353671,
+            "range": "± 28.302932",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1033.528084,
+            "range": "± 30.402651",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 8.245439,
+            "range": "± 0.129534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1187.689992,
+            "range": "± 28.726773",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1528.89692,
+            "range": "± 11.680435",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 2.337868,
+            "range": "± 0.229382",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 220.638593,
+            "range": "± 0.869422",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 281.287605,
+            "range": "± 3.848865",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
