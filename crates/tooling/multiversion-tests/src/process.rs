@@ -96,9 +96,16 @@ impl NodeProcess {
     }
 
     pub async fn kill(&mut self) -> Result<(), ProcessError> {
+        const KILL_TIMEOUT: Duration = Duration::from_secs(10);
         signal::kill(self.pid()?, Signal::SIGKILL)?;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.wait().await;
+        if let Some(mut child) = self.child.take()
+            && tokio::time::timeout(KILL_TIMEOUT, child.wait())
+                .await
+                .is_err()
+        {
+            return Err(ProcessError::ShutdownTimeout {
+                timeout: KILL_TIMEOUT,
+            });
         }
         Ok(())
     }
@@ -143,12 +150,33 @@ impl NodeProcess {
     }
 
     pub async fn respawn(&mut self) -> Result<(), ProcessError> {
+        const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+
         if let Some(mut old) = self.child.take() {
+            // Try to kill the old process. If start_kill() fails, fall back to
+            // SIGKILL via nix so the subsequent wait doesn't hang forever.
             if let Err(e) = old.start_kill() {
-                tracing::warn!(error = %e, "failed to kill old process during respawn");
+                tracing::warn!(error = %e, "start_kill failed during respawn, trying SIGKILL");
+                if let Some(raw_pid) = old.id()
+                    && let Ok(pid) = i32::try_from(raw_pid)
+                    && let Err(e) = signal::kill(Pid::from_raw(pid), Signal::SIGKILL)
+                {
+                    tracing::warn!(error = %e, "SIGKILL fallback also failed during respawn");
+                }
             }
-            // Wait for the old process to fully exit so it releases ports and data dirs.
-            let _ = old.wait().await;
+            // Wait for the old process to fully exit so it releases ports and
+            // data dirs. Timeout prevents hanging if the kill somehow failed.
+            if tokio::time::timeout(KILL_TIMEOUT, old.wait())
+                .await
+                .is_err()
+            {
+                // Last-ditch reap after SIGKILL, matching shutdown()'s pattern.
+                let _ = old.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), old.wait()).await;
+                return Err(ProcessError::ShutdownTimeout {
+                    timeout: KILL_TIMEOUT,
+                });
+            }
         }
 
         // The child has exited so its stdout/stderr pipes are closed; the

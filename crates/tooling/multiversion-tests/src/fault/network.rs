@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::FaultTarget;
@@ -16,6 +17,62 @@ fn make_chain_name() -> String {
     format!("IRYS_T_{pid}_{seq}")
 }
 
+/// Extracts the owning PID from a chain name like `IRYS_T_12345_0`.
+fn chain_owner_pid(chain: &str) -> Option<u32> {
+    chain
+        .strip_prefix("IRYS_T_")?
+        .split('_')
+        .next()?
+        .parse()
+        .ok()
+}
+
+static STALE_CLEANUP: Once = Once::new();
+
+/// One-time scan for iptables chains orphaned by crashed processes.
+///
+/// Parses `iptables -S` output for `-N IRYS_T_*` chain definitions, checks
+/// whether the owning PID is still alive via `/proc/{pid}`, and flushes +
+/// deletes any chains whose owner has exited. Chains matching the current
+/// PID are also reaped — since this runs before any chains are created
+/// (guarded by [`Once`]), they must be stale from a previous process whose
+/// PID was recycled by the OS. Silently returns if iptables is not available
+/// (e.g. unprivileged container).
+fn reap_stale_chains() {
+    STALE_CLEANUP.call_once(|| {
+        let Ok(output) = std::process::Command::new("sudo")
+            .args(["-n", "iptables", "-S"])
+            .output()
+        else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let current_pid = std::process::id();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Some(chain) = line.strip_prefix("-N ") else {
+                continue;
+            };
+            let Some(pid) = chain_owner_pid(chain) else {
+                continue;
+            };
+            // Stale if the owning process is dead, OR if the PID matches ours
+            // (must be left over from a previous process whose PID was recycled,
+            // since no chains from the current process exist yet).
+            if pid == current_pid || !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                tracing::info!(
+                    chain,
+                    stale_pid = pid,
+                    "cleaning up stale iptables chain from dead process"
+                );
+                sync_cleanup_chain(chain);
+            }
+        }
+    });
+}
+
 /// Simulates network partitions between nodes by installing iptables DROP rules.
 ///
 /// Each `NetworkPartitioner` manages its own iptables chain (e.g. `IRYS_T_12345_0`)
@@ -26,8 +83,21 @@ fn make_chain_name() -> String {
 /// [`FaultGuard::undo`] is called explicitly.
 ///
 /// Reference counting (`active_injections`) tracks how many injections are live.
-/// The iptables chain is only flushed and deleted once the last injection is undone,
-/// so multiple concurrent partitions can safely share one partitioner instance.
+/// In the normal path, the chain is flushed and deleted once the last injection is
+/// undone, so multiple concurrent partitions can safely share one partitioner
+/// instance.
+///
+/// # Cleanup guarantees
+///
+/// Rules are cleaned up at three levels to prevent leaks:
+///
+/// 1. **Normal path** — each [`FaultGuard`] removes its rules on drop/undo; the
+///    last guard deletes the chain.
+/// 2. **Panic path** — [`Drop`] flushes the chain when `active_injections > 0`,
+///    catching cases where guards were not dropped (e.g. test panicked).
+/// 3. **Crash path** — on the first [`new()`](Self::new) call per process, a
+///    one-time reaper scans for `IRYS_T_*` chains whose owning PID no longer
+///    exists (SIGKILL, OOM, `panic = abort`) and removes them.
 pub struct NetworkPartitioner {
     /// Unique iptables chain name scoped to this instance (e.g. `IRYS_T_<pid>_<seq>`).
     chain_name: String,
@@ -38,7 +108,11 @@ pub struct NetworkPartitioner {
 
 impl NetworkPartitioner {
     /// Creates a new partitioner with a unique iptables chain name and no active injections.
+    ///
+    /// On the first call per process, this also reaps any stale iptables chains left
+    /// by previous processes that crashed before their [`Drop`] could run.
     pub fn new() -> Self {
+        reap_stale_chains();
         Self {
             chain_name: make_chain_name(),
             active_injections: Arc::new(AtomicUsize::new(0)),
@@ -66,11 +140,21 @@ impl Default for NetworkPartitioner {
 
 impl Drop for NetworkPartitioner {
     fn drop(&mut self) {
-        // Safety cleanup: if no active injections remain, flush the chain.
-        // The primary cleanup path is decrement_and_maybe_cleanup().
-        if self.active_injections.load(Ordering::Acquire) == 0 {
+        let leaked = self.active_injections.load(Ordering::Acquire);
+        if leaked > 0 {
+            // Guards were not dropped (e.g. test panicked mid-injection).
+            // Flush the chain so DROP rules don't persist on the host.
+            tracing::warn!(
+                chain = %self.chain_name,
+                leaked,
+                "NetworkPartitioner dropped with active injections — \
+                 force-cleaning iptables chain"
+            );
             sync_cleanup_chain(&self.chain_name);
         }
+        // When leaked == 0 the last FaultGuard already called
+        // sync_cleanup_chain via decrement_and_maybe_cleanup, so there
+        // is nothing left to do.
     }
 }
 
@@ -247,6 +331,18 @@ mod tests {
     fn extract_ports_cases(#[case] target: FaultTarget, #[case] expected: Result<(u16, u16), ()>) {
         let result = extract_ports(&target).map_err(|_| ());
         assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case::typical("IRYS_T_12345_0", Some(12345))]
+    #[case::single_digit_seq("IRYS_T_1_99", Some(1))]
+    #[case::large_pid("IRYS_T_999999_42", Some(999999))]
+    #[case::not_our_prefix("OTHER_CHAIN", None)]
+    #[case::empty("", None)]
+    #[case::prefix_only("IRYS_T_", None)]
+    #[case::non_numeric_pid("IRYS_T_abc_0", None)]
+    fn chain_owner_pid_cases(#[case] input: &str, #[case] expected: Option<u32>) {
+        assert_eq!(chain_owner_pid(input), expected);
     }
 
     #[test]
