@@ -899,8 +899,13 @@ mod tests {
 
     #[test]
     fn generate_data_root_rejects_empty_input() {
-        let result = generate_data_root(vec![]);
-        assert!(result.is_err());
+        let err = generate_data_root(vec![])
+            .expect_err("empty input should be rejected")
+            .to_string();
+        assert!(
+            err.contains("At least one data node is required"),
+            "unexpected error: {err}"
+        );
     }
 }
 

@@ -35,7 +35,9 @@ async fn wait_for_mempool_len(
             return Ok(());
         }
         if start.elapsed() >= timeout {
-            eyre::bail!("Expected {expected_len} transactions in mempool, but found {current_len}");
+            eyre::bail!(
+                "Timed out after {timeout:?}: expected {expected_len} transactions in mempool, found {current_len}"
+            );
         }
         tokio::time::sleep(poll_interval).await;
     }

@@ -83,11 +83,11 @@ impl RecoveredMempoolState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use irys_testing_utils::utils::TempDirBuilder;
 
     #[tokio::test]
     async fn test_load_from_nonexistent_dir() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let nonexistent = dir.path().join("does_not_exist");
 
         let state = RecoveredMempoolState::load_from_disk(&nonexistent, false).await;
@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_valid_transactions() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
 
         let commitment_dir = mempool_dir.join("commitment_tx");
@@ -135,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_non_json_files() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
 
         let commitment_dir = mempool_dir.join("commitment_tx");
@@ -184,7 +184,7 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn test_handles_malformed_json() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
 
         let commitment_dir = mempool_dir.join("commitment_tx");
@@ -217,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_subdirs_returns_empty() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
 
         tokio::fs::create_dir_all(mempool_dir.join("commitment_tx"))
@@ -235,7 +235,7 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn test_remove_files_true_removes_mempool_dir() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
         tokio::fs::create_dir_all(mempool_dir.join("commitment_tx"))
             .await
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_files_loads_data_then_removes() {
-        let dir = tempdir().unwrap();
+        let dir = TempDirBuilder::new().build();
         let mempool_dir = dir.path().join("mempool");
 
         let commitment_dir = mempool_dir.join("commitment_tx");

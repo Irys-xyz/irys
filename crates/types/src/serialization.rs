@@ -1127,4 +1127,16 @@ mod tests {
     fn h256_from_base58_result_returns_err_on_invalid() {
         assert!(H256::from_base58_result("!!!invalid!!!").is_err());
     }
+
+    #[test]
+    fn h256_from_base58_result_returns_err_on_wrong_length() {
+        use base58::ToBase58 as _;
+
+        let encoded = vec![0_u8; 31].to_base58();
+        let err = H256::from_base58_result(&encoded).unwrap_err();
+        assert!(
+            err.to_string().contains("31 bytes, expected 32"),
+            "expected length error, got: {err}"
+        );
+    }
 }

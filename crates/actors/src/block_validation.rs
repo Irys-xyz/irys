@@ -3107,7 +3107,6 @@ mod tests {
         DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
     };
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tracing::{debug, info};
 

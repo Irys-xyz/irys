@@ -315,7 +315,7 @@ mod tests {
 
         match expected {
             Ok(count) => assert_eq!(result.unwrap(), count),
-            Err(()) => assert!(result.is_err()),
+            Err(()) => assert!(matches!(result, Err(ApiError::LedgerNotFound { .. }))),
         }
     }
 

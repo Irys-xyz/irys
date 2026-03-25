@@ -253,11 +253,15 @@ pub fn generate_nextest_config(
 
     // Coverage instrumentation adds overhead; give tests 3× the default timeout
     if coverage {
-        config_content.push_str("\n[profile.coverage]\n");
-        config_content.push_str("slow-timeout = { period = \"90s\", terminate-after = 2 }\n\n");
-        config_content.push_str("[[profile.coverage.scripts]]\n");
-        config_content.push_str("filter = 'all()'\n");
-        config_content.push_str("run-wrapper = 'xtask-monitor'\n");
+        if !config_content.contains("[profile.coverage]") {
+            config_content.push_str("\n[profile.coverage]\n");
+            config_content.push_str("slow-timeout = { period = \"90s\", terminate-after = 2 }\n\n");
+        }
+        if !config_content.contains("[[profile.coverage.scripts]]") {
+            config_content.push_str("[[profile.coverage.scripts]]\n");
+            config_content.push_str("filter = 'all()'\n");
+            config_content.push_str("run-wrapper = 'xtask-monitor'\n");
+        }
     }
 
     temp_file.write_all(config_content.as_bytes())?;

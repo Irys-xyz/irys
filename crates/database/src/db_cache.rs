@@ -72,10 +72,12 @@ mod global_chunk_offset_tests {
         #[test]
         fn global_chunk_offset_compact_roundtrip(bytes in proptest::array::uniform29(0_u8..)) {
             let original = GlobalChunkOffset(U232::from_le_bytes(bytes));
-            let mut buf = BytesMut::with_capacity(29);
+            let mut buf = BytesMut::with_capacity(29 + 2);
             let len = original.to_compact(&mut buf);
-            let (decoded, _) = GlobalChunkOffset::from_compact(&buf[..], len);
+            buf.extend_from_slice(&[0xAA, 0xBB]);
+            let (decoded, rest) = GlobalChunkOffset::from_compact(&buf[..], len);
             prop_assert_eq!(decoded, original);
+            prop_assert_eq!(rest, &[0xAA, 0xBB]);
         }
     }
 }

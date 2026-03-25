@@ -94,9 +94,9 @@ mod tests {
         proptest! {
             #[test]
             fn expiry_never_zero(
-                block_height in 0_u64..1_000_000,
-                num_blocks_in_epoch in 1_u64..10_000,
-                submit_ledger_epoch_length in 1_u64..100,
+                block_height in 0_u64..=1_000_000,
+                num_blocks_in_epoch in 1_u64..=10_000,
+                submit_ledger_epoch_length in 1_u64..=100,
             ) {
                 let result = calculate_submit_ledger_expiry(
                     block_height,
