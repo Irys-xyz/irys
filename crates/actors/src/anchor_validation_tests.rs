@@ -9,7 +9,7 @@ use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
 use reth_db::mdbx::DatabaseArguments;
 
-use super::get_anchor_height;
+use super::{get_anchor_height, get_canonical_anchor_height};
 
 fn signed_genesis() -> IrysBlockHeader {
     let mut header = IrysBlockHeader::new_mock_header();
@@ -66,7 +66,7 @@ fn canonical_block_in_tree_returns_height() {
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
 
-    let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, genesis.block_hash()).unwrap();
     assert_eq!(result, Some(0));
 }
 
@@ -76,7 +76,7 @@ fn non_canonical_block_in_tree_returns_height_when_canonical_false() {
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
 
-    let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), false).unwrap();
+    let result = get_anchor_height(&block_tree, &db, genesis.block_hash()).unwrap();
     assert_eq!(result, Some(0));
 }
 
@@ -86,7 +86,7 @@ fn unknown_block_returns_none() {
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
 
-    let result = get_anchor_height(&block_tree, &db, H256::random(), true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, H256::random()).unwrap();
     assert_eq!(result, None);
 }
 
@@ -101,7 +101,7 @@ fn canonical_block_in_db_with_migrated_entry_returns_height() {
     write_header_to_db(&db, &old_block);
     write_canonical_entry(&db, 5, old_block_hash);
 
-    let result = get_anchor_height(&block_tree, &db, old_block_hash, true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, old_block_hash).unwrap();
     assert_eq!(result, Some(5));
 }
 
@@ -115,7 +115,7 @@ fn orphan_block_in_db_without_migrated_entry_returns_none_when_canonical() {
     let orphan_block = mock_header(5, orphan_hash);
     write_header_to_db(&db, &orphan_block);
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, orphan_hash).unwrap();
     assert_eq!(
         result, None,
         "orphan block should not be accepted as canonical"
@@ -136,10 +136,10 @@ fn orphan_block_at_height_with_different_canonical_returns_none() {
 
     write_canonical_entry(&db, 5, canonical_hash);
 
-    let result = get_anchor_height(&block_tree, &db, canonical_hash, true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, canonical_hash).unwrap();
     assert_eq!(result, Some(5));
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, true).unwrap();
+    let result = get_canonical_anchor_height(&block_tree, &db, orphan_hash).unwrap();
     assert_eq!(result, None, "orphan should be rejected after reorg");
 }
 
@@ -152,6 +152,6 @@ fn orphan_block_in_db_returns_height_when_canonical_false() {
     let orphan_hash = H256::random();
     write_header_to_db(&db, &mock_header(5, orphan_hash));
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, false).unwrap();
+    let result = get_anchor_height(&block_tree, &db, orphan_hash).unwrap();
     assert_eq!(result, Some(5));
 }
