@@ -454,19 +454,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             max_diff_hash,
         ) = {
             let tree = self.node_ctx.block_tree_guard.read();
-            let (canonical_chain, not_onchain_count) = tree.get_canonical_chain();
-            let canonical_tip = canonical_chain
+            let chain = tree.get_canonical_chain();
+            let canonical_tip = chain
+                .entries
                 .last()
                 .map(|entry| (entry.height(), entry.block_hash()));
-            let (max_diff_height, max_diff_hash) = tree.get_max_cumulative_difficulty_block();
+            let max_diff = tree.get_max_cumulative_difficulty_block();
 
             (
                 canonical_tip.map(|(height, _)| height),
                 canonical_tip.map(|(_, block_hash)| block_hash),
-                canonical_chain.len(),
-                not_onchain_count,
-                max_diff_height,
-                max_diff_hash,
+                chain.entries.len(),
+                chain.not_onchain_count,
+                max_diff.cumulative_diff,
+                max_diff.block_hash,
             )
         };
 
@@ -1028,12 +1029,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
                 .await
                 .unwrap();
-            let latest_block = canonical_chain.0.last().unwrap();
+            let latest_block = canonical_chain.entries.last().unwrap();
 
             if latest_block.height() >= target_height {
                 // Get the specific block at target height, not the latest
                 if let Some(target_block) = canonical_chain
-                    .0
+                    .entries
                     .iter()
                     .find(|b| b.height() == target_height)
                 {
@@ -1090,7 +1091,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let canonical_chain =
                 get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
             if let Some(block) = canonical_chain
-                .0
+                .entries
                 .iter()
                 .find(|b| b.height() == target_height)
             {
@@ -1185,10 +1186,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
                 .await
                 .unwrap();
-            let latest_block = canonical_chain.0.last().unwrap();
+            let latest_block = canonical_chain.entries.last().unwrap();
 
             let latest_height = latest_block.height();
-            let not_onchain_count = canonical_chain.1 as u64;
+            let not_onchain_count = canonical_chain.not_onchain_count as u64;
             if (latest_height - not_onchain_count) >= target_height {
                 info!(
                     "reached height {} after {} retries",
@@ -1483,7 +1484,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         get_canonical_chain(self.node_ctx.block_tree_guard.clone())
             .await
             .unwrap()
-            .0
+            .entries
             .last()
             .unwrap()
             .height()
@@ -1495,7 +1496,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_tree_guard
             .read()
             .get_max_cumulative_difficulty_block()
-            .1;
+            .block_hash;
         self.node_ctx
             .block_tree_guard
             .read()
@@ -1764,7 +1765,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         for attempt in 1..=max_seconds {
             let canonical_chain =
                 get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
-            for entry in canonical_chain.0.iter().rev() {
+            for entry in canonical_chain.entries.iter().rev() {
                 let block_hash = entry.block_hash();
                 if let Ok(block) = self.get_block_by_hash(&block_hash)
                     && block.data_ledgers[ledger].tx_ids.0.contains(&txid)
@@ -2408,7 +2409,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         get_canonical_chain(self.node_ctx.block_tree_guard.clone())
             .await
             .unwrap()
-            .0
+            .entries
             .iter()
             .find(|e| e.height() == height)
             .and_then(|e| {
@@ -3518,7 +3519,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_tree_guard
             .read()
             .get_canonical_chain()
-            .0
+            .entries
     }
 
     /// Get the EMA snapshot for a given block hash
@@ -3694,7 +3695,7 @@ pub async fn solution_context_with_poa_chunk(
 
         let reset_seed = {
             let read = node_ctx.block_tree_guard.read();
-            let parent_hash = read.get_max_cumulative_difficulty_block().1;
+            let parent_hash = read.get_max_cumulative_difficulty_block().block_hash;
             read.get_block(&parent_hash)
                 .map(|b| b.vdf_limiter_info.next_seed)
                 .unwrap_or_default()
@@ -3740,7 +3741,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     // Get parent block directly from in-memory block tree
     let prev_block = {
         let read = node_ctx.block_tree_guard.read();
-        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        let parent_hash = read.get_max_cumulative_difficulty_block().block_hash;
         read.get_block(&parent_hash)
             .cloned()
             .ok_or_else(|| eyre!("Parent block header not found in block tree"))?

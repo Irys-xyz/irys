@@ -27,9 +27,10 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     let ctx = ctx.stop().await.start().await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
-    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+    let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(
         header_1.height,
         chain.last().unwrap().height(),
@@ -41,9 +42,10 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
     ctx.mine_block().await?;
-    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+    let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
     ctx.stop().await;
@@ -83,9 +85,10 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     let ctx = node.start().await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
-    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+    let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(
         header_1.height,
         chain.last().unwrap().height(),
@@ -97,9 +100,10 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
         "we expect the genesis block + 1 new block (the second block does not get saved)"
     );
     ctx.mine_block().await?;
-    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+    let chain = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .entries;
     assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
     ctx.stop().await;
