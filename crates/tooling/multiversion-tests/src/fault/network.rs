@@ -93,8 +93,9 @@ fn reap_stale_chains() {
 ///
 /// 1. **Normal path** — each [`FaultGuard`] removes its rules on drop/undo; the
 ///    last guard deletes the chain.
-/// 2. **Panic path** — [`Drop`] flushes the chain when `active_injections > 0`,
-///    catching cases where guards were not dropped (e.g. test panicked).
+/// 2. **Panic path** — [`Drop`] flushes the chain when
+///    [`panicking`](std::thread::panicking) and `active_injections > 0`,
+///    catching cases where guards may not be dropped during unwinding.
 /// 3. **Crash path** — on the first [`new()`](Self::new) call per process, a
 ///    one-time reaper scans for `IRYS_T_*` chains whose owning PID no longer
 ///    exists (SIGKILL, OOM, `panic = abort`) and removes them.
@@ -140,21 +141,23 @@ impl Default for NetworkPartitioner {
 
 impl Drop for NetworkPartitioner {
     fn drop(&mut self) {
-        let leaked = self.active_injections.load(Ordering::Acquire);
-        if leaked > 0 {
-            // Guards were not dropped (e.g. test panicked mid-injection).
-            // Flush the chain so DROP rules don't persist on the host.
+        let active = self.active_injections.load(Ordering::Acquire);
+        if active > 0 && std::thread::panicking() {
+            // Panic unwinding — guards may never run their undo closures.
+            // Force-flush the chain so DROP rules don't persist on the host.
             tracing::warn!(
                 chain = %self.chain_name,
-                leaked,
-                "NetworkPartitioner dropped with active injections — \
-                 force-cleaning iptables chain"
+                active,
+                "NetworkPartitioner dropped during panic with active injections \
+                 — force-cleaning iptables chain"
             );
             sync_cleanup_chain(&self.chain_name);
         }
-        // When leaked == 0 the last FaultGuard already called
-        // sync_cleanup_chain via decrement_and_maybe_cleanup, so there
-        // is nothing left to do.
+        // Normal drop with active > 0: FaultGuard instances still exist and
+        // hold Arc clones of the counter + chain name. They will clean up
+        // via decrement_and_maybe_cleanup when they are dropped.
+        //
+        // active == 0: the last FaultGuard already called sync_cleanup_chain.
     }
 }
 
