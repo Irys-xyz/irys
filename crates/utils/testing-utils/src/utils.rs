@@ -199,10 +199,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
 
         // Trigger SIGINT for orderly shutdown
-        let pid = unsafe { libc::getpid() };
-        unsafe {
-            libc::kill(pid, libc::SIGINT);
-        }
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGINT);
 
         // Spawn watchdog thread to force exit if graceful shutdown hangs
         spawn_shutdown_watchdog(irys_types::ShutdownReason::FatalError("panic".to_string()));

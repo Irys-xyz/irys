@@ -5296,6 +5296,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-multiversion-tests"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "irys-testing-utils",
+ "nix",
+ "proptest",
+ "reqwest 0.12.28",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-log",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
@@ -5380,6 +5400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -5510,7 +5531,7 @@ dependencies = [
  "color-eyre",
  "irys-types",
  "irys-utils",
- "libc",
+ "nix",
  "rand 0.8.5",
  "tempfile",
  "tracing",
@@ -6556,7 +6577,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "libc",
+ "nix",
  "regex",
  "serde",
  "serde_json",

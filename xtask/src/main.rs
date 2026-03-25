@@ -82,6 +82,53 @@ enum Commands {
         fix: bool,
     },
     CleanWorkspace,
+    /// Run multiversion integration tests from the multiversion-tests crate.
+    ///
+    /// Examples:
+    ///   cargo xtask multiversion-test                          # all tests
+    ///   cargo xtask multiversion-test --test upgrade           # only tests/upgrade.rs
+    ///   cargo xtask multiversion-test --filter rolling         # tests matching "rolling"
+    ///   cargo xtask multiversion-test --test upgrade --filter rolling   # "rolling" in upgrade.rs
+    MultiversionTest {
+        /// Path to pre-built binary for the new (HEAD) version
+        #[clap(long)]
+        binary_new: Option<String>,
+        /// Path to pre-built binary for the old (base) version
+        #[clap(long)]
+        binary_old: Option<String>,
+        /// Git ref (branch/tag/hash) for the old version, or "CURRENT" to build
+        /// from the working tree (default: CURRENT)
+        #[clap(long)]
+        old_ref: Option<String>,
+        /// Git ref (branch/tag/hash) for the new version, or "CURRENT" to build
+        /// from the working tree (default: CURRENT)
+        #[clap(long)]
+        new_ref: Option<String>,
+        /// Which test file to run (e.g. "upgrade", "e2e"). Maps to `cargo test --test <name>`.
+        /// Can be specified multiple times.
+        #[clap(long = "test", short = 't')]
+        test_targets: Vec<String>,
+        /// Substring filter for test names (e.g. "rolling_upgrade").
+        /// Passed to the test runner after `--`.
+        #[clap(long, short)]
+        filter: Option<String>,
+        /// Cargo profile to build binaries with (e.g. "dev", "release", "debug-release").
+        /// When omitted, tries "debug-release" then falls back to "release".
+        #[clap(long)]
+        profile: Option<String>,
+        /// Remove the target/multiversion directory before running
+        #[clap(long, default_value_t = false)]
+        clean: bool,
+        /// Remove only the target/multiversion/test-data directory before running
+        #[clap(long, default_value_t = false)]
+        clean_data: bool,
+        /// Passthrough args forwarded verbatim after the built-in flags.
+        /// The first `--` ends xtask flags; a second `--` separates cargo
+        /// args from test-runner args (which land in `runner_passthrough`).
+        /// e.g. cargo xtask multiversion-test -- -- --test-threads=2
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Flaky {
         #[clap(short, long, help = "Number of iterations to run")]
         iterations: Option<usize>,
@@ -502,6 +549,142 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "cargo clean --package {name}").remove_and_run()?;
             }
         }
+        Commands::MultiversionTest {
+            binary_new,
+            binary_old,
+            old_ref,
+            new_ref,
+            test_targets,
+            filter,
+            profile,
+            clean,
+            clean_data,
+            args,
+        } => {
+            println!("multiversion integration tests");
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("xtask CARGO_MANIFEST_DIR must have a parent");
+            let multiversion_dir = workspace_root.join("target/multiversion");
+            if clean {
+                if multiversion_dir.exists() {
+                    println!("Cleaning {}...", multiversion_dir.display());
+                    fs::remove_dir_all(&multiversion_dir)?;
+                    println!("Done.");
+                } else {
+                    println!("Nothing to clean (target/multiversion does not exist).");
+                }
+            } else if clean_data {
+                let test_data_dir = multiversion_dir.join("test-data");
+                if test_data_dir.exists() {
+                    println!("Cleaning {}...", test_data_dir.display());
+                    fs::remove_dir_all(&test_data_dir)?;
+                    println!("Done.");
+                } else {
+                    println!("Nothing to clean (target/multiversion/test-data does not exist).");
+                }
+            }
+            let binary_new = binary_new
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("binary_new: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            let binary_old = binary_old
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("binary_old: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            // Generate a human-readable, collision-resistant run ID.
+            let now = chrono::Local::now();
+            let run_id = format!(
+                "{}.{:03}-pid{}",
+                now.format("%Y-%m-%d_%H-%M-%S"),
+                now.timestamp_subsec_millis(),
+                std::process::id()
+            );
+            let _dir = sh.push_dir(workspace_root.join("crates/tooling/multiversion-tests"));
+            if let Some(ref path) = binary_new {
+                sh.set_var("IRYS_BINARY_NEW", path);
+            }
+            if let Some(ref path) = binary_old {
+                sh.set_var("IRYS_BINARY_OLD", path);
+            }
+            if let Some(ref git_ref) = old_ref {
+                sh.set_var("IRYS_OLD_REF", git_ref);
+            }
+            if let Some(ref git_ref) = new_ref {
+                sh.set_var("IRYS_NEW_REF", git_ref);
+            }
+            if let Some(ref p) = profile {
+                sh.set_var("IRYS_BUILD_PROFILE", p);
+            }
+            sh.set_var("IRYS_RUN_ID", &run_id);
+
+            // Pre-flight: when running *all* test targets, an explicit old version
+            // must be specified to avoid testing CURRENT against itself.
+            if test_targets.is_empty()
+                && binary_old.is_none()
+                && old_ref.as_deref().is_none_or(|r| r == "CURRENT")
+            {
+                return Err(eyre::eyre!(
+                    "multiversion-test: running all tests requires an old version.\n\
+                     Provide --binary-old <path> or --old-ref <git-ref> (not CURRENT)."
+                ));
+            }
+
+            // Build cargo test invocation.
+            // cargo test [--test <target>...] [--tests] <passthrough_cargo>
+            //   -- --ignored --test-threads=1 --nocapture [<filter>] <passthrough_runner>
+            let mut test_args = vec!["test".to_string()];
+            if test_targets.is_empty() {
+                // No specific test files — run all test targets.
+                test_args.push("--tests".to_string());
+            } else {
+                for target in &test_targets {
+                    test_args.push("--test".to_string());
+                    test_args.push(target.clone());
+                }
+            }
+
+            // Split passthrough args on `--` into cargo args and test runner args.
+            let (cargo_passthrough, runner_passthrough) = match args.iter().position(|a| a == "--")
+            {
+                Some(pos) => (args[..pos].to_vec(), args[pos + 1..].to_vec()),
+                None => (args, vec![]),
+            };
+            test_args.extend(cargo_passthrough);
+            test_args.extend([
+                "--".to_string(),
+                "--ignored".to_string(),
+                "--test-threads=1".to_string(),
+                "--nocapture".to_string(),
+            ]);
+            if let Some(ref f) = filter {
+                test_args.push(f.clone());
+            }
+            test_args.extend(runner_passthrough);
+            let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
+            let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
+
+            // Aggregate per-test .status marker files into a summary.
+            write_status_summary(&test_data_dir);
+
+            if result.is_err() {
+                if test_data_dir.exists() {
+                    eprintln!("test artifacts preserved at: {}", test_data_dir.display());
+                }
+                if let Ok(entries) = std::fs::read_dir(&multiversion_dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_name().to_string_lossy().starts_with("worktree-") {
+                            eprintln!("worktree preserved at: {}", entry.path().display());
+                        }
+                    }
+                }
+            }
+            result?;
+        }
         Commands::Flaky {
             iterations,
             clean,
@@ -664,6 +847,79 @@ fn main() -> eyre::Result<()> {
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
+}
+
+/// Scans per-test `.status` marker files and writes an aggregate `status.txt`.
+///
+/// Each test's `Cluster::start()` writes `.status = "RUNNING"` into its run
+/// subdirectory; `Cluster::shutdown()` overwrites it with `"PASSED"`.  If the
+/// test panicked, shutdown never ran and the marker stays `RUNNING` → FAILED.
+fn write_status_summary(run_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(run_dir) else {
+        return;
+    };
+
+    let mut tests: Vec<(String, String, Option<String>, Option<String>)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let raw = match std::fs::read_to_string(e.path().join(".status")) {
+                Ok(contents) => contents,
+                Err(err) => {
+                    eprintln!("warning: failed to read .status for {name}: {err}");
+                    "FAILED".to_string()
+                }
+            };
+            let mut lines = raw.lines();
+            let status_line = lines.next().unwrap_or("").trim();
+            let status = match status_line {
+                "PASSED" => "PASSED",
+                "RUNNING" => "FAILED",
+                other => other,
+            };
+            let mut old_ref = None;
+            let mut new_ref = None;
+            for line in lines {
+                if let Some(val) = line.strip_prefix("old_ref: ") {
+                    old_ref = Some(val.to_owned());
+                } else if let Some(val) = line.strip_prefix("new_ref: ") {
+                    new_ref = Some(val.to_owned());
+                }
+            }
+            (name, status.to_owned(), old_ref, new_ref)
+        })
+        .collect();
+
+    if tests.is_empty() {
+        return;
+    }
+
+    tests.sort();
+
+    let mut summary = String::new();
+    for (name, status, old_ref, new_ref) in &tests {
+        let mut line = format!("{name}: {status}");
+        if let Some(r) = old_ref {
+            line.push_str(&format!(" (old: {r}"));
+            if let Some(r) = new_ref {
+                line.push_str(&format!(", new: {r})"));
+            } else {
+                line.push(')');
+            }
+        } else if let Some(r) = new_ref {
+            line.push_str(&format!(" (new: {r})"));
+        }
+        line.push('\n');
+        summary.push_str(&line);
+    }
+
+    let path = run_dir.join("status.txt");
+    if let Err(e) = std::fs::write(&path, &summary) {
+        eprintln!("warning: failed to write status summary: {e}");
+    } else {
+        eprintln!("test status summary: {}", path.display());
+    }
 }
 
 pub trait CmdExt {

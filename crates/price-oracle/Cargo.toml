@@ -14,6 +14,7 @@ ignored = ["rust_decimal"]
 [dependencies]
 irys-types.workspace = true
 eyre = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-with-float"] }

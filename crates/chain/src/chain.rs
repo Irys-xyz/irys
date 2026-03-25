@@ -2189,8 +2189,15 @@ impl IrysNode {
         config: &Config,
         runtime_handle: &tokio::runtime::Handle,
     ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
-        // Use configured oracles (must be provided in config)
-        let oracle_cfgs: Vec<OracleConfig> = config.node_config.oracles.clone();
+        let oracle_cfgs: Vec<OracleConfig> = if config.node_config.oracles.is_empty() {
+            tracing::info!(
+                "No oracles configured — block production will reuse the \
+                 previous block's oracle price."
+            );
+            vec![]
+        } else {
+            config.node_config.oracles.clone()
+        };
 
         let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
         let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
