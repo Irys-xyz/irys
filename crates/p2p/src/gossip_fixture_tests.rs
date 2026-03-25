@@ -197,10 +197,6 @@ fn fixture_node_info_v2() -> wire::NodeInfoV2 {
     canonical_node_info().into()
 }
 
-fn fixture_block_index_item_v1() -> wire::BlockIndexItemV1 {
-    canonical_block_index_item().into()
-}
-
 fn fixture_block_index_item() -> wire::BlockIndexItemV2 {
     canonical_block_index_item().into()
 }
@@ -566,7 +562,6 @@ fixture_tests! {
     wire_node_info_v2 => fixture_node_info_v2(),
 
     // BlockIndexItem / LedgerIndexItem
-    block_index_item_v1 => fixture_block_index_item_v1(),
     block_index_item => fixture_block_index_item(),
     block_index_query => BlockIndexQuery { height: 100, limit: 50 },
 
@@ -583,8 +578,6 @@ fixture_tests! {
         GossipResponse::Accepted(fixture_node_info()),
     gossip_response_accepted_peer_list =>
         GossipResponse::Accepted(vec![test_peer_address()]),
-    gossip_response_accepted_block_index_v1 =>
-        GossipResponse::Accepted(vec![fixture_block_index_item_v1()]),
     gossip_response_accepted_block_index =>
         GossipResponse::Accepted(vec![fixture_block_index_item()]),
     gossip_response_accepted_whitelist =>
@@ -808,10 +801,6 @@ fn all_wire_types_have_fixture_coverage() {
     // Inner types are always tested through their version-tagged wrapper enum;
     // the fixture snapshot will break if their serialization changes.
     const EXCLUDED: &[(&str, &str)] = &[
-        (
-            "BlockIndexItemV2ConversionError",
-            "error type, not a wire message",
-        ),
         (
             "IrysBlockHeaderV1Inner",
             "tested via IrysBlockHeader version-tagged enum",

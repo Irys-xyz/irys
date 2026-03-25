@@ -429,7 +429,6 @@ pub(crate) fn canonical_node_info() -> irys_types::version::NodeInfo {
 pub(crate) fn canonical_block_index_item() -> irys_types::block::BlockIndexItem {
     irys_types::block::BlockIndexItem {
         block_hash: test_h256(0xBB),
-        num_ledgers: 2,
         ledgers: vec![
             irys_types::block::LedgerIndexItem {
                 total_chunks: 1024,

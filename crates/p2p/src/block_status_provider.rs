@@ -320,7 +320,6 @@ impl BlockStatusProvider {
                 .push_item(
                     &BlockIndexItem {
                         block_hash: genesis.block_hash,
-                        num_ledgers: 0,
                         ledgers: vec![],
                     },
                     0,
@@ -333,7 +332,6 @@ impl BlockStatusProvider {
             .push_item(
                 &BlockIndexItem {
                     block_hash: block.block_hash,
-                    num_ledgers: 0,
                     ledgers: vec![],
                 },
                 next_height,
