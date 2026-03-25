@@ -792,7 +792,6 @@ mod tests {
         public_port = 0
 
         [packing.local]
-        cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
 
         [cache]
@@ -810,10 +809,6 @@ mod tests {
         bind_port = 0
         public_ip = "0.0.0.0"
         public_port = 0
-
-        [vdf]
-        parallel_verification_thread_limit = 8
-        throttle = true
 
         [mempool]
         max_pending_pledge_items = 100

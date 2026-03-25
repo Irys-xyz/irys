@@ -458,6 +458,17 @@ fn default_actix_workers() -> usize {
         .unwrap_or(1)
 }
 
+fn thread_count_with_reserve(available: usize, reserved: usize) -> usize {
+    available.saturating_sub(reserved).max(1)
+}
+
+fn default_thread_count(reserved: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1);
+    thread_count_with_reserve(available, reserved)
+}
+
 /// # Gossip Network Configuration
 ///
 /// Settings for peer-to-peer communication between nodes.
@@ -559,7 +570,7 @@ pub struct LocalPackingConfig {
 impl Default for LocalPackingConfig {
     fn default() -> Self {
         Self {
-            cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
+            cpu_packing_concurrency: u16::try_from(default_thread_count(4)).unwrap_or(u16::MAX),
             gpu_packing_batch_size: 0,
         }
     }
@@ -771,9 +782,10 @@ fn default_network_defaults() -> NetworkDefaults {
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct VdfNodeConfig {
-    /// Maximum number of threads to use for parallel VDF verification
+    /// Maximum number of threads to use for parallel VDF verification.
+    /// Defaults to `max(1, available_cpus - 4)` when omitted.
     pub parallel_verification_thread_limit: usize,
 
     /// Controls whether and how the VDF thread is pinned to a CPU core.
@@ -827,8 +839,7 @@ fn default_vdf_validation_batch_size() -> usize {
 impl Default for VdfNodeConfig {
     fn default() -> Self {
         Self {
-            // TODO: default to something like numcpus - 4
-            parallel_verification_thread_limit: 4,
+            parallel_verification_thread_limit: default_thread_count(4),
             core_pinning: CorePinning::default(),
             throttle: false,
             progress_timeout_secs: default_vdf_progress_timeout_secs(),
@@ -1085,7 +1096,8 @@ impl NodeConfig {
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
-                    cpu_packing_concurrency: 4,
+                    cpu_packing_concurrency: u16::try_from(default_thread_count(4))
+                        .unwrap_or(u16::MAX),
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1122,7 +1134,7 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: 8,
+                parallel_verification_thread_limit: default_thread_count(4),
                 core_pinning: CorePinning::Disabled,
                 throttle: true,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
@@ -1258,7 +1270,8 @@ impl NodeConfig {
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
-                    cpu_packing_concurrency: 4,
+                    cpu_packing_concurrency: u16::try_from(default_thread_count(4))
+                        .unwrap_or(u16::MAX),
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1296,7 +1309,7 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: 4,
+                parallel_verification_thread_limit: default_thread_count(4),
                 core_pinning: CorePinning::Auto,
                 throttle: false,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
@@ -1415,7 +1428,27 @@ fn default_irys_path() -> PathBuf {
 #[cfg(test)]
 mod run_mode_tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
+
+    proptest! {
+        #[test]
+        fn thread_count_always_at_least_one(available in 0_usize..1024, reserved in 0_usize..1024) {
+            prop_assert!(thread_count_with_reserve(available, reserved) >= 1);
+        }
+
+        #[test]
+        fn thread_count_subtracts_reserved_when_sufficient(available in 5_usize..1024, reserved in 0_usize..5) {
+            let result = thread_count_with_reserve(available, reserved);
+            prop_assert_eq!(result, available - reserved);
+        }
+
+        #[test]
+        fn thread_count_floors_at_one_when_insufficient(reserved in 1_usize..1024) {
+            let result = thread_count_with_reserve(0, reserved);
+            prop_assert_eq!(result, 1);
+        }
+    }
 
     #[test]
     fn run_mode_defaults_to_production() {
@@ -1524,5 +1557,21 @@ mod run_mode_tests {
         let cfg = super::SyncConfig::default();
         assert_eq!(cfg.min_active_peers, 3, "production default expected");
         assert_eq!(cfg.peer_wait_timeout_millis, 20_000);
+    }
+
+    #[test]
+    fn vdf_config_partial_section_uses_dynamic_default() {
+        let toml_str = r#"
+            core_pinning = "Disabled"
+        "#;
+
+        let config: VdfNodeConfig =
+            toml::from_str(toml_str).expect("partial [vdf] must deserialize");
+
+        assert_eq!(
+            config.parallel_verification_thread_limit,
+            default_thread_count(4)
+        );
+        assert_eq!(config.core_pinning, CorePinning::Disabled);
     }
 }
