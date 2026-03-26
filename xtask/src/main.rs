@@ -198,11 +198,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             if coverage {
                 println!("Installing llvm-tools and cargo-llvm-cov...");
                 cmd!(sh, "rustup component add llvm-tools").run()?;
-                let _ = cmd!(
+                cmd!(
                     sh,
                     "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
                 )
-                .remove_and_run();
+                .remove_and_run()?;
             }
 
             // this is needed otherwise some tests will fail (that assert panic messages)
@@ -380,8 +380,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 nextest_args.push("heap-profile".to_string());
             }
 
-            // Add user-provided args
-            nextest_args.extend(args);
+            // Add user-provided args (by reference — args is needed later for coverage scope)
+            nextest_args.extend(args.iter().cloned());
 
             // Run nextest
             let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
@@ -455,6 +455,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     scope_args.push("--workspace".to_string());
                 }
 
+                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
                 let html_result = cmd!(
                     sh,
                     "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
@@ -467,7 +468,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 let lcov_result = cmd!(
                     sh,
-                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args...}"
+                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args_lcov...}"
                 )
                 .remove_and_run();
 
