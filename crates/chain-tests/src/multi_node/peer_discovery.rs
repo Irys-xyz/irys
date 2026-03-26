@@ -34,11 +34,8 @@ async fn peer_discovery() -> eyre::Result<()> {
         0x88, 0x99,
     ];
     let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
-    let signer = IrysSigner::new(
-        signing_key,
-        config.consensus_config().chain_id,
-        config.consensus_config().chunk_size,
-    );
+    let consensus = config.consensus_config();
+    let signer = IrysSigner::new(signing_key, consensus.chain_id, consensus.chunk_size);
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
