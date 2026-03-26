@@ -2726,11 +2726,14 @@ fn display_prefix(prefix: &str) -> &str {
 /// Preserves the module segments so that tests with the same bare function name
 /// in different modules are kept distinct when used as grouping keys.
 fn extract_func_from_path(test_path: &str) -> &str {
-    // Strip ::case_N suffixes
-    if let Some(idx) = test_path.find("::case_") {
-        &test_path[..idx]
-    } else {
-        test_path
+    // Strip rstest case suffixes: both numeric (::case_N) and named (::case::name)
+    let numeric = test_path.find("::case_");
+    let named = test_path.find("::case::");
+    match (numeric, named) {
+        (Some(a), Some(b)) => &test_path[..a.min(b)],
+        (Some(a), None) => &test_path[..a],
+        (None, Some(b)) => &test_path[..b],
+        (None, None) => test_path,
     }
 }
 

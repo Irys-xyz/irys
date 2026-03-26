@@ -527,26 +527,26 @@ impl BlockTreeServiceInner {
                         old_tip_block.height
                     );
                 }
+
                 // Even though the tip didn't change, broadcast the state update so that
                 // child blocks waiting in wait_for_parent_validation can proceed.
-                // If the block was pruned between mark_block_as_valid and now, skip the
-                // event — children will see None from get_parent_chain_state and cancel.
-                if let Some((_, &state)) = cache.get_block_and_status(&block_hash) {
-                    drop(cache);
-                    let event = BlockStateUpdated {
-                        block_hash,
-                        height,
-                        state,
-                        discarded: false,
-                        validation_result: ValidationResult::Valid,
-                    };
-                    if let Err(e) = self.service_senders.block_state_events.send(event) {
-                        tracing::trace!(
-                            block.hash = ?block_hash,
-                            block.height = height,
-                            "Failed to broadcast block state update event: {}", e
-                        );
-                    }
+                let (_, &state) = cache.get_block_and_status(&block_hash).unwrap_or_else(|| panic!("block {block_hash} (height {height}) not in cache after mark_block_as_valid succeeded under the same write lock"));
+
+                drop(cache);
+
+                let event = BlockStateUpdated {
+                    block_hash,
+                    height,
+                    state,
+                    discarded: false,
+                    validation_result: ValidationResult::Valid,
+                };
+                if let Err(e) = self.service_senders.block_state_events.send(event) {
+                    tracing::trace!(
+                        block.hash = ?block_hash,
+                        block.height = height,
+                        "Failed to broadcast block state update event: {}", e
+                    );
                 }
                 return Ok(());
             };
