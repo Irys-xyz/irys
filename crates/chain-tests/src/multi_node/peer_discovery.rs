@@ -73,7 +73,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
     let mut version_request = HandshakeRequestV2 {
-        chain_id: miner_signer_1.chain_id,
+        chain_id: miner_signer_1.chain_id(),
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
             api: "127.0.0.1:8081".parse().expect("valid socket address"),
@@ -206,7 +206,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V2",
-        "chain_id": miner_signer_2.chain_id,
+        "chain_id": miner_signer_2.chain_id(),
         "address": {
             "gossip": "127.0.0.2:8080",
             "api": "127.0.0.2:8081",
@@ -247,7 +247,7 @@ async fn peer_discovery() -> eyre::Result<()> {
 
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
     let mut version_request = HandshakeRequestV2 {
-        chain_id: miner_signer_3.chain_id,
+        chain_id: miner_signer_3.chain_id(),
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
             api: "127.0.0.3:8081".parse().expect("valid socket address"),
