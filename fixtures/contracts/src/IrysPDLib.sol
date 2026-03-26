@@ -29,13 +29,7 @@ library IrysPDLib {
     function tryReadData(
         uint8 index
     ) internal view returns (bool success, bytes memory data) {
-        (success, data) = _tryCall(
-            abi.encodeCall(IIrysPD.readData, (index))
-        );
-        if (!success || !_isValidAbiBytes(data)) {
-            return (false, bytes(""));
-        }
-        data = abi.decode(data, (bytes));
+        return _tryCallAndDecode(abi.encodeCall(IIrysPD.readData, (index)));
     }
 
     /// @notice Try to read an arbitrary byte slice from the specifier at `index`.
@@ -46,16 +40,24 @@ library IrysPDLib {
         uint32 offset,
         uint32 length
     ) internal view returns (bool success, bytes memory data) {
-        (success, data) = _tryCall(
+        return _tryCallAndDecode(
             abi.encodeCall(IIrysPD.readBytes, (index, offset, length))
         );
+    }
+
+    // ── Internal ───────────────────────────────────────────────────────
+
+    /// @dev Staticcall the PD precompile, validate the ABI envelope, and decode.
+    /// Returns (false, "") on call failure or malformed returndata.
+    function _tryCallAndDecode(
+        bytes memory payload
+    ) private view returns (bool success, bytes memory data) {
+        (success, data) = _tryCall(payload);
         if (!success || !_isValidAbiBytes(data)) {
             return (false, bytes(""));
         }
         data = abi.decode(data, (bytes));
     }
-
-    // ── Internal ───────────────────────────────────────────────────────
 
     /// @dev Validate that `data` is a well-formed ABI-encoded `bytes memory`.
     /// Checks: (1) at least 64 bytes, (2) dynamic offset == 0x20,

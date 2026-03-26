@@ -74,12 +74,35 @@ pub fn build_pd_access_list(specs: &[PdDataRead]) -> AccessList {
 /// Build a PD access list with data read specifiers AND fee parameters.
 ///
 /// This is the canonical constructor for PD transaction access lists.
+/// Validates that there are no duplicate data reads and that the total
+/// number of entries (data reads + 2 fee keys) does not exceed 256
+/// (the ABI `uint8` index limit).
 pub fn build_pd_access_list_with_fees(
     data_reads: &[PdDataRead],
     priority_fee: U256,
     base_fee_cap: U256,
 ) -> eyre::Result<AccessList> {
-    let mut keys: Vec<B256> = data_reads.iter().map(|s| B256::from(s.encode())).collect();
+    eyre::ensure!(
+        data_reads.len() + 2 <= 256,
+        "too many DataRead entries ({}); with 2 fee keys total exceeds 256",
+        data_reads.len()
+    );
+
+    let mut seen = std::collections::HashSet::with_capacity(data_reads.len());
+    let mut keys: Vec<B256> = Vec::with_capacity(data_reads.len() + 2);
+    for spec in data_reads {
+        let key = B256::from(spec.encode());
+        eyre::ensure!(
+            seen.insert(key),
+            "duplicate PdDataRead entry: partition_index={}, start={}, len={}, byte_off={}",
+            spec.partition_index,
+            spec.start,
+            spec.len,
+            spec.byte_off
+        );
+        keys.push(key);
+    }
+
     keys.push(B256::from(encode_pd_fee(
         PdAccessListArgsTypeId::PdPriorityFee as u8,
         priority_fee,

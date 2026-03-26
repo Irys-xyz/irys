@@ -143,16 +143,33 @@ pub fn read_chunk_data(
             })?;
 
         // Compute the byte slice within this chunk that overlaps the request.
-        // The last chunk of a data transaction may be shorter than chunk_size,
-        // so we must clamp to the actual chunk length to avoid an OOB panic.
+        // The last chunk of a data transaction may be shorter than chunk_size.
         let actual_len = unpacked_chunk.len();
         let chunk_byte_start = i * chunk_size;
+        let chunk_byte_end = chunk_byte_start + chunk_size;
+        let is_last_requested_chunk = i == last_chunk;
+
+        // A non-final chunk shorter than chunk_size is an error — it would
+        // silently produce a truncated result.
+        if actual_len < chunk_size as usize && !is_last_requested_chunk {
+            warn!(
+                ledger_offset,
+                actual_len, chunk_size, "Non-final chunk is shorter than chunk_size"
+            );
+            return Err(PdPrecompileError::ChunkFetchFailed {
+                offset: ledger_offset,
+                reason: format!(
+                    "chunk at offset {ledger_offset} has {actual_len} bytes but \
+                     chunk_size is {chunk_size}; only the final chunk may be short"
+                ),
+            });
+        }
+
         let slice_start = if offset as u64 > chunk_byte_start {
             (offset as u64 - chunk_byte_start) as usize
         } else {
             0
         };
-        let chunk_byte_end = chunk_byte_start + chunk_size;
         let slice_end = if req_end < chunk_byte_end {
             (req_end - chunk_byte_start) as usize
         } else {

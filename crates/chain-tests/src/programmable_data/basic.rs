@@ -273,7 +273,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             storage_keys: vec![B256::from(
                 PdDataRead {
                     partition_index: 0,
-                    start: 0,
+                    start: start_offset.data_start_offset as u32,
                     len: data_bytes.len() as u32,
                     byte_off: 0,
                 }
