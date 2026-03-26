@@ -16,29 +16,33 @@ use irys_types::{
 
 fn bench_check_request(c: &mut Criterion) {
     let mut group = c.benchmark_group("p2p/check_request");
-    let tracker = DataRequestTracker::new();
-
-    let peer = IrysPeerId::from(IrysAddress::from([0x01; 20]));
     let dedup_window_ms: u128 = 10;
+    let peer = IrysPeerId::from(IrysAddress::from([0x01; 20]));
 
     group.bench_function(BenchmarkId::from_parameter("first_request"), |b| {
         b.iter_batched(
             || {
+                let tracker = DataRequestTracker::new();
                 let mut addr_bytes = [0_u8; 20];
                 addr_bytes.copy_from_slice(&H256::random().0[..20]);
-                IrysPeerId::from(IrysAddress::from(addr_bytes))
+                let fresh_peer = IrysPeerId::from(IrysAddress::from(addr_bytes));
+                (tracker, fresh_peer)
             },
-            |fresh_peer| {
-                black_box(tracker.check_request(&fresh_peer, dedup_window_ms));
-            },
+            |(tracker, fresh_peer)| black_box(tracker.check_request(&fresh_peer, dedup_window_ms)),
             criterion::BatchSize::SmallInput,
         );
     });
 
     group.bench_function(BenchmarkId::from_parameter("repeat_request"), |b| {
-        b.iter(|| {
-            black_box(tracker.check_request(&peer, dedup_window_ms));
-        });
+        b.iter_batched(
+            || {
+                let tracker = DataRequestTracker::new();
+                tracker.check_request(&peer, dedup_window_ms);
+                tracker
+            },
+            |tracker| black_box(tracker.check_request(&peer, dedup_window_ms)),
+            criterion::BatchSize::SmallInput,
+        );
     });
 
     group.finish();
