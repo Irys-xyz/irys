@@ -169,7 +169,7 @@ fn orphan_block_in_db_returns_height_when_canonical_false() {
 #[case::below_min_off_by_one(11, 20, false)]
 #[case::above_max_off_by_one(5, 9, false)]
 #[case::in_range(5, 20, true)]
-fn validate_anchor_for_inclusion_boundary(
+fn serial_validate_anchor_for_inclusion_boundary(
     #[case] min_anchor_height: u64,
     #[case] max_anchor_height: u64,
     #[case] expected: bool,
@@ -194,7 +194,7 @@ fn validate_anchor_for_inclusion_boundary(
 #[rstest]
 #[case::height_zero_exact_range(0, 0, true)]
 #[case::height_zero_below_min(1, 10, false)]
-fn validate_anchor_for_inclusion_height_zero(
+fn serial_validate_anchor_for_inclusion_height_zero(
     #[case] min_anchor_height: u64,
     #[case] max_anchor_height: u64,
     #[case] expected: bool,
@@ -233,7 +233,10 @@ fn validate_anchor_for_inclusion_unresolvable_anchor_returns_error() {
 #[case::at_min_boundary(10, true)]
 #[case::below_min(11, false)]
 #[case::above_min(5, true)]
-fn validate_ingress_proof_anchor_boundary(#[case] min_anchor_height: u64, #[case] expected: bool) {
+fn serial_validate_ingress_proof_anchor_boundary(
+    #[case] min_anchor_height: u64,
+    #[case] expected: bool,
+) {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
@@ -260,7 +263,7 @@ fn validate_ingress_proof_anchor_boundary(#[case] min_anchor_height: u64, #[case
 #[rstest]
 #[case::height_zero_at_min(0, true)]
 #[case::height_zero_below_min(1, false)]
-fn validate_ingress_proof_anchor_height_zero(
+fn serial_validate_ingress_proof_anchor_height_zero(
     #[case] min_anchor_height: u64,
     #[case] expected: bool,
 ) {
