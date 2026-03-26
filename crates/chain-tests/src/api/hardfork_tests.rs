@@ -633,7 +633,7 @@ mod epoch_block_filtering {
     async fn heavy_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
