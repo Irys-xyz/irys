@@ -71,7 +71,7 @@ fn canonical_block_in_tree_returns_height() {
 }
 
 #[test]
-fn non_canonical_block_in_tree_returns_height_when_canonical_false() {
+fn any_block_in_tree_returns_height() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
@@ -144,7 +144,7 @@ fn orphan_block_at_height_with_different_canonical_returns_none() {
 }
 
 #[test]
-fn orphan_block_in_db_returns_height_when_canonical_false() {
+fn orphan_block_in_db_returns_height() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
