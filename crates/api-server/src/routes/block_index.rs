@@ -1,6 +1,7 @@
 use crate::{ApiState, error::ApiError};
 use actix_web::web::{self, Json};
-use irys_types::{BlockIndexItem, BlockIndexQuery};
+use irys_types::{BlockIndexItem, BlockIndexQuery, H256, LedgerIndexItem};
+use serde::Serialize;
 
 /// Maximum number of blocks that can be requested in a single query.
 ///
@@ -9,6 +10,25 @@ use irys_types::{BlockIndexItem, BlockIndexQuery};
 /// potentially leading to excessive memory usage or denial of service.
 const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
 const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
+
+/// API response wrapper that preserves the `num_ledgers` field for
+/// backward compatibility with external clients.
+#[derive(Serialize)]
+pub(crate) struct BlockIndexItemResponse {
+    block_hash: H256,
+    num_ledgers: u8,
+    ledgers: Vec<LedgerIndexItem>,
+}
+
+impl From<BlockIndexItem> for BlockIndexItemResponse {
+    fn from(item: BlockIndexItem) -> Self {
+        Self {
+            block_hash: item.block_hash,
+            num_ledgers: u8::try_from(item.ledgers.len()).unwrap_or(u8::MAX),
+            ledgers: item.ledgers,
+        }
+    }
+}
 
 fn resolve_limit(limit: usize) -> Result<usize, ApiError> {
     let effective = if limit == 0 {
@@ -26,17 +46,16 @@ fn resolve_limit(limit: usize) -> Result<usize, ApiError> {
     Ok(effective)
 }
 
-pub async fn block_index_route(
+pub(crate) async fn block_index_route(
     state: web::Data<ApiState>,
     query: web::Query<BlockIndexQuery>,
-) -> Result<Json<Vec<BlockIndexItem>>, ApiError> {
+) -> Result<Json<Vec<BlockIndexItemResponse>>, ApiError> {
     let limit = resolve_limit(query.limit)?;
     let height = query.height;
 
-    // Clone only the requested range while holding the read lock briefly
     let requested_blocks = state.block_index.read().get_range(height as u64, limit);
 
-    Ok(Json(requested_blocks))
+    Ok(Json(requested_blocks.into_iter().map(Into::into).collect()))
 }
 
 #[cfg(test)]

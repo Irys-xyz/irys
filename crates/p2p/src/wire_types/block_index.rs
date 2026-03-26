@@ -1,6 +1,41 @@
 use irys_types::{H256, block::DataLedger};
 use serde::{Deserialize, Serialize};
 
+/// V1 wire type for [`irys_types::block::BlockIndexItem`].
+///
+/// Includes `num_ledgers` for backward compatibility with V1 gossip peers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockIndexItemV1 {
+    pub block_hash: H256,
+    pub num_ledgers: u8,
+    #[serde(
+        serialize_with = "serialize_ledgers_positional",
+        deserialize_with = "deserialize_ledgers_compat"
+    )]
+    pub ledgers: Vec<LedgerIndexItem>,
+}
+
+// --- BlockIndexItemV1 conversions (derives num_ledgers from ledgers.len()) ---
+
+impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV1 {
+    fn from(src: irys_types::block::BlockIndexItem) -> Self {
+        Self {
+            block_hash: src.block_hash,
+            num_ledgers: u8::try_from(src.ledgers.len()).unwrap_or(u8::MAX),
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<BlockIndexItemV1> for irys_types::block::BlockIndexItem {
+    fn from(src: BlockIndexItemV1) -> Self {
+        Self {
+            block_hash: src.block_hash,
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// V2 wire type for [`irys_types::block::BlockIndexItem`].
 ///
 /// `num_ledgers` is omitted — the count is derived from `ledgers.len()`.
