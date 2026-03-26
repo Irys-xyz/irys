@@ -48,6 +48,9 @@ async fn setup_pd_fee_history_test_chain() -> eyre::Result<(
     // Configure node with predictable PD parameters
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
+    // All 255 chunks must fit in a single partition so the genesis node's storage
+    // modules can store them (default num_chunks_in_partition=10 would span 26 partitions).
+    config.consensus.get_mut().num_chunks_in_partition = 256;
     let sprite = config
         .consensus
         .get_mut()

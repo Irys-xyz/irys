@@ -7,6 +7,9 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
+    // All 80 PD chunks must fit in a single partition so storage modules can store them
+    // (default num_chunks_in_partition=10 would span 8 partitions).
+    genesis_config.consensus.get_mut().num_chunks_in_partition = 100;
     let genesis_max_accepted_chunks_per_block = 10;
     let peer_max_accepted_chunks_per_block = 100;
     genesis_config
@@ -42,18 +45,28 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
             .as_mut()
             .expect("Sprite hardfork must be configured for testing")
             .max_pd_chunks_per_block = peer_max_accepted_chunks_per_block;
-        peer_node.start_with_name("peer").await
+        peer_node
+            .start_and_wait_for_packing("peer", seconds_to_wait)
+            .await
     };
 
-    // === Phase 1: Upload 80 chunks of real data on peer node ===
+    // === Phase 1: Upload 80 chunks of real data on GENESIS node ===
+    // Data is uploaded to genesis (which has partition 0 in its storage modules).
+    // The peer's PdService will P2P-fetch chunks from genesis when provisioning.
     let chunk_size = 32_usize;
     let num_pd_chunks: u64 = 80;
     let data = vec![0xEF_u8; num_pd_chunks as usize * chunk_size]; // 80 × 32 = 2560 bytes
-    let data_start_offset = peer_node
+    let data_start_offset = genesis_node
         .upload_data_for_pd(&pd_tx_signer, &data, 60)
         .await?;
 
-    // === Phase 2: Inject PD tx, mine on peer, gossip to genesis ===
+    // Wait for peer to sync the blocks mined during upload/migration
+    let genesis_height = genesis_node.get_canonical_chain_height().await;
+    peer_node
+        .wait_for_block_at_height(genesis_height, 30)
+        .await?;
+
+    // === Phase 2: Inject PD tx on peer, mine on peer, gossip to genesis ===
     // Fees must be high enough to meet min_pd_transaction_cost
     let tx_hash = peer_node
         .inject_pd_tx_at_real_offsets(
