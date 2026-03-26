@@ -45,6 +45,7 @@ rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
+irys-domain = { path = ".", features = ["test-utils"] }
 criterion.workspace = true
 
 [lints]
@@ -53,4 +54,3 @@ workspace = true
 [[bench]]
 name = "block_tree_bench"
 harness = false
-required-features = ["test-utils"]

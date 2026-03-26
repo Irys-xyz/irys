@@ -5261,6 +5261,7 @@ dependencies = [
  "eyre",
  "irys-config",
  "irys-database",
+ "irys-domain",
  "irys-packing",
  "irys-reth-node-bridge",
  "irys-storage",
