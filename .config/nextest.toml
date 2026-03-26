@@ -29,19 +29,16 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(/.*heavy_.*/) - test(/.*spiky_.*/)'
 threads-required = 2
-# priority = 90
 
 # heavy3 tests (exclude spiky)
 [[profile.default.overrides]]
 filter = 'test(/.*heavy3_.*/) - test(/.*spiky_.*/)'
 threads-required = 3
-# priority = 80
 
 # heavy4 tests (exclude spiky)
 [[profile.default.overrides]]
 filter = 'test(/.*heavy4_.*/) - test(/.*spiky_.*/)'
 threads-required = 4
-# priority = 70
 
 # spiky tests — CPU spikes justify reservation, but group limits concurrency
 # so we can safely set threads-required = 1 (freeing slots for other tests)
