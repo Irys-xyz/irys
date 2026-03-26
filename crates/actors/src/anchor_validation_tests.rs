@@ -10,8 +10,9 @@ use irys_types::ingress::IngressProofV1;
 use irys_types::{
     ConsensusConfig, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysBlockHeader,
 };
+use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use reth_db::mdbx::DatabaseArguments;
-use rstest::rstest;
 
 use super::{
     get_anchor_height, validate_anchor_for_inclusion, validate_ingress_proof_anchor_for_inclusion,
@@ -65,6 +66,13 @@ fn write_canonical_entry(db: &DatabaseProvider, height: u64, block_hash: H256) {
         Ok(())
     })
     .unwrap();
+}
+
+fn write_canonical_block(db: &DatabaseProvider, height: u64) -> H256 {
+    let block_hash = H256::random();
+    write_header_to_db(db, &mock_header(height, block_hash));
+    write_canonical_entry(db, height, block_hash);
+    block_hash
 }
 
 #[test]
@@ -163,42 +171,29 @@ fn orphan_block_in_db_returns_height_when_canonical_false() {
     assert_eq!(result, Some(5));
 }
 
-#[rstest]
-#[case::at_min_boundary(10, 20, true)]
-#[case::at_max_boundary(5, 10, true)]
-#[case::below_min_off_by_one(11, 20, false)]
-#[case::above_max_off_by_one(5, 9, false)]
-#[case::in_range(5, 20, true)]
-fn serial_validate_anchor_for_inclusion_boundary(
-    #[case] min_anchor_height: u64,
-    #[case] max_anchor_height: u64,
-    #[case] expected: bool,
-) {
+#[test]
+fn serial_prop_validate_anchor_for_inclusion_boundary() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
 
-    let block_hash = H256::random();
-    write_header_to_db(&db, &mock_header(10, block_hash));
-    write_canonical_entry(&db, 10, block_hash);
+    let block_hash = write_canonical_block(&db, 10);
 
     let mut tx = DataTransactionHeader::default();
     tx.anchor = block_hash;
 
-    let result =
-        validate_anchor_for_inclusion(&block_tree, &db, min_anchor_height, max_anchor_height, &tx)
-            .unwrap();
-    assert_eq!(result, expected);
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..20, 0_u64..20), |(min, max)| {
+            let result = validate_anchor_for_inclusion(&block_tree, &db, min, max, &tx).unwrap();
+            prop_assert_eq!(result, 10 >= min && 10 <= max);
+            Ok(())
+        })
+        .unwrap();
 }
 
-#[rstest]
-#[case::height_zero_exact_range(0, 0, true)]
-#[case::height_zero_below_min(1, 10, false)]
-fn serial_validate_anchor_for_inclusion_height_zero(
-    #[case] min_anchor_height: u64,
-    #[case] max_anchor_height: u64,
-    #[case] expected: bool,
-) {
+#[test]
+fn serial_prop_validate_anchor_for_inclusion_height_zero() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
@@ -206,10 +201,14 @@ fn serial_validate_anchor_for_inclusion_height_zero(
     let mut tx = DataTransactionHeader::default();
     tx.anchor = genesis.block_hash;
 
-    let result =
-        validate_anchor_for_inclusion(&block_tree, &db, min_anchor_height, max_anchor_height, &tx)
-            .unwrap();
-    assert_eq!(result, expected);
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..20, 0_u64..20), |(min, max)| {
+            let result = validate_anchor_for_inclusion(&block_tree, &db, min, max, &tx).unwrap();
+            prop_assert_eq!(result, min == 0);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -229,44 +228,33 @@ fn validate_anchor_for_inclusion_unresolvable_anchor_returns_error() {
     assert!(matches!(ingress_err, TxIngressError::InvalidAnchor(a) if *a == unknown_anchor),);
 }
 
-#[rstest]
-#[case::at_min_boundary(10, true)]
-#[case::below_min(11, false)]
-#[case::above_min(5, true)]
-fn serial_validate_ingress_proof_anchor_boundary(
-    #[case] min_anchor_height: u64,
-    #[case] expected: bool,
-) {
+#[test]
+fn serial_prop_validate_ingress_proof_anchor_boundary() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
 
-    let block_hash = H256::random();
-    write_header_to_db(&db, &mock_header(10, block_hash));
-    write_canonical_entry(&db, 10, block_hash);
+    let block_hash = write_canonical_block(&db, 10);
 
     let ingress_proof = IngressProof::V1(IngressProofV1 {
         anchor: block_hash,
         ..Default::default()
     });
 
-    let result = validate_ingress_proof_anchor_for_inclusion(
-        &block_tree,
-        &db,
-        min_anchor_height,
-        &ingress_proof,
-    )
-    .unwrap();
-    assert_eq!(result, expected);
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..20), |min| {
+            let result =
+                validate_ingress_proof_anchor_for_inclusion(&block_tree, &db, min, &ingress_proof)
+                    .unwrap();
+            prop_assert_eq!(result, 10 >= min);
+            Ok(())
+        })
+        .unwrap();
 }
 
-#[rstest]
-#[case::height_zero_at_min(0, true)]
-#[case::height_zero_below_min(1, false)]
-fn serial_validate_ingress_proof_anchor_height_zero(
-    #[case] min_anchor_height: u64,
-    #[case] expected: bool,
-) {
+#[test]
+fn serial_prop_validate_ingress_proof_anchor_height_zero() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
@@ -276,14 +264,16 @@ fn serial_validate_ingress_proof_anchor_height_zero(
         ..Default::default()
     });
 
-    let result = validate_ingress_proof_anchor_for_inclusion(
-        &block_tree,
-        &db,
-        min_anchor_height,
-        &ingress_proof,
-    )
-    .unwrap();
-    assert_eq!(result, expected);
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..20), |min| {
+            let result =
+                validate_ingress_proof_anchor_for_inclusion(&block_tree, &db, min, &ingress_proof)
+                    .unwrap();
+            prop_assert_eq!(result, min == 0);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
