@@ -170,7 +170,7 @@ pub fn read_chunk_data(
         } else {
             0
         };
-        let slice_end = if req_end < chunk_byte_end {
+        let slice_end = if req_end <= chunk_byte_end {
             (req_end - chunk_byte_start) as usize
         } else {
             actual_len
@@ -397,6 +397,46 @@ mod tests {
         assert!(
             result.is_err(),
             "Should error (not panic) when chunk is shorter than expected"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ChunkFetchFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_short_last_chunk_at_exact_boundary() {
+        // Edge case: req_end exactly equals chunk_byte_end, but the final
+        // chunk is shorter than chunk_size. Must detect truncation, not
+        // silently return fewer bytes than requested.
+        let chunk_config = ChunkConfig {
+            num_chunks_in_partition: 100,
+            chunk_size: 256_000,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        };
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+
+        let full_chunk = Arc::new(bytes::Bytes::from(vec![0xAA_u8; 256_000]));
+        let short_chunk = Arc::new(bytes::Bytes::from(vec![0xBB_u8; 100]));
+        chunk_data_index.insert((0_u32, 0), full_chunk);
+        chunk_data_index.insert((0_u32, 1), short_chunk);
+
+        let context = PdContext::new(chunk_config, chunk_data_index);
+
+        // Spec declares exactly 2 full chunks (512_000 bytes).
+        // req_end = 512_000 == chunk_byte_end for chunk 1.
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 512_000,
+            byte_off: 0,
+        };
+
+        let result = read_chunk_data(&spec, 0, 512_000, &context);
+        assert!(
+            result.is_err(),
+            "Should error when short final chunk at exact chunk boundary"
         );
         assert!(matches!(
             result.unwrap_err(),
