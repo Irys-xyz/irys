@@ -44,6 +44,7 @@ jobs:
         run: cargo xtask test --coverage
 
       - name: Build coverage summary
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
         env:
           COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -94,6 +95,7 @@ jobs:
           fetch-depth: 1
 
       - name: Update coverage data
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
         run: |
           mkdir -p gh-pages-deploy/coverage
           rm -rf gh-pages-deploy/coverage/html
@@ -102,6 +104,7 @@ jobs:
           cp target/llvm-cov/history.json gh-pages-deploy/coverage/
 
       - name: Push to gh-pages
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
         run: |
           cd gh-pages-deploy
           git config user.name "github-actions[bot]"

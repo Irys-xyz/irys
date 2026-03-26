@@ -437,23 +437,37 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 println!("Generating coverage reports...");
                 fs::create_dir_all("target/llvm-cov")?;
 
-                // Forward the same package/workspace scope used for the test run
+                // Forward package scope flags to `cargo llvm-cov report`.
+                // The report subcommand only accepts --package/-p, not
+                // --workspace or --exclude. When unsupported scope flags
+                // are present, warn that report coverage may be broader.
                 let mut scope_args: Vec<String> = Vec::new();
-                if user_has_package {
-                    let mut iter = args.iter().peekable();
-                    while let Some(arg) = iter.next() {
-                        if arg.starts_with("--package=") || arg.starts_with("-p=") {
-                            scope_args.push(arg.clone()); // clone: collecting user args for reuse
-                        } else if (arg == "-p" || arg == "--package") {
-                            scope_args.push(arg.clone()); // clone: collecting user args for reuse
-                            if let Some(val) = iter.next() {
-                                scope_args.push(val.clone()); // clone: collecting user args for reuse
-                            }
+                let mut has_unsupported_scope = false;
+                let mut iter = args.iter().peekable();
+                while let Some(arg) = iter.next() {
+                    if arg.starts_with("--package=") || arg.starts_with("-p=") {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                    } else if arg == "-p" || arg == "--package" {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                        if let Some(val) = iter.next() {
+                            scope_args.push(val.clone()); // clone: collecting user args for reuse
+                        }
+                    } else if arg == "--exclude"
+                        || arg.starts_with("--exclude=")
+                        || arg == "--workspace"
+                    {
+                        has_unsupported_scope = true;
+                        if arg == "--exclude" {
+                            iter.next(); // skip the value
                         }
                     }
                 }
-                // No else: cargo llvm-cov report defaults to the whole workspace
-                // when no --package filter is given.
+                if has_unsupported_scope {
+                    eprintln!(
+                        "Warning: cargo llvm-cov report does not support --workspace/--exclude; \
+                         report may include crates excluded from the test run"
+                    );
+                }
 
                 let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
                 let html_result = cmd!(
