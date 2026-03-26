@@ -99,8 +99,12 @@ jobs:
         if: hashFiles('target/llvm-cov/lcov.info') != ''
         run: |
           mkdir -p gh-pages-deploy/coverage
-          rm -rf gh-pages-deploy/coverage/html
-          cp -r target/llvm-cov/html gh-pages-deploy/coverage/html
+          if [ -d target/llvm-cov/html ]; then
+            rm -rf gh-pages-deploy/coverage/html
+            cp -r target/llvm-cov/html gh-pages-deploy/coverage/html
+          else
+            echo "HTML coverage report missing; updating lcov/history only."
+          fi
           cp target/llvm-cov/lcov.info gh-pages-deploy/coverage/
           cp target/llvm-cov/history.json gh-pages-deploy/coverage/
 
