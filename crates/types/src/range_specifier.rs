@@ -126,6 +126,22 @@ impl PdDataRead {
             byte_off,
         };
 
+        // Reject partition_index values that would overflow the ledger offset
+        // calculation (num_chunks_in_partition * partition_index). Without this
+        // check, an attacker can craft a PD tx that the PdService marks as Ready
+        // (empty key set from overflow → no missing chunks) without any real data.
+        if chunk_config
+            .num_chunks_in_partition
+            .checked_mul(partition_index)
+            .is_none()
+        {
+            return Err(eyre!(
+                "PdDataRead partition_index ({partition_index}) causes ledger offset overflow \
+                 with num_chunks_in_partition ({})",
+                chunk_config.num_chunks_in_partition
+            ));
+        }
+
         let chunks = spec.chunks_needed(chunk_config.chunk_size);
         let end = u64::from(start)
             .checked_add(chunks)

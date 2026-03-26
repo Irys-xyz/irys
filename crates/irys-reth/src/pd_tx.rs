@@ -56,6 +56,8 @@ pub enum PdValidationError {
     },
     #[error("unknown type byte {0:#04x} in PD access list key")]
     UnknownTypeByte(u8),
+    #[error("too many DataRead entries ({count}); ABI index is uint8 so max is 256")]
+    TooManyDataReads { count: usize },
 }
 
 /// Create a PD access list for a list of `PdDataRead` specs, under the PD precompile address.
@@ -268,9 +270,14 @@ pub fn parse_pd_transaction(access_list: &AccessList, chunk_config: &ChunkConfig
         }
     }
 
-    // 3. At least one DataRead required
+    // 3. At least one DataRead required, and no more than 256 (ABI index is uint8)
     if data_reads.is_empty() {
         return PdParseResult::InvalidPd(PdValidationError::NoDataReads);
+    }
+    if data_reads.len() > 256 {
+        return PdParseResult::InvalidPd(PdValidationError::TooManyDataReads {
+            count: data_reads.len(),
+        });
     }
 
     // 4. Both fee keys required

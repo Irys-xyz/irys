@@ -32,9 +32,7 @@ library IrysPDLib {
         (success, data) = _tryCall(
             abi.encodeCall(IIrysPD.readData, (index))
         );
-        // ABI-encoded `bytes` requires ≥64 bytes (32 offset + 32 length).
-        // Guard against short returndata to avoid reverting in abi.decode.
-        if (!success || data.length < 64) {
+        if (!success || !_isValidAbiBytes(data)) {
             return (false, bytes(""));
         }
         data = abi.decode(data, (bytes));
@@ -51,13 +49,32 @@ library IrysPDLib {
         (success, data) = _tryCall(
             abi.encodeCall(IIrysPD.readBytes, (index, offset, length))
         );
-        if (!success || data.length < 64) {
+        if (!success || !_isValidAbiBytes(data)) {
             return (false, bytes(""));
         }
         data = abi.decode(data, (bytes));
     }
 
     // ── Internal ───────────────────────────────────────────────────────
+
+    /// @dev Validate that `data` is a well-formed ABI-encoded `bytes memory`.
+    /// Checks: (1) at least 64 bytes, (2) dynamic offset == 0x20,
+    /// (3) declared length fits within the remaining returndata.
+    /// Returns false instead of reverting on malformed payloads.
+    function _isValidAbiBytes(bytes memory data) private pure returns (bool) {
+        if (data.length < 64) return false;
+        uint256 dynOffset;
+        uint256 bytesLen;
+        assembly {
+            dynOffset := mload(add(data, 32))
+            bytesLen := mload(add(data, 64))
+        }
+        if (dynOffset != 0x20) return false;
+        // 64 bytes for offset + length words, then the declared payload.
+        // Use subtraction form to avoid uint256 overflow when bytesLen is large.
+        if (bytesLen > data.length - 64) return false;
+        return true;
+    }
 
     function _tryCall(
         bytes memory callData

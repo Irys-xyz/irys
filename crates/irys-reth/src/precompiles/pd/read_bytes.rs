@@ -33,7 +33,47 @@ pub fn read_chunk_data(
 ) -> Result<Bytes, PdPrecompileError> {
     let config = context.config();
     let chunk_size = config.chunk_size;
-    let chunks_needed = spec.chunks_needed(chunk_size);
+
+    // The declared access window is [byte_off, byte_off + len).
+    let window_end = spec.byte_off as u64 + spec.len as u64;
+
+    // Validate length > 0
+    if length == 0 {
+        return Err(PdPrecompileError::ByteRangeOutOfBounds {
+            start: offset as usize,
+            end: offset as usize,
+            available: window_end as usize,
+        });
+    }
+
+    // Validate range is within the declared window [byte_off, byte_off + len)
+    let req_end = (offset as u64).checked_add(length as u64).ok_or_else(|| {
+        warn!(offset, length, "Byte range end overflow");
+        PdPrecompileError::ByteRangeOutOfBounds {
+            start: offset as usize,
+            end: usize::MAX,
+            available: window_end as usize,
+        }
+    })?;
+
+    if (offset as u64) < spec.byte_off as u64 || req_end > window_end {
+        warn!(
+            offset,
+            length,
+            byte_off = spec.byte_off,
+            len = spec.len,
+            "Requested byte range exceeds declared PdDataRead window"
+        );
+        return Err(PdPrecompileError::ByteRangeOutOfBounds {
+            start: offset as usize,
+            end: req_end as usize,
+            available: window_end as usize,
+        });
+    }
+
+    // Determine which chunks overlap with [offset, offset + length)
+    let first_chunk = offset as u64 / chunk_size;
+    let last_chunk = (req_end - 1) / chunk_size;
 
     // Calculate ledger offsets from partition-relative coordinates
     let base_offset = config
@@ -68,14 +108,15 @@ pub fn read_chunk_data(
     debug!(
         partition_index = spec.partition_index,
         start = spec.start,
-        chunks_needed,
+        first_chunk,
+        last_chunk,
         ledger_start,
         "Fetching chunks from cache"
     );
 
-    // Fetch and concatenate all chunks
-    let mut bytes = Vec::with_capacity((chunks_needed * chunk_size) as usize);
-    for i in 0..chunks_needed {
+    // Fetch only the overlapping chunks and extract the requested slice
+    let mut result = Vec::with_capacity(length as usize);
+    for i in first_chunk..=last_chunk {
         let ledger_offset = ledger_start.checked_add(i).ok_or_else(|| {
             warn!(ledger_start, chunk_index = i, "Ledger offset overflow");
             PdPrecompileError::OffsetOutOfRange {
@@ -101,56 +142,49 @@ pub fn read_chunk_data(
                 }
             })?;
 
-        bytes.extend(&*unpacked_chunk);
-    }
+        // Compute the byte slice within this chunk that overlaps the request.
+        // The last chunk of a data transaction may be shorter than chunk_size,
+        // so we must clamp to the actual chunk length to avoid an OOB panic.
+        let actual_len = unpacked_chunk.len();
+        let chunk_byte_start = i * chunk_size;
+        let slice_start = if offset as u64 > chunk_byte_start {
+            (offset as u64 - chunk_byte_start) as usize
+        } else {
+            0
+        };
+        let chunk_byte_end = chunk_byte_start + chunk_size;
+        let slice_end = if req_end < chunk_byte_end {
+            (req_end - chunk_byte_start) as usize
+        } else {
+            actual_len
+        };
 
-    debug!(
-        total_bytes_fetched = bytes.len(),
-        chunks_needed, "Successfully fetched all chunks from cache"
-    );
-
-    // Validate length > 0
-    if length == 0 {
-        return Err(PdPrecompileError::ByteRangeOutOfBounds {
-            start: offset as usize,
-            end: offset as usize,
-            available: bytes.len(),
-        });
-    }
-
-    // Extract byte range
-    let start = offset as usize;
-    let end = start.checked_add(length as usize).ok_or_else(|| {
-        warn!(start, length, "Byte range end overflow");
-        PdPrecompileError::ByteRangeOutOfBounds {
-            start,
-            end: usize::MAX,
-            available: bytes.len(),
+        if slice_start >= actual_len || slice_end > actual_len {
+            warn!(
+                ledger_offset,
+                slice_start,
+                slice_end,
+                actual_len,
+                "Chunk shorter than expected; requested range exceeds chunk data"
+            );
+            return Err(PdPrecompileError::ChunkFetchFailed {
+                offset: ledger_offset,
+                reason: format!(
+                    "chunk at offset {ledger_offset} has {actual_len} bytes, \
+                     need [{slice_start}..{slice_end})"
+                ),
+            });
         }
-    })?;
 
-    if end > bytes.len() {
-        warn!(
-            start,
-            end,
-            available = bytes.len(),
-            "Requested byte range exceeds available data"
-        );
-        return Err(PdPrecompileError::ByteRangeOutOfBounds {
-            start,
-            end,
-            available: bytes.len(),
-        });
+        result.extend_from_slice(&unpacked_chunk[slice_start..slice_end]);
     }
 
-    let extracted = Bytes::copy_from_slice(&bytes[start..end]);
-
     debug!(
-        bytes_extracted = extracted.len(),
+        bytes_extracted = result.len(),
         "Byte range extraction successful"
     );
 
-    Ok(extracted)
+    Ok(Bytes::copy_from_slice(&result))
 }
 
 #[cfg(test)]
@@ -243,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_exceeds_available_data() {
+    fn test_range_exceeds_declared_window() {
         let context = create_test_context_with_chunks(1);
         let spec = PdDataRead {
             partition_index: 0,
@@ -251,10 +285,27 @@ mod tests {
             len: 100,
             byte_off: 0,
         };
-        // chunks_needed = 1, total data = 256_000 bytes
-        // Request offset 255_900, length 200 → end = 256_100 > 256_000
-        let result = read_chunk_data(&spec, 255_900, 200, &context);
-        assert!(result.is_err(), "Out-of-bounds range should fail");
+        // Declared window is [0, 100). Request [50, 200) exceeds the window.
+        let result = read_chunk_data(&spec, 50, 150, &context);
+        assert!(result.is_err(), "Out-of-window range should fail");
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ByteRangeOutOfBounds { .. }
+        ));
+    }
+
+    #[test]
+    fn test_offset_before_byte_off_rejected() {
+        let context = create_test_context_with_chunks(1);
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 50,
+            byte_off: 100,
+        };
+        // Declared window is [100, 150). Request [0, 50) is before byte_off.
+        let result = read_chunk_data(&spec, 0, 50, &context);
+        assert!(result.is_err(), "Offset before byte_off should fail");
         assert!(matches!(
             result.unwrap_err(),
             PdPrecompileError::ByteRangeOutOfBounds { .. }
@@ -293,5 +344,46 @@ mod tests {
         let result = read_chunk_data(&spec, 0, 512_000, &context);
         assert!(result.is_ok(), "Multi-chunk read should succeed");
         assert_eq!(result.unwrap().len(), 512_000);
+    }
+
+    #[test]
+    fn test_short_last_chunk_does_not_panic() {
+        // The last chunk of a data transaction can be shorter than chunk_size.
+        // Ensure read_chunk_data returns an error instead of panicking.
+        let chunk_config = ChunkConfig {
+            num_chunks_in_partition: 100,
+            chunk_size: 256_000,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        };
+        let chunk_data_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
+
+        // Insert a full first chunk and a short second chunk (100 bytes)
+        let full_chunk = Arc::new(bytes::Bytes::from(vec![0xAA_u8; 256_000]));
+        let short_chunk = Arc::new(bytes::Bytes::from(vec![0xBB_u8; 100]));
+        chunk_data_index.insert((0_u32, 0), full_chunk);
+        chunk_data_index.insert((0_u32, 1), short_chunk);
+
+        let context = PdContext::new(chunk_config, chunk_data_index);
+
+        // Spec spans 2 chunks (byte_off=0, len=300_000 > 256_000)
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 300_000,
+            byte_off: 0,
+        };
+
+        // Request bytes that extend into the short second chunk
+        // Byte 256_000..300_000 lives in chunk 1, but chunk 1 is only 100 bytes.
+        let result = read_chunk_data(&spec, 0, 300_000, &context);
+        assert!(
+            result.is_err(),
+            "Should error (not panic) when chunk is shorter than expected"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            PdPrecompileError::ChunkFetchFailed { .. }
+        ));
     }
 }
