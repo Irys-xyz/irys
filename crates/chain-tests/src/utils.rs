@@ -2576,19 +2576,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunk_size: u64,
         num_chunks_in_partition: u64,
     ) -> eyre::Result<Vec<PdDataRead>> {
-        assert!(total_chunks > 0, "total_chunks must be > 0");
-        assert!(
+        eyre::ensure!(total_chunks > 0, "total_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
             num_chunks_in_partition > 0,
             "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        // Cap each read so `chunks_in_read * chunk_size` fits in u32 (PdDataRead.len).
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
         );
 
         let mut reads = Vec::new();
         let mut remaining = total_chunks;
         let mut global_offset = u64::from(offset_base);
         let mut sentinel_ix = 0_u64;
-
-        // Cap each read so `chunks_in_read * chunk_size` fits in u32 (PdDataRead.len).
-        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
 
         while remaining > 0 {
             let start = global_offset % num_chunks_in_partition;

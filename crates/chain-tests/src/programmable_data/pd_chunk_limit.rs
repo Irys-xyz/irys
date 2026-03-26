@@ -74,7 +74,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
         U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
     )?;
-    let chunk_config = ChunkConfig::from_consensus(genesis_config.consensus.get_mut());
+    let chunk_config = ChunkConfig::from_consensus(consensus);
     let chunks = sum_pd_chunks_in_access_list(&access_list, &chunk_config);
     assert!(
         chunks > genesis_max_accepted_chunks_per_block,
