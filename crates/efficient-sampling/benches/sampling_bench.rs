@@ -35,9 +35,7 @@ fn bench_next_recall_range(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || Ranges::new(num_ranges),
-                    |mut ranges| {
-                        ranges.next_recall_range(1, &seeds[0], &partition_hash);
-                    },
+                    |mut ranges| ranges.next_recall_range(1, &seeds[0], &partition_hash),
                     criterion::BatchSize::SmallInput,
                 );
             },
@@ -57,9 +55,7 @@ fn bench_reconstruct(c: &mut Criterion) {
         group.bench_function(BenchmarkId::from_parameter(format!("gap_{gap}")), |b| {
             b.iter_batched(
                 || Ranges::new(64_840),
-                |mut ranges| {
-                    ranges.reconstruct(&step_seeds, &partition_hash);
-                },
+                |mut ranges| ranges.reconstruct(&step_seeds, &partition_hash),
                 criterion::BatchSize::SmallInput,
             );
         });

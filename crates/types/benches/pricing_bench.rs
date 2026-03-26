@@ -41,16 +41,17 @@ fn bench_calculate_perm_fee(c: &mut Criterion) {
     let config = make_config();
     let irys_price: Amount<(IrysPrice, Usd)> = Amount::token(dec!(1.0)).expect("valid price");
     let bytes = config.chunk_size;
-    let term_fee = calculate_term_fee(
-        bytes,
-        config.epoch.submit_ledger_epoch_length,
-        &config,
-        10,
-        irys_price,
-    )
-    .expect("term fee");
 
     for (proofs, label) in [(1_u64, "1_proof"), (10, "10_proofs"), (100, "100_proofs")] {
+        let term_fee = calculate_term_fee(
+            bytes,
+            config.epoch.submit_ledger_epoch_length,
+            &config,
+            proofs,
+            irys_price,
+        )
+        .expect("term fee");
+
         group.bench_function(BenchmarkId::from_parameter(label), |b| {
             b.iter(|| {
                 black_box(
