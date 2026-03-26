@@ -518,11 +518,14 @@ impl IrysTransactionCommon for DataTransactionHeader {
         use alloy_primitives::keccak256;
 
         // Store the signer address
-        self.signer = IrysAddress::from_public_key(signer.signer.verifying_key());
+        self.signer = IrysAddress::from_public_key(signer.signing_key().verifying_key());
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();
-        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+        let signature: Signature = signer
+            .signing_key()
+            .sign_prehash_recoverable(&prehash)?
+            .into();
 
         self.signature = IrysSignature::new(signature);
 
@@ -600,7 +603,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();
-        let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
+        let signature: Signature = signer
+            .signing_key()
+            .sign_prehash_recoverable(&prehash)?
+            .into();
 
         self.set_signature(IrysSignature::new(signature));
 

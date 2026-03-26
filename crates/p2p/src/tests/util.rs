@@ -263,7 +263,7 @@ impl GossipServiceTestFixture {
         node_config.http.public_port = gossip_port;
         node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
-        node_config.mining_key = random_signer.signer;
+        node_config.mining_key = random_signer.into_signing_key();
         // Generate a distinct peer_id for this test fixture
         // peer_id is separate from mining_address in V2
         let config = Config::new_with_random_peer_id(node_config);
