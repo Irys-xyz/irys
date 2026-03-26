@@ -1075,13 +1075,13 @@ fn cmd_config(config: &ClassificationConfig) {
             .map(|t| format!("{}s", t / 1000))
             .unwrap_or_else(|| "-".to_string());
 
+        let pattern_str = match &rule.exclude {
+            Some(ex) => format!("{} - {}", rule.pattern.as_str(), ex.as_str()),
+            None => rule.pattern.as_str().to_string(),
+        };
         println!(
             "{:<15} {:>10} {:>12} {:>8}  {}",
-            rule.name,
-            threads_str,
-            timeout_str,
-            rule.priority,
-            rule.pattern.as_str()
+            rule.name, threads_str, timeout_str, rule.priority, pattern_str
         );
     }
 }
