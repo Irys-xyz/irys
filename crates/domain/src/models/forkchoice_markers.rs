@@ -25,6 +25,11 @@ pub struct ForkChoiceMarkers {
     pub prune_block: Arc<IrysBlockHeader>,
 }
 
+fn compute_depth_delta(prune_depth: usize, migration_depth: usize) -> Result<u64> {
+    u64::try_from(prune_depth.saturating_sub(migration_depth))
+        .map_err(|e| eyre!("depth_delta overflow: {e}"))
+}
+
 impl ForkChoiceMarkers {
     /// Computes canonical fork-choice markers from the live block tree state.
     ///
@@ -54,8 +59,7 @@ impl ForkChoiceMarkers {
         let index_safe_height = block_index.latest_height();
         let migration_height =
             compute_migration_height(head_height, tree_safe_height, index_safe_height);
-        let depth_delta = u64::try_from(prune_depth.saturating_sub(migration_depth))
-            .map_err(|e| eyre::eyre!("depth_delta overflow: {e}"))?;
+        let depth_delta = compute_depth_delta(prune_depth, migration_depth)?;
         let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta);
 
         let head_block = block_at_height(
@@ -110,8 +114,7 @@ impl ForkChoiceMarkers {
 
         let head_height = block_index.latest_height();
         let migration_height = head_height;
-        let depth_delta = u64::try_from(prune_depth.saturating_sub(migration_depth))
-            .map_err(|e| eyre::eyre!("depth_delta overflow: {e}"))?;
+        let depth_delta = compute_depth_delta(prune_depth, migration_depth)?;
         let prune_height = head_height.saturating_sub(depth_delta);
 
         let head_block = marker_from_index_height(block_index, database, head_height)?;
