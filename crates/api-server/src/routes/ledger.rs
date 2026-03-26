@@ -293,8 +293,8 @@ mod tests {
     #[rstest]
     #[case(DataLedger::Publish, DataLedger::Publish, 3, Ok(3))]
     #[case(DataLedger::Submit, DataLedger::Submit, 2, Ok(2))]
-    #[case(DataLedger::Publish, DataLedger::Submit, 0, Err(()))]
-    #[case(DataLedger::Submit, DataLedger::Publish, 0, Err(()))]
+    #[case(DataLedger::Publish, DataLedger::Submit, 2, Err(()))]
+    #[case(DataLedger::Submit, DataLedger::Publish, 2, Err(()))]
     fn count_assignments_by_ledger_type_cases(
         #[case] assignment_ledger: DataLedger,
         #[case] query_ledger: DataLedger,

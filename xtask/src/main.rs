@@ -496,7 +496,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 if html_result.is_ok() {
                     println!("  HTML report: target/llvm-cov/html/index.html");
-                    if std::option_env!("CI").is_none() {
+                    if std::env::var("CI").is_err() {
                         #[cfg(target_os = "macos")]
                         let _ = cmd!(sh, "open target/llvm-cov/html/index.html").remove_and_run();
 
@@ -554,7 +554,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             println!("cargo doc");
             cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
 
-            if std::option_env!("CI").is_none() {
+            if std::env::var("CI").is_err() {
                 #[cfg(target_os = "macos")]
                 cmd!(sh, "open target/doc/irys/index.html").remove_and_run()?;
 

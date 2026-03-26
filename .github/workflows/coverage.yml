@@ -15,7 +15,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
   CARGO_INCREMENTAL: 0
 
 jobs:
@@ -23,6 +22,8 @@ jobs:
     name: coverage
     runs-on: [self-hosted, test-runner]
     timeout-minutes: 60
+    env:
+      IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +65,7 @@ jobs:
               history = json.load(f)
 
           history.append({
-              "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "commit": os.environ["COMMIT_SHA"][:12],
               "total_lines": total_lines,
               "covered_lines": hit_lines,

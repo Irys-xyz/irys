@@ -219,12 +219,7 @@ pub use crate::h256::H256;
 impl H256 {
     /// Decodes a H256 from a string. This will panic if the input is malformed!
     pub fn from_base58(string: &str) -> Self {
-        let decoded = string.from_base58().expect("to parse base58 string");
-        let array: [u8; 32] = decoded.as_slice()[..32]
-            .try_into()
-            .expect("Decoded base58 string should have at least 32 bytes");
-
-        Self(array)
+        Self::from_base58_result(string).expect("to parse base58 string into H256")
     }
 
     pub fn from_base58_result(string: &str) -> eyre::Result<Self> {
@@ -972,8 +967,9 @@ mod tests {
             let original = H256(raw);
             let mut buf = BytesMut::with_capacity(32);
             original.to_compact(&mut buf);
-            let (decoded, _) = H256::from_compact(&buf[..], buf.len());
+            let (decoded, remaining) = H256::from_compact(&buf[..], buf.len());
             prop_assert_eq!(original, decoded);
+            prop_assert!(remaining.is_empty(), "H256 from_compact left trailing bytes");
         }
 
         #[test]
@@ -981,8 +977,9 @@ mod tests {
             let original = Base64::from(data);
             let mut buf = BytesMut::with_capacity(original.0.len());
             original.to_compact(&mut buf);
-            let (decoded, _) = Base64::from_compact(&buf[..], buf.len());
+            let (decoded, remaining) = Base64::from_compact(&buf[..], buf.len());
             prop_assert_eq!(original, decoded);
+            prop_assert!(remaining.is_empty(), "Base64 from_compact left trailing bytes");
         }
     }
 
@@ -1132,7 +1129,7 @@ mod tests {
     fn h256_from_base58_result_returns_err_on_wrong_length() {
         use base58::ToBase58 as _;
 
-        let encoded = vec![0_u8; 31].to_base58();
+        let encoded = [0_u8; 31].to_base58();
         let err = H256::from_base58_result(&encoded).unwrap_err();
         assert!(
             err.to_string().contains("31 bytes, expected 32"),
