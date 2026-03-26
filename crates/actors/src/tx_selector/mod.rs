@@ -52,7 +52,6 @@ pub async fn select_best_txs(
     let mut confirmed_commitments = HashSet::new();
     let mut commitment_tx = Vec::new();
     let mut unfunded_address = HashSet::new();
-    let mut already_staked_tx_ids: Vec<H256> = Vec::new();
 
     let max_commitments: usize = ctx
         .config
@@ -258,7 +257,6 @@ pub async fn select_best_txs(
                     tx.commitment_type = ?tx.commitment_type(),
                     "Not promoting commitment tx - signer already staked"
                 );
-                already_staked_tx_ids.push(tx.id());
                 continue;
             }
         }
@@ -327,16 +325,6 @@ pub async fn select_best_txs(
         if commitment_tx.len() >= max_commitments {
             break;
         }
-    }
-
-    if !already_staked_tx_ids.is_empty() {
-        info!(
-            evicted_count = already_staked_tx_ids.len(),
-            "Evicting already-staked Stake commitment txs from mempool"
-        );
-        mempool_state
-            .remove_commitment_txs(already_staked_tx_ids)
-            .await;
     }
 
     // Log commitment selection summary
