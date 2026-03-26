@@ -427,8 +427,29 @@ mod tests {
         proc.kill().await.unwrap();
     }
 
+    /// Returns `true` when the current environment allows sending `SIGSTOP`
+    /// to a child process.  Docker's default seccomp profile blocks this
+    /// unless `--cap-add=SYS_PTRACE` (or `seccomp=unconfined`) is set.
+    fn can_sigstop() -> bool {
+        use std::process::Command as StdCommand;
+        let mut child = match StdCommand::new("sleep").arg("60").spawn() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let pid = Pid::from_raw(child.id() as i32);
+        let ok = signal::kill(pid, Signal::SIGSTOP).is_ok();
+        let _ = signal::kill(pid, Signal::SIGCONT);
+        let _ = child.kill();
+        let _ = child.wait();
+        ok
+    }
+
     #[tokio::test]
     async fn freeze_and_unfreeze() {
+        if !can_sigstop() {
+            eprintln!("skipping freeze_and_unfreeze: SIGSTOP not permitted in this environment");
+            return;
+        }
         let (config, _dir) = stub_config("freeze-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         proc.freeze().unwrap();

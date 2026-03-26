@@ -167,6 +167,16 @@ pub fn run_vdf<B: BlockProvider>(
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
+        // Enforce a minimum step duration to prevent VDF from outrunning block
+        // production when sha_1s_difficulty is low for tests.
+        // With production difficulty (13M+), steps always exceed this floor.
+        if config.throttle {
+            const MIN_STEP_DURATION: Duration = Duration::from_millis(25);
+            if elapsed < MIN_STEP_DURATION {
+                std::thread::sleep(MIN_STEP_DURATION.checked_sub(elapsed).unwrap());
+            }
+        }
+
         global_step_number = store_step(
             hash,
             &atomic_vdf_global_step,

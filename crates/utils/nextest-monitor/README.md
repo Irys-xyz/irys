@@ -110,6 +110,35 @@ Summary: 1 tests need reclassification
 
 The suggested fix: rename `test_produce_block` → `heavy_test_produce_block` so nextest allocates 2 threads.
 
+### Applying reclassifications automatically
+
+Instead of manually renaming test functions, use the `apply` command to automatically rename them in source files based on the analysis results:
+
+```bash
+# Preview what would be changed (no files modified)
+cargo run --bin nextest-report -- apply --dry-run
+
+# Apply the renames
+cargo run --bin nextest-report -- apply
+
+# Search from a different root directory
+cargo run --bin nextest-report -- apply --root /path/to/source
+```
+
+The `apply` command:
+1. Runs the same analysis as `analyze` to find misclassified tests
+2. Locates each test function definition in `.rs` source files
+3. Renames `fn test_foo` → `fn heavy_test_foo` (or other prefix changes) on the definition line
+4. Clamps downsizes to one tier step per run for safety — run `apply` again after verifying stability to continue stepping down
+
+After applying, follow these steps:
+
+```bash
+cargo fmt --all                       # Format changed files
+cargo xtask check                     # Verify compilation
+cargo xtask test --monitor            # Verify with updated classifications
+```
+
 ### Manual setup (without xtask)
 
 If you want to use the wrapper directly without `cargo xtask`:
@@ -220,6 +249,7 @@ heaptrack_gui target/nextest-monitor/heap-profiles/my_test__name.*.zst
 | `detail <pattern>` | Deep dive on one test — stats + ASCII charts (if detailed samples exist) |
 | `export` | Dump to CSV or JSON (`--format csv\|json`, `-o FILE`) |
 | `config` | Show parsed classification rules from `nextest.toml` |
+| `apply` | Rename test functions in source to match suggested classifications (`--dry-run` to preview) |
 | `clear` | Delete the stats file |
 | `heap <pattern>` | Show heaptrack allocation details for matching tests (requires `--features heap-profile`) |
 | `heap-list` | List available heap profiles (requires `--features heap-profile`) |
@@ -230,10 +260,20 @@ Global options: `--input <FILE>` (stats JSON), `--config <FILE>` (nextest.toml p
 
 The tool suggests reclassification based on **sustained CPU exceedance** (default threshold: 20% of runtime):
 
+**Upgrades** (stability):
 - If a test exceeds its thread allocation for >20% of runtime → suggest upgrading (e.g. add `heavy_` prefix)
-- If a test uses far less than allocated → suggest downgrading
 - If duration exceeds timeout → suggest adding `slow_` prefix
-- Memory is **observability only** — it does not affect reclassification
+
+**Downgrades** (performance): over-allocated tests are categorized by risk:
+- **Spike-justified**: peak CPU reaches the allocation during bursts — keep current tier
+- **Short I/O** (<5s, low CPU): finishes fast, low slot cost — safe to step down
+- **Long I/O** (>15s, low CPU): biggest performance opportunity, but verify contention sensitivity
+- **Mid I/O** (5-15s, low CPU): moderate risk — verify before downgrading
+- **Not I/O-bound** (CPU active but below allocation): safe to downgrade
+
+Each over-allocated test shows its **wasted thread-time** (duration × excess threads) to prioritize the biggest performance wins. The summary shows total wasted thread-time across all suggested downgrades.
+
+Memory data is shown for **observability** (including a memory contention analysis table) but does not drive reclassification decisions.
 
 ## Platform support
 

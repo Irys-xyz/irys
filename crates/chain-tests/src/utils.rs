@@ -2862,6 +2862,29 @@ impl IrysNodeTest<IrysNodeCtx> {
         None
     }
 
+    /// Polls `get_chunk` (HTTP) until the chunk appears in storage or the
+    /// timeout expires. Use after `mine_blocks` to wait for async chunk
+    /// migration to complete before verifying chunk contents.
+    pub async fn wait_for_chunk_in_storage(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        max_seconds: usize,
+    ) -> eyre::Result<PackedChunk> {
+        for _attempt in 1..=max_seconds {
+            if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
+                return Ok(chunk);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(eyre::eyre!(
+            "Chunk not found in storage after {}s: {} ledger chunk_offset: {}",
+            max_seconds,
+            ledger,
+            chunk_offset,
+        ))
+    }
+
     pub async fn verify_migrated_chunk_32b(
         &self,
         ledger: DataLedger,
@@ -2869,28 +2892,31 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_bytes: &[u8; 32],
         expected_data_size: u64,
     ) {
-        if let Some(packed_chunk) = self.get_chunk(ledger, chunk_offset).await {
-            let unpacked_chunk = unpack(
-                &packed_chunk,
-                self.node_ctx.config.consensus.entropy_packing_iterations,
-                self.node_ctx.config.consensus.chunk_size as usize,
-                self.node_ctx.config.consensus.chain_id,
-            );
-            if unpacked_chunk.bytes.0 != expected_bytes {
-                println!(
-                    "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",
-                    chunk_offset, unpacked_chunk.bytes.0, expected_bytes
+        let packed_chunk = self
+            .wait_for_chunk_in_storage(ledger, chunk_offset, 10)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Chunk not found after 10s! {} ledger chunk_offset: {}: {e}",
+                    ledger, chunk_offset
                 )
-            }
-            assert_eq!(unpacked_chunk.bytes.0, expected_bytes);
+            });
 
-            assert_eq!(unpacked_chunk.data_size, expected_data_size);
-        } else {
-            panic!(
-                "Chunk not found! {} ledger chunk_offset: {}",
-                ledger, chunk_offset
-            );
+        let unpacked_chunk = unpack(
+            &packed_chunk,
+            self.node_ctx.config.consensus.entropy_packing_iterations,
+            self.node_ctx.config.consensus.chunk_size as usize,
+            self.node_ctx.config.consensus.chain_id,
+        );
+        if unpacked_chunk.bytes.0 != expected_bytes {
+            println!(
+                "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",
+                chunk_offset, unpacked_chunk.bytes.0, expected_bytes
+            )
         }
+        assert_eq!(unpacked_chunk.bytes.0, expected_bytes);
+
+        assert_eq!(unpacked_chunk.data_size, expected_data_size);
     }
 
     pub async fn verify_chunk_not_present(

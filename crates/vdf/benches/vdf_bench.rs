@@ -26,6 +26,7 @@ fn build_tiers() -> [Tier; 3] {
         num_checkpoints_in_vdf_step: testnet_consensus.num_checkpoints_in_vdf_step,
         max_allowed_vdf_fork_steps: testnet_consensus.max_allowed_vdf_fork_steps,
         sha_1s_difficulty: testnet_consensus.sha_1s_difficulty,
+        throttle: false,
     };
 
     let mainnet_consensus = ConsensusConfig::mainnet().vdf;
@@ -35,6 +36,7 @@ fn build_tiers() -> [Tier; 3] {
         num_checkpoints_in_vdf_step: mainnet_consensus.num_checkpoints_in_vdf_step,
         max_allowed_vdf_fork_steps: mainnet_consensus.max_allowed_vdf_fork_steps,
         sha_1s_difficulty: mainnet_consensus.sha_1s_difficulty,
+        throttle: false,
     };
 
     [

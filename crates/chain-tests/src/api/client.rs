@@ -118,7 +118,7 @@ async fn check_info_endpoint(
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_api_client_all_endpoints_should_work() {
+async fn api_client_all_endpoints_should_work() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -172,7 +172,7 @@ async fn api_client_wait_for_promotion_errors_for_missing_tx() {
 /// Ensures wait_for_promotion succeeds for a properly posted tx after uploading chunks and mining.
 /// Guards against regressions in /tx/{id}/promotion_status and client polling behavior.
 #[test_log::test(tokio::test)]
-async fn heavy_api_client_wait_for_promotion_happy_path() {
+async fn api_client_wait_for_promotion_happy_path() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -204,7 +204,12 @@ async fn heavy_api_client_wait_for_promotion_happy_path() {
         .await
         .expect("post_transaction should succeed");
 
-    // Optionally advance a block to drive background processing
+    // Wait for ingress proofs to be generated (async background task) before mining
+    ctx.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
+        .await
+        .expect("ingress proofs should be generated");
+
+    // Advance a block to drive promotion (Submit + Publish in one block)
     let _ = ctx.mine_block().await.expect("expected mined block");
 
     // This should succeed if promotion occurs within the attempts window
@@ -218,7 +223,7 @@ async fn heavy_api_client_wait_for_promotion_happy_path() {
 
 /// Tests the transaction status API lifecycle: PENDING -> CONFIRMED -> FINALIZED
 #[test_log::test(tokio::test)]
-async fn heavy_api_tx_status_lifecycle() {
+async fn api_tx_status_lifecycle() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -516,7 +521,7 @@ async fn api_tx_status_confirmed_survives_restart() {
 
 /// Tests transaction status for commitment transactions
 #[test_log::test(tokio::test)]
-async fn heavy_api_tx_status_commitment_tx() {
+async fn api_tx_status_commitment_tx() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -595,7 +600,7 @@ async fn heavy_api_tx_status_commitment_tx() {
 /// Regression test for the double-promotion bug caused by `#[serde(skip)]` on metadata
 /// which loses `promoted_height` when the mempool persists to disk.
 #[test_log::test(tokio::test)]
-async fn heavy_api_double_promotion_after_restart() {
+async fn api_double_promotion_after_restart() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -625,6 +630,11 @@ async fn heavy_api_double_promotion_after_restart() {
         .post_transaction(api_address, tx.header.clone())
         .await
         .expect("post_transaction should succeed");
+
+    // Wait for ingress proofs to be generated (async background task) before mining
+    ctx.wait_for_ingress_proofs_no_mining(vec![tx_id], 10)
+        .await
+        .expect("ingress proofs should be generated");
 
     // Mine a block to trigger single-block promotion (Submit + Publish in one block)
     ctx.mine_block().await.expect("expected mined block");

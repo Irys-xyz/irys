@@ -360,7 +360,7 @@ async fn peer_discovery() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_should_reinitialize_handshakes() -> eyre::Result<()> {
+async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // TODO: this test should:
     //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.
     //  2. Peer 2 launched. Peer 2 has Peer 1 as trusted peer.

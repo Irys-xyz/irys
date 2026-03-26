@@ -30,7 +30,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[tokio::test]
-async fn heavy_pending_chunks_test() -> eyre::Result<()> {
+async fn pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -578,7 +578,7 @@ async fn heavy_mempool_persistence_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
@@ -973,7 +973,7 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn heavy4_mempool_publish_fork_recovery_test(
+async fn heavy3_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
@@ -1405,7 +1405,7 @@ async fn heavy4_mempool_publish_fork_recovery_test(
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
 #[test_log::test(tokio::test)]
-async fn heavy4_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     // std::env::set_var(
     //     "RUST_LOG",
     //     "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -1677,7 +1677,7 @@ async fn heavy4_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
 #[tokio::test]
-async fn heavy4_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
@@ -2028,7 +2028,7 @@ async fn heavy4_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy3_test_evm_gossip() -> eyre::Result<()> {
+async fn heavy_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
@@ -2224,8 +2224,7 @@ async fn heavy3_test_evm_gossip() -> eyre::Result<()> {
 /// send (staked) invalid pledge commitment txs where tx id has been tampered with
 /// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
-async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()>
-{
+async fn heavy_staked_stake_and_pledge_tampered_id_rejected_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2315,7 +2314,7 @@ async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
 #[test_log::test(tokio::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
-async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_unstaked_pledge_tampered_id_rejected_on_ingress_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
 
     let signer = genesis_config.new_random_signer();
@@ -2363,7 +2362,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 /// expect valid tx to ingress successfully
-async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2436,7 +2435,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     },
 )]
 #[test_log::test(tokio::test)]
-async fn stake_tx_fee_and_value_validation_test(
+async fn heavy_stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -2507,7 +2506,7 @@ async fn stake_tx_fee_and_value_validation_test(
     },
 )]
 #[test_log::test(tokio::test)]
-async fn pledge_tx_fee_validation_test(
+async fn heavy_pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
@@ -2630,7 +2629,7 @@ async fn heavy_commitment_tx_valid_higher_fee_test(
 /// see what txs get included (assert its count is equal to `initial_commitments` + 1)
 /// transfer the user enough funds to afford the remaining commitments
 /// produce another block, make sure it includes the rest
-async fn heavy_commitment_tx_cumulative_fee_validation_test(
+async fn commitment_tx_cumulative_fee_validation_test(
     #[case] starting_balance: irys_types::U256,
     #[case] initial_commitments: u64,
     #[case] total_pledge_count: u64,

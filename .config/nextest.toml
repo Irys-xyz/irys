@@ -3,6 +3,10 @@ experimental = ["wrapper-scripts"]
 
 [test-groups]
 serial = { max-threads = 1 }
+# Spiky tests have brief CPU spikes that can interfere under high concurrency.
+# max-threads limits how many run simultaneously. Lower = more stable but slower.
+# Target: reduce toward 1 as tests become more contention-resilient.
+spiky = { max-threads = 3 }
 
 
 [profile.default]
@@ -21,35 +25,41 @@ filter = 'test(/.*slow_.*/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
 priority = 100
 
-# heavy tests
+# heavy tests (exclude spiky — they manage their own threads-required)
 [[profile.default.overrides]]
-filter = 'test(/.*heavy_.*/)'
+filter = 'test(/.*heavy_.*/) - test(/.*spiky_.*/)'
 threads-required = 2
-priority = 90
 
-# heavy3 tests
+# heavy3 tests (exclude spiky)
 [[profile.default.overrides]]
-filter = 'test(/.*heavy3_.*/)'
+filter = 'test(/.*heavy3_.*/) - test(/.*spiky_.*/)'
 threads-required = 3
-priority = 80
 
-# heavy4 tests
+# heavy4 tests (exclude spiky)
 [[profile.default.overrides]]
-filter = 'test(/.*heavy4_.*/)'
+filter = 'test(/.*heavy4_.*/) - test(/.*spiky_.*/)'
 threads-required = 4
-priority = 70
+
+# spiky tests — CPU spikes justify reservation, but group limits concurrency
+# so we can safely set threads-required = 1 (freeing slots for other tests)
+[[profile.default.overrides]]
+filter = 'test(/.*spiky_.*/)'
+test-group = 'spiky'
+threads-required = 1
+priority = 100
+
 
 # Define the monitoring wrapper script
 [scripts.wrapper.nextest-monitor]
 command = 'nextest-wrapper'
 
 [profile.heap-profile]
-test-threads = 1           # Reduce parallelism during profiling (less noise)
-slow-timeout = { period = "120s", terminate-after = 2 }  # Allow extra time for profiling overhead
+test-threads = 1                                        # Reduce parallelism during profiling (less noise)
+slow-timeout = { period = "120s", terminate-after = 2 } # Allow extra time for profiling overhead
 
 [profile.cpu-profile]
-# test-threads = 1
-test-threads = 12
+test-threads = 1
+
 
 # Apply wrapper to all tests in cpu-profile
 [[profile.cpu-profile.scripts]]

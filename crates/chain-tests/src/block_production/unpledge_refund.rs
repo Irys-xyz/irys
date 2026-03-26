@@ -30,7 +30,7 @@ use crate::utils::IrysNodeTest;
 // epoch block emits the refund, increases the peer balance by the pledged value, decreases treasury,
 // and clears the local storage module assignment for the partition.
 #[test_log::test(tokio::test)]
-async fn heavy3_unpledge_epoch_refund_flow() -> eyre::Result<()> {
+async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     initialize_tracing();
     let num_blocks_in_epoch = 2_u64;
     let seconds_to_wait = 20_usize;

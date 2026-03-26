@@ -216,9 +216,6 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
         .sync_state
         .set_gossip_reception_enabled(true);
 
-    // Give a moment for network to stabilize
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // Send peer2's fork to genesis to trigger reorg
     // Since we used regular mining, blocks should be in provider and can be sent
     error!("Gossiping peer2's fork to trigger reorg");
@@ -233,46 +230,27 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     error!("All blocks gossiped, waiting for reorg");
 
-    // Give genesis time to process the reorg
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Check what genesis has at height 5
-    let genesis_hash = genesis_node.wait_until_height(5, seconds_to_wait).await?;
-    let genesis_head = genesis_node.get_block_by_hash(&genesis_hash)?;
-
-    // Detailed diagnostics
-    if genesis_hash != peer2_hash {
-        eprintln!("Reorg did not happen as expected!");
-        eprintln!("Genesis has block at height 5: {}", genesis_hash);
-        eprintln!("  Parent: {}", genesis_head.previous_block_hash);
-        eprintln!("  Cumulative diff: {:?}", genesis_head.cumulative_diff);
-        eprintln!("Expected peer2's block: {}", peer2_hash);
-        eprintln!("  Parent: {}", peer2_head.previous_block_hash);
-        eprintln!("  Cumulative diff: {:?}", peer2_head.cumulative_diff);
-
-        // Check if it's peer1's block
-        let peer1_height = peer1_node.get_canonical_chain_height().await;
-        if peer1_height >= 5 {
-            let peer1_5 = peer1_node.get_block_by_height(5).await?;
-            eprintln!("Peer1 also has block at height 5: {}", peer1_5.block_hash);
-            if genesis_hash == peer1_5.block_hash {
-                panic!("Genesis has peer1's block 5 instead of peer2's!");
+    // Poll until peer2's block is specifically the canonical block at height 5.
+    // wait_until_height(5) alone could race with canonical reorgs if peer1 or
+    // genesis extends the chain to height 5 before peer2's reorg completes.
+    {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(seconds_to_wait as u64);
+        loop {
+            if let Ok(block) = genesis_node.get_block_by_height(5).await {
+                if block.block_hash == peer2_hash {
+                    break;
+                }
             }
-        }
 
-        // Check if peer2's chain is actually heavier
-        if peer2_head.cumulative_diff <= genesis_head.cumulative_diff {
-            panic!(
-                "Peer2's chain is not heavier! P2: {:?}, Genesis: {:?}",
-                peer2_head.cumulative_diff, genesis_head.cumulative_diff
+            eyre::ensure!(
+                start.elapsed() < timeout,
+                "Timeout waiting for peer2's block {} to become canonical at height 5",
+                peer2_hash
             );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-
-    assert_eq!(
-        genesis_hash, peer2_hash,
-        "Genesis should have reorganized to peer2's chain"
-    );
 
     // Wait until the epoch commitment state reflects the reorg effects:
     // - peer2's pledge is present

@@ -2,8 +2,8 @@ use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, BlockDiscoveryStub,
-    FakeGossipServer, MempoolStub,
+    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, wait_until_listening,
+    BlockDiscoveryStub, FakeGossipServer, MempoolStub,
 };
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
@@ -224,8 +224,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let MockedServices {
         block_status_provider_mock,
@@ -396,8 +395,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let MockedServices {
         block_status_provider_mock,
@@ -549,16 +547,23 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .await
         .expect("can't process block");
 
-    // Wait a little for processing - there's no specific event we're waiting for here
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Wait for block3's background processing to complete (parent fetch fails)
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while block_pool.is_block_processing(&block3.block_hash).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "block3 processing should have completed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     // Couldn't fetch block2, so block3 is not processed
     assert!(block_discovery_stub.get_blocks().is_empty());
     assert!(!block_pool.contains_block(&block2.block_hash).await);
     assert!(block_pool.contains_block(&block3.block_hash).await);
-    // Assert that both blocks are not marked as processing
     assert!(!block_pool.is_block_processing(&block2.block_hash).await);
-    assert!(!block_pool.is_block_processing(&block3.block_hash).await);
 
     info!("Adding block2 to the server and processing block4 to trigger reprocessing");
     // Add a previously missing block to the server
@@ -702,8 +707,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let peer_list_guard = peer_list_data_guard.clone();
 
@@ -832,7 +836,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         }
     });
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let is_parent_in_the_tree =
         block_status_provider_mock.is_block_in_the_tree(&bogus_block.previous_block_hash);
     let is_parent_in_index = block_status_provider_mock.is_height_in_the_index(1);

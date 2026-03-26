@@ -657,7 +657,7 @@ impl ConsensusConfig {
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const CHUNK_SIZE: u64 = 32;
-        const SHA1_DIFFICULTY: u64 = 70_000;
+        const SHA1_DIFFICULTY: u64 = 1_000;
         const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
         const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 
@@ -699,9 +699,8 @@ impl ConsensusConfig {
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
-                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
-                // With 12s target block time, this resets approximately every 10 minutes
-                reset_frequency: 50 * 12,
+                // Reset VDF every ~100 blocks. This is not tied to real-world time due to the low sha1_difficulty for this testing config.
+                reset_frequency: 100 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: SHA1_DIFFICULTY,
@@ -956,7 +955,7 @@ mod tests {
         // - The canonical JSON serialization implementation
         // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
+        let expected_hash = H256::from_base58("PGh7Dunjx4xjNTLbx48G8DdKuozbsZ3nYCLm6AvRjUN");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
