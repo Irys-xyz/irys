@@ -1429,6 +1429,96 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Upload data for PD tests and wait for migration into storage modules.
+    ///
+    /// Returns the global Publish ledger offset where the data starts. The signer
+    /// must be funded before node start via `fund_genesis_accounts`.
+    ///
+    /// Flow:
+    /// 1. Record current Publish ledger `total_chunks` → `data_start_offset`
+    /// 2. Post data transaction via mempool
+    /// 3. Upload chunks via HTTP POST to `/v1/chunk`
+    /// 4. Mine blocks until data tx appears in block index (migration depth)
+    /// 5. Wait for first and last chunk to appear in storage modules
+    pub async fn upload_data_for_pd(
+        &self,
+        signer: &IrysSigner,
+        data: &[u8],
+        timeout_secs: usize,
+    ) -> eyre::Result<u64> {
+        // 1. Record the Publish ledger total_chunks BEFORE posting.
+        let data_start_offset = {
+            let block_index = self.node_ctx.block_index_guard.read();
+            block_index
+                .get_latest_item()
+                .and_then(|item| {
+                    item.ledgers
+                        .iter()
+                        .find(|l| l.ledger == DataLedger::Publish)
+                        .map(|l| l.total_chunks)
+                })
+                .unwrap_or(0)
+        };
+
+        // 2. Post data tx via the mempool channel.
+        let tx = self
+            .post_publish_data_tx(signer, data.to_vec())
+            .await
+            .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+        let num_chunks = tx.chunks.len();
+
+        // 3. Upload chunks via HTTP so they're in the cache for migration.
+        let client = reqwest::Client::new();
+        let http_url = format!(
+            "http://127.0.0.1:{}",
+            self.node_ctx.config.node_config.http.bind_port
+        );
+        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+            let min = chunk_node.min_byte_range;
+            let max = chunk_node.max_byte_range;
+            let chunk = UnpackedChunk {
+                data_root: tx.header.data_root,
+                data_size: tx.header.data_size,
+                data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+                bytes: Base64(data[min..max].to_vec()),
+                tx_offset: TxChunkOffset::from(
+                    TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                ),
+            };
+            let resp = client
+                .post(format!("{}/v1/chunk", &http_url))
+                .json(&chunk)
+                .send()
+                .await?;
+            eyre::ensure!(
+                resp.status() == reqwest::StatusCode::OK,
+                "Chunk upload failed with status {}",
+                resp.status()
+            );
+        }
+
+        // 4. Mine blocks until the tx header appears in the block index.
+        self.wait_for_migrated_txs(vec![tx.header.clone()], timeout_secs)
+            .await?;
+
+        // 5. Wait for first and last chunk in storage modules.
+        let first_offset = LedgerChunkOffset::from(data_start_offset);
+        self.wait_for_chunk_in_storage(DataLedger::Publish, first_offset, timeout_secs)
+            .await?;
+        if num_chunks > 1 {
+            let last_offset = LedgerChunkOffset::from(data_start_offset + (num_chunks as u64) - 1);
+            self.wait_for_chunk_in_storage(DataLedger::Publish, last_offset, timeout_secs)
+                .await?;
+        }
+
+        info!(
+            "Data uploaded and migrated for PD, data_start_offset={}, num_chunks={}",
+            data_start_offset, num_chunks
+        );
+        Ok(data_start_offset)
+    }
+
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
@@ -2624,6 +2714,124 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Ok(reads)
+    }
+
+    /// Build PD data read entries from a real global Publish ledger offset.
+    ///
+    /// Unlike `build_synthetic_pd_data_reads` which uses sequential partition indices
+    /// from 0, this derives both `partition_index` and `start` from the actual global
+    /// offset within the Publish ledger. Handles partition boundary crossings.
+    pub fn build_pd_data_reads_at_global_offset(
+        global_start: u64,
+        num_chunks: u64,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        eyre::ensure!(num_chunks > 0, "num_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = num_chunks;
+        let mut current_offset = global_start;
+
+        while remaining > 0 {
+            let partition_index = current_offset / num_chunks_in_partition;
+            let start = current_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            current_offset += chunks_in_read;
+        }
+
+        Ok(reads)
+    }
+
+    /// Inject a PD EVM transaction referencing real chunk offsets.
+    ///
+    /// Uses `build_pd_data_reads_at_global_offset` to compute correct partition
+    /// indices from the global offset. Does NOT insert into `chunk_data_index` or
+    /// `ready_pd_txs` — PdService provisions chunks from storage naturally.
+    pub async fn inject_pd_tx_at_real_offsets(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        global_offset: u64,
+        num_chunks: u64,
+        priority_fee_per_chunk: impl Into<U256>,
+        base_fee_cap_per_chunk: impl Into<U256>,
+        nonce: u64,
+    ) -> eyre::Result<alloy_core::primitives::B256> {
+        let priority_fee: U256 = priority_fee_per_chunk.into();
+        let base_fee_cap: U256 = base_fee_cap_per_chunk.into();
+
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
+
+        let data_reads = Self::build_pd_data_reads_at_global_offset(
+            global_offset,
+            num_chunks,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
+
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee_cap.into())?;
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: alloy_primitives::Bytes::new(),
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
     }
 
     /// Creates and injects a single PD transaction with a custom priority fee.
