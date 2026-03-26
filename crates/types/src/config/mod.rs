@@ -792,6 +792,7 @@ mod tests {
         public_port = 0
 
         [packing.local]
+        cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
 
         [cache]
@@ -823,6 +824,10 @@ mod tests {
         max_valid_submit_txs = 3000
         max_valid_commitment_addresses = 300
         max_commitments_per_address = 20
+
+        [vdf]
+        parallel_verification_thread_limit = 4
+        throttle = true
         "#;
 
         // Create the expected config
