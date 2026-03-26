@@ -451,9 +451,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                             }
                         }
                     }
-                } else {
-                    scope_args.push("--workspace".to_string());
                 }
+                // No else: cargo llvm-cov report defaults to the whole workspace
+                // when no --package filter is given.
 
                 let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
                 let html_result = cmd!(
