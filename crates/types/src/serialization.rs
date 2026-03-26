@@ -949,7 +949,8 @@ mod tests {
             };
             prop_assert_eq!(&buf[..], &expected_bytes[..]);
 
-            let (decoded, _) = U256::from_compact(&buf[..], buf.len());
+            let (decoded, remaining) = U256::from_compact(&buf[..], buf.len());
+            prop_assert!(remaining.is_empty(), "U256 from_compact left trailing bytes");
             prop_assert_eq!(val, decoded);
         }
 

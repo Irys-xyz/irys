@@ -22,8 +22,6 @@ jobs:
     name: coverage
     runs-on: [self-hosted, test-runner]
     timeout-minutes: 60
-    env:
-      IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,6 +37,8 @@ jobs:
           git show origin/gh-pages:coverage/history.json > previous-coverage/history.json 2>/dev/null || echo '[]' > previous-coverage/history.json
 
       - name: Run tests with coverage
+        env:
+          IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
         run: cargo xtask test --coverage
 
       - name: Build coverage summary
@@ -61,8 +61,11 @@ jobs:
 
           percentage = (hit_lines / total_lines * 100) if total_lines > 0 else 0
 
-          with open("previous-coverage/history.json") as f:
-              history = json.load(f)
+          try:
+              with open("previous-coverage/history.json") as f:
+                  history = json.load(f)
+          except (json.JSONDecodeError, ValueError):
+              history = []
 
           history.append({
               "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
