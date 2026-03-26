@@ -243,7 +243,6 @@ impl ClassificationConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
-        _test_name: &str,
         avg_cpu: Option<f64>,
         duration_ms: u64,
         time_above_1t_ms: Option<u64>,
@@ -637,7 +636,6 @@ fn analyze_reclassifications(
     for test in aggregated {
         let current = config.classify(&test.test_name);
         let suggested = config.suggest_classification(
-            &test.test_name,
             test.avg_avg_cpu,
             test.avg_duration_ms,
             test.avg_time_above_1t_ms,
