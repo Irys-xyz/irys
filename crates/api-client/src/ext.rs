@@ -64,9 +64,13 @@ impl ApiClientExt for IrysApiClient {
         peer: SocketAddr,
         param: BlockParam,
     ) -> eyre::Result<CombinedBlockHeader> {
-        let path = format!("/block/{}", param);
         let r = self
-            .make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+            .make_request::<CombinedBlockHeader, _>(
+                peer,
+                Method::GET,
+                &format!("/block/{param}"),
+                None::<&()>,
+            )
             .await?;
         r.ok_or_eyre("unable to get block header")
     }
@@ -118,7 +122,7 @@ impl ApiClientExt for IrysApiClient {
                 .make_request::<PromotionStatus, _>(
                     peer,
                     Method::GET,
-                    format!("/tx/{}/promotion-status", &tx_id).as_str(),
+                    &format!("/tx/{tx_id}/promotion-status"),
                     None::<&()>,
                 )
                 .await?;
@@ -144,11 +148,12 @@ impl ApiClientExt for IrysApiClient {
         ledger: DataLedger,
         data_size: u64,
     ) -> eyre::Result<PriceInfo> {
+        let ledger_id = u32::from(ledger);
         let response = self
             .make_request(
                 peer,
                 Method::GET,
-                format!("/price/{}/{}", ledger as u32, data_size).as_str(),
+                &format!("/price/{ledger_id}/{data_size}"),
                 None::<&()>,
             )
             .await?;
@@ -162,10 +167,11 @@ impl ApiClientExt for IrysApiClient {
         data_root: DataRoot,
         offset: u32, // data root relative offset
     ) -> eyre::Result<ChunkFormat> {
+        let ledger_num = u32::from(ledger_id);
         self.make_request(
             peer,
             Method::GET,
-            format!("/chunk/data-root/{}/{data_root}/{offset}", ledger_id as u32).as_str(),
+            &format!("/chunk/data-root/{ledger_num}/{data_root}/{offset}"),
             None::<&()>,
         )
         .await?

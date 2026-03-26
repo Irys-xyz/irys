@@ -11,6 +11,7 @@ use xtask::failures::{
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
+const LLVM_COV_VERSION: &str = "0.6.16";
 const NEXTEST_VERSION: &str = "0.9.124";
 
 #[derive(Parser, Debug)]
@@ -25,7 +26,12 @@ enum Commands {
     /// Runs tests via nextest, with failure tracking (& optional failure-only reruns)
     Test {
         /// Produce coverage files
-        #[clap(short, long, default_value_t = false)]
+        #[clap(
+            short,
+            long,
+            default_value_t = false,
+            conflicts_with = "rerun_failures"
+        )]
         coverage: bool,
         /// Only run tests that failed in the previous run
         #[clap(long, default_value_t = false)]
@@ -195,14 +201,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             .remove_and_run();
 
             if coverage {
-                cmd!(sh, "cargo install --locked --version 0.10.5 grcov").remove_and_run()?;
-                for (key, val) in [
-                    ("CARGO_INCREMENTAL", "0"),
-                    ("RUSTFLAGS", "-Cinstrument-coverage"),
-                    ("LLVM_PROFILE_FILE", "target/coverage/%p-%m.profraw"),
-                ] {
-                    sh.set_var(key, val);
-                }
+                println!("Installing llvm-tools and cargo-llvm-cov...");
+                cmd!(sh, "rustup component add llvm-tools").run()?;
+                cmd!(
+                    sh,
+                    "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                )
+                .remove_and_run()?;
             }
 
             // this is needed otherwise some tests will fail (that assert panic messages)
@@ -305,17 +310,32 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let wrapper_path = build_wrapper(sh, wrapper_features)?;
                 let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
 
-                generate_nextest_config(&wrapper_path_str, failed_tests_filter.as_deref())?
+                generate_nextest_config(
+                    &wrapper_path_str,
+                    failed_tests_filter.as_deref(),
+                    coverage,
+                )?
             };
 
-            // Build the nextest command
-            let mut nextest_args = vec![
-                "nextest".to_string(),
-                "run".to_string(),
-                "--workspace".to_string(),
-                "--tests".to_string(),
-                "--all-targets".to_string(),
-            ];
+            let user_has_package = args
+                .iter()
+                .any(|a| a == "-p" || a == "--package" || a.starts_with("--package="));
+
+            let mut nextest_args = if coverage {
+                vec![
+                    "llvm-cov".to_string(),
+                    "nextest".to_string(),
+                    "--no-report".to_string(),
+                ]
+            } else {
+                vec!["nextest".to_string(), "run".to_string()]
+            };
+
+            if !user_has_package {
+                nextest_args.push("--workspace".to_string());
+            }
+            nextest_args.push("--tests".to_string());
+            nextest_args.push("--all-targets".to_string());
 
             // Validate passthrough args don't conflict with xtask-injected flags.
             let user_has_config_file = args
@@ -344,6 +364,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
                 nextest_args.push("--profile".to_string());
                 nextest_args.push("xtask-rerun-failures".to_string());
+            } else if coverage {
+                if user_has_profile {
+                    return Err(eyre::eyre!(
+                        "Do not pass --profile via xtask passthrough args when using --coverage; xtask selects the profile."
+                    ));
+                }
+                nextest_args.push("--profile".to_string());
+                nextest_args.push("coverage".to_string());
             } else if heap_profile {
                 if user_has_profile {
                     return Err(eyre::eyre!(
@@ -356,8 +384,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 nextest_args.push("heap-profile".to_string());
             }
 
-            // Add user-provided args
-            nextest_args.extend(args);
+            // Add user-provided args (by reference — args is needed later for coverage scope)
+            nextest_args.extend(args.iter().cloned());
 
             // Run nextest
             let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
@@ -407,22 +435,83 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
             }
 
-            // Propagate the test result
-            test_result?;
-
+            // Generate coverage reports before propagating test failures,
+            // so reports are available even when some tests fail.
             if coverage {
-                cmd!(sh, "mkdir -p target/coverage").remove_and_run()?;
-                cmd!(sh, "grcov . --binary-path ./target/debug/deps/ -s . -t html,cobertura --branch --ignore-not-existing --ignore '../*' --ignore \"/*\" -o target/coverage/").remove_and_run()?;
+                println!("Generating coverage reports...");
+                fs::create_dir_all("target/llvm-cov")?;
 
-                // Open the generated file
-                if std::option_env!("CI").is_none() {
-                    #[cfg(target_os = "macos")]
-                    cmd!(sh, "open target/coverage/html/index.html").remove_and_run()?;
+                // Forward package scope flags to `cargo llvm-cov report`.
+                // The report subcommand only accepts --package/-p, not
+                // --workspace or --exclude. When unsupported scope flags
+                // are present, warn that report coverage may be broader.
+                let mut scope_args: Vec<String> = Vec::new();
+                let mut has_unsupported_scope = false;
+                let mut iter = args.iter();
+                while let Some(arg) = iter.next() {
+                    if arg.starts_with("--package=") || arg.starts_with("-p=") {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                    } else if arg == "-p" || arg == "--package" {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                        if let Some(val) = iter.next() {
+                            scope_args.push(val.clone()); // clone: collecting user args for reuse
+                        }
+                    } else if arg == "--exclude"
+                        || arg.starts_with("--exclude=")
+                        || arg == "--workspace"
+                    {
+                        has_unsupported_scope = true;
+                        if arg == "--exclude" {
+                            iter.next(); // skip the value
+                        }
+                    }
+                }
+                if has_unsupported_scope {
+                    eprintln!(
+                        "Warning: cargo llvm-cov report does not support --workspace/--exclude; \
+                         report may include crates excluded from the test run"
+                    );
+                }
 
-                    #[cfg(target_os = "linux")]
-                    cmd!(sh, "xdg-open target/coverage/html/index.html").remove_and_run()?;
+                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
+                let html_result = cmd!(
+                    sh,
+                    "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
+                )
+                .remove_and_run();
+
+                if let Err(e) = &html_result {
+                    eprintln!("Warning: HTML coverage report generation failed: {e}");
+                }
+
+                let lcov_result = cmd!(
+                    sh,
+                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args_lcov...}"
+                )
+                .remove_and_run();
+
+                if let Err(e) = &lcov_result {
+                    eprintln!("Warning: LCOV coverage report generation failed: {e}");
+                }
+
+                if html_result.is_ok() {
+                    println!("  HTML report: target/llvm-cov/html/index.html");
+                    if std::env::var("CI").is_err() {
+                        #[cfg(target_os = "macos")]
+                        let _ = cmd!(sh, "open target/llvm-cov/html/index.html").remove_and_run();
+
+                        #[cfg(target_os = "linux")]
+                        let _ =
+                            cmd!(sh, "xdg-open target/llvm-cov/html/index.html").remove_and_run();
+                    }
+                }
+                if lcov_result.is_ok() {
+                    println!("  LCOV report: target/llvm-cov/lcov.info");
                 }
             }
+
+            // Propagate the test result
+            test_result?;
         }
         Commands::Check { args } => {
             println!("cargo check");
@@ -465,7 +554,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             println!("cargo doc");
             cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
 
-            if std::option_env!("CI").is_none() {
+            if std::env::var("CI").is_err() {
                 #[cfg(target_os = "macos")]
                 cmd!(sh, "open target/doc/irys/index.html").remove_and_run()?;
 

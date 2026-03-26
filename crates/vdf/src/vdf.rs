@@ -535,4 +535,41 @@ mod tests {
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
     }
+
+    mod process_reset_props {
+        use super::super::process_reset;
+        use crate::apply_reset_seed;
+        use irys_types::H256;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn at_boundary_applies_seed(
+                k in 0_u64..50,
+                reset_frequency in 1_u64..100,
+                hash_bytes in any::<[u8; 32]>(),
+                seed_bytes in any::<[u8; 32]>(),
+            ) {
+                let global_step = k * reset_frequency;
+                let hash = H256::from(hash_bytes);
+                let reset_seed = H256::from(seed_bytes);
+                let result = process_reset(global_step, hash, reset_frequency, reset_seed);
+                prop_assert_eq!(result, apply_reset_seed(hash, reset_seed));
+            }
+
+            #[test]
+            fn not_at_boundary_returns_hash(
+                k in 0_u64..50,
+                reset_frequency in 2_u64..100,
+                hash_bytes in any::<[u8; 32]>(),
+                seed_bytes in any::<[u8; 32]>(),
+            ) {
+                let global_step = k * reset_frequency + 1;
+                let hash = H256::from(hash_bytes);
+                let reset_seed = H256::from(seed_bytes);
+                let result = process_reset(global_step, hash, reset_frequency, reset_seed);
+                prop_assert_eq!(result, hash);
+            }
+        }
+    }
 }

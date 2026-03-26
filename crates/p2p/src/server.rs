@@ -23,7 +23,7 @@ use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction,
     DataTransactionHeader, GossipRequest, GossipRequestV2, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
+    IrysBlockHeader, IrysPeerId, NodeInfo, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -965,34 +965,8 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
     }
 
-    async fn handle_info(server: Data<Self>) -> HttpResponse {
-        let block_index = &server.data_handler.block_index;
-        let block_tree = &server.data_handler.block_tree;
-        let peer_list = &server.peer_list;
-        let sync_state = &server.data_handler.sync_state;
-        let started_at = server.data_handler.started_at;
-        let mining_address = server.data_handler.gossip_client.mining_address;
-        let chain_id = server.data_handler.config.consensus.chain_id;
-
-        let node_info = get_node_info(
-            block_index,
-            block_tree,
-            peer_list,
-            sync_state,
-            started_at,
-            mining_address,
-            chain_id,
-        )
-        .await;
-
-        let wire_info: wire_types::NodeInfoV1 = node_info.into();
-        HttpResponse::Ok()
-            .content_type(ContentType::json())
-            .json(GossipResponse::Accepted(wire_info))
-    }
-
-    async fn handle_info_v2(server: Data<Self>) -> HttpResponse {
-        let node_info = get_node_info(
+    async fn fetch_node_info(server: &Data<Self>) -> Result<NodeInfo, HttpResponse> {
+        get_node_info(
             &server.data_handler.block_index,
             &server.data_handler.block_tree,
             &server.peer_list,
@@ -1001,7 +975,30 @@ where
             server.data_handler.gossip_client.mining_address,
             server.data_handler.config.consensus.chain_id,
         )
-        .await;
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get node info: {e}");
+            HttpResponse::InternalServerError().finish()
+        })
+    }
+
+    async fn handle_info(server: Data<Self>) -> HttpResponse {
+        let node_info = match Self::fetch_node_info(&server).await {
+            Ok(info) => info,
+            Err(resp) => return resp,
+        };
+
+        let wire_info: wire_types::NodeInfoV1 = node_info.into();
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(GossipResponse::Accepted(wire_info))
+    }
+
+    async fn handle_info_v2(server: Data<Self>) -> HttpResponse {
+        let node_info = match Self::fetch_node_info(&server).await {
+            Ok(info) => info,
+            Err(resp) => return resp,
+        };
 
         let wire_info: wire_types::NodeInfoV2 = node_info.into();
         HttpResponse::Ok()

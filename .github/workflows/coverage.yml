@@ -1,0 +1,124 @@
+name: Coverage
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coverage-gh-pages
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Fetch previous coverage history
+        run: |
+          mkdir -p previous-coverage
+          git fetch origin gh-pages --depth=1 2>/dev/null || true
+          git show origin/gh-pages:coverage/history.json > previous-coverage/history.json 2>/dev/null || echo '[]' > previous-coverage/history.json
+
+      - name: Run tests with coverage
+        env:
+          IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
+        run: cargo xtask test --coverage
+
+      - name: Build coverage summary
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python3 << 'PYEOF'
+          import json, datetime, os
+
+          total_lines = 0
+          hit_lines = 0
+          with open("target/llvm-cov/lcov.info") as f:
+              for line in f:
+                  line = line.strip()
+                  if line.startswith("LF:"):
+                      total_lines += int(line.split(":")[1])
+                  elif line.startswith("LH:"):
+                      hit_lines += int(line.split(":")[1])
+
+          percentage = (hit_lines / total_lines * 100) if total_lines > 0 else 0
+
+          try:
+              with open("previous-coverage/history.json") as f:
+                  history = json.load(f)
+          except (json.JSONDecodeError, ValueError):
+              history = []
+
+          history.append({
+              "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "commit": os.environ["COMMIT_SHA"][:12],
+              "total_lines": total_lines,
+              "covered_lines": hit_lines,
+              "percentage": round(percentage, 2),
+          })
+
+          history = history[-100:]
+
+          with open("target/llvm-cov/history.json", "w") as f:
+              json.dump(history, f, indent=2)
+
+          print(f"Coverage: {hit_lines}/{total_lines} lines ({percentage:.2f}%)")
+          if len(history) > 1:
+              prev = history[-2]["percentage"]
+              delta = percentage - prev
+              sign = "+" if delta >= 0 else ""
+              print(f"Delta:    {sign}{delta:.2f}% (previous: {prev:.2f}%)")
+          PYEOF
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-deploy
+          fetch-depth: 1
+
+      - name: Update coverage data
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        run: |
+          mkdir -p gh-pages-deploy/coverage
+          if [ -d target/llvm-cov/html ]; then
+            rm -rf gh-pages-deploy/coverage/html
+            cp -r target/llvm-cov/html gh-pages-deploy/coverage/html
+          else
+            echo "HTML coverage report missing; updating lcov/history only."
+          fi
+          cp target/llvm-cov/lcov.info gh-pages-deploy/coverage/
+          cp target/llvm-cov/history.json gh-pages-deploy/coverage/
+
+      - name: Push to gh-pages
+        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        run: |
+          cd gh-pages-deploy
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage/
+          if git diff --staged --quiet; then
+            echo "No coverage changes to commit"
+          else
+            git commit -m "coverage: update for ${GITHUB_SHA::12}"
+            git pull --rebase origin gh-pages
+            git push origin gh-pages
+          fi

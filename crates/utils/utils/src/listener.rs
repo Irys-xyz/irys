@@ -4,14 +4,12 @@ use std::net::{SocketAddr, TcpListener};
 // if randomisation (requested port 0) is used.
 pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let backlog = 1024;
+    let backlog: i32 = 1024;
     let domain = Domain::for_address(addr);
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     // need this so application restarts can pick back up the same port without suffering from time-wait
     socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;
-    // clamp backlog to max u32 that fits in i32 range
-    let backlog = core::cmp::min(backlog, i32::MAX as u32) as i32;
     socket.listen(backlog)?;
     let listener = TcpListener::from(socket);
     Ok(listener)

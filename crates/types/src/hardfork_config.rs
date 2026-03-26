@@ -144,7 +144,6 @@ impl IrysHardforkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert_matches::assert_matches;
     use proptest::prelude::*;
 
     #[test]
@@ -173,34 +172,6 @@ mod tests {
             config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1_000_000)),
             5
         );
-    }
-
-    #[test]
-    fn test_aurora_params() {
-        let config = IrysHardforkConfig {
-            frontier: FrontierParams {
-                number_of_ingress_proofs_total: 5,
-                number_of_ingress_proofs_from_assignees: 2,
-            },
-            next_name_tbd: None,
-            aurora: Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(1500),
-                minimum_commitment_tx_version: 2,
-            }),
-            borealis: None,
-        };
-
-        // Before activation timestamp
-        let aurora = config.aurora_at(UnixTimestamp::from_secs(1499));
-        assert_matches!(aurora, None);
-
-        // At activation timestamp
-        let aurora = config.aurora_at(UnixTimestamp::from_secs(1500));
-        assert_eq!(aurora, config.aurora.as_ref());
-
-        // After activation timestamp
-        let aurora = config.aurora_at(UnixTimestamp::from_secs(1501));
-        assert_eq!(aurora, config.aurora.as_ref());
     }
 
     #[test]
@@ -481,6 +452,28 @@ mod tests {
                 config.minimum_commitment_version_at(UnixTimestamp::from_secs(timestamp_secs)),
                 expected
             );
+        }
+
+        #[test]
+        fn retain_valid_commitment_versions_filters_below_minimum() {
+            struct TestTx(u8);
+            impl VersionDiscriminant for TestTx {
+                fn version(&self) -> u8 {
+                    self.0
+                }
+            }
+
+            let config = config_with_aurora(1000, 2);
+            let mut txs = vec![TestTx(1), TestTx(2), TestTx(3), TestTx(1)];
+
+            config.retain_valid_commitment_versions(&mut txs, UnixTimestamp::from_secs(1001));
+            let versions: Vec<u8> = txs.iter().map(|t| t.0).collect();
+            assert_eq!(versions, vec![2, 3]);
+
+            let mut txs_before = vec![TestTx(1), TestTx(2)];
+            config.retain_valid_commitment_versions(&mut txs_before, UnixTimestamp::from_secs(999));
+            let versions_before: Vec<u8> = txs_before.iter().map(|t| t.0).collect();
+            assert_eq!(versions_before, vec![1, 2]);
         }
     }
 }

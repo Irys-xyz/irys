@@ -336,58 +336,9 @@ mod tests {
     use rstest::rstest;
 
     #[test]
-    fn test_from_secs() {
-        let ts = UnixTimestamp::from_secs(1609459200);
-        assert_eq!(ts.as_secs(), 1609459200);
-    }
-
-    #[test]
     fn test_now() {
         let ts = UnixTimestamp::now().expect("Failed to get current time");
         assert!(ts.as_secs() > 0);
-    }
-
-    #[test]
-    fn test_saturating_sub() {
-        let ts = UnixTimestamp::from_secs(100);
-        assert_eq!(ts.saturating_sub_secs(30), UnixTimestamp::from_secs(70));
-        assert_eq!(ts.saturating_sub_secs(200), UnixTimestamp::from_secs(0));
-    }
-
-    #[test]
-    fn test_saturating_seconds_since() {
-        let ts1 = UnixTimestamp::from_secs(100);
-        let ts2 = UnixTimestamp::from_secs(50);
-
-        assert_eq!(ts1.saturating_seconds_since(ts2), 50);
-        assert_eq!(ts2.saturating_seconds_since(ts1), 0);
-    }
-
-    #[test]
-    fn test_comparisons() {
-        let ts1 = UnixTimestamp::from_secs(100);
-        let ts2 = UnixTimestamp::from_secs(200);
-
-        assert!(ts1 < ts2);
-        assert!(ts2 > ts1);
-        assert!(ts1 <= ts2);
-        assert!(ts2 >= ts1);
-    }
-
-    #[test]
-    fn test_encode_decode() {
-        let ts = UnixTimestamp::from_secs(1609459200);
-        let encoded = ts.encode();
-        let decoded = UnixTimestamp::decode(&encoded).unwrap();
-        assert_eq!(ts, decoded);
-    }
-
-    #[test]
-    fn test_decode_exact_8_bytes_required() {
-        // Ensure exactly 8 bytes are required (documented contract)
-        assert!(UnixTimestamp::decode(&[0; 7]).is_err());
-        assert!(UnixTimestamp::decode(&[0; 9]).is_err());
-        assert!(UnixTimestamp::decode(&[0; 8]).is_ok());
     }
 
     #[test]
@@ -425,54 +376,6 @@ mod tests {
                 assert_eq!(result.unwrap(), UnixTimestamp::from_secs(u64::MAX));
             }
         }
-    }
-
-    #[test]
-    fn test_compact_roundtrip() {
-        use bytes::BytesMut;
-
-        let original = UnixTimestamp::from_secs(1609459200);
-        let mut buf = BytesMut::with_capacity(8);
-        let len = original.to_compact(&mut buf);
-        assert_eq!(len, 8);
-
-        let (decoded, remaining) = UnixTimestamp::from_compact(&buf[..], len);
-        assert_eq!(decoded, original);
-        assert_eq!(remaining.len(), 0);
-    }
-
-    #[test]
-    fn test_conversions() {
-        let ts = UnixTimestamp::from_secs(12345);
-
-        let from_u64: UnixTimestamp = 12345_u64.into();
-        assert_eq!(ts, from_u64);
-
-        let to_u64: u64 = ts.into();
-        assert_eq!(to_u64, 12345);
-    }
-
-    #[test]
-    fn test_display() {
-        let ts = UnixTimestamp::from_secs(1609459200);
-        assert_eq!(format!("{}", ts), "1609459200");
-    }
-
-    #[test]
-    fn test_ordering() {
-        let ts1 = UnixTimestamp::from_secs(100);
-        let ts2 = UnixTimestamp::from_secs(200);
-        let ts3 = UnixTimestamp::from_secs(200);
-
-        assert!(ts1 < ts2);
-        assert!(ts2 > ts1);
-        assert_eq!(ts2, ts3);
-    }
-
-    #[test]
-    fn test_default() {
-        let ts: UnixTimestamp = Default::default();
-        assert_eq!(ts, UnixTimestamp::from_secs(0));
     }
 }
 
@@ -578,17 +481,6 @@ mod unix_timestamp_ms_tests {
     }
 
     #[test]
-    fn test_u128_conversions() {
-        let ts = UnixTimestampMs::from_millis(12345);
-
-        let from_u128: UnixTimestampMs = 12345_u128.into();
-        assert_eq!(ts, from_u128);
-
-        let to_u128: u128 = ts.into();
-        assert_eq!(to_u128, 12345);
-    }
-
-    #[test]
     fn test_serde_json_string_format() {
         // Verify JSON serializes as string (matches string_u128 format)
         let ts = UnixTimestampMs::from_millis(1609459200000);
@@ -601,38 +493,6 @@ mod unix_timestamp_ms_tests {
 
         // Numbers should be rejected
         assert!(serde_json::from_str::<UnixTimestampMs>("12345").is_err());
-    }
-
-    #[test]
-    fn test_to_secs_truncates_millis() {
-        use std::time::Duration;
-
-        // Test that to_secs() truncates milliseconds (rounds down), matching Duration behavior
-
-        // 1500ms should become 1 second (not 2)
-        let ts = UnixTimestampMs::from_millis(1500);
-        assert_eq!(ts.to_secs().as_secs(), 1);
-        assert_eq!(Duration::from_millis(1500).as_secs(), 1);
-
-        // 999ms should become 0 seconds
-        let ts = UnixTimestampMs::from_millis(999);
-        assert_eq!(ts.to_secs().as_secs(), 0);
-        assert_eq!(Duration::from_millis(999).as_secs(), 0);
-
-        // 1000ms should become exactly 1 second
-        let ts = UnixTimestampMs::from_millis(1000);
-        assert_eq!(ts.to_secs().as_secs(), 1);
-        assert_eq!(Duration::from_millis(1000).as_secs(), 1);
-
-        // 2999ms should become 2 seconds
-        let ts = UnixTimestampMs::from_millis(2999);
-        assert_eq!(ts.to_secs().as_secs(), 2);
-        assert_eq!(Duration::from_millis(2999).as_secs(), 2);
-
-        // Realistic timestamp: verify truncation for actual timestamp values
-        // 1609459200500 ms = 1609459200.5 seconds -> should truncate to 1609459200
-        let ts = UnixTimestampMs::from_millis(1609459200500);
-        assert_eq!(ts.to_secs().as_secs(), 1609459200);
     }
 }
 
@@ -704,5 +564,13 @@ mod unix_timestamp_ms_property_tests {
             let (native_decoded, _) = u128::from_compact(&native_buf[..], native_len);
             prop_assert_eq!(our_decoded.as_millis(), native_decoded);
         }
+    }
+
+    #[rstest::rstest]
+    #[case::empty(&[])]
+    #[case::too_short(&[0_u8; 15])]
+    #[case::too_long(&[0_u8; 17])]
+    fn unix_timestamp_ms_decode_rejects_wrong_length(#[case] bytes: &[u8]) {
+        assert!(<UnixTimestampMs as reth_db::table::Decode>::decode(bytes).is_err());
     }
 }

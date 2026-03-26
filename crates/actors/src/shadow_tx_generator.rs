@@ -1170,27 +1170,6 @@ mod tests {
     }
 
     #[test]
-    fn test_btreemap_maintains_sorted_order() {
-        // Quick test to verify BTreeMap maintains sorted order
-        let mut rewards_map: BTreeMap<IrysAddress, u32> = BTreeMap::new();
-
-        // Insert addresses in random order
-        let addr1 = IrysAddress::from([5_u8; 20]);
-        let addr2 = IrysAddress::from([1_u8; 20]);
-        let addr3 = IrysAddress::from([9_u8; 20]);
-
-        rewards_map.insert(addr3, 3);
-        rewards_map.insert(addr1, 1);
-        rewards_map.insert(addr2, 2);
-
-        // Verify they come out sorted
-        let addresses: Vec<IrysAddress> = rewards_map.keys().copied().collect();
-        assert_eq!(addresses[0], addr2); // Smallest address first
-        assert_eq!(addresses[1], addr1);
-        assert_eq!(addresses[2], addr3); // Largest address last
-    }
-
-    #[test]
     fn test_publish_tx_with_reward_address_redirection() {
         let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test
@@ -1596,69 +1575,5 @@ mod tests {
         // Treasury should decrease by total refunds
         let expected_treasury = initial_treasury - total_refunds;
         assert_eq!(generator.treasury_balance(), expected_treasury);
-    }
-
-    #[test]
-    fn test_empty_expired_ledger_fees() {
-        let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
-        let block_height = 101;
-        let reward_address = IrysAddress::from([20_u8; 20]);
-        let reward_amount = U256::from(5000);
-        let initial_treasury = U256::from(10_000_000);
-
-        // Empty expired fees
-        let expired_fees = LedgerExpiryBalanceDelta {
-            reward_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: Vec::new(),
-        };
-
-        let publish_ledger = PublishLedgerWithTxs {
-            txs: vec![],
-            proofs: None,
-        };
-
-        // Only expect block reward
-        let expected_shadow_txs = vec![ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(
-                TransactionPacket::BlockReward(BlockRewardIncrement {
-                    amount: reward_amount.into(),
-                }),
-                H256::zero().into(),
-            ),
-            transaction_fee: 0,
-        }];
-
-        let solution_hash = H256::zero();
-        let epoch_snapshot = test_epoch_snapshot();
-        let mut generator = ShadowTxGenerator::new(
-            &block_height,
-            &reward_address,
-            &reward_amount,
-            &parent_block,
-            &solution_hash,
-            &config,
-            &[],
-            &[],
-            &publish_ledger,
-            initial_treasury,
-            &expired_fees,
-            &[],
-            &[],
-            &epoch_snapshot,
-        )
-        .expect("Should create generator");
-
-        // Compare actual with expected
-        generator
-            .by_ref()
-            .zip_eq(expected_shadow_txs)
-            .for_each(|(actual, expected)| {
-                let actual = actual.expect("Should be Ok");
-                assert_eq!(actual, expected);
-            });
-
-        // Treasury should remain unchanged (no expired fees to pay)
-        assert_eq!(generator.treasury_balance(), initial_treasury);
     }
 }

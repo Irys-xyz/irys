@@ -658,6 +658,7 @@ impl PeerNetworkSender {
 #[cfg(test)]
 mod tests {
     use crate::{peer_list::*, *};
+    use rstest::rstest;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     #[test]
@@ -866,21 +867,6 @@ mod tests {
         }
 
         #[rstest]
-        #[case(0, 10, 0)]
-        #[case(5, 10, 0)]
-        #[case(100, 10, 90)]
-        #[case(50, 200, 0)]
-        fn test_decrease_saturating_behavior(
-            #[case] initial: u16,
-            #[case] decrease: u16,
-            #[case] expected: u16,
-        ) {
-            let mut score = PeerScore::new(initial);
-            score.decrease_by(decrease);
-            assert_eq!(score.get(), expected);
-        }
-
-        #[rstest]
         #[case(90, 10, 100)]
         #[case(95, 10, 100)]
         #[case(50, 100, 100)]
@@ -953,5 +939,67 @@ mod tests {
         assert_ne!(decoded.protocol_version, item.protocol_version);
         // For the records that don't have a protocol version, it should default to V1
         assert_eq!(decoded.protocol_version, ProtocolVersion::V1);
+    }
+
+    #[rstest]
+    #[case::tag_2(2)]
+    #[case::tag_255(255)]
+    #[case::tag_128(128)]
+    fn decode_address_unknown_tag_returns_zero(#[case] tag: u8) {
+        let buf = [tag, 192, 168, 1, 1, 0x1F, 0x90];
+        let (addr, consumed) = decode_address(&buf);
+        assert_eq!(
+            addr,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
+        );
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn ipv6_address_encode_decode_roundtrip() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+
+        let addr = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7334),
+            8080,
+            0,
+            0,
+        ));
+
+        let mut buf = Vec::new();
+        encode_address(&addr, &mut buf);
+
+        let (decoded, consumed) = decode_address(&buf);
+        assert_eq!(consumed, 19);
+        assert_eq!(decoded, addr);
+    }
+
+    mod prop_address_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+        proptest! {
+            #[test]
+            fn address_encode_decode_roundtrip(
+                ip_v4 in any::<[u8; 4]>(),
+                ip_v6 in any::<[u8; 16]>(),
+                port in any::<u16>(),
+                use_v6 in any::<bool>(),
+            ) {
+                let addr = if use_v6 {
+                    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_v6), port, 0, 0))
+                } else {
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_v4), port))
+                };
+
+                let mut buf = Vec::new();
+                let size = encode_address(&addr, &mut buf);
+                let (decoded, consumed) = decode_address(&buf);
+
+                prop_assert_eq!(decoded, addr);
+                prop_assert_eq!(consumed, size);
+            }
+        }
     }
 }

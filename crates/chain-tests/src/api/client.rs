@@ -1,6 +1,6 @@
 //! api client tests
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{coverage_adjusted_timeout, IrysNodeTest};
 use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient, TransactionStatus};
 use irys_chain::IrysNodeCtx;
@@ -204,12 +204,21 @@ async fn heavy_api_client_wait_for_promotion_happy_path() {
         .await
         .expect("post_transaction should succeed");
 
-    // Optionally advance a block to drive background processing
+    // Wait until the ingress proof is persisted before mining.
+    // Promotion selection reads proofs from DB during block processing.
+    ctx.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await
+        .expect("ingress proof should be persisted before mining");
+
     let _ = ctx.mine_block().await.expect("expected mined block");
 
     // This should succeed if promotion occurs within the attempts window
     api_client
-        .wait_for_promotion(api_address, tx.header.id, 100)
+        .wait_for_promotion(
+            api_address,
+            tx.header.id,
+            coverage_adjusted_timeout(100_u64),
+        )
         .await
         .expect("wait_for_promotion should succeed for a properly posted tx");
 
@@ -631,7 +640,7 @@ async fn heavy_api_double_promotion_after_restart() {
 
     // Wait for the promotion to be reflected in the API
     api_client
-        .wait_for_promotion(api_address, tx_id, 100)
+        .wait_for_promotion(api_address, tx_id, coverage_adjusted_timeout(100_u64))
         .await
         .expect("tx should be promoted");
 

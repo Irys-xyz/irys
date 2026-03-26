@@ -1077,4 +1077,36 @@ mod tests {
         eprintln!("=== Signed HandshakeRequestV2 JSON ===");
         eprintln!("{}", serde_json::to_string_pretty(&req).unwrap());
     }
+
+    mod user_agent_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn valid_component() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9._-]{1,20}"
+        }
+
+        proptest! {
+            #[test]
+            fn parse_build_user_agent_roundtrip(
+                name in valid_component(),
+                version in valid_component(),
+            ) {
+                let ua = build_user_agent(&name, &version);
+                let parsed = parse_user_agent(&ua).expect("should parse a well-formed UA string");
+                prop_assert_eq!(parsed.0, name);
+                prop_assert_eq!(parsed.1, version);
+                prop_assert_eq!(parsed.2, std::env::consts::OS);
+                prop_assert_eq!(parsed.3, std::env::consts::ARCH);
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0)]
+    #[case::three(3)]
+    #[case::max(u32::MAX)]
+    fn protocol_version_from_unknown_is_err(#[case] value: u32) {
+        assert!(ProtocolVersion::try_from(value).is_err());
+    }
 }

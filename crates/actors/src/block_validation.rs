@@ -2836,11 +2836,31 @@ fn process_block_ledgers_with_states(
                             ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
-                    TxInclusionState::Found { .. } => {
-                        // Transaction already found once, this is a duplicate
-                        *state = TxInclusionState::Duplicate {
-                            ledger_historical: (ledger_type, historical_block_hash),
-                        };
+                    TxInclusionState::Found {
+                        ledger_current,
+                        ledger_historical,
+                    } => {
+                        if ledger_historical.1 == historical_block_hash
+                            && let Some(merged_historical_ledger) =
+                                merge_same_block_historical_ledgers(
+                                    ledger_historical.0,
+                                    ledger_type,
+                                )
+                        {
+                            *state = TxInclusionState::Found {
+                                ledger_current: *ledger_current,
+                                ledger_historical: (
+                                    merged_historical_ledger,
+                                    historical_block_hash,
+                                ),
+                            };
+                        } else {
+                            // Transaction already found in a different historical block, or in an
+                            // invalid same-block combination, so this is a real duplicate.
+                            *state = TxInclusionState::Duplicate {
+                                ledger_historical: (ledger_type, historical_block_hash),
+                            };
+                        }
                     }
                     TxInclusionState::Duplicate { .. } => {
                         // Already marked as duplicate, no need to update
@@ -2850,6 +2870,21 @@ fn process_block_ledgers_with_states(
         }
     }
     Ok(())
+}
+
+/// Block layout is fixed-order (Publish then Submit) per chainspec, so
+/// in practice only (Publish, Submit) is reachable. The symmetric arm
+/// is defensive against deserialized or future block orderings.
+fn merge_same_block_historical_ledgers(
+    existing: DataLedger,
+    incoming: DataLedger,
+) -> Option<DataLedger> {
+    match (existing, incoming) {
+        (DataLedger::Submit, DataLedger::Publish) | (DataLedger::Publish, DataLedger::Submit) => {
+            Some(DataLedger::Publish)
+        }
+        _ => None,
+    }
 }
 
 pub fn get_assigned_ingress_proofs(
@@ -3074,6 +3109,97 @@ mod tests {
     };
     use std::sync::Arc;
     use tracing::{debug, info};
+
+    fn ledger_with_tx(ledger_id: DataLedger, tx_id: H256) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id: ledger_id.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List(vec![tx_id]),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }
+    }
+
+    #[test]
+    fn same_block_submit_then_publish_is_not_marked_duplicate() -> eyre::Result<()> {
+        let tx_id = H256::from_slice(&[7; 32]);
+        let historical_block_hash = BlockHash::from_slice(&[3; 32]);
+        let current_block_hash = BlockHash::from_slice(&[9; 32]);
+        let tx = DataTransactionHeader::default();
+        let mut tx_states = HashMap::from([(
+            tx_id,
+            (
+                &tx,
+                TxInclusionState::Searching {
+                    ledger_current: DataLedger::Submit,
+                },
+            ),
+        )]);
+
+        let ledgers = vec![
+            ledger_with_tx(DataLedger::Submit, tx_id),
+            ledger_with_tx(DataLedger::Publish, tx_id),
+        ];
+
+        process_block_ledgers_with_states(
+            &ledgers,
+            historical_block_hash,
+            current_block_hash,
+            &mut tx_states,
+        )?;
+
+        assert!(matches!(
+            tx_states.get(&tx_id).map(|(_, state)| state),
+            Some(TxInclusionState::Found {
+                ledger_current: (DataLedger::Submit, hash_a),
+                ledger_historical: (DataLedger::Publish, hash_b),
+            }) if *hash_a == current_block_hash && *hash_b == historical_block_hash
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn same_ledger_in_two_historical_blocks_is_marked_duplicate() -> eyre::Result<()> {
+        let tx_id = H256::from_slice(&[8; 32]);
+        let first_block_hash = BlockHash::from_slice(&[4; 32]);
+        let second_block_hash = BlockHash::from_slice(&[5; 32]);
+        let current_block_hash = BlockHash::from_slice(&[9; 32]);
+        let tx = DataTransactionHeader::default();
+        let mut tx_states = HashMap::from([(
+            tx_id,
+            (
+                &tx,
+                TxInclusionState::Searching {
+                    ledger_current: DataLedger::Submit,
+                },
+            ),
+        )]);
+
+        process_block_ledgers_with_states(
+            &[ledger_with_tx(DataLedger::Submit, tx_id)],
+            first_block_hash,
+            current_block_hash,
+            &mut tx_states,
+        )?;
+        process_block_ledgers_with_states(
+            &[ledger_with_tx(DataLedger::Submit, tx_id)],
+            second_block_hash,
+            current_block_hash,
+            &mut tx_states,
+        )?;
+
+        assert!(matches!(
+            tx_states.get(&tx_id).map(|(_, state)| state),
+            Some(TxInclusionState::Duplicate {
+                ledger_historical: (DataLedger::Submit, hash),
+            }) if *hash == second_block_hash
+        ));
+
+        Ok(())
+    }
 
     pub(super) struct TestContext {
         pub block_index: BlockIndex,

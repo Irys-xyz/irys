@@ -139,3 +139,19 @@ where
 
     Ok(dump_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn state_root_json_roundtrip(bytes in any::<[u8; 32]>()) {
+            let root = StateRoot { root: B256::from(bytes) };
+            let json = serde_json::to_string(&root).unwrap();
+            let decoded: StateRoot = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(decoded, root);
+        }
+    }
+}

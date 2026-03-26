@@ -84,6 +84,28 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
+/// Coverage instrumentation multiplier for in-test timeouts.
+///
+/// `cargo-llvm-cov` sets `LLVM_PROFILE_FILE` when running under coverage.
+/// Coverage adds ~3x overhead; this multiplier keeps in-test wait loops
+/// from timing out under instrumented builds.
+const COVERAGE_TIMEOUT_MULTIPLIER: u8 = 3;
+
+/// Adjust a timeout (in seconds) for coverage instrumentation overhead.
+///
+/// Returns `base_seconds * 3` when `LLVM_PROFILE_FILE` is set (i.e. running
+/// under `cargo llvm-cov`), otherwise returns `base_seconds` unchanged.
+pub fn coverage_adjusted_timeout<T>(base_seconds: T) -> T
+where
+    T: Copy + std::ops::Mul<Output = T> + From<u8>,
+{
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        base_seconds * T::from(COVERAGE_TIMEOUT_MULTIPLIER)
+    } else {
+        base_seconds
+    }
+}
+
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
     vdf_steps_guard: VdfStateReadonly,
@@ -790,7 +812,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         self.ensure_vdf_running_for_sync("wait_until_block_index_height");
         let mut retries = 0;
-        let max_retries = max_seconds; // 1 second per retry
+        let max_retries = coverage_adjusted_timeout(max_seconds);
         while self.node_ctx.block_index_guard.read().latest_height() < target_height
             && retries < max_retries
         {
@@ -827,6 +849,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<()> {
         self.ensure_vdf_running_for_sync("wait_until_block_bounds_available");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         let chunk_offset_u64: u64 = chunk_offset.into();
         let mut last_error = "none".to_string();
 
@@ -878,6 +901,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<IrysBlockHeader> {
         self.ensure_vdf_running_for_sync("wait_for_block_in_index");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         for _attempt in 1..=max_seconds {
             if let Ok(block) = self.get_block_by_height_from_index(height, include_chunk) {
                 return Ok(block);
@@ -937,6 +961,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         self.ensure_vdf_running_for_sync("wait_for_packing");
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         self.node_ctx
             .packing_waiter
             .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
@@ -997,7 +1022,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<H256> {
         self.ensure_vdf_running_for_sync("wait_until_height");
         let mut retries = 0;
-        let max_retries = max_seconds; // 1 second per retry
+        let max_retries = coverage_adjusted_timeout(max_seconds);
 
         loop {
             let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
@@ -1047,6 +1072,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<H256> {
         self.ensure_vdf_running_for_sync("wait_for_block_at_height");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         // Subscribe to block state updates
         let mut block_state_rx = self
             .node_ctx
@@ -1121,6 +1147,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<()> {
         self.ensure_vdf_running_for_sync("wait_for_vdf_step");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         let deadline = Instant::now() + Duration::from_secs(max_seconds as u64);
         loop {
             let current_step = self.node_ctx.vdf_steps_guard.read().global_step;
@@ -1152,7 +1179,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<H256> {
         self.ensure_vdf_running_for_sync("wait_until_height_confirmed");
         let mut retries = 0;
-        let max_retries = max_seconds; // 1 second per retry
+        let max_retries = coverage_adjusted_timeout(max_seconds);
 
         loop {
             let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
@@ -1196,6 +1223,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
         B: MessageBody,
     {
+        let seconds = coverage_adjusted_timeout(seconds);
         let delay = Duration::from_secs(1);
         for attempt in 1..=seconds {
             if let Some(_packed_chunk) =
@@ -1239,6 +1267,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_value: u64,
         timeout_secs: usize,
     ) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
         const CHECKS_PER_SECOND: usize = 10;
         let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
         let max_attempts = timeout_secs * CHECKS_PER_SECOND;
@@ -1273,6 +1302,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         mut unconfirmed_txs: Vec<DataTransactionHeader>,
         seconds: usize,
     ) -> eyre::Result<()> {
+        let seconds = coverage_adjusted_timeout(seconds);
         let delay = Duration::from_secs(1);
         for attempt in 1..=seconds {
             if unconfirmed_txs.is_empty() {
@@ -1364,6 +1394,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         mine_blocks: bool,
         num_proofs: usize,
     ) -> eyre::Result<()> {
+        let seconds = coverage_adjusted_timeout(seconds);
         tracing::info!(
             "waiting up to {} seconds for unconfirmed_promotions: {:?}",
             seconds,
@@ -1696,6 +1727,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds_to_wait: usize,
     ) -> eyre::Result<IrysBlockHeader> {
         self.ensure_vdf_running_for_sync("wait_for_block");
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         let mut retries = 0;
@@ -1729,6 +1761,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<IrysBlockHeader> {
         self.ensure_vdf_running_for_sync("wait_for_block_containing_tx");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         for attempt in 1..=max_seconds {
             let canonical_chain =
                 get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
@@ -1796,6 +1829,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds_to_wait: usize,
     ) -> eyre::Result<reth_ethereum_primitives::Block> {
         self.ensure_vdf_running_for_sync("wait_for_evm_block");
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         for retry in 0..max_retries {
@@ -1822,6 +1856,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: alloy_core::primitives::BlockHash,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         for retry in 0..max_retries {
@@ -1852,6 +1887,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds_to_wait: usize,
     ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
         self.ensure_vdf_running_for_sync("wait_for_evm_tx");
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         let retries_per_second = 50;
@@ -1920,6 +1956,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
         self.ensure_vdf_running_for_sync("wait_for_reth_marker");
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         let deadline = Instant::now() + Duration::from_secs(seconds_to_wait);
         let mut attempt: u32 = 0;
 
@@ -1969,7 +2006,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
-        let max_retries = seconds_to_wait; // 1 second per retry
+        let max_retries = coverage_adjusted_timeout(seconds_to_wait);
 
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -2007,6 +2044,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx_ids: Vec<H256>,
         seconds_to_wait: usize,
     ) -> eyre::Result<()> {
+        let seconds_to_wait = coverage_adjusted_timeout(seconds_to_wait);
         let max_retries = seconds_to_wait * 5; // 200ms per retry
         let mut tx_ids: HashSet<H256> = tx_ids.clone().into_iter().collect();
 
@@ -2051,7 +2089,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Vec<CommitmentTransaction>,
     )> {
         let mut retries = 0;
-        let max_retries = seconds_to_wait; // 1 second per retry
+        let max_retries = coverage_adjusted_timeout(seconds_to_wait);
         debug!(
             "Waiting for {} submit, {} publish and {} commitment",
             &submit_txs, &publish_txs, &commitment_txs
@@ -2283,6 +2321,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<DataTransactionHeader> {
         self.ensure_vdf_running_for_sync("wait_for_tx_included");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         for _ in 0..(max_seconds * 10) {
             match self.get_storage_tx_header_from_mempool(tx_id).await {
                 Ok(header) if header.metadata().included_height.is_some() => {
@@ -2308,6 +2347,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<DataTransactionHeader> {
         self.ensure_vdf_running_for_sync("wait_for_tx_confirmed_in_raw_mempool");
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         for _ in 0..(max_seconds * 10) {
             match self.get_storage_tx_header_from_raw_mempool(tx_id).await {
                 Ok(header)
@@ -2862,6 +2902,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         None
     }
 
+    pub async fn wait_for_chunk_http(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        timeout_secs: usize,
+    ) -> Option<PackedChunk> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        for _ in 0..timeout_secs {
+            if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
+                return Some(chunk);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        self.get_chunk(ledger, chunk_offset).await
+    }
+
     pub async fn verify_migrated_chunk_32b(
         &self,
         ledger: DataLedger,
@@ -3005,6 +3061,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         target: &PeerAddress,
         max_attempts: usize,
     ) -> eyre::Result<()> {
+        let max_attempts = coverage_adjusted_timeout(max_attempts);
         for _ in 0..max_attempts {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -3785,6 +3842,7 @@ pub async fn wait_for_block_event(
     timeout_secs: u64,
     predicate: impl Fn(&BlockStateUpdated) -> bool,
 ) -> eyre::Result<BlockStateUpdated> {
+    let timeout_secs = coverage_adjusted_timeout(timeout_secs);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -3997,6 +4055,7 @@ pub async fn wait_for_block_containing_tx(
     db: &DatabaseProvider,
     max_seconds: usize,
 ) -> eyre::Result<IrysBlockHeader> {
+    let max_seconds = coverage_adjusted_timeout(max_seconds);
     for attempt in 1..=max_seconds {
         if let Some(block) = get_block_containing_tx(txid, ledger, db) {
             tracing::info!(

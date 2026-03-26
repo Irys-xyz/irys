@@ -9,10 +9,17 @@ pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
-) -> IrysBlockHeader {
-    IrysBlockHeader::V1(IrysBlockHeaderV1 {
+) -> eyre::Result<IrysBlockHeader> {
+    let proof_count = u8::try_from(number_of_ingress_proofs_total).map_err(|_| {
+        eyre::eyre!(
+            "number_of_ingress_proofs_total ({}) exceeds u8::MAX (255)",
+            number_of_ingress_proofs_total
+        )
+    })?;
+
+    Ok(IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: H256::zero(),
-        signature: IrysSignature::default(), // Empty signature to be replaced by actual signing
+        signature: IrysSignature::default(),
         height: 0,
         diff: U256::from(0),
         cumulative_diff: U256::from(0),
@@ -44,7 +51,7 @@ pub fn build_unsigned_irys_genesis_block(
                 total_chunks: 0,
                 expires: None,
                 proofs: None,
-                required_proof_count: Some(number_of_ingress_proofs_total as u8),
+                required_proof_count: Some(proof_count),
             },
             DataTransactionLedger {
                 ledger_id: DataLedger::Submit.into(),
@@ -70,6 +77,73 @@ pub fn build_unsigned_irys_genesis_block(
         },
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
-        treasury: U256::zero(), // Treasury will be set when genesis commitments are added
-    })
+        treasury: U256::zero(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{Amount, Decimal, IrysAddress};
+    use proptest::prelude::*;
+
+    fn test_genesis_config() -> GenesisConfig {
+        GenesisConfig {
+            timestamp_millis: 0,
+            miner_address: IrysAddress::ZERO,
+            reward_address: IrysAddress::ZERO,
+            last_epoch_hash: H256::zero(),
+            vdf_seed: H256::zero(),
+            vdf_next_seed: None,
+            genesis_price: Amount::token(Decimal::new(15, 2)).expect("valid token amount"),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn ingress_proof_count_preserved_for_valid_values(count in 0_u64..=255) {
+            let config = test_genesis_config();
+            let block = build_unsigned_irys_genesis_block(
+                &config,
+                B256::ZERO,
+                count,
+            ).map_err(|e| TestCaseError::fail(e.to_string()))?;
+            let publish_ledger = block
+                .data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == u32::from(DataLedger::Publish))
+                .expect("publish ledger should exist");
+            prop_assert_eq!(
+                publish_ledger.required_proof_count,
+                Some(u8::try_from(count).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ingress_proof_count_over_255() {
+        let config = test_genesis_config();
+        let result = build_unsigned_irys_genesis_block(&config, B256::ZERO, 256);
+        let err_msg = result
+            .expect_err("expected overflow for ingress proof count > 255")
+            .to_string();
+        assert!(
+            err_msg.contains("exceeds u8::MAX"),
+            "expected 'exceeds u8::MAX' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn genesis_block_has_two_data_ledgers() -> eyre::Result<()> {
+        let config = test_genesis_config();
+        let block = build_unsigned_irys_genesis_block(&config, B256::ZERO, 5)?;
+        assert_eq!(block.data_ledgers.len(), 2);
+        let submit_ledger = block
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == u32::from(DataLedger::Submit))
+            .expect("submit ledger should exist");
+        assert_eq!(submit_ledger.required_proof_count, None);
+        Ok(())
+    }
 }
