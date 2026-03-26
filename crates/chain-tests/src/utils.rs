@@ -52,7 +52,7 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::SendTraced as _;
 use irys_types::{
@@ -1429,6 +1429,96 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Upload data for PD tests and wait for migration into storage modules.
+    ///
+    /// Returns the global Publish ledger offset where the data starts. The signer
+    /// must be funded before node start via `fund_genesis_accounts`.
+    ///
+    /// Flow:
+    /// 1. Record current Publish ledger `total_chunks` → `data_start_offset`
+    /// 2. Post data transaction via mempool
+    /// 3. Upload chunks via HTTP POST to `/v1/chunk`
+    /// 4. Mine blocks until data tx appears in block index (migration depth)
+    /// 5. Wait for first and last chunk to appear in storage modules
+    pub async fn upload_data_for_pd(
+        &self,
+        signer: &IrysSigner,
+        data: &[u8],
+        timeout_secs: usize,
+    ) -> eyre::Result<u64> {
+        // 1. Record the Publish ledger total_chunks BEFORE posting.
+        let data_start_offset = {
+            let block_index = self.node_ctx.block_index_guard.read();
+            block_index
+                .get_latest_item()
+                .and_then(|item| {
+                    item.ledgers
+                        .iter()
+                        .find(|l| l.ledger == DataLedger::Publish)
+                        .map(|l| l.total_chunks)
+                })
+                .unwrap_or(0)
+        };
+
+        // 2. Post data tx via the mempool channel.
+        let tx = self
+            .post_publish_data_tx(signer, data.to_vec())
+            .await
+            .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+        let num_chunks = tx.chunks.len();
+
+        // 3. Upload chunks via HTTP so they're in the cache for migration.
+        let client = reqwest::Client::new();
+        let http_url = format!(
+            "http://127.0.0.1:{}",
+            self.node_ctx.config.node_config.http.bind_port
+        );
+        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+            let min = chunk_node.min_byte_range;
+            let max = chunk_node.max_byte_range;
+            let chunk = UnpackedChunk {
+                data_root: tx.header.data_root,
+                data_size: tx.header.data_size,
+                data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+                bytes: Base64(data[min..max].to_vec()),
+                tx_offset: TxChunkOffset::from(
+                    TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                ),
+            };
+            let resp = client
+                .post(format!("{}/v1/chunk", &http_url))
+                .json(&chunk)
+                .send()
+                .await?;
+            eyre::ensure!(
+                resp.status() == reqwest::StatusCode::OK,
+                "Chunk upload failed with status {}",
+                resp.status()
+            );
+        }
+
+        // 4. Mine blocks until the tx header appears in the block index.
+        self.wait_for_migrated_txs(vec![tx.header.clone()], timeout_secs)
+            .await?;
+
+        // 5. Wait for first and last chunk in storage modules.
+        let first_offset = LedgerChunkOffset::from(data_start_offset);
+        self.wait_for_chunk_in_storage(DataLedger::Publish, first_offset, timeout_secs)
+            .await?;
+        if num_chunks > 1 {
+            let last_offset = LedgerChunkOffset::from(data_start_offset + (num_chunks as u64) - 1);
+            self.wait_for_chunk_in_storage(DataLedger::Publish, last_offset, timeout_secs)
+                .await?;
+        }
+
+        info!(
+            "Data uploaded and migrated for PD, data_start_offset={}, num_chunks={}",
+            data_start_offset, num_chunks
+        );
+        Ok(data_start_offset)
+    }
+
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn wait_for_migrated_txs(
@@ -2562,6 +2652,188 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    /// Build synthetic `PdDataRead` entries that pass `PdDataRead::decode` validation.
+    ///
+    /// Splits `total_chunks` into one or more entries, each fitting within the partition
+    /// boundary (`start + chunks_needed <= num_chunks_in_partition`). Uses sequential
+    /// `partition_index` values (`0, 1, 2, ...`) so each entry targets a distinct
+    /// partition and avoids duplicate-key rejection.
+    ///
+    /// These entries reference valid partition offsets but the chunks don't exist in
+    /// storage. Callers must insert the tx hash into `ready_pd_txs` directly after
+    /// injection so the block producer treats the tx as ready.
+    pub fn build_synthetic_pd_data_reads(
+        total_chunks: u64,
+        offset_base: u32,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        eyre::ensure!(total_chunks > 0, "total_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        // Cap each read so `chunks_in_read * chunk_size` fits in u32 (PdDataRead.len).
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = total_chunks;
+        let mut global_offset = u64::from(offset_base);
+        let mut partition_ix = 0_u64;
+
+        while remaining > 0 {
+            let start = global_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index: partition_ix,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            global_offset += chunks_in_read;
+            partition_ix += 1;
+        }
+
+        Ok(reads)
+    }
+
+    /// Build PD data read entries from a real global Publish ledger offset.
+    ///
+    /// Unlike `build_synthetic_pd_data_reads` which uses sequential partition indices
+    /// from 0, this derives both `partition_index` and `start` from the actual global
+    /// offset within the Publish ledger. Handles partition boundary crossings.
+    pub fn build_pd_data_reads_at_global_offset(
+        global_start: u64,
+        num_chunks: u64,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        eyre::ensure!(num_chunks > 0, "num_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = num_chunks;
+        let mut current_offset = global_start;
+
+        while remaining > 0 {
+            let partition_index = current_offset / num_chunks_in_partition;
+            let start = current_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            current_offset += chunks_in_read;
+        }
+
+        Ok(reads)
+    }
+
+    /// Inject a PD EVM transaction referencing real chunk offsets.
+    ///
+    /// Uses `build_pd_data_reads_at_global_offset` to compute correct partition
+    /// indices from the global offset. Does NOT insert into `chunk_data_index` or
+    /// `ready_pd_txs` — PdService provisions chunks from storage naturally.
+    pub async fn inject_pd_tx_at_real_offsets(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        global_offset: u64,
+        num_chunks: u64,
+        priority_fee_per_chunk: impl Into<U256>,
+        base_fee_cap_per_chunk: impl Into<U256>,
+        nonce: u64,
+    ) -> eyre::Result<alloy_core::primitives::B256> {
+        let priority_fee: U256 = priority_fee_per_chunk.into();
+        let base_fee_cap: U256 = base_fee_cap_per_chunk.into();
+
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
+
+        let data_reads = Self::build_pd_data_reads_at_global_offset(
+            global_offset,
+            num_chunks,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
+
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee_cap.into())?;
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: alloy_primitives::Bytes::new(),
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
+    }
+
     /// Creates and injects a single PD transaction with a custom priority fee.
     ///
     /// # Returns
@@ -2613,29 +2885,38 @@ impl IrysNodeTest<IrysNodeCtx> {
         let base_fee: U256 = base_fee_per_chunk.into();
 
         let local_signer = LocalSigner::from(signer.signer.clone());
-        let chain_id = self.node_ctx.config.consensus.chain_id;
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
 
-        // Build storage keys for the specified number of chunks.
-        // Use U200::MAX as a sentinel partition_index: it overflows u64 in specs_to_keys(),
-        // producing an empty chunk key set. This means PdService marks the tx as Ready
-        // (0 required chunks) without needing real data uploaded. Tests that need real
-        // chunk data should use inject_pd_contract_call() with explicit ChunkRangeSpecifiers.
-        //
-        // Note: the sentinel does NOT affect parse_pd_transaction() — byte 0 of each
-        // encoded key is always the type discriminant (0x00 = ChunkRead), and partition_index
-        // occupies bytes 1-25 only. The parser sees valid ChunkRead entries regardless of
-        // the partition_index value. The sentinel's effect is confined to PdService::specs_to_keys().
-        let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
-            partition_index: alloy_primitives::aliases::U200::MAX,
-            offset: offset_base + i as u32,
-            chunk_count: 1,
-        });
-        let access_list = build_pd_access_list_with_fees(
-            storage_keys,
-            std::iter::empty(),
-            priority_fee.into(),
-            base_fee.into(),
-        );
+        // Build PdDataRead entries covering the requested number of chunks.
+        // Uses sequential partition_index values (0, 1, 2, ...) pointing at valid
+        // but unpopulated chunk offsets. After injection we insert the tx hash into
+        // ready_pd_txs directly so the block producer treats it as ready without
+        // PdService needing to provision real chunk data.
+        let data_reads = Self::build_synthetic_pd_data_reads(
+            u64::from(chunks_per_tx),
+            offset_base,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
+
+        // Pre-populate chunk_data_index with zero-filled chunks so PdService's
+        // cache finds them during block validation (handle_provision_block_chunks).
+        let fake_chunk = std::sync::Arc::new(bytes::Bytes::from(vec![0_u8; chunk_size as usize]));
+        for spec in &data_reads {
+            let base = num_chunks_in_partition * spec.partition_index;
+            let chunks_needed = spec.chunks_needed(chunk_size);
+            for i in 0..chunks_needed {
+                self.node_ctx
+                    .chunk_data_index
+                    .insert((0_u32, base + spec.start as u64 + i), fake_chunk.clone());
+            }
+        }
+
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee.into())?;
 
         // Create and sign EIP-1559 transaction
         let mut tx = TxEip1559 {
@@ -2663,6 +2944,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .rpc
             .inject_tx(tx_envelope)
             .await?;
+
+        // Mark the tx as ready directly — the synthetic PdDataRead entries reference
+        // valid partition offsets but no real chunk data exists, so PdService would
+        // mark it as PartiallyReady. Inserting here bypasses that; PdService never
+        // removes from ready_pd_txs during provisioning.
+        self.node_ctx.ready_pd_txs.insert(tx_hash);
 
         Ok(tx_hash)
     }
@@ -2722,28 +3009,26 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Build and inject a tx that calls a contract function with PD chunk access.
-    /// PD fees and chunk/byte specifiers are encoded in the access list; the `input`
+    /// PD fees and data read specifiers are encoded in the access list; the `input`
     /// field carries only the clean ABI calldata for the target contract.
     pub async fn inject_pd_contract_call(
         &self,
         signer: &irys_types::irys::IrysSigner,
         contract_address: Address,
         abi_calldata: alloy_primitives::Bytes,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
-        byte_specs: Vec<ByteRangeSpecifier>,
+        data_reads: Vec<PdDataRead>,
         priority_fee_per_chunk: u64,
         nonce: u64,
     ) -> eyre::Result<FixedBytes<32>> {
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
 
-        // Build access list with chunk/byte range specifiers and fee parameters
+        // Build access list with data read specifiers and fee parameters
         let access_list = build_pd_access_list_with_fees(
-            chunk_specs,
-            byte_specs,
+            &data_reads,
             alloy_primitives::U256::from(priority_fee_per_chunk),
             alloy_primitives::U256::from(1_000_000_000_000_000_u64),
-        );
+        )?;
 
         // Create and sign EIP-1559 transaction targeting the contract
         let mut tx = TxEip1559 {

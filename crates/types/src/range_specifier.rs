@@ -1,17 +1,29 @@
-//! Range offsets are used by PD to figure out what chunks/bytes are required to fulfill a precompile call.
+//! PD access list encoding for data reads and fee parameters.
+//!
+//! Each access list storage key under the PD precompile address is a 32-byte
+//! value whose first byte is a type discriminant:
+//!
+//! | Type byte | Meaning          | Struct              |
+//! |-----------|------------------|---------------------|
+//! | `0x01`    | Data read        | [`PdDataRead`]      |
+//! | `0x02`    | Priority fee     | (fee U256)          |
+//! | `0x03`    | Base fee cap     | (fee U256)          |
+//!
+//! `0x00` is intentionally unused so that `B256::ZERO` always fails validation.
 
-use std::ops::Div as _;
+use alloy_primitives::U256;
+use eyre::eyre;
 
-use alloy_primitives::{aliases::U200, B256, U256};
-use eyre::{eyre, OptionExt as _};
-use ruint::Uint;
-use serde::{Deserialize, Serialize};
+use crate::chunk_provider::ChunkConfig;
+
+// ---------------------------------------------------------------------------
+// Type discriminant enum
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PdAccessListArgsTypeId {
-    ChunkRead = 0,
-    ByteRead = 1,
+    DataRead = 1,
     PdPriorityFee = 2,
     PdBaseFeeCap = 3,
 }
@@ -26,8 +38,7 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
     type Error = PdAccessListArgsTypeIdDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            0 => Ok(Self::ChunkRead),
-            1 => Ok(Self::ByteRead),
+            1 => Ok(Self::DataRead),
             2 => Ok(Self::PdPriorityFee),
             3 => Ok(Self::PdBaseFeeCap),
             _ => Err(PdAccessListArgsTypeIdDecodeError::UnknownPdAccessListArgsTypeId(id)),
@@ -35,305 +46,152 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
     }
 }
 
-pub enum PdAccessListArg {
-    ChunkRead(ChunkRangeSpecifier),
-    ByteRead(ByteRangeSpecifier),
-    PdPriorityFee(U256),
-    PdBaseFeeCap(U256),
+// ---------------------------------------------------------------------------
+// PdDataRead
+// ---------------------------------------------------------------------------
+
+/// Unified PD access list specifier. Encodes a data read from a partition's
+/// chunk range.
+///
+/// Binary layout (32 bytes, all big-endian):
+///
+/// | Offset   | Size  | Field           | Description                             |
+/// |----------|-------|-----------------|-----------------------------------------|
+/// | `[0]`    | 1     | type byte       | Must be `0x01`                          |
+/// | `[1..9]` | 8     | partition_index | Partition to read from                  |
+/// | `[9..13]`| 4     | start           | First chunk offset within partition     |
+/// | `[13..17]`| 4    | len             | Number of bytes to read                 |
+/// | `[17..20]`| 3    | byte_off        | Byte offset within the first chunk (u24)|
+/// | `[20..32]`| 12   | reserved        | Must be zero                            |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PdDataRead {
+    pub partition_index: u64,
+    pub start: u32,
+    pub len: u32,
+    /// Byte offset within the first chunk. Stored as u32 but the top byte is
+    /// always zero (u24 range: 0..16_777_215).
+    pub byte_off: u32,
 }
 
-impl PdAccessListArg {
-    pub fn type_id(&self) -> PdAccessListArgsTypeId {
-        match *self {
-            Self::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
-            Self::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
-            Self::PdPriorityFee(_) => PdAccessListArgsTypeId::PdPriorityFee,
-            Self::PdBaseFeeCap(_) => PdAccessListArgsTypeId::PdBaseFeeCap,
+/// Maximum value for the `byte_off` field (2^24 - 1).
+const BYTE_OFF_MAX: u32 = (1 << 24) - 1;
+
+impl PdDataRead {
+    /// Decode a `PdDataRead` from a 32-byte access list storage key.
+    ///
+    /// # Validity rules
+    /// - Type byte (`[0]`) must be `0x01`.
+    /// - `len` must be > 0.
+    /// - `byte_off` must be < `chunk_config.chunk_size` (as u32).
+    /// - Reserved bytes `[20..32]` must all be zero.
+    /// - `start + chunks_needed` must not exceed `num_chunks_in_partition`.
+    pub fn decode(bytes: &[u8; 32], chunk_config: &ChunkConfig) -> eyre::Result<Self> {
+        // Type discriminant
+        if bytes[0] != PdAccessListArgsTypeId::DataRead as u8 {
+            return Err(eyre!(
+                "invalid PdDataRead type byte: expected 0x01, got 0x{:02X}",
+                bytes[0]
+            ));
         }
+
+        // Reserved bytes must be zero
+        if bytes[20..32].iter().any(|&b| b != 0) {
+            return Err(eyre!("non-zero reserved bytes in PdDataRead"));
+        }
+
+        let partition_index = u64::from_be_bytes(bytes[1..9].try_into()?);
+        let start = u32::from_be_bytes(bytes[9..13].try_into()?);
+        let len = u32::from_be_bytes(bytes[13..17].try_into()?);
+
+        // byte_off is u24 big-endian in bytes [17..20]
+        let byte_off = ((bytes[17] as u32) << 16) | ((bytes[18] as u32) << 8) | (bytes[19] as u32);
+
+        if len == 0 {
+            return Err(eyre!("PdDataRead len must be > 0"));
+        }
+
+        let chunk_size_u32 = u32::try_from(chunk_config.chunk_size)
+            .map_err(|_| eyre!("chunk_size does not fit in u32"))?;
+
+        if byte_off >= chunk_size_u32 {
+            return Err(eyre!(
+                "PdDataRead byte_off ({byte_off}) must be < chunk_size ({chunk_size_u32})"
+            ));
+        }
+
+        let spec = Self {
+            partition_index,
+            start,
+            len,
+            byte_off,
+        };
+
+        // Reject partition_index values that would overflow the ledger offset
+        // calculation (num_chunks_in_partition * partition_index). Without this
+        // check, an attacker can craft a PD tx that the PdService marks as Ready
+        // (empty key set from overflow → no missing chunks) without any real data.
+        if chunk_config
+            .num_chunks_in_partition
+            .checked_mul(partition_index)
+            .is_none()
+        {
+            return Err(eyre!(
+                "PdDataRead partition_index ({partition_index}) causes ledger offset overflow \
+                 with num_chunks_in_partition ({})",
+                chunk_config.num_chunks_in_partition
+            ));
+        }
+
+        let chunks = spec.chunks_needed(chunk_config.chunk_size);
+        let end = u64::from(start)
+            .checked_add(chunks)
+            .ok_or_else(|| eyre!("PdDataRead start + chunks_needed overflows u64"))?;
+
+        if end > chunk_config.num_chunks_in_partition {
+            return Err(eyre!(
+                "PdDataRead exceeds partition boundary: start({start}) + chunks_needed({chunks}) = {end} > num_chunks({})",
+                chunk_config.num_chunks_in_partition
+            ));
+        }
+
+        Ok(spec)
     }
 
+    /// Encode this `PdDataRead` into a 32-byte access list storage key.
+    #[must_use]
     pub fn encode(&self) -> [u8; 32] {
-        match self {
-            Self::ChunkRead(range_specifier) => range_specifier.encode(),
-            Self::ByteRead(bytes_range_specifier) => bytes_range_specifier.encode(),
-            Self::PdPriorityFee(fee) => {
-                encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, *fee)
-                    .expect("PdPriorityFee encode: fee must be > 0 and <= MAX_PD_FEE")
-            }
-            Self::PdBaseFeeCap(fee) => {
-                encode_pd_fee(PdAccessListArgsTypeId::PdBaseFeeCap as u8, *fee)
-                    .expect("PdBaseFeeCap encode: fee must be > 0 and <= MAX_PD_FEE")
-            }
-        }
-    }
-
-    pub fn decode(bytes: &[u8; 32]) -> eyre::Result<Self> {
-        let type_id = PdAccessListArgsTypeId::try_from(bytes[0])
-            .map_err(|e| eyre!("failed to decode type ID: {}", e))?;
-
-        match type_id {
-            PdAccessListArgsTypeId::ChunkRead => {
-                Ok(Self::ChunkRead(ChunkRangeSpecifier::decode(bytes)?))
-            }
-            PdAccessListArgsTypeId::ByteRead => {
-                Ok(Self::ByteRead(ByteRangeSpecifier::decode(bytes)?))
-            }
-            PdAccessListArgsTypeId::PdPriorityFee => {
-                let fee = decode_pd_fee(bytes, PdAccessListArgsTypeId::PdPriorityFee as u8)?;
-                Ok(Self::PdPriorityFee(fee))
-            }
-            PdAccessListArgsTypeId::PdBaseFeeCap => {
-                let fee = decode_pd_fee(bytes, PdAccessListArgsTypeId::PdBaseFeeCap as u8)?;
-                Ok(Self::PdBaseFeeCap(fee))
-            }
-        }
-    }
-}
-
-impl From<PdAccessListArg> for PdAccessListArgsTypeId {
-    fn from(value: PdAccessListArg) -> Self {
-        value.type_id()
-    }
-}
-
-pub trait PdAccessListArgSerde {
-    fn encode(&self) -> [u8; 32] {
-        let mut bytes = [0_u8; 32];
-        bytes[0] = Self::get_type() as u8;
-        bytes[1..].copy_from_slice(&self.encode_inner());
-        bytes
-    }
-
-    fn decode(bytes: &[u8; 32]) -> eyre::Result<Self>
-    where
-        Self: Sized,
-    {
-        let type_id = bytes[0];
-        if type_id != Self::get_type() as u8 {
-            return Err(eyre!("invalid type ID"));
-        }
-        Self::decode_inner(bytes[1..].try_into()?)
-    }
-
-    fn get_type() -> PdAccessListArgsTypeId;
-
-    fn encode_inner(&self) -> [u8; 31];
-
-    fn decode_inner(bytes: &[u8; 31]) -> eyre::Result<Self>
-    where
-        Self: Sized;
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct ChunkRangeSpecifier {
-    pub partition_index: U200, // 3 64-bit words + 1 8 bit word, 25 bytes
-    pub offset: u32,           // offset within the partition (chunks)
-    pub chunk_count: u16,      // number of chunks in the range
-}
-
-impl PdAccessListArgSerde for ChunkRangeSpecifier {
-    fn get_type() -> PdAccessListArgsTypeId {
-        PdAccessListArgsTypeId::ChunkRead
-    }
-
-    fn encode_inner(&self) -> [u8; 31] {
-        let mut buf: [u8; 31] = [0; 31];
-        buf[0..=24].copy_from_slice(&self.partition_index.to_le_bytes::<25>());
-        buf[25..=28].copy_from_slice(&self.offset.to_le_bytes());
-        buf[29..=30].copy_from_slice(&self.chunk_count.to_le_bytes());
+        assert!(
+            self.byte_off <= BYTE_OFF_MAX,
+            "byte_off {:#010X} exceeds u24 max ({:#010X})",
+            self.byte_off,
+            BYTE_OFF_MAX
+        );
+        let mut buf = [0_u8; 32];
+        buf[0] = PdAccessListArgsTypeId::DataRead as u8;
+        buf[1..9].copy_from_slice(&self.partition_index.to_be_bytes());
+        buf[9..13].copy_from_slice(&self.start.to_be_bytes());
+        buf[13..17].copy_from_slice(&self.len.to_be_bytes());
+        // byte_off as u24 big-endian
+        buf[17] = (self.byte_off >> 16) as u8;
+        buf[18] = (self.byte_off >> 8) as u8;
+        buf[19] = self.byte_off as u8;
+        // bytes [20..32] are already zero (reserved)
         buf
     }
 
-    fn decode_inner(bytes: &[u8; 31]) -> eyre::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(Self {
-            partition_index: U200::try_from_le_slice(bytes[0..=24].try_into()?)
-                .ok_or_eyre("U200 out of bounds")?,
-            offset: u32::from_le_bytes(bytes[25..=28].try_into()?),
-            chunk_count: u16::from_le_bytes(bytes[29..=30].try_into()?),
-        })
+    /// Number of chunks needed to satisfy this read.
+    ///
+    /// `ceil((byte_off + len) / chunk_size)`
+    #[must_use]
+    pub fn chunks_needed(&self, chunk_size: u64) -> u64 {
+        let total_bytes = u64::from(self.byte_off) + u64::from(self.len);
+        total_bytes.div_ceil(chunk_size)
     }
 }
 
-// wrapper so we can have blanket impls
-pub struct PdArgsEncWrapper<T>(T);
-impl<T> PdArgsEncWrapper<T> {
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-impl<T: PdAccessListArgSerde> From<&[u8; 32]> for PdArgsEncWrapper<T> {
-    fn from(bytes: &[u8; 32]) -> Self {
-        Self(T::decode(bytes).expect("Invalid byte encoding"))
-    }
-}
-
-impl<T: PdAccessListArgSerde> From<PdArgsEncWrapper<T>> for [u8; 32] {
-    fn from(wrapper: PdArgsEncWrapper<T>) -> [u8; 32] {
-        wrapper.0.encode()
-    }
-}
-
-impl<T: PdAccessListArgSerde> From<PdArgsEncWrapper<T>> for B256 {
-    fn from(wrapper: PdArgsEncWrapper<T>) -> Self {
-        Self::from(wrapper.0.encode())
-    }
-}
-
-impl<T: PdAccessListArgSerde> From<&B256> for PdArgsEncWrapper<T> {
-    fn from(bytes: &B256) -> Self {
-        Self(T::decode(&bytes.0).expect("Invalid byte encoding"))
-    }
-}
-
-#[cfg(test)]
-mod range_specifier_tests {
-
-    use crate::range_specifier::{
-        decode_pd_fee, encode_pd_fee, ChunkRangeSpecifier, PdAccessListArg,
-        PdAccessListArgSerde as _, PdAccessListArgsTypeId, MAX_PD_FEE,
-    };
-    use alloy_primitives::{aliases::U200, U256};
-
-    #[test]
-    fn test_encode_decode_roundtrip() -> eyre::Result<()> {
-        let range_spec = ChunkRangeSpecifier {
-            partition_index: U200::from(42_u16),
-            offset: 12_u32,
-            chunk_count: 11_u16,
-        };
-
-        let enc = range_spec.encode();
-        let dec = ChunkRangeSpecifier::decode(&enc).unwrap();
-        assert_eq!(dec, range_spec);
-        Ok(())
-    }
-
-    #[test]
-    fn test_byte_boundaries() {
-        // Test maximum values
-        let max_values = ChunkRangeSpecifier {
-            partition_index: U200::MAX,
-            offset: u32::MAX,
-            chunk_count: u16::MAX,
-        };
-
-        let encoded = max_values.encode();
-        let decoded = ChunkRangeSpecifier::decode(&encoded).unwrap();
-
-        assert_eq!(max_values, decoded);
-    }
-
-    #[test]
-    fn test_pd_fee_encode_decode_roundtrip() -> eyre::Result<()> {
-        let priority_fee = U256::from(1_000_000_u64);
-        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
-        let encoded = encode_pd_fee(type_byte, priority_fee)?;
-        let decoded = decode_pd_fee(&encoded, type_byte)?;
-        assert_eq!(decoded, priority_fee);
-
-        let base_fee = U256::from(500_000_u64);
-        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
-        let encoded = encode_pd_fee(type_byte, base_fee)?;
-        let decoded = decode_pd_fee(&encoded, type_byte)?;
-        assert_eq!(decoded, base_fee);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_pd_fee_reject_zero() {
-        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, U256::ZERO);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("fee must be > 0"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_pd_fee_reject_overflow() {
-        let over_max = MAX_PD_FEE.checked_add(U256::from(1)).expect("no overflow");
-        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, over_max);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("fee exceeds u248 max"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_pd_fee_reject_wrong_type_byte() -> eyre::Result<()> {
-        use crate::range_specifier::PdFeeDecodeError;
-        let fee = U256::from(42_u64);
-        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
-        let encoded = encode_pd_fee(type_byte, fee)?;
-
-        // Try decoding with the wrong expected type byte
-        let wrong_type = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
-        let result = decode_pd_fee(&encoded, wrong_type);
-        assert!(matches!(result, Err(PdFeeDecodeError::UnexpectedTypeByte)));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_pd_fee_max_value() -> eyre::Result<()> {
-        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
-        let encoded = encode_pd_fee(type_byte, MAX_PD_FEE)?;
-        let decoded = decode_pd_fee(&encoded, type_byte)?;
-        assert_eq!(decoded, MAX_PD_FEE);
-        Ok(())
-    }
-
-    #[test]
-    fn test_pd_fee_small_value() -> eyre::Result<()> {
-        let fee = U256::from(1);
-        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
-        let encoded = encode_pd_fee(type_byte, fee)?;
-
-        // The encoded form should be: type_byte, 30 zero bytes, then 0x01
-        assert_eq!(encoded[0], type_byte);
-        for &b in &encoded[1..31] {
-            assert_eq!(b, 0x00, "expected zero byte in padding");
-        }
-        assert_eq!(encoded[31], 0x01);
-
-        let decoded = decode_pd_fee(&encoded, type_byte)?;
-        assert_eq!(decoded, fee);
-        Ok(())
-    }
-
-    #[test]
-    fn test_pd_access_list_arg_fee_roundtrip() -> eyre::Result<()> {
-        // PdPriorityFee variant
-        let priority_fee = U256::from(999_999_u64);
-        let arg = PdAccessListArg::PdPriorityFee(priority_fee);
-        let encoded = arg.encode();
-        let decoded = PdAccessListArg::decode(&encoded)?;
-        match decoded {
-            PdAccessListArg::PdPriorityFee(f) => assert_eq!(f, priority_fee),
-            other => panic!("expected PdPriorityFee, got {:?}", other.type_id()),
-        }
-
-        // PdBaseFeeCap variant
-        let base_fee = U256::from(123_456_789_u64);
-        let arg = PdAccessListArg::PdBaseFeeCap(base_fee);
-        let encoded = arg.encode();
-        let decoded = PdAccessListArg::decode(&encoded)?;
-        match decoded {
-            PdAccessListArg::PdBaseFeeCap(f) => assert_eq!(f, base_fee),
-            other => panic!("expected PdBaseFeeCap, got {:?}", other.type_id()),
-        }
-
-        Ok(())
-    }
-}
+// ---------------------------------------------------------------------------
+// Fee encoding (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Maximum PD fee value: 2^248 - 1. Fits in 31 bytes.
 pub const MAX_PD_FEE: U256 = U256::from_be_bytes([
@@ -382,250 +240,270 @@ pub fn decode_pd_fee(bytes: &[u8; 32], expected_type: u8) -> Result<U256, PdFeeD
     Ok(fee)
 }
 
-pub type U34 = Uint<34, 1>;
-pub type U18 = Uint<18, 1>;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct ByteRangeSpecifier {
-    pub index: u8,         // index of the corresponding PD chunk range request
-    pub chunk_offset: u16, // the PD chunk range request start relative chunk offset (matches chunk_count in RangeSpecifier)
-    pub byte_offset: U18,  // the chunk offset relative byte offset to start reading from
-    pub length: U34,       // the number of bytes to read - this is optional
-                           // pub reserved: [u8; 20], // 20 bytes, unused (for now)
-}
-
-impl PdAccessListArgSerde for ByteRangeSpecifier {
-    fn get_type() -> PdAccessListArgsTypeId {
-        PdAccessListArgsTypeId::ByteRead
-    }
-
-    fn encode_inner(&self) -> [u8; 31] {
-        let mut buf: [u8; 31] = [0; 31];
-        buf[0] = self.index;
-        buf[1..=2].copy_from_slice(&self.chunk_offset.to_le_bytes());
-        buf[3..=5].copy_from_slice(&self.byte_offset.to_le_bytes::<3>());
-        buf[6..=10].copy_from_slice(&self.length.to_le_bytes::<5>());
-        // 20 unused bytes
-        // buf[11..=30].copy_from_slice(&self.reserved);
-        buf
-    }
-
-    fn decode_inner(bytes: &[u8; 31]) -> eyre::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(Self {
-            index: bytes[0],
-            chunk_offset: u16::from_le_bytes(bytes[1..=2].try_into()?),
-            byte_offset: U18::try_from_le_slice(bytes[3..=5].try_into()?)
-                .ok_or_eyre("U18 out of bounds")?,
-            length: U34::try_from_le_slice(bytes[6..=10].try_into()?)
-                .ok_or_eyre("U34 out of bounds")?,
-        })
-    }
-}
-
-impl ByteRangeSpecifier {
-    pub fn translate_offset(&mut self, chunk_size: u64, offset: u64) -> eyre::Result<()> {
-        let full_offset: u64 = offset
-            .checked_add(u64::try_from(self.byte_offset)?)
-            .ok_or_else(|| eyre!("Offset addition overflow"))?;
-
-        let additional_chunks = full_offset.div(chunk_size);
-        let new_chunk_offset = self
-            .chunk_offset
-            .checked_add(
-                u16::try_from(additional_chunks).map_err(|_| eyre!("Chunk offset overflow"))?,
-            )
-            .ok_or_else(|| eyre!("Chunk offset addition overflow"))?;
-
-        let new_byte_offset = U18::try_from(full_offset % chunk_size)
-            .map_err(|_| eyre!("Byte offset conversion error"))?;
-
-        self.chunk_offset = new_chunk_offset;
-        self.byte_offset = new_byte_offset;
-        Ok(())
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod bytes_range_specifier_tests {
+mod tests {
     use super::*;
 
+    fn test_chunk_config() -> ChunkConfig {
+        ChunkConfig {
+            chunk_size: 262_144, // 256 KB
+            num_chunks_in_partition: 51_872_000,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        }
+    }
+
+    // === PdDataRead tests ===
+
     #[test]
-    fn test_encode_decode_roundtrip() {
-        let original = ByteRangeSpecifier {
-            index: 42,
-            chunk_offset: 12345,
-            byte_offset: U18::from(123456),
-            length: U34::from(12345678),
+    fn roundtrip_basic() {
+        let spec = PdDataRead {
+            partition_index: 42,
+            start: 100,
+            len: 1000,
+            byte_off: 500,
         };
-
-        let encoded = original.encode();
-        let decoded = ByteRangeSpecifier::decode(&encoded).unwrap();
-
-        assert_eq!(original, decoded);
+        let encoded = spec.encode();
+        let decoded = PdDataRead::decode(&encoded, &test_chunk_config()).unwrap();
+        assert_eq!(spec, decoded);
     }
 
     #[test]
-    fn test_bit_boundaries() {
-        // Test maximum values
-        let max_values = ByteRangeSpecifier {
-            index: 255,
-            chunk_offset: 65535,
-            byte_offset: U18::from((1 << 18) - 1),
-            length: U34::from((1_u64 << 34) - 1),
-        };
-
-        let encoded = max_values.encode();
-        let decoded = ByteRangeSpecifier::decode(&encoded).unwrap();
-
-        assert_eq!(max_values, decoded);
+    fn zero_type_byte_rejected() {
+        let bytes = [0_u8; 32]; // type byte 0x00
+        assert!(PdDataRead::decode(&bytes, &test_chunk_config()).is_err());
     }
 
     #[test]
-    fn test_validation() {
-        U18::try_from(1_u32 << 18).expect_err("value should overflow");
-        U34::try_from(1_u64 << 34).expect_err("value should overflow");
+    fn zero_len_rejected() {
+        let mut encoded = [0_u8; 32];
+        encoded[0] = 0x01; // valid type byte but len=0
+        assert!(PdDataRead::decode(&encoded, &test_chunk_config()).is_err());
     }
 
     #[test]
-    fn test_translate_offset_within_chunk() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 0,
-            chunk_offset: 5,
-            byte_offset: U18::from(100),
-            length: U34::from(50),
+    fn byte_off_exceeds_chunk_size_rejected() {
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 262_144,
         };
+        let encoded = spec.encode();
+        assert!(PdDataRead::decode(&encoded, &test_chunk_config()).is_err());
+    }
 
-        let chunk_size = 1000;
-        let offset = 200;
-        specifier.translate_offset(chunk_size, offset)?;
+    #[test]
+    fn nonzero_reserved_bytes_rejected() {
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
+        let mut encoded = spec.encode();
+        encoded[25] = 0xFF; // taint reserved byte
+        assert!(PdDataRead::decode(&encoded, &test_chunk_config()).is_err());
+    }
 
-        assert_eq!(specifier.chunk_offset, 5);
-        assert_eq!(u64::try_from(specifier.byte_offset)?, 300);
-        assert_eq!(specifier.length, specifier.length);
+    #[test]
+    fn partition_boundary_overflow_rejected() {
+        let config = test_chunk_config();
+        // start + chunks_needed would exceed num_chunks_in_partition
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: config.num_chunks_in_partition as u32, // at boundary
+            len: 100,
+            byte_off: 0,
+        };
+        let encoded = spec.encode();
+        assert!(PdDataRead::decode(&encoded, &config).is_err());
+    }
+
+    #[test]
+    fn chunks_needed_calculation() {
+        let chunk_size = 262_144_u64;
+        // Exactly one chunk
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 0,
+        };
+        assert_eq!(spec.chunks_needed(chunk_size), 1);
+
+        // Spans two chunks due to byte_off
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: 262_100,
+        };
+        assert_eq!(spec.chunks_needed(chunk_size), 2);
+    }
+
+    #[test]
+    fn big_endian_encoding() {
+        let spec = PdDataRead {
+            partition_index: 0x0102030405060708,
+            start: 0x090A0B0C,
+            len: 0x0D0E0F10,
+            byte_off: 0x111213,
+        };
+        let encoded = spec.encode();
+        assert_eq!(encoded[0], 0x01); // type byte
+        assert_eq!(
+            &encoded[1..9],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(&encoded[9..13], &[0x09, 0x0A, 0x0B, 0x0C]);
+        assert_eq!(&encoded[13..17], &[0x0D, 0x0E, 0x0F, 0x10]);
+        assert_eq!(&encoded[17..20], &[0x11, 0x12, 0x13]);
+        assert_eq!(&encoded[20..32], &[0_u8; 12]); // reserved
+    }
+
+    #[test]
+    fn byte_off_max_u24_accepted() {
+        // byte_off at maximum u24 value should still be accepted if < chunk_size
+        // With our default chunk_size of 262_144 (0x40000), byte_off of 262_143 is valid
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 1,
+            byte_off: 262_143, // chunk_size - 1
+        };
+        let encoded = spec.encode();
+        let decoded = PdDataRead::decode(&encoded, &test_chunk_config()).unwrap();
+        assert_eq!(spec, decoded);
+    }
+
+    #[test]
+    fn byte_off_u24_max_roundtrip() {
+        // Verify that the maximum valid byte_off (0xFFFFFF) roundtrips correctly.
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 100,
+            byte_off: BYTE_OFF_MAX,
+        };
+        let encoded = spec.encode();
+        // Decode with a config that has chunk_size > BYTE_OFF_MAX
+        let large_config = ChunkConfig {
+            chunk_size: (BYTE_OFF_MAX as u64) + 1,
+            num_chunks_in_partition: 51_872_000,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        };
+        let decoded = PdDataRead::decode(&encoded, &large_config).unwrap();
+        assert_eq!(decoded.byte_off, BYTE_OFF_MAX);
+    }
+
+    #[test]
+    fn chunks_needed_exact_boundary() {
+        let chunk_size = 262_144_u64;
+        // byte_off + len = exactly chunk_size => 1 chunk
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 262_144,
+            byte_off: 0,
+        };
+        assert_eq!(spec.chunks_needed(chunk_size), 1);
+
+        // byte_off + len = chunk_size + 1 => 2 chunks
+        let spec = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 262_144 - 99,
+            byte_off: 100,
+        };
+        assert_eq!(spec.chunks_needed(chunk_size), 2);
+    }
+
+    // === Fee encoding tests (preserved from original) ===
+
+    #[test]
+    fn test_pd_fee_encode_decode_roundtrip() -> eyre::Result<()> {
+        let priority_fee = U256::from(1_000_000_u64);
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, priority_fee)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, priority_fee);
+
+        let base_fee = U256::from(500_000_u64);
+        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let encoded = encode_pd_fee(type_byte, base_fee)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, base_fee);
+
         Ok(())
     }
 
     #[test]
-    fn test_translate_offset_cross_chunk() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 1,
-            chunk_offset: 10,
-            byte_offset: U18::from(800),
-            length: U34::from(100),
-        };
-
-        let chunk_size = 1000;
-        let offset = 300;
-        specifier.translate_offset(chunk_size, offset)?;
-
-        assert_eq!(specifier.chunk_offset, 11);
-        assert_eq!(u64::try_from(specifier.byte_offset)?, 100);
-        assert_eq!(specifier.length, specifier.length);
-        Ok(())
-    }
-
-    #[test]
-    fn test_translate_offset_multiple_chunks() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 2,
-            chunk_offset: 20,
-            byte_offset: U18::from(500),
-            length: U34::from(200),
-        };
-
-        let chunk_size = 1000;
-        let offset = 2500;
-        specifier.translate_offset(chunk_size, offset)?;
-
-        assert_eq!(specifier.chunk_offset, 23);
-        assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
-        assert_eq!(specifier.length, specifier.length);
-        Ok(())
-    }
-
-    #[test]
-    fn test_translate_offset_zero() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 3,
-            chunk_offset: 15,
-            byte_offset: U18::from(250),
-            length: U34::from(75),
-        };
-
-        let chunk_size = 1000;
-        let offset = 0;
-        specifier.translate_offset(chunk_size, offset)?;
-
-        assert_eq!(specifier.chunk_offset, 15);
-        assert_eq!(u64::try_from(specifier.byte_offset)?, 250);
-        assert_eq!(specifier.length, specifier.length);
-        Ok(())
-    }
-
-    #[test]
-    fn test_translate_offset_exact_chunk_boundary() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 4,
-            chunk_offset: 30,
-            byte_offset: U18::from(900),
-            length: U34::from(150),
-        };
-
-        let chunk_size = 1000;
-        let offset = 100;
-        specifier.translate_offset(chunk_size, offset)?;
-
-        assert_eq!(specifier.chunk_offset, 31);
-        assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
-        assert_eq!(specifier.length, specifier.length);
-        Ok(())
-    }
-
-    #[test]
-    fn test_translate_offset_overflow_handling() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 5,
-            chunk_offset: u16::MAX,
-            byte_offset: U18::from(500),
-            length: U34::from(100),
-        };
-
-        let chunk_size = 1000;
-        let offset = 1000;
-
-        // Should return an error instead of panicking
-        let result = specifier.translate_offset(chunk_size, offset);
+    fn test_pd_fee_reject_zero() {
+        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, U256::ZERO);
         assert!(result.is_err());
-
-        // Verify error message
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("overflow"),
-            "Expected overflow error, got: {err}"
+            err.to_string().contains("fee must be > 0"),
+            "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_pd_fee_reject_overflow() {
+        let over_max = MAX_PD_FEE.checked_add(U256::from(1)).expect("no overflow");
+        let result = encode_pd_fee(PdAccessListArgsTypeId::PdPriorityFee as u8, over_max);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("fee exceeds u248 max"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_pd_fee_reject_wrong_type_byte() -> eyre::Result<()> {
+        let fee = U256::from(42_u64);
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, fee)?;
+
+        // Try decoding with the wrong expected type byte
+        let wrong_type = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let result = decode_pd_fee(&encoded, wrong_type);
+        assert!(matches!(result, Err(PdFeeDecodeError::UnexpectedTypeByte)));
 
         Ok(())
     }
 
     #[test]
-    fn test_translate_offset_huge_offset() -> eyre::Result<()> {
-        let mut specifier = ByteRangeSpecifier {
-            index: 6,
-            chunk_offset: 0,
-            byte_offset: U18::from(0),
-            length: U34::from(100),
-        };
+    fn test_pd_fee_max_value() -> eyre::Result<()> {
+        let type_byte = PdAccessListArgsTypeId::PdPriorityFee as u8;
+        let encoded = encode_pd_fee(type_byte, MAX_PD_FEE)?;
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, MAX_PD_FEE);
+        Ok(())
+    }
 
-        let chunk_size = 1000;
-        let offset = u64::MAX;
+    #[test]
+    fn test_pd_fee_small_value() -> eyre::Result<()> {
+        let fee = U256::from(1);
+        let type_byte = PdAccessListArgsTypeId::PdBaseFeeCap as u8;
+        let encoded = encode_pd_fee(type_byte, fee)?;
 
-        // Should return an error for impossibly large offset
-        let result = specifier.translate_offset(chunk_size, offset);
-        assert!(result.is_err());
+        // The encoded form should be: type_byte, 30 zero bytes, then 0x01
+        assert_eq!(encoded[0], type_byte);
+        for &b in &encoded[1..31] {
+            assert_eq!(b, 0x00, "expected zero byte in padding");
+        }
+        assert_eq!(encoded[31], 0x01);
 
+        let decoded = decode_pd_fee(&encoded, type_byte)?;
+        assert_eq!(decoded, fee);
         Ok(())
     }
 }

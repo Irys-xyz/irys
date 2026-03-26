@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::range_specifier::ChunkRangeSpecifier;
+use crate::range_specifier::PdDataRead;
 use crate::ChunkFormat;
 
 /// Configuration values needed for chunk operations.
@@ -95,14 +95,14 @@ pub enum PdChunkMessage {
     /// New PD transaction detected — start provisioning chunks.
     NewTransaction {
         tx_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
+        chunk_specs: Vec<PdDataRead>,
     },
     /// Transaction removed from mempool (included in block or evicted).
     TransactionRemoved { tx_hash: B256 },
     /// Provision chunks needed for validating a peer block.
     ProvisionBlockChunks {
         block_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
+        chunk_specs: Vec<PdDataRead>,
         response: oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
     },
     /// Release chunks provisioned for a block after validation completes.

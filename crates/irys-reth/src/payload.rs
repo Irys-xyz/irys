@@ -31,6 +31,7 @@
 use crate::IrysPayloadBuilderAttributes;
 use crate::pd_tx::{PdParseResult, parse_pd_transaction};
 use alloy_consensus::Transaction as _;
+use irys_types::chunk_provider::ChunkConfig;
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -344,6 +345,8 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     hardforks: Arc<IrysHardforkConfig>,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 impl<Pool, Client, EvmConfig> std::fmt::Debug for IrysPayloadBuilder<Pool, Client, EvmConfig>
@@ -361,6 +364,7 @@ where
             .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
             .field("hardforks", &self.hardforks)
             .field("ready_pd_txs", &"<dashset>")
+            .field("chunk_config", &self.chunk_config)
             .finish()
     }
 }
@@ -374,6 +378,8 @@ pub struct CombinedTransactionIterator {
     is_sprite_active: bool,
     /// Shared set of ready PD tx hashes for lock-free readiness checks.
     ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+    /// Chunk configuration for PD transaction parsing.
+    chunk_config: ChunkConfig,
 }
 
 struct ShadowTxQueue {
@@ -492,7 +498,7 @@ impl CombinedTransactionIterator {
         match transaction
             .transaction
             .access_list()
-            .map(parse_pd_transaction)
+            .map(|al| parse_pd_transaction(al, &self.chunk_config))
         {
             Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
             _ => 0,
@@ -508,6 +514,7 @@ impl CombinedTransactionIterator {
         max_pd_chunks_per_block: u64,
         is_sprite_active: bool,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+        chunk_config: ChunkConfig,
     ) -> Self {
         Self {
             shadow: ShadowTxQueue::from_shadow_transactions(timestamp, shadow_txs),
@@ -515,6 +522,7 @@ impl CombinedTransactionIterator {
             pool_iter,
             is_sprite_active,
             ready_pd_txs,
+            chunk_config,
         }
     }
 
@@ -525,11 +533,16 @@ impl CombinedTransactionIterator {
 
         // Check deferred PD transactions - need to capture is_sprite_active for closure
         let is_sprite_active = self.is_sprite_active;
+        let chunk_config = self.chunk_config;
         if let Some(tx) = self.pd_budget.pop_ready_deferred(|tx| {
             if !is_sprite_active {
                 return 0;
             }
-            match tx.transaction.access_list().map(parse_pd_transaction) {
+            match tx
+                .transaction
+                .access_list()
+                .map(|al| parse_pd_transaction(al, &chunk_config))
+            {
                 Some(PdParseResult::ValidPd(meta)) => meta.total_chunks,
                 _ => 0,
             }
@@ -613,6 +626,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         max_pd_chunks_per_block: u64,
         hardforks: Arc<IrysHardforkConfig>,
         ready_pd_txs: Arc<dashmap::DashSet<revm_primitives::B256>>,
+        chunk_config: ChunkConfig,
     ) -> Self {
         Self {
             client,
@@ -622,6 +636,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             max_pd_chunks_per_block,
             hardforks,
             ready_pd_txs,
+            chunk_config,
         }
     }
 }
@@ -655,6 +670,7 @@ where
             self.max_pd_chunks_per_block,
             is_sprite_active,
             self.ready_pd_txs.clone(),
+            self.chunk_config,
         ))
     }
 }
@@ -773,29 +789,40 @@ where
 mod tests {
     use super::*;
     use crate::pd_tx::build_pd_access_list_with_fees;
-    use alloy_primitives::aliases::U200;
     use alloy_primitives::{Bytes, U256};
-    use irys_types::range_specifier::ChunkRangeSpecifier;
+    use irys_types::range_specifier::PdDataRead;
     use rand09::{SeedableRng as _, rngs::StdRng};
     use reth_primitives_traits::SignedTransaction;
     use reth_transaction_pool::{PoolTransaction as _, test_utils::TransactionGenerator};
     use std::collections::VecDeque;
 
+    /// Chunk config used by the payload iterator test. Production-scale values
+    /// are required because `PdDataRead::decode` validates
+    /// `start + chunks_needed <= num_chunks_in_partition`.
+    fn test_payload_chunk_config() -> ChunkConfig {
+        ChunkConfig {
+            num_chunks_in_partition: 51_872_000,
+            chunk_size: 262_144,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        }
+    }
+
     fn pd_pooled_transaction(
         generator: &mut TransactionGenerator<StdRng>,
         nonce: u64,
         chunk_count: u16,
+        chunk_size: u32,
     ) -> EthPooledTransaction {
-        let access_list = build_pd_access_list_with_fees(
-            [ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset: 0,
-                chunk_count,
-            }],
-            std::iter::empty(),
-            U256::from(1_u64),
-            U256::from(1_u64),
-        );
+        let read = PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: u32::from(chunk_count) * chunk_size,
+            byte_off: 0,
+        };
+        let access_list =
+            build_pd_access_list_with_fees(&[read], U256::from(1_u64), U256::from(1_u64))
+                .expect("test fee encoding should not fail");
         let signed = generator
             .transaction()
             .nonce(nonce)
@@ -869,10 +896,13 @@ mod tests {
         let shadow_tx = generator.gen_eip1559_pooled();
         let shadow_hash = *shadow_tx.hash();
 
-        let pd_small = pd_pooled_transaction(&mut generator, 0, 2_000);
+        let cfg = test_payload_chunk_config();
+        let chunk_size = cfg.chunk_size as u32;
+
+        let pd_small = pd_pooled_transaction(&mut generator, 0, 2_000, chunk_size);
         let pd_small_hash = *pd_small.hash();
 
-        let pd_large = pd_pooled_transaction(&mut generator, 1, 7_000);
+        let pd_large = pd_pooled_transaction(&mut generator, 1, 7_000, chunk_size);
         let pd_large_hash = *pd_large.hash();
 
         let normal_tx = normal_pooled_transaction(&mut generator, 2);
@@ -892,6 +922,7 @@ mod tests {
         ready_pd_txs.insert(revm_primitives::B256::from_slice(pd_large_hash.as_slice()));
 
         // is_sprite_active = true to enable PD chunk budgeting for this test
+        let chunk_config = cfg;
         let mut iterator = CombinedTransactionIterator::new(
             timestamp,
             vec![shadow_tx],
@@ -899,6 +930,7 @@ mod tests {
             7_500,
             true,
             ready_pd_txs,
+            chunk_config,
         );
 
         let collected: Vec<_> = (&mut iterator).take(3).collect();

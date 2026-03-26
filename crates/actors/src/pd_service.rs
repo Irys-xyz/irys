@@ -10,7 +10,7 @@ use irys_types::app_state::DatabaseProvider;
 use irys_types::chunk_provider::{
     ChunkStorageProvider, PdChunkFetcher, PdChunkMessage, PdChunkReceiver,
 };
-use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{DataLedger, IrysAddress, PeerAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
@@ -698,22 +698,13 @@ impl PdService {
         }
     }
 
-    /// Convert chunk range specifiers to chunk keys using checked arithmetic.
-    fn specs_to_keys(&self, chunk_specs: &[ChunkRangeSpecifier]) -> HashSet<ChunkKey> {
+    /// Convert PD data read specifiers to chunk keys using checked arithmetic.
+    fn specs_to_keys(&self, chunk_specs: &[PdDataRead]) -> HashSet<ChunkKey> {
         let config = self.storage_provider.config();
         let mut keys = HashSet::new();
 
         for spec in chunk_specs {
-            let partition_index: u64 = match spec.partition_index.try_into() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(
-                        partition_index = %spec.partition_index,
-                        "Partition index exceeds u64::MAX, skipping spec"
-                    );
-                    continue;
-                }
-            };
+            let partition_index = spec.partition_index;
 
             let base_offset = match config.num_chunks_in_partition.checked_mul(partition_index) {
                 Some(v) => v,
@@ -726,10 +717,11 @@ impl PdService {
                 }
             };
 
-            for i in 0..spec.chunk_count {
+            let chunks_needed = spec.chunks_needed(config.chunk_size);
+            for i in 0..chunks_needed {
                 let ledger_offset = base_offset
-                    .checked_add(spec.offset as u64)
-                    .and_then(|v| v.checked_add(i as u64));
+                    .checked_add(spec.start as u64)
+                    .and_then(|v| v.checked_add(i));
 
                 match ledger_offset {
                     Some(offset) => {
@@ -739,7 +731,7 @@ impl PdService {
                     None => {
                         warn!(
                             base_offset,
-                            spec_offset = spec.offset,
+                            spec_start = spec.start,
                             chunk_index = i,
                             "Ledger offset overflow, skipping chunk"
                         );
@@ -751,7 +743,7 @@ impl PdService {
     }
 
     /// Provision chunks for a new PD transaction.
-    fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<ChunkRangeSpecifier>) {
+    fn handle_provision_chunks(&mut self, tx_hash: B256, chunk_specs: Vec<PdDataRead>) {
         debug!(
             "handle_provision_chunks: tx_hash={}, specs={:?}",
             tx_hash,
@@ -965,7 +957,7 @@ impl PdService {
     fn handle_provision_block_chunks(
         &mut self,
         block_hash: B256,
-        chunk_specs: Vec<ChunkRangeSpecifier>,
+        chunk_specs: Vec<PdDataRead>,
         response: tokio::sync::oneshot::Sender<Result<(), Vec<(u32, u64)>>>,
     ) {
         let required_chunks = self.specs_to_keys(&chunk_specs);
@@ -1185,7 +1177,7 @@ mod tests {
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
-    use irys_types::range_specifier::ChunkRangeSpecifier;
+    use irys_types::range_specifier::PdDataRead;
     use irys_types::{ConsensusConfig, IrysBlockHeader};
     use std::sync::RwLock;
     use tokio::sync::{mpsc, oneshot};
@@ -1308,10 +1300,11 @@ mod tests {
     fn test_provision_block_chunks_loads_into_cache() {
         let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xAA);
-        let specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 3,
+        let specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 3 * 256_000,
+            byte_off: 0,
         }];
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -1348,10 +1341,11 @@ mod tests {
     fn test_release_block_chunks_removes_references() {
         let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xBB);
-        let specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
 
         // Provision — hold the receiver alive so the send succeeds
@@ -1393,18 +1387,20 @@ mod tests {
         let block_hash = B256::with_last_byte(0xCC);
 
         // First, provision via a tx (simulating mempool monitor)
-        let tx_specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let tx_specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
         service.handle_provision_chunks(tx_hash, tx_specs);
 
         // Now provision same chunks for a block
-        let block_specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let block_specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
         let (resp_tx, resp_rx) = oneshot::channel();
         service.handle_provision_block_chunks(block_hash, block_specs, resp_tx);
@@ -1441,10 +1437,11 @@ mod tests {
         let ready_set = service.ready_pd_txs.clone();
         let tx_hash = B256::with_last_byte(0x01);
 
-        let specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 3,
+        let specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 3 * 256_000,
+            byte_off: 0,
         }];
 
         service.handle_provision_chunks(tx_hash, specs);
@@ -1461,10 +1458,11 @@ mod tests {
     fn test_provision_block_chunks_cleans_up_on_dropped_receiver() {
         let (mut service, _tmp) = test_service();
         let block_hash = B256::with_last_byte(0xDD);
-        let specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
 
         // Create a oneshot and immediately drop the receiver to simulate
@@ -1504,18 +1502,20 @@ mod tests {
         let block_hash = B256::with_last_byte(0xEE);
 
         // First, provision via a tx (simulating mempool monitor)
-        let tx_specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let tx_specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
         service.handle_provision_chunks(tx_hash, tx_specs);
 
         // Now provision same chunks for a block, but drop the receiver
-        let block_specs = vec![ChunkRangeSpecifier {
-            partition_index: Default::default(),
-            offset: 0,
-            chunk_count: 2,
+        let block_specs = vec![PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: 2 * 256_000,
+            byte_off: 0,
         }];
         let (resp_tx, resp_rx) = oneshot::channel();
         drop(resp_rx);

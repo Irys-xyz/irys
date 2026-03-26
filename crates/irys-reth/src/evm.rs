@@ -650,7 +650,8 @@ where
             );
 
             // Parse PD fee metadata from the access list (canonical parser).
-            match crate::pd_tx::parse_pd_transaction(&tx.access_list) {
+            let chunk_config = self.context.chunk_config();
+            match crate::pd_tx::parse_pd_transaction(&tx.access_list, &chunk_config) {
                 crate::pd_tx::PdParseResult::InvalidPd(err) => {
                     tracing::debug!(?err, "Invalid PD transaction rejected at EVM layer");
                     return Err(EVMError::Transaction(
@@ -1772,8 +1773,7 @@ mod tests {
     use reth_evm::EvmEnv;
     use reth_provider::ReceiptProvider as _;
 
-    use alloy_primitives::aliases::U200;
-    use irys_types::range_specifier::ChunkRangeSpecifier;
+    use irys_types::range_specifier::PdDataRead;
     use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
@@ -1804,21 +1804,25 @@ mod tests {
     }
 
     /// Helper to build PD access list with N chunks and fee parameters.
+    ///
+    /// Each read requests exactly 1 chunk (32 bytes = testing config chunk_size).
+    /// `num_chunks` reads are created at consecutive partition offsets 0..N.
     fn build_pd_access_list_with_test_fees(
         num_chunks: usize,
         priority_fee: U256,
         base_fee_cap: U256,
     ) -> alloy_eips::eip2930::AccessList {
-        build_pd_access_list_with_fees(
-            (0..num_chunks).map(|i| ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset: i as u32,
-                chunk_count: 1,
-            }),
-            std::iter::empty(),
-            priority_fee,
-            base_fee_cap,
-        )
+        // chunk_size=32 in ConsensusConfig::testing()
+        let reads: Vec<PdDataRead> = (0..num_chunks)
+            .map(|i| PdDataRead {
+                partition_index: 0,
+                start: i as u32,
+                len: 32,
+                byte_off: 0,
+            })
+            .collect();
+        build_pd_access_list_with_fees(&reads, priority_fee, base_fee_cap)
+            .expect("test fee encoding should not fail")
     }
 
     /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
