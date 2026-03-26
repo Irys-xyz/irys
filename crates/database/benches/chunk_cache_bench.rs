@@ -11,7 +11,7 @@ use irys_database::{
 };
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{Base64, DataRoot, H256, MAX_CHUNK_SIZE, TxChunkOffset, UnpackedChunk};
-use reth_db::{Database as _, mdbx::DatabaseArguments};
+use reth_db::{Database as _, mdbx::DatabaseArguments, transaction::DbTxMut as _};
 
 fn make_chunk(data_root: DataRoot, offset: u32) -> UnpackedChunk {
     let mut data = vec![0xAB_u8; MAX_CHUNK_SIZE];
@@ -37,6 +37,19 @@ fn bench_cache_chunk_write(c: &mut Criterion) {
 
     let data_root = H256::from([0xCD; 32]);
     let mut offset_counter = 0_u32;
+
+    db.update(|tx| {
+        tx.put::<irys_database::tables::CachedDataRoots>(
+            data_root,
+            irys_database::db_cache::CachedDataRoot {
+                data_size: u64::try_from(MAX_CHUNK_SIZE).unwrap(),
+                ..Default::default()
+            },
+        )?;
+        Ok::<(), reth_db::DatabaseError>(())
+    })
+    .unwrap()
+    .unwrap();
 
     group.bench_function(BenchmarkId::from_parameter("single_chunk"), |b| {
         b.iter_batched(
@@ -74,6 +87,13 @@ fn bench_cache_chunk_read(c: &mut Criterion) {
         let data_root = H256::from([0xCD; 32]);
 
         db.update(|tx| {
+            tx.put::<irys_database::tables::CachedDataRoots>(
+                data_root,
+                irys_database::db_cache::CachedDataRoot {
+                    data_size: u64::try_from(MAX_CHUNK_SIZE).unwrap(),
+                    ..Default::default()
+                },
+            )?;
             for i in 0..count {
                 let chunk = make_chunk(data_root, i);
                 cache_chunk_verified(tx, &chunk).unwrap();
