@@ -32,11 +32,12 @@ library IrysPDLib {
         (success, data) = _tryCall(
             abi.encodeCall(IIrysPD.readData, (index))
         );
-        if (success) {
-            data = abi.decode(data, (bytes));
-        } else {
-            data = "";
+        // ABI-encoded `bytes` requires ≥64 bytes (32 offset + 32 length).
+        // Guard against short returndata to avoid reverting in abi.decode.
+        if (!success || data.length < 64) {
+            return (false, bytes(""));
         }
+        data = abi.decode(data, (bytes));
     }
 
     /// @notice Try to read an arbitrary byte slice from the specifier at `index`.
@@ -50,11 +51,10 @@ library IrysPDLib {
         (success, data) = _tryCall(
             abi.encodeCall(IIrysPD.readBytes, (index, offset, length))
         );
-        if (success) {
-            data = abi.decode(data, (bytes));
-        } else {
-            data = "";
+        if (!success || data.length < 64) {
+            return (false, bytes(""));
         }
+        data = abi.decode(data, (bytes));
     }
 
     // ── Internal ───────────────────────────────────────────────────────
