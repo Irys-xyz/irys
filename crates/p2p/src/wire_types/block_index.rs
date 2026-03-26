@@ -84,6 +84,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw: Vec<LedgerIndexItemCompat> = Vec::deserialize(deserializer)?;
+    if raw.len() > DataLedger::ALL.len() {
+        return Err(serde::de::Error::custom(format!(
+            "ledgers array too large: {} > {}",
+            raw.len(),
+            DataLedger::ALL.len(),
+        )));
+    }
     raw.into_iter()
         .enumerate()
         .map(|(idx, item)| {
