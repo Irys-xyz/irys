@@ -14,61 +14,62 @@ use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
 
 fn bench_store_ingress_proof(c: &mut Criterion) {
     let mut group = c.benchmark_group("ingress_proof/store");
+    let data_root = H256::from([0xCD; 32]);
+
+    let new_proof = IngressProof::V1(IngressProofV1 {
+        data_root,
+        proof: H256::from([0xFF; 32]),
+        ..Default::default()
+    });
 
     for num_existing in [0_u32, 1, 10] {
-        let db_path = TempDirBuilder::new().build();
-        let db = open_or_create_db(
-            db_path.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-
-        let data_root = H256::from([0xCD; 32]);
-
-        db.update_eyre(|tx| {
-            tx.put::<irys_database::tables::CachedDataRoots>(
-                data_root,
-                irys_database::db_cache::CachedDataRoot {
-                    data_size: 256 * 1024,
-                    ..Default::default()
-                },
-            )?;
-
-            for i in 0..num_existing {
-                let existing_addr = IrysAddress::from([u8::try_from(i + 1).unwrap(); 20]);
-                let proof = IngressProof::V1(IngressProofV1 {
-                    data_root,
-                    proof: H256::from([u8::try_from(i + 1).unwrap(); 32]),
-                    ..Default::default()
-                });
-                store_external_ingress_proof_checked(tx, &proof, existing_addr)?;
-            }
-            Ok(())
-        })
-        .unwrap();
-
-        let new_proof = IngressProof::V1(IngressProofV1 {
-            data_root,
-            proof: H256::from([0xFF; 32]),
-            ..Default::default()
-        });
-
         group.bench_function(
             BenchmarkId::from_parameter(format!("{num_existing}_existing")),
             |b| {
                 b.iter_batched(
                     || {
+                        let db_path = TempDirBuilder::new().build();
+                        let db = open_or_create_db(
+                            db_path.path(),
+                            IrysTables::ALL,
+                            DatabaseArguments::irys_testing().unwrap(),
+                        )
+                        .unwrap();
+
+                        db.update_eyre(|tx| {
+                            tx.put::<irys_database::tables::CachedDataRoots>(
+                                data_root,
+                                irys_database::db_cache::CachedDataRoot {
+                                    data_size: 256 * 1024,
+                                    ..Default::default()
+                                },
+                            )?;
+
+                            for i in 0..num_existing {
+                                let existing_addr =
+                                    IrysAddress::from([u8::try_from(i + 1).unwrap(); 20]);
+                                let proof = IngressProof::V1(IngressProofV1 {
+                                    data_root,
+                                    proof: H256::from([u8::try_from(i + 1).unwrap(); 32]),
+                                    ..Default::default()
+                                });
+                                store_external_ingress_proof_checked(tx, &proof, existing_addr)?;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+
                         let addr = IrysAddress::from([0xAB; 20]);
-                        (new_proof.clone(), addr) // clone: need owned copy per iteration
+                        (db_path, db, new_proof.clone(), addr) // clone: need owned copy per iteration
                     },
-                    |(proof, addr)| {
+                    |(db_path, db, proof, addr): (_, _, IngressProof, _)| {
+                        let _keep_alive = db_path;
                         db.update_eyre(|tx| {
                             black_box(store_external_ingress_proof_checked(tx, &proof, addr))
                         })
                         .unwrap();
                     },
-                    criterion::BatchSize::SmallInput,
+                    criterion::BatchSize::LargeInput,
                 );
             },
         );
