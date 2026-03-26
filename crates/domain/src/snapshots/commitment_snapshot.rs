@@ -172,6 +172,17 @@ impl CommitmentSnapshot {
         total.saturating_sub(miner_commitments.unpledges.len())
     }
 
+    fn validated_pledge_count(
+        miner_commitments: &MinerCommitments,
+        pledges_in_epoch: usize,
+    ) -> Result<u64, CommitmentSnapshotStatus> {
+        u64::try_from(Self::active_pledge_count(
+            miner_commitments,
+            pledges_in_epoch,
+        ))
+        .map_err(|_| CommitmentSnapshotStatus::InvalidPledgeCount)
+    }
+
     /// Adds a new commitment transaction to the snapshot and validates its acceptance
     pub fn add_commitment(
         &mut self,
@@ -241,11 +252,9 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::Accepted;
                 }
 
-                // Validate pledge count matches actual number of existing pledges
-                let Ok(current_pledge_count) = u64::try_from(Self::active_pledge_count(
-                    miner_commitments,
-                    pledges_in_epoch,
-                )) else {
+                let Ok(current_pledge_count) =
+                    Self::validated_pledge_count(miner_commitments, pledges_in_epoch)
+                else {
                     return CommitmentSnapshotStatus::InvalidPledgeCount;
                 };
                 if *pledge_count_before_executing != current_pledge_count {
@@ -272,12 +281,10 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
 
-                // Validate pledge count
                 let miner_commitments = self.commitments.entry(*signer).or_default();
-                let Ok(current_pledge_count) = u64::try_from(Self::active_pledge_count(
-                    miner_commitments,
-                    pledges_in_epoch,
-                )) else {
+                let Ok(current_pledge_count) =
+                    Self::validated_pledge_count(miner_commitments, pledges_in_epoch)
+                else {
                     return CommitmentSnapshotStatus::InvalidPledgeCount;
                 };
                 if *pledge_count_before_executing != current_pledge_count {

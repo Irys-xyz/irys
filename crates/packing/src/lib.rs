@@ -328,11 +328,11 @@ pub fn calibrate_packing(runs: u64) -> u32 {
             ratio
         );
 
-        // adjust iterations based on the ratio of target time to actual time
-        // f64-to-u32: no TryFrom<f64> for u32 in std; value is positive and bounded by calibration
+        // f64-to-u32: no TryFrom<f64> for u32 in std; clamp ceiling avoids
+        // f64 precision rounding u32::MAX up to 4294967296.0 which wraps to 0
         iterations = (f64::from(iterations) * ratio)
             .round()
-            .clamp(1.0, f64::from(u32::MAX)) as u32;
+            .clamp(1.0, (u32::MAX - 1) as f64) as u32;
     }
 
     println!(

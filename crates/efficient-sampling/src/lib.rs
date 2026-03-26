@@ -130,9 +130,8 @@ impl Ranges {
     pub fn reconstruct(&mut self, next_steps: &H256List, partition_hash: &H256) -> Result<()> {
         let step = self.last_step_num;
         next_steps.0.iter().enumerate().try_for_each(|(i, seed)| {
-            let offset = u64::try_from(i).expect(
-                "enumerate index is bounded by H256List length which fits in u64 on all platforms",
-            );
+            let offset =
+                u64::try_from(i).map_err(|_| eyre::eyre!("enumerate index {i} exceeds u64"))?;
             self.next_recall_range(step + 1 + offset, seed, partition_hash)?;
             Ok(())
         })

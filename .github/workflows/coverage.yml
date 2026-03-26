@@ -31,9 +31,6 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
-      - name: Install cargo-llvm-cov
-        run: cargo install --locked --version 0.6.16 cargo-llvm-cov
-
       - name: Fetch previous coverage history
         run: |
           mkdir -p previous-coverage

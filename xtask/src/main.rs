@@ -26,7 +26,12 @@ enum Commands {
     /// Runs tests via nextest, with failure tracking (& optional failure-only reruns)
     Test {
         /// Produce coverage files
-        #[clap(short, long, default_value_t = false)]
+        #[clap(
+            short,
+            long,
+            default_value_t = false,
+            conflicts_with = "rerun_failures"
+        )]
         coverage: bool,
         /// Only run tests that failed in the previous run
         #[clap(long, default_value_t = false)]
@@ -312,7 +317,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 )?
             };
 
-            // Build the nextest command
             let user_has_package = args
                 .iter()
                 .any(|a| a == "-p" || a == "--package" || a.starts_with("--package="));
@@ -443,7 +447,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 // are present, warn that report coverage may be broader.
                 let mut scope_args: Vec<String> = Vec::new();
                 let mut has_unsupported_scope = false;
-                let mut iter = args.iter().peekable();
+                let mut iter = args.iter();
                 while let Some(arg) = iter.next() {
                     if arg.starts_with("--package=") || arg.starts_with("-p=") {
                         scope_args.push(arg.clone()); // clone: collecting user args for reuse
