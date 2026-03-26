@@ -234,11 +234,12 @@ async fn build_and_inject_real_pd_tx(
     let chain_id = node.node_ctx.config.consensus.chain_id;
 
     // Build access list referencing real partition/offset values.
-    // chunk_size=32 in this test context, so total bytes = chunk_count * 32.
+    let chunk_size = u32::try_from(node.node_ctx.config.consensus.chunk_size)
+        .expect("test chunk_size must fit in u32");
     let reads = vec![PdDataRead {
         partition_index,
         start: offset,
-        len: u32::from(chunk_count) * 32,
+        len: u32::from(chunk_count) * chunk_size,
         byte_off: 0,
     }];
     let access_list = build_pd_access_list_with_fees(

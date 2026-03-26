@@ -2565,11 +2565,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Build synthetic `PdDataRead` entries that pass `PdDataRead::decode` validation.
     ///
     /// Splits `total_chunks` into one or more entries, each fitting within the partition
-    /// boundary (`start + chunks_needed <= num_chunks_in_partition`). Uses descending
-    /// sentinel `partition_index` values (`u64::MAX`, `u64::MAX - 1`, ...) so that each
-    /// encoded key is unique (avoiding duplicate-key rejection) and each overflows in
-    /// `specs_to_keys()`, producing an empty chunk key set — PdService marks the tx as
-    /// Ready without needing real data uploaded.
+    /// boundary (`start + chunks_needed <= num_chunks_in_partition`). Uses sequential
+    /// `partition_index` values (`0, 1, 2, ...`) so each entry targets a distinct
+    /// partition and avoids duplicate-key rejection.
+    ///
+    /// These entries reference valid partition offsets but the chunks don't exist in
+    /// storage. Callers must insert the tx hash into `ready_pd_txs` directly after
+    /// injection so the block producer treats the tx as ready.
     pub fn build_synthetic_pd_data_reads(
         total_chunks: u64,
         offset_base: u32,
@@ -2601,7 +2603,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut reads = Vec::new();
         let mut remaining = total_chunks;
         let mut global_offset = u64::from(offset_base);
-        let mut sentinel_ix = 0_u64;
+        let mut partition_ix = 0_u64;
 
         while remaining > 0 {
             let start = global_offset % num_chunks_in_partition;
@@ -2610,7 +2612,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let len = chunks_in_read * chunk_size;
 
             reads.push(PdDataRead {
-                partition_index: u64::MAX - sentinel_ix,
+                partition_index: partition_ix,
                 start: start as u32,
                 len: len as u32,
                 byte_off: 0,
@@ -2618,7 +2620,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             remaining -= chunks_in_read;
             global_offset += chunks_in_read;
-            sentinel_ix += 1;
+            partition_ix += 1;
         }
 
         Ok(reads)
@@ -2681,11 +2683,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         let num_chunks_in_partition = consensus.num_chunks_in_partition;
 
         // Build PdDataRead entries covering the requested number of chunks.
-        // Uses sentinel partition_index values (u64::MAX, u64::MAX-1, ...) that
-        // overflow in specs_to_keys(), producing an empty chunk key set. This means
-        // PdService marks the tx as Ready (0 required chunks) without needing real
-        // data uploaded. Tests that need real chunk data should use
-        // inject_pd_contract_call() with explicit PdDataRead specs.
+        // Uses sequential partition_index values (0, 1, 2, ...) pointing at valid
+        // but unpopulated chunk offsets. After injection we insert the tx hash into
+        // ready_pd_txs directly so the block producer treats it as ready without
+        // PdService needing to provision real chunk data.
         let data_reads = Self::build_synthetic_pd_data_reads(
             u64::from(chunks_per_tx),
             offset_base,
@@ -2721,6 +2722,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .rpc
             .inject_tx(tx_envelope)
             .await?;
+
+        // Mark the tx as ready directly — the synthetic PdDataRead entries reference
+        // valid partition offsets but no real chunk data exists, so PdService would
+        // mark it as PartiallyReady. Inserting here bypasses that; PdService never
+        // removes from ready_pd_txs during provisioning.
+        self.node_ctx.ready_pd_txs.insert(tx_hash);
 
         Ok(tx_hash)
     }

@@ -36,7 +36,7 @@ async fn heavy_test_pd_mock_e2e_single_node() -> eyre::Result<()> {
         .await;
 
     // 3. Inject a minimal PD transaction:
-    //    - 1 chunk, partition_index = 0 (U200::ZERO), offset = 0
+    //    - 1 chunk, partition_index = 0, start = 0, byte_off = 0
     //    - Fees set well above the minimum to ensure acceptance
     //    - nonce = 0 (first transaction from this signer)
     //    - offset_base = 0 (start of the partition)

@@ -796,15 +796,28 @@ mod tests {
     use reth_transaction_pool::{PoolTransaction as _, test_utils::TransactionGenerator};
     use std::collections::VecDeque;
 
+    /// Chunk config used by the payload iterator test. Production-scale values
+    /// are required because `PdDataRead::decode` validates
+    /// `start + chunks_needed <= num_chunks_in_partition`.
+    fn test_payload_chunk_config() -> ChunkConfig {
+        ChunkConfig {
+            num_chunks_in_partition: 51_872_000,
+            chunk_size: 262_144,
+            entropy_packing_iterations: 0,
+            chain_id: 1,
+        }
+    }
+
     fn pd_pooled_transaction(
         generator: &mut TransactionGenerator<StdRng>,
         nonce: u64,
         chunk_count: u16,
+        chunk_size: u32,
     ) -> EthPooledTransaction {
         let read = PdDataRead {
             partition_index: 0,
             start: 0,
-            len: u32::from(chunk_count) * 256_000,
+            len: u32::from(chunk_count) * chunk_size,
             byte_off: 0,
         };
         let access_list =
@@ -883,10 +896,13 @@ mod tests {
         let shadow_tx = generator.gen_eip1559_pooled();
         let shadow_hash = *shadow_tx.hash();
 
-        let pd_small = pd_pooled_transaction(&mut generator, 0, 2_000);
+        let cfg = test_payload_chunk_config();
+        let chunk_size = cfg.chunk_size as u32;
+
+        let pd_small = pd_pooled_transaction(&mut generator, 0, 2_000, chunk_size);
         let pd_small_hash = *pd_small.hash();
 
-        let pd_large = pd_pooled_transaction(&mut generator, 1, 7_000);
+        let pd_large = pd_pooled_transaction(&mut generator, 1, 7_000, chunk_size);
         let pd_large_hash = *pd_large.hash();
 
         let normal_tx = normal_pooled_transaction(&mut generator, 2);
@@ -906,12 +922,7 @@ mod tests {
         ready_pd_txs.insert(revm_primitives::B256::from_slice(pd_large_hash.as_slice()));
 
         // is_sprite_active = true to enable PD chunk budgeting for this test
-        let chunk_config = ChunkConfig {
-            num_chunks_in_partition: 51_872_000,
-            chunk_size: 262_144,
-            entropy_packing_iterations: 0,
-            chain_id: 1,
-        };
+        let chunk_config = cfg;
         let mut iterator = CombinedTransactionIterator::new(
             timestamp,
             vec![shadow_tx],

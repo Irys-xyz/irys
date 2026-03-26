@@ -245,10 +245,14 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = node
+    let start_offset = node
         .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
         .await?
         .unwrap();
+    assert_eq!(
+        start_offset.data_start_offset, 0,
+        "test assumes the uploaded tx is the first migrated publish tx"
+    );
 
     // let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
     //     irys_database::Ledger::Publish,

@@ -111,13 +111,17 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
         .encoded_2718()
         .into();
-    peer_node
+    let tx_hash = peer_node
         .node_ctx
         .reth_node_adapter
         .rpc
         .inject_tx(tx_envelope)
         .await
         .expect("PD tx should be accepted by the peer node");
+
+    // Mark the tx as ready directly — chunks don't exist in storage, but this test
+    // only checks structural validation (chunk count limits), not data availability.
+    peer_node.node_ctx.ready_pd_txs.insert(tx_hash);
 
     // Mine block on genesis node containing the PD transaction
     let (block, block_eth_payload, _) = peer_node.mine_block_without_gossip().await?;
