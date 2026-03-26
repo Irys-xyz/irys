@@ -500,7 +500,14 @@ fn canonical_and_wire_serde_match_for_data_tx_header() {
 
 #[rstest::rstest]
 #[case::v1_stake(canonical_commitment_v1_stake())]
+#[case::v1_pledge(canonical_commitment_v1_pledge())]
+#[case::v1_unpledge(canonical_commitment_v1_unpledge())]
+#[case::v1_unstake(canonical_commitment_v1_unstake())]
 #[case::v2_stake(canonical_commitment_v2_stake())]
+#[case::v2_pledge(canonical_commitment_v2_pledge())]
+#[case::v2_unpledge(canonical_commitment_v2_unpledge())]
+#[case::v2_unstake(canonical_commitment_v2_unstake())]
+#[case::v2_update_reward_address(canonical_commitment_v2_update_reward_address())]
 fn canonical_and_wire_serde_match_for_commitment_transaction(
     #[case] canonical: CommitmentTransaction,
 ) {
