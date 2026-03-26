@@ -69,9 +69,9 @@ impl ChunkCache {
         self.chunks.peek(key).map(|entry| Arc::clone(&entry.data))
     }
 
-    /// Check if a chunk is present in the cache.
+    /// Check if a chunk is present in the cache or the shared chunk data index.
     pub fn contains(&self, key: &ChunkKey) -> bool {
-        self.chunks.contains(key)
+        self.chunks.contains(key) || self.shared_index.contains_key(&(key.ledger, key.offset))
     }
 
     /// Insert a chunk into the cache, referenced by the given transaction.

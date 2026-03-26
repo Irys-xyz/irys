@@ -2693,6 +2693,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             chunk_size,
             num_chunks_in_partition,
         )?;
+
+        // Pre-populate chunk_data_index with zero-filled chunks so PdService's
+        // cache finds them during block validation (handle_provision_block_chunks).
+        let fake_chunk = std::sync::Arc::new(bytes::Bytes::from(vec![0_u8; chunk_size as usize]));
+        for spec in &data_reads {
+            let base = num_chunks_in_partition * spec.partition_index;
+            let chunks_needed = spec.chunks_needed(chunk_size);
+            for i in 0..chunks_needed {
+                self.node_ctx
+                    .chunk_data_index
+                    .insert((0_u32, base + spec.start as u64 + i), fake_chunk.clone());
+            }
+        }
+
         let access_list =
             build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee.into())?;
 

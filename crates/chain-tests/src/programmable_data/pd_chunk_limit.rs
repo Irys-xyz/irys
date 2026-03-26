@@ -64,6 +64,24 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         consensus.chunk_size,
         consensus.num_chunks_in_partition,
     )?;
+
+    // Pre-populate chunk_data_index on the peer node so PdService's cache can
+    // find chunks during block validation.
+    let fake_chunk = std::sync::Arc::new(bytes::Bytes::from(vec![
+        0_u8;
+        consensus.chunk_size as usize
+    ]));
+    for spec in &data_reads {
+        let base = consensus.num_chunks_in_partition * spec.partition_index;
+        let chunks_needed = spec.chunks_needed(consensus.chunk_size);
+        for i in 0..chunks_needed {
+            peer_node
+                .node_ctx
+                .chunk_data_index
+                .insert((0_u32, base + spec.start as u64 + i), fake_chunk.clone());
+        }
+    }
+
     // Build access list with 80 chunks AND fee parameters.
     // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
     // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
