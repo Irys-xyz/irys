@@ -726,9 +726,6 @@ mod tests {
         public_ip = "0.0.0.0"
         public_port = 0
 
-        [vdf]
-        parallel_verification_thread_limit = 4
-
         [mempool]
         max_pending_pledge_items = 100
         max_pledges_per_item = 100
@@ -742,6 +739,9 @@ mod tests {
         max_valid_submit_txs = 3000
         max_valid_commitment_addresses = 300
         max_commitments_per_address = 20
+
+        [vdf]
+        parallel_verification_thread_limit = 4
         "#;
 
         // Create the expected config
