@@ -37,8 +37,8 @@ impl PackingWorkerState {
         match PACKING_TYPE {
             PackingType::CPU => {
                 let cpu_packing_concurrency = self.0.config.cpu_packing_concurrency;
-                let chunk_size_usize = usize::try_from(chunk_size)
-                    .map_err(|e| eyre::eyre!("chunk_size to usize: {e}"))?;
+                let chunk_size_usize =
+                    usize::try_from(chunk_size).expect("protocol-fixed chunk_size fits usize");
                 let stream = stream::iter(start_value..=end_value).map(move  |i| {
                     let runtime_handle = runtime_handle.clone();
                     let semaphore = semaphore.clone();
@@ -108,8 +108,8 @@ impl PackingWorkerState {
                             &start, &end, &num_chunks
                         );
 
-                        let chunk_size_u32 = u32::try_from(chunk_size)
-                            .map_err(|e| eyre::eyre!("chunk_size to u32: {e}"))?;
+                        let chunk_size_u32 =
+                            u32::try_from(chunk_size).expect("protocol-fixed chunk_size fits u32");
                         let out = runtime_handle
                             .spawn_blocking(move || {
 

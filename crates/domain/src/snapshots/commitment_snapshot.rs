@@ -533,6 +533,46 @@ mod tests {
     }
 
     #[test]
+    fn test_unpledge_count_validation_failure() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = IrysAddress::random();
+        let partition_hash = H256::random();
+
+        let mut epoch_snapshot = EpochSnapshot::default();
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer,
+            StakeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer,
+                amount: U256::from(1_000_u64),
+                reward_address: signer,
+            },
+        );
+        epoch_snapshot.commitment_state.pledge_commitments.insert(
+            signer,
+            vec![PledgeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer,
+                amount: U256::from(1_000_u64),
+                partition_hash: Some(partition_hash),
+            }],
+        );
+
+        let unpledge_wrong_count = create_test_commitment_v2(
+            signer,
+            CommitmentTypeV2::Unpledge {
+                pledge_count_before_executing: 5,
+                partition_hash,
+            },
+            U256::zero(),
+        );
+        let status = snapshot.add_commitment(&unpledge_wrong_count, &epoch_snapshot);
+        assert_eq!(status, CommitmentSnapshotStatus::InvalidPledgeCount);
+    }
+
+    #[test]
     fn test_unpledge_counts_include_snapshot_changes() {
         let mut snapshot = CommitmentSnapshot::default();
         let signer = IrysAddress::random();
@@ -681,12 +721,14 @@ mod tests {
 
     enum UnstakedCase {
         Pledge,
+        Unpledge,
         Unstake,
         UpdateRewardAddress,
     }
 
     #[rstest]
     #[case::pledge(UnstakedCase::Pledge)]
+    #[case::unpledge(UnstakedCase::Unpledge)]
     #[case::unstake(UnstakedCase::Unstake)]
     #[case::update_reward_address(UnstakedCase::UpdateRewardAddress)]
     fn test_commitment_without_stake_is_rejected(#[case] variant: UnstakedCase) {
@@ -700,6 +742,14 @@ mod tests {
                     pledge_count_before_executing: 0,
                 },
                 U256::from(1000),
+            ),
+            UnstakedCase::Unpledge => create_test_commitment_v2(
+                signer,
+                CommitmentTypeV2::Unpledge {
+                    pledge_count_before_executing: 0,
+                    partition_hash: H256::random(),
+                },
+                U256::zero(),
             ),
             UnstakedCase::Unstake => {
                 create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000))
