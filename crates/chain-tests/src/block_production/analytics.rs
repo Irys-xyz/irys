@@ -130,7 +130,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let alloy_providers = accounts
         .iter()
         .map(|a| {
-            let signer: PrivateKeySigner = a.signer.clone().into();
+            let signer: PrivateKeySigner = a.signing_key().clone().into();
             ProviderBuilder::new()
                 .wallet(EthereumWallet::from(signer))
                 .connect_http(
