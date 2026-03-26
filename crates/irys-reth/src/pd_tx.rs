@@ -74,17 +74,16 @@ pub fn build_pd_access_list(specs: &[PdDataRead]) -> AccessList {
 /// Build a PD access list with data read specifiers AND fee parameters.
 ///
 /// This is the canonical constructor for PD transaction access lists.
-/// Validates that there are no duplicate data reads and that the total
-/// number of entries (data reads + 2 fee keys) does not exceed 256
-/// (the ABI `uint8` index limit).
+/// Validates that there are no duplicate data reads and that the number
+/// of data reads does not exceed 256 (the ABI `uint8` index limit).
 pub fn build_pd_access_list_with_fees(
     data_reads: &[PdDataRead],
     priority_fee: U256,
     base_fee_cap: U256,
 ) -> eyre::Result<AccessList> {
     eyre::ensure!(
-        data_reads.len() + 2 <= 256,
-        "too many DataRead entries ({}); with 2 fee keys total exceeds 256",
+        data_reads.len() <= 256,
+        "too many DataRead entries ({}); ABI index is uint8 so max is 256",
         data_reads.len()
     );
 
