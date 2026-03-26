@@ -733,6 +733,7 @@ mod tests {
 
         [vdf]
         parallel_verification_thread_limit = 8
+        throttle = true
 
         [mempool]
         max_pending_pledge_items = 100
