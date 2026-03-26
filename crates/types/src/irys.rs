@@ -14,9 +14,9 @@ use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]
 pub struct IrysSigner {
-    pub signer: SigningKey,
-    pub chain_id: u64,
-    pub chunk_size: u64,
+    signer: SigningKey,
+    chain_id: u64,
+    chunk_size: u64,
     address: IrysAddress,
 }
 
@@ -49,6 +49,22 @@ impl IrysSigner {
 
     pub fn alloy_address(&self) -> Address {
         self.address.to_alloy_address()
+    }
+
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signer
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
+    }
+
+    pub fn into_signing_key(self) -> SigningKey {
+        self.signer
     }
 
     /// Creates a transaction from a data iterator (which can yield any size Vec), with an optional anchor and flag for if the input data should be stored in the `data` field.

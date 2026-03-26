@@ -918,10 +918,11 @@ impl NodeConfig {
     }
 
     pub fn signer(&self) -> IrysSigner {
+        let consensus = self.consensus_config();
         IrysSigner::new(
             self.mining_key.clone(), // clone: NodeConfig retains ownership of mining_key
-            self.consensus_config().chain_id,
-            self.consensus_config().chunk_size,
+            consensus.chain_id,
+            consensus.chunk_size,
         )
     }
 
@@ -954,7 +955,7 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testing_with_signer(signer: &IrysSigner) -> Self {
-        let mining_key = signer.signer.clone();
+        let mining_key = signer.signing_key().clone(); // clone: NodeConfig retains separate ownership of mining_key
         let reward_address = signer.address();
         let mut consensus = ConsensusConfig::testing();
         consensus.genesis.miner_address = reward_address;
@@ -1103,7 +1104,7 @@ impl NodeConfig {
         let mut consensus = ConsensusConfig::testnet();
         let signer = IrysSigner::new(mining_key, consensus.chain_id, consensus.chunk_size);
 
-        let mining_key = signer.signer.clone();
+        let mining_key = signer.signing_key().clone(); // clone: NodeConfig retains separate ownership of mining_key
         let reward_address = signer.address();
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
