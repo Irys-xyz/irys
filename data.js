@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774523594478,
+  "lastUpdate": 1774563204164,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1411,6 +1411,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000163,
             "range": "± 0.000026",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "18339ca16b15f59d9579e53049854bf9c896b708",
+          "message": "feat: VDF throttling (#1239)\n\n* feat: v1\n\n* feat: remove worktrees\n\n* feat: tune test VDF\n\n* fix: heavy4_ema_intervals_roll_over_in_forks via block state event\n\n* fix: magic 3s sleep mempool tests\n\n* feat: remove magic sleeps\n\n* feat: address feedback\n\n* fix: restore priority for slow tests, improve programmable data API poll\n\n* feat: improve nextest monitor analysis\n\n* feat: capacity resizing pass 1\n\n* wip: spiky test class\n\n* feat: address feedback\n\n* fix: slow capturing spiky tests, add design doc\n\n* feat: address feedback\n\n* feat: address feedback\n\n* chore: fmt\n\n* feat: address feedback\n\n* feat: address feedback\n\n* chore: remove unused _test_name param\n\n* feat: switch from debug_assertions to a regular config\n\n* fix: missing throttle field\n\n* fix: VDF throttle in config ser/des test\n\n* fix: SIGSTOP error in unprivileged environments\n\n* chore: remove commented out priorities\n\n* chore: update gitignore",
+          "timestamp": "2026-03-26T21:55:59Z",
+          "tree_id": "55d2b41179109bb3d139965d0b0bbcd84d03075b",
+          "url": "https://github.com/Irys-xyz/irys/commit/18339ca16b15f59d9579e53049854bf9c896b708"
+        },
+        "date": 1774563203400,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074793,
+            "range": "± 0.001548",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 796.298168,
+            "range": "± 28.898556",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.721098,
+            "range": "± 3.696575",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.122875,
+            "range": "± 0.002743",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1210.918671,
+            "range": "± 15.098478",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1550.584253,
+            "range": "± 24.968353",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.462532,
+            "range": "± 0.023795",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.599417,
+            "range": "± 1.567998",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.111497,
+            "range": "± 2.272589",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
