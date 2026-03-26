@@ -27,11 +27,7 @@ fn bench_reward_between(c: &mut Criterion) {
         (0, SECS_PER_YEAR, "1_year"),
         (0, 10 * SECS_PER_YEAR, "10_years"),
         (3 * SECS_PER_YEAR, 5 * SECS_PER_YEAR, "across_half_life"),
-        (
-            240 * SECS_PER_YEAR,
-            241 * SECS_PER_YEAR,
-            "large_t_underflow",
-        ),
+        (240 * SECS_PER_YEAR, 241 * SECS_PER_YEAR, "large_t"),
     ];
 
     for (prev, new, label) in cases {

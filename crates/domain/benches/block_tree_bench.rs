@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use irys_domain::{BlockTree, CommitmentSnapshot, dummy_ema_snapshot, dummy_epoch_snapshot};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{BlockBody, ConsensusConfig, H256, IrysBlockHeader, SealedBlock, U256};
@@ -39,7 +39,7 @@ fn seal_block(header: &mut IrysBlockHeader) -> Arc<SealedBlock> {
     Arc::new(SealedBlock::new(header.clone(), body).expect("sealing block")) // clone: SealedBlock takes ownership
 }
 
-fn build_linear_chain(depth: usize) -> (BlockTree, Vec<IrysBlockHeader>) {
+fn build_linear_chain(depth: usize) -> (BlockTree, H256) {
     let config = ConsensusConfig::testing();
     let genesis = random_block(U256::from(0));
     let mut tree = BlockTree::new(&genesis, config);
@@ -54,36 +54,41 @@ fn build_linear_chain(depth: usize) -> (BlockTree, Vec<IrysBlockHeader>) {
         .unwrap();
     tree.mark_tip(&genesis.block_hash).unwrap();
 
-    let mut blocks = vec![genesis];
+    let mut previous = genesis;
+    let mut tip_hash = previous.block_hash;
 
     for i in 1..depth {
         let mut block = extend_chain(
             random_block(U256::from(u64::try_from(i).unwrap())),
-            &blocks[i - 1],
+            &previous,
         );
         let sealed = seal_block(&mut block);
         tree.add_block(&sealed, comm.clone(), epoch.clone(), ema.clone()) // clone: Arc, cheap
             .unwrap();
-        tree.mark_tip(&block.block_hash).unwrap();
-        blocks.push(block);
+        if i < depth - 1 {
+            tree.mark_tip(&block.block_hash).unwrap();
+        }
+        tip_hash = block.block_hash;
+        previous = block;
     }
 
-    (tree, blocks)
+    (tree, tip_hash)
 }
 
 fn bench_mark_tip_linear(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_tree/mark_tip");
 
     for depth in [10_usize, 100, 500] {
-        let (mut tree, blocks) = build_linear_chain(depth);
-        let tip_hash = blocks.last().unwrap().block_hash;
-
         group.bench_function(
             BenchmarkId::from_parameter(format!("{depth}_blocks")),
             |b| {
-                b.iter(|| {
-                    black_box(tree.mark_tip(&tip_hash).unwrap());
-                });
+                b.iter_batched(
+                    || build_linear_chain(depth),
+                    |(mut tree, tip_hash)| {
+                        black_box(tree.mark_tip(&tip_hash).unwrap());
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
     }

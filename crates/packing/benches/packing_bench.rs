@@ -24,19 +24,11 @@ struct PackingTier {
     measurement_time: Duration,
 }
 
-fn build_packing_tiers() -> [PackingTier; 3] {
-    let testing = ConsensusConfig::testing();
+fn build_packing_tiers() -> [PackingTier; 2] {
     let testnet = ConsensusConfig::testnet();
     let mainnet = ConsensusConfig::mainnet();
 
     [
-        PackingTier {
-            name: "testing",
-            iterations: testing.entropy_packing_iterations,
-            chain_id: testing.chain_id,
-            sample_size: 100,
-            measurement_time: Duration::from_secs(5),
-        },
         PackingTier {
             name: "testnet",
             iterations: testnet.entropy_packing_iterations,
