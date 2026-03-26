@@ -5030,6 +5030,7 @@ dependencies = [
  "alloy-sol-macro",
  "alloy-sol-types",
  "assert_matches",
+ "bytes",
  "eyre",
  "futures",
  "hex",
