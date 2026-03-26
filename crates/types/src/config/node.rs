@@ -342,6 +342,19 @@ pub(crate) const fn default_oracle_initial_direction_up() -> bool {
     true
 }
 
+impl OracleConfig {
+    /// Returns a default mock oracle config suitable for development/testing.
+    pub fn default_mock() -> Self {
+        Self::Mock {
+            initial_price: Amount::token(dec!(1)).expect("valid token amount"),
+            incremental_change: Amount::token(dec!(0.00000000000001)).expect("valid token amount"),
+            smoothing_interval: 15,
+            initial_direction_up: true,
+            poll_interval_ms: default_mock_oracle_poll_interval_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageSyncConfig {
