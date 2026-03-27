@@ -457,3 +457,71 @@ fn test_irys_transaction_response_roundtrip(#[case] canonical: IrysTransactionRe
     let roundtrip: IrysTransactionResponse = deserialized.into();
     assert_eq!(canonical, roundtrip);
 }
+
+// =============================================================================
+// Canonical vs wire serde parity tests (#1208)
+// =============================================================================
+
+#[test]
+fn canonical_and_wire_serde_match_for_unpacked_chunk() {
+    let canonical = canonical_unpacked_chunk();
+    let wire: wire::UnpackedChunk = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
+
+#[test]
+fn canonical_and_wire_serde_match_for_block_header() {
+    let canonical = canonical_block_header();
+    let wire: wire::IrysBlockHeader = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
+
+#[test]
+fn canonical_and_wire_serde_match_for_block_body() {
+    let canonical = canonical_block_body();
+    let wire: wire::BlockBody = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
+
+#[test]
+fn canonical_and_wire_serde_match_for_data_tx_header() {
+    let canonical = canonical_data_tx_header();
+    let wire: wire::DataTransactionHeader = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
+
+#[rstest::rstest]
+#[case::v1_stake(canonical_commitment_v1_stake())]
+#[case::v1_pledge(canonical_commitment_v1_pledge())]
+#[case::v1_unpledge(canonical_commitment_v1_unpledge())]
+#[case::v1_unstake(canonical_commitment_v1_unstake())]
+#[case::v2_stake(canonical_commitment_v2_stake())]
+#[case::v2_pledge(canonical_commitment_v2_pledge())]
+#[case::v2_unpledge(canonical_commitment_v2_unpledge())]
+#[case::v2_unstake(canonical_commitment_v2_unstake())]
+#[case::v2_update_reward_address(canonical_commitment_v2_update_reward_address())]
+fn canonical_and_wire_serde_match_for_commitment_transaction(
+    #[case] canonical: CommitmentTransaction,
+) {
+    let wire: wire::CommitmentTransaction = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
+
+#[test]
+fn canonical_and_wire_serde_match_for_ingress_proof() {
+    let canonical = canonical_ingress_proof();
+    let wire: wire::IngressProof = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
