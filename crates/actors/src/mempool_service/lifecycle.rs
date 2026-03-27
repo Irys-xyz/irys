@@ -159,7 +159,6 @@ impl Inner {
             &self.block_tree_read_guard,
             &self.irys_db,
             tx.anchor(),
-            false, /* does not need to be canonical */
         ) {
             Ok(Some(h)) => h,
             // if we don't know about the anchor, we should prune
