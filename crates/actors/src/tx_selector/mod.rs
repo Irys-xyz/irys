@@ -251,7 +251,6 @@ pub async fn select_best_txs(
                 "Checking stake status for commitment tx"
             );
             if is_staked {
-                // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                 debug!(
                     tx.id = ?tx.id(),
                     tx.signer = ?tx.signer(),
