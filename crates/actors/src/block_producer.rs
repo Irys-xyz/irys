@@ -1349,7 +1349,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxsBundle> {
+    ) -> Result<MempoolTxsBundle, crate::tx_selector::TxSelectorError> {
         // Fetch mempool once
         let mut mempool_txs = self
             .fetch_best_mempool_txs(prev_block_header, block_timestamp)
@@ -1446,7 +1446,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxs> {
+    ) -> Result<MempoolTxs, crate::tx_selector::TxSelectorError> {
         let ctx = crate::tx_selector::TxSelectionContext {
             block_tree: &self.inner().block_tree_guard,
             db: &self.inner().db,
