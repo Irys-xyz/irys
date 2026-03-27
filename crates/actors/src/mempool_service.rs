@@ -393,8 +393,8 @@ impl Inner {
 
         // is this anchor too old?
 
-        let min_anchor_height = latest_height
-            .saturating_sub(self.config.consensus.mempool.tx_anchor_expiry_depth as u64);
+        let min_anchor_height =
+            crate::anchor_validation::min_tx_anchor_height(&self.config.consensus, latest_height);
 
         let too_old = anchor_height < min_anchor_height;
 
