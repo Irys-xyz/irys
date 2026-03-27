@@ -132,6 +132,14 @@ fn resize_memory_without_gas<W: InterpreterTypes>(
 /// that was stored by the PD precompile (identity check via
 /// [`is_current_pd_return_marker`]), memory expansion gas is waived. All other
 /// gas and semantic behaviour is identical to upstream `RETURNDATACOPY`.
+/// Compute the EVM memory expansion cost for `num_words` words.
+/// `cost = 3 * num_words + num_words² / 512`
+#[cfg(test)]
+fn expected_memory_cost(num_words: usize) -> u64 {
+    let w = num_words as u64;
+    3 * w + w * w / 512
+}
+
 pub(crate) fn irys_returndatacopy<W: InterpreterTypes, H: Host + ?Sized>(
     context: InstructionContext<'_, H, W>,
 ) {
@@ -197,4 +205,327 @@ pub(crate) fn irys_returndatacopy<W: InterpreterTypes, H: Host + ?Sized>(
         len,
         context.interpreter.return_data.buffer(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Bytes;
+    use revm::bytecode::Bytecode;
+    use revm::context_interface::DummyHost;
+    use revm::interpreter::interpreter::ExtBytecode;
+    use revm::interpreter::interpreter_types::{LoopControl as _, MemoryTr as _};
+    use revm::interpreter::{
+        InstructionContext, InstructionResult, InputsImpl, Interpreter, SharedMemory, num_words,
+    };
+    use revm::primitives::hardfork::SpecId;
+    use revm::primitives::U256;
+
+    use super::irys_returndatacopy;
+    use crate::instructions::pd_return_marker::{PdReturnMarkerScope, set_pd_return_marker};
+
+    type TestInterpreter = revm::interpreter::interpreter::EthInterpreter;
+
+    /// Build an interpreter with `gas_limit`, return data set to `return_data`,
+    /// and three values pushed onto the stack for RETURNDATACOPY:
+    /// `[memory_offset, data_offset, len]` (pushed in correct pop order).
+    fn build_interpreter(
+        gas_limit: u64,
+        return_data: Bytes,
+        memory_offset: usize,
+        data_offset: usize,
+        len: usize,
+    ) -> Interpreter<TestInterpreter> {
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[0x00])); // STOP
+        let mut interp = Interpreter::<TestInterpreter>::new(
+            SharedMemory::new(),
+            ExtBytecode::new(bytecode),
+            InputsImpl::default(),
+            false,
+            SpecId::CANCUN,
+            gas_limit,
+        );
+        // ReturnDataImpl has a pub inner field: ReturnDataImpl(pub Bytes)
+        interp.return_data = revm::interpreter::interpreter::ReturnDataImpl(return_data);
+
+        // Stack is popped in order: [memory_offset, offset, len]
+        // Push in reverse so the first pop gets memory_offset.
+        assert!(interp.stack.push(U256::from(len)));
+        assert!(interp.stack.push(U256::from(data_offset)));
+        assert!(interp.stack.push(U256::from(memory_offset)));
+
+        interp
+    }
+
+    fn call_handler(interp: &mut Interpreter<TestInterpreter>) {
+        let mut host = DummyHost::new(SpecId::CANCUN);
+        let ctx = InstructionContext {
+            interpreter: interp,
+            host: &mut host,
+        };
+        irys_returndatacopy::<TestInterpreter, DummyHost>(ctx);
+    }
+
+    /// The copy gas for `len` bytes: `3 * ceil(len / 32)`.
+    fn copy_gas(len: usize) -> u64 {
+        3 * num_words(len) as u64
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1b: PD return data skips memory expansion gas
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pd_return_data_skips_memory_expansion_gas() {
+        let _scope = PdReturnMarkerScope::new();
+
+        // 5,120,064 bytes ≈ 20 chunks × 256,000 + 64 ABI overhead
+        let size = 5_120_064;
+        let data = Bytes::from(vec![0xAB_u8; size]);
+        set_pd_return_marker(&data);
+
+        let gas_limit = 100_000_000; // large enough for any path
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, size);
+
+        call_handler(&mut interp);
+
+        // Should NOT have halted
+        assert!(
+            !interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            "PD 5 MB read should succeed, got: {:?}",
+            interp.bytecode.instruction_result()
+        );
+
+        let words = num_words(size);
+        assert_eq!(words, 160_002);
+
+        // Memory bookkeeping updated
+        assert_eq!(interp.gas.memory().words_num, words);
+
+        // Gas spent should be ONLY copy gas, no memory expansion
+        let expected_copy = copy_gas(size);
+        let gas_spent = interp.gas.spent();
+        assert_eq!(
+            gas_spent, expected_copy,
+            "Gas should be only copy gas ({expected_copy}), got {gas_spent}"
+        );
+
+        // Verify memory was actually resized and data copied
+        assert!(interp.memory.len() >= size);
+        let mem = interp.memory.slice(0..32);
+        assert!(mem.iter().all(|&b| b == 0xAB), "Data should be copied");
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1c: Non-PD return data charges full gas
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn non_pd_return_data_charges_memory_expansion() {
+        let _scope = PdReturnMarkerScope::new();
+        // Do NOT set the PD marker
+
+        let size = 5_120_064;
+        let data = Bytes::from(vec![0xCD_u8; size]);
+        let gas_limit = 100_000_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, size);
+
+        call_handler(&mut interp);
+
+        assert!(
+            !interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            "Non-PD with enough gas should succeed"
+        );
+
+        let words = num_words(size);
+        let expected_copy = copy_gas(size);
+        let expected_expansion = super::expected_memory_cost(words);
+        let gas_spent = interp.gas.spent();
+
+        // Gas must include both copy gas AND memory expansion
+        assert!(
+            gas_spent >= expected_copy + expected_expansion - 1,
+            "Non-PD gas ({gas_spent}) should include copy ({expected_copy}) + expansion ({expected_expansion})"
+        );
+    }
+
+    #[test]
+    fn non_pd_large_read_oogs_with_limited_gas() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let size = 5_120_064;
+        let data = Bytes::from(vec![0xEF_u8; size]);
+        // Memory expansion for 5 MB is ~50M gas. Give only 1M.
+        let gas_limit = 1_000_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, size);
+
+        call_handler(&mut interp);
+
+        assert!(
+            interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            "Non-PD 5 MB with 1M gas should OOG"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1d: Zero-length short-circuits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn zero_length_returns_early_no_gas() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let data = Bytes::from(vec![0xFF_u8; 1024]);
+        set_pd_return_marker(&data);
+
+        let gas_limit = 100_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, 0);
+
+        call_handler(&mut interp);
+
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        // Zero-length copy gas = 3 * ceil(0/32) = 0
+        assert_eq!(interp.gas.spent(), 0, "Zero-length should cost zero dynamic gas");
+        assert_eq!(interp.gas.memory().words_num, 0, "No memory expansion");
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1e: PD marker cleared between transactions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn marker_cleared_by_scope_charges_expansion() {
+        let data = Bytes::from(vec![0xAA_u8; 1024]);
+        set_pd_return_marker(&data);
+
+        // Create and drop a scope — clears the marker
+        {
+            let _scope = PdReturnMarkerScope::new();
+        }
+
+        // Now handler should treat this as non-PD
+        let gas_limit = 100_000_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, 1024);
+
+        call_handler(&mut interp);
+
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+
+        let words = num_words(1024);
+        let expected_expansion = super::expected_memory_cost(words);
+        let gas_spent = interp.gas.spent();
+
+        // Must include memory expansion (not just copy gas)
+        assert!(
+            gas_spent > copy_gas(1024) + expected_expansion / 2,
+            "After scope drop, gas ({gas_spent}) should include memory expansion"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1f: Non-zero source offset
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pd_non_zero_source_offset_still_exempt() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let size = 100_000;
+        let mut raw = vec![0x00_u8; size];
+        // Write a pattern at offset 50,000
+        raw[50_000..50_032].fill(0xBE);
+        let data = Bytes::from(raw);
+        set_pd_return_marker(&data);
+
+        let read_offset = 50_000;
+        let read_len = 32;
+        let gas_limit = 100_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, read_offset, read_len);
+
+        call_handler(&mut interp);
+
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+
+        // Only copy gas, no expansion (PD exempt)
+        assert_eq!(interp.gas.spent(), copy_gas(read_len));
+
+        // Verify correct bytes were copied
+        let mem = interp.memory.slice(0..32);
+        assert!(mem.iter().all(|&b| b == 0xBE));
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1g: Multiple RETURNDATACOPY ops against same PD buffer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_returndatacopy_both_exempt() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let size = 2_000_000; // 2 MB
+        let data = Bytes::from(vec![0x42_u8; size]);
+        set_pd_return_marker(&data);
+
+        let gas_limit = 100_000_000;
+
+        // First copy: 1 MB at dest_offset=0
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, 1_000_000);
+        call_handler(&mut interp);
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        let _gas_after_first = interp.gas.spent();
+        let words_after_first = interp.gas.memory().words_num;
+
+        // Second copy: next 1 MB at dest_offset=1_000_000
+        // Re-push stack for second call
+        assert!(interp.stack.push(U256::from(1_000_000_usize))); // len
+        assert!(interp.stack.push(U256::from(1_000_000_usize))); // data_offset
+        assert!(interp.stack.push(U256::from(1_000_000_usize))); // memory_offset
+        // Reset bytecode action so the handler can execute again
+        interp.bytecode.reset_action();
+
+        call_handler(&mut interp);
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+
+        let gas_after_second = interp.gas.spent();
+        let words_after_second = interp.gas.memory().words_num;
+
+        // Both copies should only charge copy gas (no expansion)
+        let expected_total = copy_gas(1_000_000) + copy_gas(1_000_000);
+        assert_eq!(
+            gas_after_second, expected_total,
+            "Both copies should charge only copy gas ({expected_total}), got {gas_after_second}"
+        );
+
+        // High-water mark should be at 2 MB
+        assert_eq!(words_after_second, num_words(2_000_000));
+        assert!(words_after_second > words_after_first);
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 1h: High-water mark bookkeeping is exact
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pd_highwater_mark_expansion_cost_is_correct() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let size = 5_120_064;
+        let data = Bytes::from(vec![0x11_u8; size]);
+        set_pd_return_marker(&data);
+
+        let gas_limit = 100_000_000;
+        let mut interp = build_interpreter(gas_limit, data, 0, 0, size);
+
+        call_handler(&mut interp);
+
+        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+
+        let words = num_words(size);
+        // expansion_cost should match what a normal expansion would compute
+        let expected_expansion_cost = super::expected_memory_cost(words);
+        assert_eq!(
+            interp.gas.memory().expansion_cost, expected_expansion_cost,
+            "expansion_cost should be updated even though gas was not charged"
+        );
+        assert_eq!(interp.gas.memory().words_num, words);
+    }
 }
