@@ -577,6 +577,7 @@ mod tests {
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
+        num_partitions_per_term_ledger_slot = 1
         entropy_packing_iterations = 1000
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
@@ -647,6 +648,7 @@ mod tests {
 
         [hardforks.borealis]
         activation_timestamp = "1970-01-01T00:00:00+00:00"
+
         "#;
 
         // Create the expected config
@@ -913,5 +915,31 @@ mod tests {
         assert_eq!(updated.consensus.expected_genesis_hash, Some(hash));
         assert_eq!(updated.consensus.chain_id, config.consensus.chain_id);
         assert_eq!(updated.peer_id(), config.peer_id());
+    }
+
+    #[test]
+    fn test_cascade_activation_timestamp_valid() {
+        use crate::hardfork_config::Cascade;
+        use crate::UnixTimestamp;
+
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(5000),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
     }
 }

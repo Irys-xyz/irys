@@ -587,6 +587,8 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
         commitment_tx: vec![],
         submit_tx: vec![old_data_tx.header],
         publish_tx: PublishLedgerWithTxs::default(),
+        one_year_tx: vec![],
+        thirty_day_tx: vec![],
     });
 
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -624,6 +626,8 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
             commitment_tx: vec![commitment_tx_old.clone()],
             submit_tx: vec![],
             publish_tx: PublishLedgerWithTxs::default(),
+            one_year_tx: vec![],
+            thirty_day_tx: vec![],
         };
     };
 
@@ -658,6 +662,8 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
                 txs: vec![data_tx.header.clone()],
                 proofs: Some(IngressProofsList(vec![too_old_ingress_proof])),
             },
+            one_year_tx: vec![],
+            thirty_day_tx: vec![],
         }
     };
 
@@ -767,6 +773,8 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
                 txs: vec![fresh_publish_tx.header.clone()],
                 proofs: Some(IngressProofsList(vec![edge_case_ingress_proof])),
             },
+            one_year_tx: vec![],
+            thirty_day_tx: vec![],
         };
     }
 

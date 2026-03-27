@@ -5,6 +5,7 @@ use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
 use eyre::eyre;
 use irys_database::{db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid};
+use irys_domain::HardforkConfigExt as _;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
@@ -28,12 +29,26 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
-        // Fast-fail if this tx targets an unsupported term ledger
-        match DataLedger::try_from(tx.ledger_id) {
-            Ok(DataLedger::Publish | DataLedger::Submit) => {
-                // Valid ledgers - continue
+        // Fast-fail if this tx targets an unsupported ledger
+        let ledger = DataLedger::try_from(tx.ledger_id)
+            .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;
+        if !ledger.is_user_targetable() {
+            return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+        }
+        if matches!(ledger, DataLedger::OneYear | DataLedger::ThirtyDay) {
+            // Valid only when Cascade hardfork is active (epoch-aligned activation)
+            let cascade_active = {
+                let tree = self.block_tree_read_guard.read();
+                let epoch_snapshot = tree.canonical_epoch_snapshot();
+                self.config
+                    .node_config
+                    .consensus_config()
+                    .hardforks
+                    .is_cascade_active_for_epoch(&epoch_snapshot)
+            };
+            if !cascade_active {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
-            _ => return Err(TxIngressError::InvalidLedger(tx.ledger_id)),
         }
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
@@ -144,9 +159,24 @@ impl Inner {
             DataLedger::Publish => {
                 // Gossip path: skip API-only checks here
             }
-            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
-                // Term ledgers and direct Submit targeting are not yet supported
-                return Err(TxIngressError::InvalidLedger(ledger as u32));
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                // Term ledgers: validate perm_fee rejection and fee structure
+                // (skip EMA pricing check since gossip may come from different fork)
+                if tx.perm_fee.is_some() {
+                    return Err(TxIngressError::FundMisalignment(
+                        "Term-only ledger transactions must not have a perm_fee".to_string(),
+                    ));
+                }
+                irys_types::transaction::fee_distribution::TermFeeCharges::new(
+                    tx.term_fee,
+                    &self.config.consensus,
+                )
+                .map_err(|e| {
+                    TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e))
+                })?;
+            }
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
         }
 
@@ -192,9 +222,24 @@ impl Inner {
                 // Publish ledger - permanent storage
                 self.validate_fee_structure_api_only(&tx)?;
             }
-            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
-                // Term ledgers and direct Submit targeting are not yet supported
-                return Err(TxIngressError::InvalidLedger(ledger as u32));
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                // Term-only ledgers must not carry a perm_fee
+                if tx.perm_fee.is_some() {
+                    return Err(TxIngressError::FundMisalignment(
+                        "Term-only ledger transactions must not have a perm_fee".to_string(),
+                    ));
+                }
+                // Validate term fee structure only
+                TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
+                    .map_err(|e| {
+                        TxIngressError::FundMisalignment(format!(
+                            "Invalid term fee structure: {}",
+                            e
+                        ))
+                    })?;
+            }
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
         }
 
@@ -280,22 +325,56 @@ impl Inner {
 
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
         let next_block_height = latest_height + 1;
+
+        let ledger = DataLedger::try_from(tx.ledger_id)
+            .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;
+
+        let cascade = self.config.consensus.hardforks.cascade.as_ref();
+        let epoch_length = match ledger {
+            DataLedger::Publish => self.config.consensus.epoch.submit_ledger_epoch_length,
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
+            DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).ok_or_else(|| {
+                TxIngressError::FundMisalignment(
+                    "Cascade hardfork not configured for OneYear ledger".to_string(),
+                )
+            })?,
+            DataLedger::ThirtyDay => {
+                cascade.map(|c| c.thirty_day_epoch_length).ok_or_else(|| {
+                    TxIngressError::FundMisalignment(
+                        "Cascade hardfork not configured for ThirtyDay ledger".to_string(),
+                    )
+                })?
+            }
+        };
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
             next_block_height,
             self.config.consensus.epoch.num_blocks_in_epoch,
-            self.config.consensus.epoch.submit_ledger_epoch_length,
+            epoch_length,
         );
 
-        // Use latest block's timestamp for hardfork params
-        let number_of_ingress_proofs_total = self
-            .config
-            .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
+        // Publish uses the full ingress proof replica count (part of perm pipeline).
+        // OneYear/ThirtyDay use the independently configurable term ledger partition count.
+        // Submit is already rejected above.
+        let replica_count = match ledger {
+            DataLedger::Publish => self
+                .config
+                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                self.config.consensus.num_partitions_per_term_ledger_slot
+            }
+            DataLedger::Submit => {
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
+        };
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
             epochs_for_storage,
             &self.config.consensus,
-            number_of_ingress_proofs_total,
+            replica_count,
             pricing_ema,
+            latest_block_timestamp_secs,
         )
         .map_err(|e| {
             TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
@@ -326,9 +405,10 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
-                number_of_ingress_proofs_total,
+                replica_count,
                 pricing_ema,
                 expected_term_fee,
+                latest_block_timestamp_secs,
             )
             .map_err(|e| {
                 TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))

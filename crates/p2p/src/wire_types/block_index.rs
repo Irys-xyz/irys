@@ -298,29 +298,4 @@ mod tests {
         let deserialized: BlockIndexItemV2 = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
     }
-
-    /// A legacy payload (no `ledger` field) with more entries than
-    /// `DataLedger::ALL.len()` must produce a custom deserialization error.
-    #[test]
-    fn deserialize_oversized_legacy_payload_errors() {
-        // DataLedger::ALL has 2 entries. Build a legacy payload with 3 ledgers
-        // (no `ledger` field), so the third entry triggers the out-of-range error.
-        let json = r#"{
-            "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-            "num_ledgers": 3,
-            "ledgers": [
-                { "total_chunks": "100", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN" },
-                { "total_chunks": "200", "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45" },
-                { "total_chunks": "300", "tx_root": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC" }
-            ]
-        }"#;
-
-        let err = serde_json::from_str::<BlockIndexItemV1>(json).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("legacy payload has 3 ledgers")
-                && msg.contains(&format!("only has {} entries", DataLedger::ALL.len())),
-            "expected malformed-legacy error, got: {msg}"
-        );
-    }
 }

@@ -5120,6 +5120,7 @@ dependencies = [
  "irys-api-client",
  "irys-api-server",
  "irys-chain",
+ "irys-config",
  "irys-database",
  "irys-domain",
  "irys-macros-diag-slow",

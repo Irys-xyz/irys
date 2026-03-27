@@ -1,5 +1,9 @@
 mod anchor_canonical_reorg;
 mod blobs_rejected;
+mod cascade_block_rejection;
+mod cascade_ledger_shape;
+mod cascade_term_balance;
+mod cascade_term_expiry;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;
 mod ingress_proof_validation;
@@ -114,6 +118,8 @@ async fn block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![invalid_stake.clone()],
                 commitment_txs_to_bill: vec![invalid_stake],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -212,6 +218,8 @@ async fn block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![invalid_pledge.clone()],
                 commitment_txs_to_bill: vec![invalid_pledge],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -309,6 +317,8 @@ async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: commitments.clone(),
                 commitment_txs_to_bill: commitments,
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -428,6 +438,8 @@ async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<
                 commitment_txs: commitments.clone(),
                 commitment_txs_to_bill: commitments,
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -587,6 +599,8 @@ async fn block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![self.wrong_commitment.clone()],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -847,6 +861,8 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(proofs),
@@ -1048,6 +1064,8 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -1211,6 +1229,8 @@ async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() ->
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.publish_tx.clone()],
                     proofs: None,

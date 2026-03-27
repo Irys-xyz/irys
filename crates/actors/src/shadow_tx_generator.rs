@@ -39,6 +39,8 @@ pub struct ShadowTxGenerator<'a> {
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
+    one_year_txs: &'a [DataTransactionHeader],
+    thirty_day_txs: &'a [DataTransactionHeader],
 
     // Iterator state
     treasury_balance: U256,
@@ -93,6 +95,24 @@ impl Iterator for ShadowTxGenerator<'_> {
                         return Some(result);
                     }
                     // Move to next phase
+                    self.phase = Phase::TermLedger;
+                    self.index = 0;
+                }
+
+                Phase::TermLedger => {
+                    // Process OneYear txs first, then ThirtyDay txs
+                    let combined_len = self.one_year_txs.len() + self.thirty_day_txs.len();
+                    if self.index < combined_len {
+                        let tx = if self.index < self.one_year_txs.len() {
+                            &self.one_year_txs[self.index]
+                        } else {
+                            &self.thirty_day_txs[self.index - self.one_year_txs.len()]
+                        };
+                        let result = self.try_process_term_only(tx);
+                        self.index += 1;
+                        return Some(result);
+                    }
+                    // Move to next phase
                     self.phase = Phase::ExpiredLedgerFees;
                     self.index = 0;
                 }
@@ -140,6 +160,8 @@ impl<'a> ShadowTxGenerator<'a> {
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
+        one_year_txs: &'a [DataTransactionHeader],
+        thirty_day_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
@@ -177,6 +199,8 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            one_year_txs,
+            thirty_day_txs,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -239,6 +263,8 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            one_year_txs,
+            thirty_day_txs,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -558,6 +584,24 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(shadow_metadata)
     }
 
+    /// Process a term-only ledger transaction (OneYear/ThirtyDay).
+    /// These have term_fee only (no perm_fee), so no PublishFeeCharges needed.
+    #[tracing::instrument(skip_all, err)]
+    fn try_process_term_only(&mut self, tx: &DataTransactionHeader) -> Result<ShadowMetadata> {
+        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
+
+        // Reuse the same shadow tx creation — perm_fee is None for term-only txs
+        let shadow_metadata = self.create_submit_shadow_tx(tx, &term_charges)?;
+
+        // Update treasury with term fee (no perm_fee for term-only txs)
+        self.treasury_balance = self
+            .treasury_balance
+            .checked_add(term_charges.term_fee_treasury)
+            .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
+
+        Ok(shadow_metadata)
+    }
+
     /// Process a commitment transaction at a specific index
     #[tracing::instrument(skip_all, err)]
     fn try_process_commitment_at_index(&mut self, index: usize) -> Result<ShadowMetadata> {
@@ -734,6 +778,7 @@ enum Phase {
     Header,
     Commitments,
     SubmitLedger,
+    TermLedger,
     ExpiredLedgerFees,
     PublishLedger,
     CommitmentRefunds,
@@ -929,6 +974,8 @@ mod tests {
             &config,
             &[],
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1062,6 +1109,8 @@ mod tests {
             &config,
             &commitments,
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1146,6 +1195,8 @@ mod tests {
             &config,
             &[],
             &submit_txs,
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1375,6 +1426,8 @@ mod tests {
             &config,
             &[],
             &submit_txs,
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1470,6 +1523,8 @@ mod tests {
             &parent_block,
             &solution_hash,
             &config,
+            &[],
+            &[],
             &[],
             &[],
             &publish_ledger,
@@ -1575,6 +1630,8 @@ mod tests {
             &config,
             &[],
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &expired_fees,
@@ -1638,6 +1695,8 @@ mod tests {
             &parent_block,
             &solution_hash,
             &config,
+            &[],
+            &[],
             &[],
             &[],
             &publish_ledger,

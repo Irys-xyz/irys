@@ -22,6 +22,7 @@ irys-actors = { workspace = true, features = ["test-utils"] }
 irys-api-client.workspace = true
 irys-api-server.workspace = true
 irys-chain.workspace = true
+irys-config.workspace = true
 irys-database.workspace = true
 irys-domain.workspace = true
 irys-macros-diag-slow.workspace = true
