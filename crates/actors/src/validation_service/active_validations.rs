@@ -19,11 +19,8 @@ use priority_queue::PriorityQueue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::{
-    sync::Notify,
-    task::{JoinHandle, JoinSet},
-};
-use tracing::{Instrument as _, debug, error, info, instrument, warn};
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{Instrument as _, debug, info, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
 use crate::validation_service::VdfValidationResult;
@@ -89,7 +86,6 @@ pub(super) struct ConcurrentValidationResult {
 pub(super) struct PreemptibleVdfTask {
     pub task: BlockValidationTask,
     pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
-    vdf_notify: Arc<Notify>,
 }
 
 impl PreemptibleVdfTask {
@@ -115,44 +111,45 @@ impl PreemptibleVdfTask {
             }
         };
 
-        // Notify the main loop that VDF task completed so it can poll the result
-        self.vdf_notify.notify_one();
-
         (result, self.task)
     }
 }
 
-/// Currently running VDF task
-pub(super) struct CurrentVdfTask {
+/// Currently running VDF task with its JoinHandle.
+pub(super) struct RunningVdfTask {
     pub hash: BlockHash,
     pub priority: BlockPriorityMeta,
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
-    pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
     pub sealed_block: Arc<SealedBlock>,
+    pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
 }
 
-/// Simplified VDF scheduler with preemption
+/// VDF scheduler with preemption. At most one VDF task runs at a time.
+/// The running task's handle is awaited directly in the main select loop.
 pub(super) struct VdfScheduler {
-    /// Currently running VDF task
-    pub current: Option<CurrentVdfTask>,
+    /// Currently running VDF task (at most one).
+    pub current: Option<RunningVdfTask>,
 
-    /// Pending VDF tasks
+    /// Pending VDF tasks ordered by priority.
     pub pending: PriorityQueue<BlockValidationTask, BlockPriorityMeta>,
-
-    /// VDF task completion notifier
-    vdf_notify: Arc<Notify>,
-
-    /// Tokio runtime handle for spawning tasks
-    runtime_handle: tokio::runtime::Handle,
 }
 
 impl VdfScheduler {
-    pub(super) fn new(vdf_notify: Arc<Notify>, runtime_handle: tokio::runtime::Handle) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
-            vdf_notify,
-            runtime_handle,
+        }
+    }
+
+    /// Await the current VDF task's completion. Returns `pending` if no task is running,
+    /// which naturally disables this branch in `tokio::select!`.
+    pub(super) async fn recv_vdf_result(
+        &mut self,
+    ) -> Result<(BlockHash, VdfValidationResult, BlockValidationTask), tokio::task::JoinError> {
+        match self.current.as_mut() {
+            Some(task) => (&mut task.handle).await,
+            None => std::future::pending().await,
         }
     }
 
@@ -178,8 +175,11 @@ impl VdfScheduler {
         // Check if we should preempt current task
         self.check_preemption();
 
-        // Notify the main loop to process the task
-        self.vdf_notify.notify_one();
+        // If nothing running, start immediately
+        debug_assert!(
+            self.start_next(),
+            "VDF scheduler must be processing work after submit (either already running or just started)"
+        );
     }
 
     /// Check if current task should be preempted by higher priority pending task
@@ -200,72 +200,44 @@ impl VdfScheduler {
         }
     }
 
-    /// Start next VDF task if none running
+    /// Start next VDF task if none running.
+    /// Returns `true` if a VDF task is active (either already running or just started).
     #[instrument(skip_all)]
-    pub(super) fn start_next(&mut self) -> Option<()> {
+    pub(super) fn start_next(&mut self) -> bool {
         if self.current.is_some() {
-            return None; // Already running
+            return true; // Already running
         }
 
-        let (task, priority) = self.pending.pop()?;
+        let Some((task, priority)) = self.pending.pop() else {
+            return false; // Nothing to run
+        };
         let hash = task.sealed_block.header().block_hash;
 
         // Create AtomicU8 for cancellation
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let cancel_signal = Arc::clone(&cancel_u8);
         let sealed_block = Arc::clone(&task.sealed_block);
-        let preemptible = PreemptibleVdfTask {
-            task,
-            cancel_u8: Arc::clone(&cancel_u8),
-            vdf_notify: Arc::clone(&self.vdf_notify),
-        };
-        let handle = self.runtime_handle.spawn(
-            preemptible
-                .execute()
-                .instrument(tracing::info_span!(
-                    "vdf_validation",
-                    block.hash = %hash,
-                    block.priority = ?priority
-                ))
-                .in_current_span(),
+
+        let handle = tokio::spawn(
+            async move {
+                let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
+                (hash, result, task)
+            }
+            .instrument(tracing::info_span!(
+                "vdf_validation",
+                block.hash = %hash,
+                block.priority = ?priority
+            )),
         );
-        self.current = Some(CurrentVdfTask {
+
+        self.current = Some(RunningVdfTask {
             hash,
             priority,
+            cancel_signal,
             sealed_block,
-            cancel_signal: cancel_u8,
             handle,
         });
-        Some(())
-    }
-
-    /// Poll current VDF task
-    #[instrument(skip_all)]
-    pub(super) async fn poll_current(
-        &mut self,
-    ) -> Option<(BlockHash, VdfValidationResult, BlockValidationTask)> {
-        let mut current = self.current.take()?;
-
-        // Use poll_immediate to check without blocking
-        let poll_result = futures::future::poll_immediate(&mut current.handle).await;
-
-        match poll_result {
-            Some(Ok((result, task))) => {
-                // Task completed - no need to notify here since task already did
-                Some((current.hash, result, task))
-            }
-            Some(Err(e)) => {
-                error!("VDF task panicked: {}", e);
-                // We lost the task on panic, cannot continue
-                // Notify to ensure we can start the next task
-                self.vdf_notify.notify_one();
-                None
-            }
-            None => {
-                // Still running, put it back
-                self.current = Some(current);
-                None
-            }
-        }
+        true
     }
 }
 
@@ -285,13 +257,9 @@ pub(super) struct ValidationCoordinator {
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(
-        block_tree_guard: BlockTreeReadGuard,
-        vdf_notify: Arc<Notify>,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> Self {
+    pub(super) fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
         Self {
-            vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify), runtime_handle),
+            vdf_scheduler: VdfScheduler::new(),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
             block_tree_guard,
@@ -346,52 +314,27 @@ impl ValidationCoordinator {
         self.vdf_scheduler.submit(task, priority);
     }
 
-    /// Process VDF completion
-    #[instrument(skip_all)]
-    pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
-        // Poll current VDF task
-        if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-            match &result {
-                VdfValidationResult::Valid => {
-                    let block_hash = task.sealed_block.header().block_hash;
+    /// Spawn a VDF-validated block into the concurrent validation JoinSet.
+    pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
+        let block_hash = task.sealed_block.header().block_hash;
 
-                    let abort_handle = self.concurrent_tasks.spawn(
-                        async move {
-                            let validation_result = task.execute_concurrent().await;
+        let abort_handle = self.concurrent_tasks.spawn(
+            async move {
+                let validation_result = task.execute_concurrent().await;
 
-                            ConcurrentValidationResult {
-                                block_hash,
-                                validation_result,
-                            }
-                        }
-                        .instrument(tracing::error_span!(
-                            "concurrent_validation",
-                            block.hash = %block_hash
-                        ))
-                        .in_current_span(),
-                    );
-                    self.concurrent_task_blocks
-                        .insert(abort_handle.id(), block_hash);
-                }
-                VdfValidationResult::Cancelled => {
-                    // Re-queue the cancelled task with recalculated priority
-                    let priority = self.calculate_priority(task.sealed_block.header());
-                    self.vdf_scheduler.pending.push(task, priority);
-                }
-                VdfValidationResult::Invalid(error) => {
-                    tracing::error!(block.hash =? hash, "invalid vdf {error}");
-                    // Invalid tasks are not re-queued
+                ConcurrentValidationResult {
+                    block_hash,
+                    validation_result,
                 }
             }
-
-            // Start next VDF task
-            self.vdf_scheduler.start_next();
-            return Some((hash, result));
-        }
-
-        // Try to start a VDF task if none running
-        self.vdf_scheduler.start_next();
-        None
+            .instrument(tracing::error_span!(
+                "concurrent_validation",
+                block.hash = %block_hash
+            ))
+            .in_current_span(),
+        );
+        self.concurrent_task_blocks
+            .insert(abort_handle.id(), block_hash);
     }
 
     /// Reevaluate all priorities after reorg
@@ -404,6 +347,11 @@ impl ValidationCoordinator {
 
         // Reevaluate pending VDF tasks
         self.reevaluate_pending_vdf();
+
+        // Defensive: ensure a pending task starts if nothing is running.
+        // Maintains the invariant even if future code paths add to pending
+        // without calling start_next().
+        self.vdf_scheduler.start_next();
     }
 
     /// Reevaluate and potentially preempt current VDF task
@@ -674,12 +622,7 @@ mod tests {
     async fn test_priority_calculation_after_fork_becomes_canonical() {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let vdf_notify = Arc::new(Notify::new());
-        let coordinator = ValidationCoordinator::new(
-            block_tree_guard.clone(),
-            vdf_notify,
-            tokio::runtime::Handle::current(),
-        );
+        let coordinator = ValidationCoordinator::new(block_tree_guard.clone());
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
@@ -841,5 +784,405 @@ mod tests {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // Tests for the JoinHandle-based VDF signaling (replacing Notify)
+    // =========================================================================
+
+    /// Helper to create a RunningVdfTask with a never-completing handle.
+    /// Used for testing scheduler state without real VDF execution.
+    fn make_running_vdf_task(
+        priority: BlockPriorityMeta,
+    ) -> (RunningVdfTask, Arc<std::sync::atomic::AtomicU8>) {
+        let cancel = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = priority.height;
+        header.vdf_limiter_info.steps =
+            H256List(vec![Default::default(); priority.vdf_step_count as usize]);
+        header.test_sign();
+        let hash = header.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                header,
+                BlockBody {
+                    block_hash: hash,
+                    ..Default::default()
+                },
+            )
+            .expect("sealing block"),
+        );
+        let task = RunningVdfTask {
+            hash,
+            priority,
+            cancel_signal: Arc::clone(&cancel),
+            sealed_block: sealed,
+            handle: tokio::spawn(std::future::pending()),
+        };
+        (task, cancel)
+    }
+
+    /// Verifies that `&mut JoinHandle` resolves directly in `tokio::select!` when the
+    /// spawned task completes — no external signaling mechanism (like Notify) needed.
+    #[tokio::test]
+    async fn test_handle_resolves_directly_in_select() {
+        let expected = 42_u64;
+        let mut handle = tokio::spawn(async move { expected });
+
+        let result = tokio::select! {
+            r = &mut handle => r.unwrap(),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                panic!("Handle did not resolve — select was not woken");
+            }
+        };
+
+        assert_eq!(result, expected);
+    }
+
+    /// Verifies that a panicking spawned task produces a JoinError through the handle,
+    /// which is how VDF task panics are caught and reported to the block tree.
+    #[tokio::test]
+    async fn test_handle_panic_yields_join_error() {
+        let mut handle: tokio::task::JoinHandle<u64> = tokio::spawn(async {
+            panic!("simulated VDF panic");
+        });
+
+        let result = tokio::select! {
+            r = &mut handle => r,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                panic!("Handle did not resolve after panic");
+            }
+        };
+
+        assert!(result.is_err(), "Panicked task should produce JoinError");
+        assert!(
+            result.unwrap_err().is_panic(),
+            "Error should be a panic, not cancellation"
+        );
+    }
+
+    /// Verifies that recv_vdf_result() pends forever when no VDF task is running,
+    /// allowing other select branches to fire.
+    #[tokio::test]
+    async fn test_select_skips_vdf_branch_when_no_task() {
+        let mut scheduler = VdfScheduler::new();
+        assert!(scheduler.current.is_none());
+
+        // recv_vdf_result returns pending() when current is None,
+        // so the timer branch fires instead.
+        let which_branch = tokio::select! {
+            _r = scheduler.recv_vdf_result() => "handle",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => "timer",
+        };
+
+        assert_eq!(
+            which_branch, "timer",
+            "recv_vdf_result should pend when no task is running"
+        );
+    }
+
+    /// Verifies that the cancel signal (AtomicU8) propagates correctly from the
+    /// scheduler to a running task, causing it to return VdfValidationResult::Cancelled.
+    /// This is the mechanism behind preemption: check_preemption sets the signal,
+    /// the task detects it and returns Cancelled, and the select handler requeues it.
+    #[tokio::test]
+    async fn test_cancel_signal_produces_cancelled_result() {
+        let cancel = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let cancel_reader = Arc::clone(&cancel);
+
+        // Simulate a VDF task that checks the cancel signal
+        let mut handle = tokio::spawn(async move {
+            for _ in 0..1000 {
+                if cancel_reader.load(std::sync::atomic::Ordering::Relaxed)
+                    == CancelEnum::Cancelled as u8
+                {
+                    return VdfValidationResult::Cancelled;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            VdfValidationResult::Valid
+        });
+
+        // Set cancel signal (simulates check_preemption)
+        cancel.store(
+            CancelEnum::Cancelled as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        let result = tokio::select! {
+            r = &mut handle => r.unwrap(),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                panic!("Task did not respond to cancel signal within timeout");
+            }
+        };
+
+        assert!(
+            matches!(result, VdfValidationResult::Cancelled),
+            "Task should detect cancel signal and return Cancelled"
+        );
+    }
+
+    /// Verifies that start_next() is a no-op when a VDF task is already running.
+    /// This enforces the single-task invariant: at most one VDF task at a time.
+    #[tokio::test]
+    async fn test_start_next_preserves_running_task() {
+        let mut scheduler = VdfScheduler::new();
+        let priority = BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::Canonical,
+            vdf_step_count: 1,
+        };
+        let (running_task, _cancel) = make_running_vdf_task(priority);
+        let original_hash = running_task.hash;
+        scheduler.current = Some(running_task);
+
+        // start_next should be a no-op since a task is already running
+        scheduler.start_next();
+
+        assert!(
+            scheduler.current.is_some(),
+            "Current task should still be present"
+        );
+        assert_eq!(
+            scheduler.current.as_ref().unwrap().hash,
+            original_hash,
+            "Current task should be the same one (not replaced)"
+        );
+    }
+
+    /// Verifies that start_next() does nothing when the pending queue is empty.
+    #[test]
+    fn test_start_next_noop_when_pending_empty() {
+        // Note: safe to call outside a tokio runtime because start_next returns
+        // before reaching tokio::spawn when pending is empty.
+        let mut scheduler = VdfScheduler::new();
+
+        scheduler.start_next();
+
+        assert!(
+            scheduler.current.is_none(),
+            "No task should start with empty pending"
+        );
+    }
+
+    /// Verifies that sequential handle awaits work correctly, simulating the
+    /// "complete one task, start next" pattern used in the validation service.
+    #[tokio::test]
+    async fn test_sequential_handle_processing() {
+        let hashes: Vec<BlockHash> = (0..3).map(|_| BlockHash::random()).collect();
+
+        for (i, &expected_hash) in hashes.iter().enumerate() {
+            let mut handle = tokio::spawn(async move { expected_hash });
+
+            let result = tokio::select! {
+                r = &mut handle => r.unwrap(),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("Handle {} did not resolve within timeout", i);
+                }
+            };
+
+            assert_eq!(
+                result, expected_hash,
+                "Task {} should return its expected hash",
+                i
+            );
+        }
+    }
+
+    /// Tests that reevaluate_priorities() updates the running VDF task's priority
+    /// when the block tree changes after a reorg.
+    /// Setup: Canonical chain (0-3), extension block at height 4 set as current VDF task.
+    /// Action: Fork from height 2 becomes canonical (heights 3-6).
+    /// Expected: Current VDF task's priority changes from CanonicalExtension to Fork.
+    #[tokio::test]
+    async fn test_reevaluate_priorities_updates_running_task_priority() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
+        let mut coordinator = ValidationCoordinator::new(block_tree_guard.clone());
+
+        // Add an extension block at height 4 (extends canonical tip)
+        let (ext_header, ext_sealed) = {
+            let mut tree = block_tree_guard.write();
+            let (canonical_chain, _) = tree.get_canonical_chain();
+            let tip = canonical_chain.last().unwrap();
+
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = 4;
+            header.previous_block_hash = tip.block_hash();
+            header.cumulative_diff = 4.into();
+            header.test_sign();
+
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            );
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::NotOnchain(BlockState::ValidationScheduled),
+            )
+            .unwrap();
+
+            (header, sealed)
+        };
+
+        // Verify initial priority is CanonicalExtension
+        let initial_priority = coordinator.calculate_priority(&ext_header);
+        assert_eq!(initial_priority.state, BlockPriority::CanonicalExtension);
+
+        // Set the extension block as the current VDF task
+        let cancel = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        coordinator.vdf_scheduler.current = Some(RunningVdfTask {
+            hash: ext_header.block_hash,
+            priority: initial_priority,
+            cancel_signal: cancel,
+            sealed_block: ext_sealed,
+            handle: tokio::spawn(std::future::pending()),
+        });
+
+        // Create a fork from height 2 that becomes the new canonical chain
+        {
+            let mut tree = block_tree_guard.write();
+            let (canonical_chain, _) = tree.get_canonical_chain();
+            let fork_parent = canonical_chain.iter().find(|e| e.height() == 2).unwrap();
+
+            let mut last_hash = fork_parent.block_hash();
+            for height in 3..=6 {
+                let mut header = IrysBlockHeader::new_mock_header();
+                header.height = height;
+                header.previous_block_hash = last_hash;
+                header.cumulative_diff = (height * 10).into();
+                header.test_sign();
+                last_hash = header.block_hash;
+
+                let sealed = Arc::new(
+                    SealedBlock::new(
+                        header.clone(),
+                        BlockBody {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("sealing block"),
+                );
+                tree.add_common(
+                    header.block_hash,
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                    ChainState::NotOnchain(BlockState::ValidationScheduled),
+                )
+                .unwrap();
+
+                tree.mark_block_as_valid(&header.block_hash).unwrap();
+                tree.mark_tip(&header.block_hash).unwrap();
+            }
+        }
+
+        // Confirm the priority has changed in the block tree
+        let new_priority = coordinator.calculate_priority(&ext_header);
+        assert_eq!(new_priority.state, BlockPriority::Fork);
+
+        // Reevaluate priorities (this is called after reorg events in the service)
+        coordinator.reevaluate_priorities();
+
+        // Verify the running task's priority was updated
+        let current = coordinator
+            .vdf_scheduler
+            .current
+            .as_ref()
+            .expect("current task should still exist");
+        assert_eq!(
+            current.priority.state,
+            BlockPriority::Fork,
+            "Running task priority should update from CanonicalExtension to Fork after reorg"
+        );
+    }
+
+    /// Tests that reevaluate_priorities() correctly handles the case where the
+    /// running VDF task's priority doesn't change after a reorg.
+    #[tokio::test]
+    async fn test_reevaluate_priorities_noop_when_priority_unchanged() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
+        let mut coordinator = ValidationCoordinator::new(block_tree_guard.clone());
+
+        // Add an extension block and set as current
+        let ext_header = {
+            let mut tree = block_tree_guard.write();
+            let (canonical_chain, _) = tree.get_canonical_chain();
+            let tip = canonical_chain.last().unwrap();
+
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = 4;
+            header.previous_block_hash = tip.block_hash();
+            header.cumulative_diff = 4.into();
+            header.test_sign();
+
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            );
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::NotOnchain(BlockState::ValidationScheduled),
+            )
+            .unwrap();
+
+            header
+        };
+
+        let initial_priority = coordinator.calculate_priority(&ext_header);
+        assert_eq!(initial_priority.state, BlockPriority::CanonicalExtension);
+
+        let cancel = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let ext_hash = ext_header.block_hash;
+        coordinator.vdf_scheduler.current = Some(RunningVdfTask {
+            hash: ext_hash,
+            priority: initial_priority,
+            cancel_signal: Arc::clone(&cancel),
+            sealed_block: Arc::new(
+                SealedBlock::new(
+                    ext_header,
+                    BlockBody {
+                        block_hash: ext_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            ),
+            handle: tokio::spawn(std::future::pending()),
+        });
+
+        // Reevaluate without any tree changes
+        coordinator.reevaluate_priorities();
+
+        // Priority should remain unchanged
+        let current = coordinator.vdf_scheduler.current.as_ref().unwrap();
+        assert_eq!(current.priority.state, BlockPriority::CanonicalExtension);
+        // Cancel signal should NOT be set (no preemption)
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "Cancel signal should not be set when priority is unchanged"
+        );
     }
 }
