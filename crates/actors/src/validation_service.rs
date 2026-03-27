@@ -36,7 +36,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use tokio::{
-    sync::{Notify, broadcast, mpsc::UnboundedReceiver},
+    sync::{broadcast, mpsc::UnboundedReceiver},
     time::Duration,
 };
 use tracing::{Instrument as _, debug, error, info, warn};
@@ -69,8 +69,6 @@ pub struct ValidationService {
     msg_rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
-    /// VDF task completion notifier
-    vdf_notify: Arc<Notify>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -129,7 +127,6 @@ impl ValidationService {
         let reorg_rx = service_senders.subscribe_reorgs();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
-        let vdf_notify = Arc::new(Notify::new());
 
         let handle = runtime_handle.spawn(
             async move {
@@ -137,7 +134,6 @@ impl ValidationService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    vdf_notify: vdf_notify.clone(),
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.vdf.parallel_verification_thread_limit)
@@ -180,12 +176,8 @@ impl ValidationService {
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
-        // Use the improved implementation
-        let mut coordinator = active_validations::ValidationCoordinator::new(
-            self.inner.block_tree_guard.clone(),
-            Arc::clone(&self.vdf_notify),
-            tokio::runtime::Handle::current(),
-        );
+        let mut coordinator =
+            active_validations::ValidationCoordinator::new(self.inner.block_tree_guard.clone());
 
         // Create a timer for periodic pipeline logging
         let mut pipeline_log_interval = tokio::time::interval(Duration::from_secs(5));
@@ -242,12 +234,14 @@ impl ValidationService {
                     }
                 }
 
-                // Process VDF completions
-                _ = self.vdf_notify.notified() => {
-                    if let Some((hash, result)) = coordinator.process_vdf().await {
-                        match result {
+                // Process VDF task completion
+                result = coordinator.vdf_scheduler.recv_vdf_result() => {
+                    let current = coordinator.vdf_scheduler.current.take().unwrap();
+
+                    match result {
+                        Ok((hash, vdf_result, task)) => match vdf_result {
                             VdfValidationResult::Valid => {
-                                // Valid VDF - task continues to concurrent validation
+                                coordinator.spawn_concurrent(task);
                             }
                             VdfValidationResult::Invalid(vdf_error) => {
                                 error!(
@@ -255,11 +249,12 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
-                                // Send failure to block tree
                                 if let Err(e) = self.inner.service_senders.block_tree.send_traced(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
-                                        validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
+                                        validation_result: ValidationResult::Invalid(
+                                            ValidationError::VdfValidationFailed(vdf_error.to_string())
+                                        ),
                                     }
                                 ) {
                                     error!(
@@ -269,10 +264,37 @@ impl ValidationService {
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                // Cancelled tasks are re-queued internally, no action needed
+                                // Re-queue with recalculated priority
+                                let priority = coordinator.calculate_priority(task.sealed_block.header());
+                                coordinator.vdf_scheduler.pending.push(task, priority);
+                            }
+                        }
+                        Err(join_error) => {
+                            error!(
+                                block.hash = %current.hash,
+                                custom.error = %join_error,
+                                "VDF validation task panicked"
+                            );
+                            if let Err(e) = self.inner.service_senders.block_tree.send_traced(
+                                crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                    block_hash: current.hash,
+                                    validation_result: ValidationResult::Invalid(
+                                        ValidationError::TaskPanicked {
+                                            task: "vdf_validation".to_string(),
+                                            details: join_error.to_string(),
+                                        },
+                                    ),
+                                }
+                            ) {
+                                error!(
+                                    custom.error = ?e,
+                                    "Failed to send VDF panic result to block tree service"
+                                );
                             }
                         }
                     }
+                    // Start next pending VDF task
+                    coordinator.vdf_scheduler.start_next();
                 }
 
                 // Process concurrent task completions (only if there are tasks)
@@ -342,9 +364,6 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
-
-                    // TODO: this notify_one() is a quick and dirty fix for an issue this system has with it's usage of notify that we haven't been able to figure out (it causes stalls in the VDF validation)
-                    self.vdf_notify.notify_one();
 
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
