@@ -3,6 +3,7 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use irys_actors::tx_selector::TxSelectorError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     mempool_service::TxIngressError, reth_ethereum_primitives,
@@ -1215,7 +1216,7 @@ async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<irys_actors::block_producer::MempoolTxsBundle, TxSelectorError> {
             // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],

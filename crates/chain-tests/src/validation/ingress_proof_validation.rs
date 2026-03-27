@@ -38,7 +38,10 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
