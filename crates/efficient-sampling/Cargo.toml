@@ -12,6 +12,11 @@ tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "sampling_bench"
+harness = false

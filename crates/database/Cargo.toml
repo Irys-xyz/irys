@@ -30,6 +30,19 @@ strum.workspace = true
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rand.workspace = true
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "chunk_cache_bench"
+harness = false
+
+[[bench]]
+name = "block_index_bench"
+harness = false
+
+[[bench]]
+name = "ingress_proof_bench"
+harness = false

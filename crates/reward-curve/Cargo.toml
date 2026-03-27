@@ -25,6 +25,11 @@ csv = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "reward_bench"
+harness = false
