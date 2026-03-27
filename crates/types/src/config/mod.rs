@@ -17,6 +17,11 @@ pub struct Config(Arc<CombinedConfigInner>);
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
         let consensus = node_config.consensus_config();
+        let irys_signer = IrysSigner::new(
+            node_config.mining_key.clone(), // clone: moving into cached signer while NodeConfig retains ownership
+            consensus.chain_id,
+            consensus.chunk_size,
+        );
 
         Self(Arc::new(CombinedConfigInner {
             consensus,
@@ -24,6 +29,7 @@ impl Config {
             vdf: node_config.vdf(),
             node_config,
             peer_id,
+            irys_signer,
         }))
     }
 
@@ -49,16 +55,12 @@ impl Config {
             vdf: inner.vdf.clone(),
             mempool: inner.mempool.clone(),
             peer_id: inner.peer_id,
+            irys_signer: inner.irys_signer.clone(), // clone: propagating cached signer into new Arc
         }))
     }
 
-    pub fn irys_signer(&self) -> IrysSigner {
-        // TODO: store the IrysSigner somewhere so we don't have to clone it all the time (& also memoize the address)
-        IrysSigner {
-            signer: self.node_config.mining_key.clone(),
-            chain_id: self.consensus.chain_id,
-            chunk_size: self.consensus.chunk_size,
-        }
+    pub fn irys_signer(&self) -> &IrysSigner {
+        &self.0.irys_signer
     }
 
     /// Get the number of ingress proofs required at a given timestamp (in seconds).
@@ -182,6 +184,7 @@ pub struct CombinedConfigInner {
     pub vdf: VdfConfig,
     pub mempool: MempoolConfig,
     pub peer_id: IrysPeerId,
+    pub irys_signer: IrysSigner,
 }
 
 impl From<&NodeConfig> for VdfConfig {

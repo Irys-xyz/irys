@@ -807,7 +807,8 @@ pub trait BlockProdStrategy {
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
-        let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
+        let local_signer =
+            LocalSigner::from_signing_key(self.inner().config.irys_signer().signing_key().clone()); // clone: need owned SigningKey for LocalSigner; block production path, not hot loop
 
         // Get treasury balance from previous block
         let initial_treasury_balance = prev_block_header.treasury;

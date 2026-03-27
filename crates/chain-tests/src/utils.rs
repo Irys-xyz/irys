@@ -640,7 +640,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         let mut peer_config = node_config.clone();
-        peer_config.mining_key = peer_signer.signer.clone();
+        peer_config.mining_key = peer_signer.signing_key().clone(); // clone: peer_signer still needed for address
         peer_config.reward_address = peer_signer.address();
 
         // Set peer mode and expected genesis hash via consensus config

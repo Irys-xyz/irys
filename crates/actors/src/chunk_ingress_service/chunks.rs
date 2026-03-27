@@ -774,7 +774,7 @@ pub fn generate_ingress_proof(
     data_root: DataRoot,
     size: u64,
     chunk_size: u64,
-    signer: IrysSigner,
+    signer: &IrysSigner,
     chain_id: ChainId,
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
@@ -838,7 +838,7 @@ pub fn generate_ingress_proof(
 
         // generate the ingress proof hash
         let proof = irys_types::ingress::generate_ingress_proof(
-            &signer, data_root, iter, chain_id, anchor,
+            signer, data_root, iter, chain_id, anchor,
         )?;
 
         Ok((proof, total_data_size, chunk_count))
@@ -851,7 +851,7 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
-    db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, signer))??;
 
     Ok(proof)
 }
