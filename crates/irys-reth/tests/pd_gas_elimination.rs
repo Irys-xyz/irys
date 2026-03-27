@@ -99,8 +99,8 @@ fn chunk_data_index(num_chunks: u64) -> irys_types::chunk_provider::ChunkDataInd
 }
 
 fn test_factory(num_chunks: u64) -> IrysEvmFactory {
-    use irys_types::chunk_provider::ChunkConfig;
     use irys_types::ConsensusConfig;
+    use irys_types::chunk_provider::ChunkConfig;
 
     let consensus = ConsensusConfig::testing();
     let hardfork_config = Arc::new(consensus.hardforks);
@@ -162,10 +162,7 @@ fn evm_env() -> EvmEnv {
         ..Default::default()
     };
 
-    EvmEnv {
-        cfg_env,
-        block_env,
-    }
+    EvmEnv { cfg_env, block_env }
 }
 
 fn build_access_list(num_chunks: u64) -> AccessList {
@@ -221,11 +218,7 @@ fn run_pd_read(num_chunks: u64) -> (bool, u64, usize) {
     let result = evm.transact_raw(pd_proxy_tx(num_chunks)).unwrap();
     let success = result.result.is_success();
     let gas_used = result.result.gas_used();
-    let output_len = result
-        .result
-        .into_output()
-        .map(|o| o.len())
-        .unwrap_or(0);
+    let output_len = result.result.into_output().map(|o| o.len()).unwrap_or(0);
     (success, gas_used, output_len)
 }
 
@@ -409,8 +402,8 @@ fn test_db_with_all_contracts(returner_size: u32) -> CacheDB<EmptyDB> {
 
 /// Non-PD 512 KB RETURNDATACOPY charges memory expansion gas.
 ///
-/// 512 KB = 16,384 words → expansion cost = 3 * 16384 + 16384² / 512
-///                                        = 49,152 + 524,288 = 573,440
+/// 512,000 bytes = 16,000 words → expansion cost = 3 * 16000 + 16000² / 512
+///                                               = 48,000 + 500,000 = 548,000
 #[test]
 fn non_pd_512kb_returndatacopy_includes_memory_expansion_gas() {
     let return_size: u32 = 512_000;
@@ -482,7 +475,7 @@ fn pd_vs_non_pd_512kb_gas_comparison() {
     assert!(result.result.is_success(), "Non-PD 512 KB should succeed");
     let gas_non_pd = result.result.gas_used();
 
-    // Non-PD includes ~573K memory expansion; PD does not.
+    // Non-PD includes ~548K memory expansion; PD does not.
     assert!(
         gas_non_pd > gas_pd * 3,
         "Non-PD ({gas_non_pd}) should be much higher than PD ({gas_pd})"
@@ -598,10 +591,12 @@ fn pd_copy_preserves_memory_high_water_mark() {
         delta < 2_000,
         "Extra MSTORE delta ({delta}) should be ~630-1260 — high-water mark preserved"
     );
-    // Also assert it's nonzero — expansion DID happen
+    // Also assert it's nonzero — expansion DID happen.
+    // MSTORE at offset 5,120,096 expands from 160,002 to 160,004 words (2 words).
+    // Incremental cost = cost(160004) - cost(160002) ≈ 1256, plus MSTORE(3) + PUSH(9) ≈ 1265.
     assert!(
-        delta > 100,
-        "Extra MSTORE delta ({delta}) should be > 100 — incremental expansion was charged"
+        delta > 500,
+        "Extra MSTORE delta ({delta}) should be > 500 — incremental expansion was charged"
     );
 }
 
@@ -652,10 +647,7 @@ fn pd_marker_does_not_leak_across_transactions() {
         authorization_list: Default::default(),
     };
     let res2 = evm2.transact_raw(tx2).unwrap();
-    assert!(
-        res2.result.is_success(),
-        "TX2 non-PD read should succeed"
-    );
+    assert!(res2.result.is_success(), "TX2 non-PD read should succeed");
     let gas_non_pd = res2.result.gas_used();
 
     let expansion = expected_memory_cost(num_words(return_size as usize));
@@ -797,12 +789,14 @@ fn nested_call_does_not_inherit_pd_exemption() {
     );
 }
 
-/// Two PD calls in one transaction both get the exemption.
+/// Two PD reads in separate transactions both get the exemption.
 ///
-/// Uses two separate EVM transactions through the proxy at different nonces,
-/// verifying each independently gets low gas.
+/// Uses two separate EVM instances (same thread) through the proxy,
+/// verifying each independently gets low gas. This tests that
+/// `PdReturnMarkerScope` correctly clears the marker between transactions
+/// without interfering with subsequent PD calls.
 #[test]
-fn two_pd_reads_same_evm_both_exempt() {
+fn two_pd_reads_separate_txs_both_exempt() {
     let num_chunks: u64 = 4; // 1 MB per read
     let factory = test_factory(num_chunks);
     let db = test_db_with_proxy();
@@ -830,5 +824,142 @@ fn two_pd_reads_same_evm_both_exempt() {
         res2.result.gas_used() < copy_gas + 600_000,
         "Read 2 gas ({}) should be low",
         res2.result.gas_used()
+    );
+}
+
+// ===========================================================================
+// Task 6c: Two PD STATICCALLs in one transaction both get exemption
+// ===========================================================================
+
+const DUAL_PROXY_ADDR: Address = Address::repeat_byte(0xDD);
+
+/// Runtime bytecode that STATICCALLs PD(0x500) twice and does
+/// RETURNDATACOPY after each. Both copies should be PD-exempt.
+///
+/// Flow:
+/// 1. CALLDATACOPY calldata to memory[0]
+/// 2. STATICCALL PD → RETURNDATACOPY to memory[0..rds]
+/// 3. Restore calldata (CALLDATACOPY to memory[0] again)
+/// 4. STATICCALL PD → RETURNDATACOPY to memory[rds..2*rds]
+/// 5. RETURN 32 bytes
+///
+/// The second RETURNDATACOPY uses RETURNDATASIZE as the dest offset,
+/// placing data immediately after the first copy region.
+const DUAL_PD_PROXY_RUNTIME: &[u8] = &[
+    // 1. CALLDATACOPY: memory[0..cds] = calldata
+    0x36, // CALLDATASIZE              PC=0
+    0x60, 0x00, // PUSH1 0    srcOffset      PC=1
+    0x60, 0x00, // PUSH1 0    destOffset     PC=3
+    0x37, // CALLDATACOPY              PC=5
+    // 2. STATICCALL 1: PD(0x500)(memory[0..cds])
+    0x60, 0x00, // PUSH1 0    retSize        PC=6
+    0x60, 0x00, // PUSH1 0    retOffset      PC=8
+    0x36, // CALLDATASIZE argsSize     PC=10
+    0x60, 0x00, // PUSH1 0    argsOffset     PC=11
+    0x61, 0x05, 0x00, // PUSH2 0x0500 address      PC=13
+    0x5A, // GAS                       PC=16
+    0xFA, // STATICCALL                PC=17
+    // 2b. Check success: revert if failed
+    0x15, // ISZERO                    PC=18
+    0x60, 60,   // PUSH1 60   revert_pc     PC=19
+    0x57, // JUMPI                     PC=21
+    // 3. RETURNDATACOPY 1: memory[0..rds] = returndata
+    0x3D, // RETURNDATASIZE            PC=22
+    0x60, 0x00, // PUSH1 0    srcOffset      PC=23
+    0x60, 0x00, // PUSH1 0    destOffset     PC=25
+    0x3E, // RETURNDATACOPY            PC=27
+    // 4. Restore calldata: memory[0..cds] = calldata
+    0x36, // CALLDATASIZE              PC=28
+    0x60, 0x00, // PUSH1 0    srcOffset      PC=29
+    0x60, 0x00, // PUSH1 0    destOffset     PC=31
+    0x37, // CALLDATACOPY              PC=33
+    // 5. STATICCALL 2: PD(0x500)(memory[0..cds])
+    0x60, 0x00, // PUSH1 0    retSize        PC=34
+    0x60, 0x00, // PUSH1 0    retOffset      PC=36
+    0x36, // CALLDATASIZE argsSize     PC=38
+    0x60, 0x00, // PUSH1 0    argsOffset     PC=39
+    0x61, 0x05, 0x00, // PUSH2 0x0500 address      PC=41
+    0x5A, // GAS                       PC=44
+    0xFA, // STATICCALL                PC=45
+    // 5b. Check success: revert if failed
+    0x15, // ISZERO                    PC=46
+    0x60, 60,   // PUSH1 60   revert_pc     PC=47
+    0x57, // JUMPI                     PC=49
+    // 6. RETURNDATACOPY 2: memory[rds..2*rds] = returndata
+    0x3D, // RETURNDATASIZE  (len)     PC=50
+    0x60, 0x00, // PUSH1 0    srcOffset      PC=51
+    0x3D, // RETURNDATASIZE  (destOff) PC=53
+    0x3E, // RETURNDATACOPY            PC=54
+    // 7. RETURN 32 bytes from offset 0
+    0x60, 0x20, // PUSH1 32                  PC=55
+    0x60, 0x00, // PUSH1 0                   PC=57
+    0xF3, // RETURN                    PC=59
+    // 8. Revert path
+    0x5B, // JUMPDEST                  PC=60
+    0x60, 0x00, // PUSH1 0                   PC=61
+    0x60, 0x00, // PUSH1 0                   PC=63
+    0xFD, // REVERT                    PC=65
+];
+
+/// Two PD STATICCALLs in a single transaction both get gas exemption.
+///
+/// A single contract calls PD(0x500) twice with RETURNDATACOPY after each.
+/// Both copies should skip memory expansion gas. This proves that the
+/// marker is correctly updated per-STATICCALL within a single transaction.
+#[test]
+fn two_pd_staticcalls_in_one_tx_both_exempt() {
+    let num_chunks: u64 = 4; // 4 × 256,000 = 1,024,000 bytes per read
+    let factory = test_factory(num_chunks);
+    let mut db = test_db_with_proxy();
+
+    deploy_contract(&mut db, DUAL_PROXY_ADDR, DUAL_PD_PROXY_RUNTIME);
+
+    let calldata: Bytes = readDataCall { index: 0 }.abi_encode().into();
+    let access_list = build_access_list(num_chunks);
+
+    let mut evm = factory.create_evm(db, evm_env());
+    let tx = TxEnv {
+        caller: TEST_CALLER,
+        kind: TxKind::Call(DUAL_PROXY_ADDR),
+        nonce: 0,
+        gas_limit: 30_000_000,
+        value: U256::ZERO,
+        data: calldata,
+        gas_price: 0,
+        chain_id: Some(1),
+        gas_priority_fee: None,
+        access_list,
+        blob_hashes: Vec::new(),
+        max_fee_per_blob_gas: 0,
+        tx_type: 1,
+        authorization_list: Default::default(),
+    };
+
+    let result = evm.transact_raw(tx).unwrap();
+    assert!(
+        result.result.is_success(),
+        "Dual PD STATICCALL should succeed"
+    );
+
+    let gas_used = result.result.gas_used();
+
+    // Each PD read returns: 4 × 256,000 + 64 ABI overhead = 1,024,064 bytes
+    let return_bytes = (num_chunks * CHUNK_SIZE + 64) as usize;
+    let copy_gas_per_call = 3 * num_words(return_bytes) as u64;
+    let total_copy_gas = 2 * copy_gas_per_call;
+
+    // Without exemption, memory expansion for ~2 MB would cost ~8M gas.
+    let total_mem_words = num_words(2 * return_bytes);
+    let expansion_without_exemption = expected_memory_cost(total_mem_words);
+
+    assert!(
+        expansion_without_exemption > 5_000_000,
+        "Sanity: expansion without exemption ({expansion_without_exemption}) should exceed 5M"
+    );
+
+    // With exemption, gas should be copy gas + overhead only.
+    assert!(
+        gas_used < total_copy_gas + 600_000,
+        "Dual PD gas ({gas_used}) should be ~copy ({total_copy_gas}) + overhead, not include expansion ({expansion_without_exemption})"
     );
 }

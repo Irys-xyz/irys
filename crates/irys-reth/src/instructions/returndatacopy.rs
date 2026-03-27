@@ -215,13 +215,15 @@ mod tests {
     use revm::interpreter::interpreter::ExtBytecode;
     use revm::interpreter::interpreter_types::{LoopControl as _, MemoryTr as _};
     use revm::interpreter::{
-        InstructionContext, InstructionResult, InputsImpl, Interpreter, SharedMemory, num_words,
+        InputsImpl, InstructionContext, InstructionResult, Interpreter, SharedMemory, num_words,
     };
-    use revm::primitives::hardfork::SpecId;
     use revm::primitives::U256;
+    use revm::primitives::hardfork::SpecId;
 
     use super::irys_returndatacopy;
-    use crate::instructions::pd_return_marker::{PdReturnMarkerScope, set_pd_return_marker};
+    use crate::instructions::pd_return_marker::{
+        PdReturnMarkerScope, clear_pd_return_marker, set_pd_return_marker,
+    };
 
     type TestInterpreter = revm::interpreter::interpreter::EthInterpreter;
 
@@ -290,7 +292,10 @@ mod tests {
 
         // Should NOT have halted
         assert!(
-            !interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error),
             "PD 5 MB read should succeed, got: {:?}",
             interp.bytecode.instruction_result()
         );
@@ -332,7 +337,10 @@ mod tests {
         call_handler(&mut interp);
 
         assert!(
-            !interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error),
             "Non-PD with enough gas should succeed"
         );
 
@@ -361,7 +369,10 @@ mod tests {
         call_handler(&mut interp);
 
         assert!(
-            interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error),
+            interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error),
             "Non-PD 5 MB with 1M gas should OOG"
         );
     }
@@ -382,9 +393,18 @@ mod tests {
 
         call_handler(&mut interp);
 
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
         // Zero-length copy gas = 3 * ceil(0/32) = 0
-        assert_eq!(interp.gas.spent(), 0, "Zero-length should cost zero dynamic gas");
+        assert_eq!(
+            interp.gas.spent(),
+            0,
+            "Zero-length should cost zero dynamic gas"
+        );
         assert_eq!(interp.gas.memory().words_num, 0, "No memory expansion");
     }
 
@@ -408,7 +428,12 @@ mod tests {
 
         call_handler(&mut interp);
 
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
 
         let words = num_words(1024);
         let expected_expansion = super::expected_memory_cost(words);
@@ -443,7 +468,12 @@ mod tests {
 
         call_handler(&mut interp);
 
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
 
         // Only copy gas, no expansion (PD exempt)
         assert_eq!(interp.gas.spent(), copy_gas(read_len));
@@ -470,7 +500,12 @@ mod tests {
         // First copy: 1 MB at dest_offset=0
         let mut interp = build_interpreter(gas_limit, data, 0, 0, 1_000_000);
         call_handler(&mut interp);
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
         let _gas_after_first = interp.gas.spent();
         let words_after_first = interp.gas.memory().words_num;
 
@@ -483,7 +518,12 @@ mod tests {
         interp.bytecode.reset_action();
 
         call_handler(&mut interp);
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
 
         let gas_after_second = interp.gas.spent();
         let words_after_second = interp.gas.memory().words_num;
@@ -517,15 +557,73 @@ mod tests {
 
         call_handler(&mut interp);
 
-        assert!(!interp.bytecode.instruction_result().is_some_and(InstructionResult::is_error));
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error)
+        );
 
         let words = num_words(size);
         // expansion_cost should match what a normal expansion would compute
         let expected_expansion_cost = super::expected_memory_cost(words);
         assert_eq!(
-            interp.gas.memory().expansion_cost, expected_expansion_cost,
+            interp.gas.memory().expansion_cost,
+            expected_expansion_cost,
             "expansion_cost should be updated even though gas was not charged"
         );
         assert_eq!(interp.gas.memory().words_num, words);
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtask 6b: Failed PD call clears prior exemption
+    // -----------------------------------------------------------------------
+
+    /// Simulates the sequence: successful PD call → failed PD call → RETURNDATACOPY.
+    ///
+    /// The PD precompile clears the marker on entry and only sets it on success.
+    /// After a failure, the marker is cleared, so RETURNDATACOPY on the
+    /// (non-PD) return data must charge full memory expansion gas.
+    #[test]
+    fn failed_pd_call_clears_prior_exemption() {
+        let _scope = PdReturnMarkerScope::new();
+
+        // Simulate a prior successful PD call by setting the marker.
+        let prior_pd_data = Bytes::from(vec![0xAA_u8; 1024]);
+        set_pd_return_marker(&prior_pd_data);
+
+        // Simulate a second PD precompile entry: clear_pd_return_marker() is
+        // called on every precompile invocation before any work is done.
+        clear_pd_return_marker();
+
+        // Simulate PD failure: set_pd_return_marker() is NOT called.
+        // The return data is a different allocation (e.g. revert/error bytes).
+        let size = 5_120_064;
+        let revert_data = Bytes::from(vec![0xEE_u8; size]);
+
+        let gas_limit = 100_000_000;
+        let mut interp = build_interpreter(gas_limit, revert_data, 0, 0, size);
+
+        call_handler(&mut interp);
+
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error),
+            "Should succeed with enough gas"
+        );
+
+        let words = num_words(size);
+        let expected_copy = copy_gas(size);
+        let expected_expansion = super::expected_memory_cost(words);
+        let gas_spent = interp.gas.spent();
+
+        // Gas must include memory expansion — the marker was cleared by the
+        // failed precompile call, so no exemption applies.
+        assert!(
+            gas_spent >= expected_copy + expected_expansion - 1,
+            "After failed PD call, gas ({gas_spent}) should include copy ({expected_copy}) + expansion ({expected_expansion})"
+        );
     }
 }
