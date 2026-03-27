@@ -74,7 +74,6 @@ fn index_and_prune_block_index() -> eyre::Result<()> {
         for i in 0..10 {
             let item = block_index_item_by_height(tx, &(i as u64 + 1))?;
             assert_eq!(item.block_hash, headers[i].block_hash);
-            assert_eq!(item.num_ledgers, 4);
 
             // Loop though each ledger_item in the BlockIndexItem
             for ledger_item in &item.ledgers {

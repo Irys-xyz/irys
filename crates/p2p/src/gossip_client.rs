@@ -665,7 +665,7 @@ impl GossipClient {
                     ))
                 } else {
                     match resp
-                        .json::<GossipResponse<Vec<wire_types::BlockIndexItemV1>>>()
+                        .json::<GossipResponse<Vec<wire_types::BlockIndexItemV2>>>()
                         .await
                     {
                         Ok(GossipResponse::Accepted(wire_items)) => {

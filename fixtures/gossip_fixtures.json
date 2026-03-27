@@ -61,25 +61,6 @@
   "gossip_response_accepted": {
     "Accepted": null
   },
-  "gossip_response_accepted_block_index": {
-    "Accepted": [
-      {
-        "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-        "ledgers": [
-          {
-            "ledger": "Publish",
-            "total_chunks": "1024",
-            "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
-          },
-          {
-            "ledger": "Submit",
-            "total_chunks": "512",
-            "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
-          }
-        ]
-      }
-    ]
-  },
   "gossip_response_accepted_block_index_v1": {
     "Accepted": [
       {
@@ -97,6 +78,25 @@
           }
         ],
         "num_ledgers": 2
+      }
+    ]
+  },
+  "gossip_response_accepted_block_index": {
+    "Accepted": [
+      {
+        "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+        "ledgers": [
+          {
+            "ledger": "Publish",
+            "total_chunks": "1024",
+            "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN"
+          },
+          {
+            "ledger": "Submit",
+            "total_chunks": "512",
+            "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45"
+          }
+        ]
       }
     ]
   },
