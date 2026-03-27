@@ -65,9 +65,10 @@ impl Ranges {
             let rng_seed: u32 = u32::from_be_bytes(hasher.finish()[28..32].try_into().unwrap());
             let mut rng = SimpleRNG::new(rng_seed);
 
-            let next_range_pos = (rng.next()
-                % TryInto::<u32>::try_into(self.last_range_pos).expect("Value exceeds u32::MAX"))
-                as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
+            let choice_count = u32::try_from(self.last_range_pos + 1)
+                .expect("partition range count must fit in u32 for SimpleRNG-based sampling");
+            let next_range_pos = usize::try_from(rng.next() % choice_count)
+                .expect("u32 always fits in usize on 32-bit and above architectures");
             let range = self.ranges[next_range_pos];
             self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
             self.last_range_pos -= 1;
@@ -221,6 +222,30 @@ mod tests {
 
         // check ranges are reinitialized after all possible ranges are retrieved
         assert_eq!(num_recall_ranges as usize, ranges.last_range_pos + 1,)
+    }
+
+    #[test]
+    fn test_two_range_sampling_not_biased() {
+        let partition_hash = H256::random();
+        let mut first_draws = HashSet::new();
+
+        for seed_byte in 0..=255_u8 {
+            let mut ranges = Ranges::new(2);
+            let mut seed = H256::zero();
+            seed.0[0] = seed_byte;
+            let range = ranges.get_recall_range(1, &seed, &partition_hash).unwrap();
+            first_draws.insert(range);
+            if first_draws.len() > 1 {
+                break;
+            }
+        }
+
+        assert!(
+            first_draws.len() > 1,
+            "With 2 ranges, different seeds should produce different first draws. \
+             Got only {:?} across 256 seeds — sampling is biased.",
+            first_draws
+        );
     }
 
     #[test]
