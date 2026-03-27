@@ -50,6 +50,7 @@ use crate::{
 
 pub mod engine;
 pub mod evm;
+mod instructions;
 pub mod mempool;
 pub mod payload;
 pub mod payload_builder_builder;
