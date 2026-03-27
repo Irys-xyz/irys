@@ -176,8 +176,9 @@ impl VdfScheduler {
         self.check_preemption();
 
         // If nothing running, start immediately
+        let active = self.start_next();
         debug_assert!(
-            self.start_next(),
+            active,
             "VDF scheduler must be processing work after submit (either already running or just started)"
         );
     }
