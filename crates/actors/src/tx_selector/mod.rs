@@ -74,7 +74,7 @@ pub async fn select_best_txs(
 
         // Get the canonical chain bounded by the parent block to avoid including
         // blocks beyond the parent when building on a non-tip parent.
-        let (full_canonical, _) = tree.get_canonical_chain();
+        let full_canonical = tree.get_canonical_chain().entries;
 
         let Some(parent_pos) = full_canonical
             .iter()

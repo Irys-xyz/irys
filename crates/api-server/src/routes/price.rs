@@ -58,7 +58,7 @@ pub async fn get_price(
         DataLedger::Publish => {
             // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
-            let (canonical, _) = tree.get_canonical_chain();
+            let canonical = tree.get_canonical_chain().entries;
             let last_block_entry = canonical
                 .last()
                 .ok_or(("Empty canonical chain", StatusCode::BAD_REQUEST))?;

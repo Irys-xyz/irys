@@ -44,13 +44,13 @@ impl ForkChoiceMarkers {
         migration_depth: usize,
         prune_depth: usize,
     ) -> Result<Self> {
-        let (canonical_chain, _) = block_tree.get_canonical_chain();
-        if canonical_chain.is_empty() {
+        let chain = block_tree.get_canonical_chain();
+        if chain.entries.is_empty() {
             bail!("canonical chain is empty while computing fork-choice markers");
         }
 
-        let head_height = tree_head_height(&canonical_chain)?;
-        let tree_safe_height = tree_safe_height(&canonical_chain, migration_depth)?;
+        let head_height = tree_head_height(&chain.entries)?;
+        let tree_safe_height = tree_safe_height(&chain.entries, migration_depth)?;
         let index_safe_height = block_index.latest_height();
         let migration_height =
             compute_migration_height(head_height, tree_safe_height, index_safe_height);
@@ -59,7 +59,7 @@ impl ForkChoiceMarkers {
 
         let head_block = block_at_height(
             head_height,
-            &canonical_chain,
+            &chain.entries,
             block_tree,
             block_index,
             database,
@@ -67,7 +67,7 @@ impl ForkChoiceMarkers {
 
         let migration_block = block_at_height(
             migration_height,
-            &canonical_chain,
+            &chain.entries,
             block_tree,
             block_index,
             database,
@@ -75,7 +75,7 @@ impl ForkChoiceMarkers {
 
         let prune_block = block_at_height(
             prune_height,
-            &canonical_chain,
+            &chain.entries,
             block_tree,
             block_index,
             database,
@@ -88,13 +88,13 @@ impl ForkChoiceMarkers {
         })
     }
 
-    /// Computes canonical fork-choice markers using only the block index—mirroring the values that
+    /// Computes canonical fork-choice markers using only the block index---mirroring the values that
     /// would have been in effect before shutdown (aside from the head, which is rolled back to the
     /// latest indexed block).
     ///
     /// During startup the block tree is empty, so:
     /// - `head` resolves to the latest block index entry (the prior canonical head).
-    /// - `migration_block` mirrors that same entry to match the “confirmed” head just before shutdown.
+    /// - `migration_block` mirrors that same entry to match the "confirmed" head just before shutdown.
     /// - `prune_block` is derived from the index at `block_tree_depth` behind the tip so the finalized
     ///   marker aligns with the state before shutdown.
     pub fn from_index(

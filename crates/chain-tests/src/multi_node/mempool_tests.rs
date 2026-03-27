@@ -900,9 +900,9 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     );
 
     debug!("reorg_tx: {:?}", reorg_tx.header.id);
-    debug!("canonical_before: {:?}", &canon_before.0);
+    debug!("canonical_before: {:?}", &canon_before.entries);
 
-    debug!("canonical_after: {:?}", &canon.0);
+    debug!("canonical_after: {:?}", &canon.entries);
 
     // Validate the ReorgEvent with the canonical chains
     let old_fork: Vec<_> = reorg_event
@@ -921,12 +921,15 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     debug!("old_fork:  {:?}", old_fork);
     debug!("new_fork:  {:?}", new_fork);
 
-    assert_eq!(old_fork, vec![canon_before.0.last().unwrap().block_hash()]);
+    assert_eq!(
+        old_fork,
+        vec![canon_before.entries.last().unwrap().block_hash()]
+    );
     assert_eq!(
         new_fork,
         vec![
-            canon.0[canon.0.len() - 2].block_hash(),
-            canon.0.last().unwrap().block_hash()
+            canon.entries[canon.entries.len() - 2].block_hash(),
+            canon.entries.last().unwrap().block_hash()
         ]
     );
 
