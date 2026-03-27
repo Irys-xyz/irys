@@ -193,6 +193,7 @@ impl From<&NodeConfig> for VdfConfig {
             num_checkpoints_in_vdf_step: consensus.num_checkpoints_in_vdf_step,
             max_allowed_vdf_fork_steps: consensus.max_allowed_vdf_fork_steps,
             sha_1s_difficulty: consensus.sha_1s_difficulty,
+            throttle: value.vdf.throttle,
         }
     }
 }
@@ -248,6 +249,10 @@ pub struct VdfConfig {
 
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
+
+    /// When true, enforce a minimum step duration to prevent VDF from
+    /// outrunning block production when sha_1s_difficulty is low.
+    pub throttle: bool,
 }
 
 impl VdfConfig {
@@ -616,10 +621,10 @@ mod tests {
         min_difficulty_adjustment_factor = 0.25
 
         [vdf]
-        reset_frequency = 600
+        reset_frequency = 1200
         max_allowed_vdf_fork_steps = 60000
         num_checkpoints_in_vdf_step = 25
-        sha_1s_difficulty = 70000
+        sha_1s_difficulty = 1000
 
         [block_reward_config]
         inflation_cap = 100000000
@@ -729,7 +734,8 @@ mod tests {
         public_port = 0
 
         [vdf]
-        parallel_verification_thread_limit = 4
+        parallel_verification_thread_limit = 8
+        throttle = true
 
         [mempool]
         max_pending_pledge_items = 100

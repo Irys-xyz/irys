@@ -122,7 +122,7 @@ fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
 /// This test ensures that if we attempt to submit a block with a timestamp
 /// too far in the future, the node rejects it during block prevalidation.
 #[tokio::test]
-async fn heavy_test_future_block_rejection() -> Result<()> {
+async fn test_future_block_rejection() -> Result<()> {
     use irys_actors::{
         async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     };
@@ -266,7 +266,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
+async fn test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     // Tamper the VDF seeds (make them parent-inconsistent)
@@ -300,7 +300,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
+async fn test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     let max = ctx.config.consensus_config().mempool.max_data_txs_per_block as usize;
@@ -346,7 +346,7 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
+async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     // Create a tx that incorrectly targets Submit (otherwise valid + well-funded)
@@ -466,7 +466,7 @@ async fn heavy_test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
+async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     // Check if block has a commitment ledger (needed for this test)

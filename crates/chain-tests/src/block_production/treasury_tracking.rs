@@ -9,7 +9,7 @@ use tracing::info;
 
 /// Test that verifies the treasury field is correctly tracked across blocks
 #[tokio::test]
-async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
+async fn test_treasury_tracking() -> eyre::Result<()> {
     initialize_tracing();
 
     // ===== SETUP =====

@@ -374,13 +374,42 @@ impl BinaryResolver {
         );
 
         let target_dir = work_dir.join("target");
-        let mut child = Command::new("cargo")
-            .args(&args)
+        let mut cmd = Command::new("cargo");
+        cmd.args(&args)
             .current_dir(work_dir)
             .env("CARGO_TARGET_DIR", &target_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+
+        // TODO: once ring releases 0.17.15+ (current: 0.17.14), we should no
+        // longer need this workaround. See https://github.com/rust-lang/cargo/issues/16134
+        //
+        // Strip env vars that ring's build.rs registers via
+        // `cargo:rerun-if-env-changed`. When this inner `cargo build` is
+        // spawned by a `cargo test` process, cargo sets CARGO_PKG_* etc. for
+        // the test binary's runtime env. If those leak here, ring's
+        // fingerprint records them; the next `cargo test --tests` compilation
+        // (which sees different values) marks ring dirty, causing a rebuild
+        // ping-pong on every invocation.
+        // Keep in sync with the list in xtask's `remove_and_run`.
+        for var in [
+            "CARGO_MANIFEST_DIR",
+            "CARGO_PKG_NAME",
+            "CARGO_PKG_VERSION_MAJOR",
+            "CARGO_PKG_VERSION_MINOR",
+            "CARGO_PKG_VERSION_PATCH",
+            "CARGO_PKG_VERSION_PRE",
+            "CARGO_MANIFEST_LINKS",
+            "RING_PREGENERATE_ASM",
+            "CARGO_CFG_TARGET_ARCH",
+            "CARGO_CFG_TARGET_OS",
+            "CARGO_CFG_TARGET_ENV",
+            "CARGO_CFG_TARGET_ENDIAN",
+        ] {
+            cmd.env_remove(var);
+        }
+
+        let mut child = cmd.spawn()?;
 
         // Stream stderr line-by-line to eprintln so build progress is visible
         // during tests (with --nocapture), while also collecting it for error

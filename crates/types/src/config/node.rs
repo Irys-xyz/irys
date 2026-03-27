@@ -767,6 +767,11 @@ pub struct VdfNodeConfig {
     /// Controls whether and how the VDF thread is pinned to a CPU core.
     #[serde(default)]
     pub core_pinning: CorePinning,
+
+    /// When true, enforce a minimum step duration to prevent VDF from
+    /// outrunning block production when sha_1s_difficulty is low.
+    #[serde(default)]
+    pub throttle: bool,
 }
 
 impl Default for VdfNodeConfig {
@@ -775,6 +780,7 @@ impl Default for VdfNodeConfig {
             // TODO: default to something like numcpus - 4
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
+            throttle: false,
         }
     }
 }
@@ -1048,8 +1054,9 @@ impl NodeConfig {
             },
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: 4,
+                parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
+                throttle: true,
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -1208,6 +1215,7 @@ impl NodeConfig {
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
                 core_pinning: CorePinning::Auto,
+                throttle: false,
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),

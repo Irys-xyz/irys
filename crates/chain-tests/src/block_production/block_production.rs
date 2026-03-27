@@ -30,8 +30,6 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::time::Duration;
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
@@ -49,7 +47,7 @@ const ZERO_BALANCE: U256 = U256::ZERO;
 const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_blockprod() -> eyre::Result<()> {
+async fn test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
     node.cfg.consensus.extend_genesis_accounts(vec![
@@ -183,7 +181,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
 
@@ -240,7 +238,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
+async fn mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     node.node_ctx.start_mining()?;
@@ -292,7 +290,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
+async fn test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
     let (block, _, _, outcome) = node.mine_block_and_wait_for_validation().await?;
@@ -310,14 +308,13 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-    tokio::time::sleep(Duration::from_secs(3)).await;
     node.stop().await;
 
     Ok(())
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
+async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
@@ -474,7 +471,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
+async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async();
     let node = node.start().await;
 
@@ -492,10 +489,8 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
         let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
         let new_ts = reth_block.header.timestamp as u128;
 
-        // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
         _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
-        sleep(Duration::from_millis(1_500)).await;
     }
 
     assert!(prev_ts.is_some());
@@ -806,7 +801,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_staking_pledging_txs_included() -> eyre::Result<()> {
+async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -1057,7 +1052,7 @@ async fn heavy3_staking_pledging_txs_included() -> eyre::Result<()> {
 
 // This test produces a block with invalid tx ordering.
 #[test_log::test(tokio::test)]
-async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -1201,7 +1196,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 // attempts to deduct storage fees from a user with insufficient balance.
 // irys-reth should reject even building such a block.
 #[test_log::test(tokio::test)]
-async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
+async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     use irys_types::DataLedger;
 
     // Evil strategy that forces inclusion of a transaction from underfunded user
@@ -1328,7 +1323,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
+async fn spiky_heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let mut config = NodeConfig::testing_with_epochs(2);
     config.consensus.get_mut().chunk_size = 32;
     let signer = config.new_random_signer();
@@ -1397,7 +1392,7 @@ async fn heavy3_test_always_build_on_max_difficulty_block() -> eyre::Result<()> 
 // Action: Mine 10 blocks, checking that blocks get pruned while mining.
 // Assert: Verify blocks 1-7 are pruned and blocks 8, 9, 10 still exist in the tree
 #[test_log::test(tokio::test)]
-async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
+async fn test_block_tree_pruning() -> eyre::Result<()> {
     // Setup
     // Configure test parameters
     let block_tree_depth = 3;
@@ -1474,7 +1469,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
+async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     // Evil strategy that uses an incorrect solution hash
     struct InvalidSolutionHashStrategy {
         pub prod: ProductionStrategy,
@@ -1577,7 +1572,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
 /// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2
 /// epoch blocks should include any new txs
 /// epoch blocks should contain a copy of all commitment txs from blocks in the epoch block range
-async fn heavy_commitment_txs_are_capped_per_block() -> eyre::Result<()> {
+async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let seconds_to_wait = 10;
     let max_commitment_txs_per_block: u64 = 2;
     let num_blocks_in_epoch = 5;

@@ -748,7 +748,7 @@ mod tests {
         #[case(50, 1, 49)]
         #[case(0, 1, 0)]
         #[case(100, 1, 99)]
-        fn test_decrease_slow_response(
+        fn test_decrease_sluggish_response(
             #[case] initial: u16,
             #[case] _decrease: u16,
             #[case] expected: u16,

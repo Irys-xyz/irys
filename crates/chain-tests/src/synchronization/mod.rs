@@ -210,7 +210,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()> {
+async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources(
+) -> eyre::Result<()> {
     // settings
     let max_seconds = 10;
 
@@ -269,8 +270,10 @@ async fn heavy3_should_reject_commitment_transactions_from_unknown_sources() -> 
         .wait_for_idle(Some(Duration::from_secs(10)))
         .await?;
 
-    // Wait a little for a peer to connect
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Wait for peer to connect
+    genesis_node
+        .wait_until_sees_peer(&peer.node_ctx.config.node_config.peer_address(), 100)
+        .await?;
     let genesis_peers = genesis_node.node_ctx.peer_list.all_known_peers();
     assert_eq!(genesis_peers.len(), 1);
     let peer_socket_address = genesis_peers[0].api;

@@ -4,10 +4,10 @@
 //! reports to help categorize tests by CPU consumption and timeout requirements.
 //! It reads classification rules directly from your .config/nextest.toml.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use regex::Regex;
@@ -19,6 +19,26 @@ use nextest_monitor::types::{AggregatedStats, CpuSample, MemorySample, TestStats
 /// exceeds N threads for more than this fraction of its runtime.
 /// 0.20 = 20% — brief spikes up to 20% of runtime are tolerated.
 const DEFAULT_EXCEEDANCE_PCT: f64 = 0.20;
+
+/// Default timeout headroom: a test is bumped to the next timeout tier when its
+/// duration exceeds this fraction of the current tier's timeout.
+/// 0.50 = 50% — a test using more than half its timeout gets bumped up, leaving
+/// a comfortable margin for run-to-run variance and parallel load.
+const DEFAULT_TIMEOUT_HEADROOM: f64 = 0.50;
+
+/// Short test threshold for I/O-bound downgrade decisions.
+/// Tests under this duration finish quickly and free their slot — they are
+/// less sensitive to contention and cheaper to over-allocate, so we can be
+/// more confident about downgrading them.
+const SHORT_TEST_DURATION_MS: u64 = 5_000; // 5 seconds
+
+/// Long test threshold: tests above this duration that are over-allocated
+/// represent the biggest performance opportunity. Each one holds a slot
+/// for a long time, blocking other tests from running.
+const LONG_TEST_DURATION_MS: u64 = 15_000; // 15 seconds
+
+/// RSS threshold for the memory contention analysis summary (observability).
+const MEMORY_PRESSURE_RSS_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 
 // ============================================================================
 // Nextest config parsing
@@ -59,6 +79,9 @@ struct Override {
 pub struct ClassificationRule {
     pub name: String,
     pub pattern: Regex,
+    /// Optional exclusion pattern — if a test matches `pattern` but also matches `exclude`,
+    /// this rule does not apply. Implements nextest's set-difference (`-`) operator.
+    pub exclude: Option<Regex>,
     pub threads_required: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub priority: i32,
@@ -97,14 +120,23 @@ impl ClassificationConfig {
         if let Some(overrides) = default_profile.overrides {
             for ov in overrides.iter() {
                 if let Some(ref filter) = ov.filter {
-                    // Extract regex pattern from filter like 'test(/.*slow_.*/)'
-                    if let Some(pattern) = extract_test_pattern(filter) {
-                        let regex = Regex::new(&pattern)
+                    // Extract regex pattern(s) from filter like 'test(/.*slow_.*/)'
+                    // or compound filters like 'test(/.*heavy_.*/) - test(/.*spiky_.*/)'
+                    if let Some(parsed) = extract_test_pattern(filter) {
+                        let regex = Regex::new(&parsed.include)
                             .map_err(|e| format!("Invalid regex in filter '{}': {}", filter, e))?;
+                        let exclude = parsed
+                            .exclude
+                            .map(|ex| Regex::new(&ex))
+                            .transpose()
+                            .map_err(|e| {
+                                format!("Invalid exclude regex in filter '{}': {}", filter, e)
+                            })?;
 
                         rules.push(ClassificationRule {
                             name: extract_rule_name(filter),
                             pattern: regex,
+                            exclude,
                             threads_required: ov.threads_required,
                             timeout_ms: ov
                                 .slow_timeout
@@ -136,6 +168,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "slow".to_string(),
                     pattern: Regex::new(r".*slow_.*").unwrap(),
+                    exclude: None,
                     threads_required: None,
                     timeout_ms: Some(180_000),
                     priority: 100,
@@ -143,6 +176,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy".to_string(),
                     pattern: Regex::new(r".*heavy_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(2),
                     timeout_ms: None,
                     priority: 90,
@@ -150,6 +184,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy3".to_string(),
                     pattern: Regex::new(r".*heavy3_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(3),
                     timeout_ms: None,
                     priority: 80,
@@ -157,6 +192,7 @@ impl ClassificationConfig {
                 ClassificationRule {
                     name: "heavy4".to_string(),
                     pattern: Regex::new(r".*heavy4_.*").unwrap(),
+                    exclude: None,
                     threads_required: Some(4),
                     timeout_ms: None,
                     priority: 70,
@@ -173,7 +209,12 @@ impl ClassificationConfig {
 
         // Find all matching rules (already sorted by priority)
         for rule in &self.rules {
-            if rule.pattern.is_match(test_name) {
+            if rule.pattern.is_match(test_name)
+                && !rule
+                    .exclude
+                    .as_ref()
+                    .is_some_and(|ex| ex.is_match(test_name))
+            {
                 matching_rules.push(rule.clone());
             }
         }
@@ -209,6 +250,7 @@ impl ClassificationConfig {
         time_above_3t_ms: Option<u64>,
         time_above_4t_ms: Option<u64>,
         exceedance_pct: f64,
+        timeout_headroom: f64,
     ) -> SuggestedClassification {
         let mut thread_options: Vec<u32> = vec![self.default_threads];
         thread_options.extend(self.rules.iter().filter_map(|r| r.threads_required));
@@ -254,9 +296,12 @@ impl ClassificationConfig {
         timeout_options.sort();
         timeout_options.dedup();
 
+        // Apply headroom: bump to the next tier when duration exceeds
+        // `timeout * headroom`. E.g., with 0.50 headroom a test taking 31s
+        // exceeds 50% of the 60s default and gets bumped to the slow tier.
         let suggested_timeout = timeout_options
             .iter()
-            .find(|&&t| t >= duration_ms)
+            .find(|&&t| duration_ms as f64 <= t as f64 * timeout_headroom)
             .copied()
             .unwrap_or_else(|| *timeout_options.last().unwrap_or(&self.default_timeout_ms));
 
@@ -331,32 +376,84 @@ fn parse_timeout(slow_timeout: &Option<SlowTimeout>, default: u64) -> u64 {
     }
 }
 
-/// Extract regex pattern from nextest filter like 'test(/.*slow_.*/)'
-fn extract_test_pattern(filter: &str) -> Option<String> {
-    if let Some(start) = filter.find("test(") {
-        let rest = &filter[start + 5..];
-        if let Some(end) = rest.rfind(')') {
-            let inner = &rest[..end];
-            let pattern = inner.trim_matches('/');
-            if let Some(stripped) = pattern.strip_prefix('~') {
-                return Some(format!(".*{}.*", stripped));
+/// Parsed include/exclude patterns from a nextest filter expression.
+struct ParsedFilter {
+    /// The include pattern (alternation of all positive `test(/.../)`  clauses).
+    include: String,
+    /// The exclude pattern, if any (alternation of all `- test(/.../)`  clauses).
+    exclude: Option<String>,
+}
+
+fn extract_test_pattern(filter: &str) -> Option<ParsedFilter> {
+    // Parse all test(/.../) tokens from a nextest filter expression.
+    // Tokens preceded by `-` are excludes (set difference), others are includes.
+    // Example: "test(/.*heavy_.*/) - test(/.*spiky_.*/)" → includes heavy, excludes spiky.
+    let mut includes = Vec::new();
+    let mut excludes = Vec::new();
+    let mut remaining = filter;
+
+    while let Some(idx) = remaining.find("test(") {
+        // Check if this token is preceded by `-` (set difference operator)
+        let prefix = remaining[..idx].trim_end();
+        let is_exclude = prefix.ends_with('-');
+
+        let after_test = &remaining[idx + 5..];
+        // Find the matching `)` — the pattern is wrapped in `/.../)` so find the first `)`
+        if let Some(close) = after_test.find(')') {
+            let inner = after_test[..close].trim_matches('/');
+            let pattern = if let Some(stripped) = inner.strip_prefix('~') {
+                format!(".*{}.*", stripped)
+            } else {
+                inner.to_string()
+            };
+
+            if is_exclude {
+                excludes.push(pattern);
+            } else {
+                includes.push(pattern);
             }
-            return Some(pattern.to_string());
+
+            remaining = &after_test[close + 1..];
+        } else {
+            break;
         }
     }
 
-    if filter.starts_with('/') && filter.ends_with('/') {
-        return Some(filter[1..filter.len() - 1].to_string());
+    if includes.is_empty() {
+        // Fallback: bare regex like /pattern/
+        if filter.starts_with('/') && filter.ends_with('/') {
+            return Some(ParsedFilter {
+                include: filter[1..filter.len() - 1].to_string(),
+                exclude: None,
+            });
+        }
+        return None;
     }
 
-    None
+    let include = if includes.len() == 1 {
+        includes.into_iter().next().unwrap()
+    } else {
+        format!("({})", includes.join("|"))
+    };
+
+    let exclude = if excludes.is_empty() {
+        None
+    } else if excludes.len() == 1 {
+        Some(excludes.into_iter().next().unwrap())
+    } else {
+        Some(format!("({})", excludes.join("|")))
+    };
+
+    Some(ParsedFilter { include, exclude })
 }
 
 /// Extract a human-readable name from a filter pattern
 fn extract_rule_name(filter: &str) -> String {
-    let pattern = extract_test_pattern(filter).unwrap_or_else(|| filter.to_string());
+    let pattern = extract_test_pattern(filter)
+        .map(|p| p.include)
+        .unwrap_or_else(|| filter.to_string());
 
-    for prefix in &["slow_", "heavy_", "2xheavy_", "serial_"] {
+    for prefix in &["slow_", "heavy4_", "heavy3_", "heavy_", "serial_", "spiky_"] {
         if pattern.contains(prefix) {
             return prefix.trim_end_matches('_').to_string();
         }
@@ -512,11 +609,20 @@ pub struct Reclassification {
     pub current: TestClassification,
     pub suggested: SuggestedClassification,
     pub issues: Vec<String>,
+    /// When false, the reclassification should be shown in `analyze` but NOT
+    /// auto-applied by `apply`. This is set for tests where CPU spikes justify
+    /// the current allocation tier — the operator should verify manually.
+    pub safe_to_apply: bool,
 }
 
 impl Reclassification {
     pub fn needs_change(&self) -> bool {
         !self.issues.is_empty()
+    }
+
+    /// Whether this reclassification can be auto-applied without manual review.
+    pub fn is_auto_applicable(&self) -> bool {
+        self.needs_change() && self.safe_to_apply
     }
 }
 
@@ -537,9 +643,11 @@ fn analyze_reclassifications(
             test.avg_time_above_3t_ms,
             test.avg_time_above_4t_ms,
             DEFAULT_EXCEEDANCE_PCT,
+            DEFAULT_TIMEOUT_HEADROOM,
         );
 
         let mut issues = Vec::new();
+        let mut safe_to_apply = true;
 
         // Determine time above current allocation
         let (time_above_allocation_ms, allocation_threshold) = match current.effective_threads {
@@ -584,13 +692,100 @@ fn analyze_reclassifications(
             } else if suggested.threads_required < current.effective_threads
                 && current.effective_threads > config.default_threads
             {
-                issues.push(format!(
-                    "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T - could downgrade",
-                    test.avg_avg_cpu.unwrap_or(0.0),
-                    allocation_threshold as u32,
-                    pct_above_allocation,
-                    current.effective_threads,
-                ));
+                // Check async-wait ratio: if the test spends >70% of its time
+                // below 1T CPU, it's I/O/coordination-bound (async waits for
+                // block migration, chunk sync, etc.) rather than compute-bound.
+                //
+                // However, not all I/O-bound tests equally need their slot
+                // reservation. We differentiate by:
+                //
+                //  1. **Peak CPU vs allocation**: if peak CPU never reaches
+                //     the current allocation, the slots weren't needed for CPU.
+                //  2. **Duration**: short tests (<5s) finish quickly, so
+                //     over-allocation wastes little parallelism and they're
+                //     less fragile. Long tests (>15s) waste the most
+                //     parallelism and represent the biggest perf opportunity.
+                //  3. **Slot cost**: thread-seconds wasted = duration × (current - suggested)
+                let pct_above_1t = test
+                    .avg_time_above_1t_ms
+                    .map(|t| t as f64 / test.avg_duration_ms.max(1) as f64)
+                    .unwrap_or(0.0);
+                let high_idle = pct_above_1t < 0.30;
+                let peak_cpu = test.avg_peak_cpu.unwrap_or(0.0);
+                let duration = test.avg_duration_ms;
+                let wasted_thread_secs = (duration as f64 / 1000.0)
+                    * (current.effective_threads - suggested.threads_required) as f64;
+
+                if !high_idle {
+                    // Not I/O-bound: CPU is active, safe to downgrade
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, above {}T for only {:.0}% of runtime, but allocated {}T — could downgrade (saves {:.0}s thread-time)",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        allocation_threshold as u32,
+                        pct_above_allocation,
+                        current.effective_threads,
+                        wasted_thread_secs,
+                    ));
+                } else if peak_cpu >= allocation_threshold {
+                    // I/O-bound but peak CPU actually hits the allocation
+                    // during spikes — the reservation covers real CPU bursts.
+                    // Do NOT auto-apply: operator must verify.
+                    safe_to_apply = false;
+                    issues.push(format!(
+                        "CPU over-allocated on average ({:.2}x), but peak {:.2}x reaches {}T allocation — CPU spikes justify current tier. Verify contention sensitivity before downgrading",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                    ));
+                } else if duration < SHORT_TEST_DURATION_MS {
+                    // Short I/O test: finishes fast, slot cost is low, and
+                    // short tests are less timing-sensitive
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — short test, low slot cost ({:.0}s thread-time). Safe to step down",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
+                    ));
+                } else if duration >= LONG_TEST_DURATION_MS {
+                    // Long I/O test: biggest performance opportunity, but also
+                    // most sensitive to contention
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — long-running I/O test, wastes {:.0}s thread-time. High perf impact, but verify contention sensitivity",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
+                    ));
+                } else {
+                    // Medium-duration I/O test
+                    issues.push(format!(
+                        "CPU over-allocated: avg={:.2}x, peak={:.2}x (below {}T), {} duration — I/O-bound, {:.0}s thread-time wasted. Verify contention sensitivity before downgrading",
+                        test.avg_avg_cpu.unwrap_or(0.0),
+                        peak_cpu,
+                        current.effective_threads,
+                        format_duration(duration),
+                        wasted_thread_secs,
+                    ));
+                }
+
+                // Warn when the suggestion drops more than one tier (e.g.
+                // heavy4→default). The raw suggestion is still surfaced so the
+                // operator can see the target, but large jumps have historically
+                // introduced flakiness and should be verified incrementally.
+                let tier_drop = current
+                    .effective_threads
+                    .saturating_sub(suggested.threads_required);
+                if tier_drop > 1 {
+                    issues.push(format!(
+                        "NOTE: suggestion drops {}T→{}T ({} tiers). Consider stepping down one tier at a time and verifying stability at each level",
+                        current.effective_threads,
+                        suggested.threads_required,
+                        tier_drop,
+                    ));
+                }
             }
         }
 
@@ -623,15 +818,32 @@ fn analyze_reclassifications(
             current,
             suggested,
             issues,
+            safe_to_apply,
         });
     }
 
-    // Sort by number of issues (most issues first), then by severity
+    // Sort by: (1) under-allocated before over-allocated (upgrades are more
+    // critical for stability), (2) within each group by wasted thread-seconds
+    // descending (biggest performance wins first), (3) by issue count.
     results.sort_by(|a, b| {
-        b.issues.len().cmp(&a.issues.len()).then_with(|| {
-            let a_cpu_issue = a.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
-            let b_cpu_issue = b.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
-            b_cpu_issue.cmp(&a_cpu_issue)
+        let a_under = a.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
+        let b_under = b.issues.iter().any(|i| i.contains("CPU regularly exceeds"));
+
+        // Under-allocated tests first (stability risk)
+        b_under.cmp(&a_under).then_with(|| {
+            // Within each group, sort by wasted thread-seconds (perf impact)
+            let a_waste = a.stats.avg_duration_ms as f64 / 1000.0
+                * (a.current
+                    .effective_threads
+                    .saturating_sub(a.suggested.threads_required)) as f64;
+            let b_waste = b.stats.avg_duration_ms as f64 / 1000.0
+                * (b.current
+                    .effective_threads
+                    .saturating_sub(b.suggested.threads_required)) as f64;
+            b_waste
+                .partial_cmp(&a_waste)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.issues.len().cmp(&a.issues.len()))
         })
     });
 
@@ -700,6 +912,28 @@ enum Commands {
         /// Output file (stdout if not specified)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Apply suggested reclassifications by renaming test functions in source files
+    Apply {
+        /// Dry run: show what would be changed without modifying files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Root directory to search for source files (default: current directory)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+
+    /// Analyze test scheduling: slot utilization, saturation, and critical-path impact
+    Schedule {
+        /// Available thread count (default: auto-detect from num_cpus)
+        #[arg(long)]
+        threads: Option<u32>,
+
+        /// Show top N tests by slot-seconds wasted during saturation (0 for all)
+        #[arg(long, default_value = "20")]
+        top: usize,
     },
 
     /// Clear the stats file
@@ -780,6 +1014,22 @@ fn main() -> std::io::Result<()> {
                 Commands::Export { format, output } => {
                     cmd_export(&stats, &format, output.as_ref())?
                 }
+                Commands::Apply { dry_run, root } => {
+                    let root = root.unwrap_or_else(|| PathBuf::from("."));
+                    cmd_apply(&stats, &config, &root, dry_run)?;
+                }
+                Commands::Schedule { threads, top } => {
+                    if threads == Some(0) {
+                        eprintln!("Error: --threads must be at least 1");
+                        std::process::exit(1);
+                    }
+                    let available = threads.unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get() as u32)
+                            .unwrap_or(12)
+                    });
+                    cmd_schedule(&stats, &config, available, top);
+                }
                 Commands::Clear | Commands::Config => unreachable!(),
                 #[cfg(feature = "heap-profile")]
                 Commands::Heap { .. } | Commands::HeapList => unreachable!(),
@@ -823,13 +1073,13 @@ fn cmd_config(config: &ClassificationConfig) {
             .map(|t| format!("{}s", t / 1000))
             .unwrap_or_else(|| "-".to_string());
 
+        let pattern_str = match &rule.exclude {
+            Some(ex) => format!("{} - {}", rule.pattern.as_str(), ex.as_str()),
+            None => rule.pattern.as_str().to_string(),
+        };
         println!(
             "{:<15} {:>10} {:>12} {:>8}  {}",
-            rule.name,
-            threads_str,
-            timeout_str,
-            rule.priority,
-            rule.pattern.as_str()
+            rule.name, threads_str, timeout_str, rule.priority, pattern_str
         );
     }
 }
@@ -1112,9 +1362,15 @@ fn cmd_analyze(
             let ok: Vec<_> = to_show.iter().filter(|r| !r.needs_change()).collect();
 
             if !needs_change.is_empty() {
-                println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-                println!("║                     TESTS NEEDING RECLASSIFICATION                          ║");
-                println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+                println!(
+                    "╔══════════════════════════════════════════════════════════════════════════════╗"
+                );
+                println!(
+                    "║                     TESTS NEEDING RECLASSIFICATION                          ║"
+                );
+                println!(
+                    "╚══════════════════════════════════════════════════════════════════════════════╝"
+                );
                 println!();
 
                 for r in &needs_change {
@@ -1197,29 +1453,77 @@ fn cmd_analyze(
                     } else {
                         r.suggested.rule_names.join(" + ")
                     };
+                    let apply_tag = if r.safe_to_apply {
+                        ""
+                    } else {
+                        " [manual review — skipped by apply]"
+                    };
                     println!(
-                        "│  → Suggested: {} ({}T, {:.0}s timeout)",
+                        "│  → Suggested: {} ({}T, {:.0}s timeout){}",
                         suggested_rules,
                         r.suggested.threads_required,
-                        r.suggested.timeout_ms as f64 / 1000.0
+                        r.suggested.timeout_ms as f64 / 1000.0,
+                        apply_tag
                     );
-                    println!("└────────────────────────────────────────────────────────────────────────────────");
+                    println!(
+                        "└────────────────────────────────────────────────────────────────────────────────"
+                    );
                     println!();
                 }
+
+                // Print thread-time waste summary
+                let total_waste: f64 = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required < r.current.effective_threads)
+                    .map(|r| {
+                        (r.stats.avg_duration_ms as f64 / 1000.0)
+                            * (r.current.effective_threads - r.suggested.threads_required) as f64
+                    })
+                    .sum();
+
+                let upgrade_count = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required > r.current.effective_threads)
+                    .count();
+                let downgrade_count = needs_change
+                    .iter()
+                    .filter(|r| r.suggested.threads_required < r.current.effective_threads)
+                    .count();
+                let timeout_only_count = needs_change.len() - upgrade_count - downgrade_count;
 
                 println!(
                     "Summary: {} tests need reclassification",
                     needs_change.len()
                 );
+                println!(
+                    "  Upgrades: {} (stability risk — tests exceeding CPU allocation)",
+                    upgrade_count
+                );
+                println!(
+                    "  Downgrades: {} (performance opportunity — {:.0}s total wasted thread-time per run)",
+                    downgrade_count, total_waste
+                );
+                if timeout_only_count > 0 {
+                    println!("  Timeout-only: {}", timeout_only_count);
+                }
             } else {
                 println!("All tests are correctly classified!");
             }
 
+            // Memory contention analysis across all tests
+            print_memory_contention_summary(&reclassifications, config);
+
             if show_all && !ok.is_empty() {
                 println!();
-                println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-                println!("║                        CORRECTLY CLASSIFIED TESTS                           ║");
-                println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+                println!(
+                    "╔══════════════════════════════════════════════════════════════════════════════╗"
+                );
+                println!(
+                    "║                        CORRECTLY CLASSIFIED TESTS                           ║"
+                );
+                println!(
+                    "╚══════════════════════════════════════════════════════════════════════════════╝"
+                );
                 println!();
 
                 for r in &ok {
@@ -1241,6 +1545,562 @@ fn cmd_analyze(
                 }
             }
         }
+    }
+}
+
+/// Print a memory contention summary showing which allocation tiers have the
+/// most memory pressure risk and which specific tests dominate.
+fn print_memory_contention_summary(
+    reclassifications: &[Reclassification],
+    config: &ClassificationConfig,
+) {
+    // Group tests by current thread allocation and compute memory stats
+    let mut by_tier: BTreeMap<u32, Vec<&Reclassification>> = BTreeMap::new();
+    let mut has_memory = false;
+
+    for r in reclassifications {
+        if r.stats.avg_peak_rss_bytes.is_some() {
+            has_memory = true;
+        }
+        by_tier
+            .entry(r.current.effective_threads)
+            .or_default()
+            .push(r);
+    }
+
+    if !has_memory {
+        return;
+    }
+
+    let test_threads: u32 = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+
+    println!();
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                       MEMORY CONTENTION ANALYSIS                            ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "{:<6} {:>6} {:>8} {:>10} {:>12} {:>12}  Top memory consumer",
+        "Tier", "Tests", "MaxConc", "AvgPeakRSS", "TopTestRSS", "WorstCase"
+    );
+    println!("{}", "-".repeat(90));
+
+    for (&threads, tests) in &by_tier {
+        let max_concurrent = (test_threads / threads).max(1);
+
+        // Collect tests with memory data, sorted by peak RSS descending
+        let mut with_memory: Vec<_> = tests
+            .iter()
+            .filter_map(|r| {
+                r.stats
+                    .avg_peak_rss_bytes
+                    .map(|rss| (r.test_name.as_str(), rss))
+            })
+            .collect();
+        with_memory.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if with_memory.is_empty() {
+            continue;
+        }
+
+        // Average peak RSS across all tests in this tier
+        let avg_peak_rss: u64 =
+            with_memory.iter().map(|(_, rss)| *rss).sum::<u64>() / with_memory.len() as u64;
+
+        // Worst case: top N tests by RSS running simultaneously
+        let worst_case_rss: u64 = with_memory
+            .iter()
+            .take(max_concurrent as usize)
+            .map(|(_, rss)| *rss)
+            .sum();
+
+        let (top_name, top_rss) = with_memory[0];
+        let short_name = if top_name.len() > 30 {
+            format!("...{}", &top_name[top_name.len() - 27..])
+        } else {
+            top_name.to_string()
+        };
+
+        println!(
+            "{:>4}T {:>6} {:>8} {:>10} {:>12} {:>12}  {}",
+            threads,
+            tests.len(),
+            max_concurrent,
+            format_rss(avg_peak_rss),
+            format_rss(top_rss),
+            format_rss(worst_case_rss),
+            short_name,
+        );
+    }
+
+    // Highlight the most dangerous tier
+    let most_dangerous = by_tier
+        .iter()
+        .filter_map(|(&threads, tests)| {
+            let max_concurrent = (test_threads / threads).max(1);
+            let mut with_memory: Vec<u64> = tests
+                .iter()
+                .filter_map(|r| r.stats.avg_peak_rss_bytes)
+                .collect();
+            with_memory.sort_unstable_by(|a, b| b.cmp(a));
+
+            if with_memory.is_empty() {
+                return None;
+            }
+
+            let worst_case: u64 = with_memory.iter().take(max_concurrent as usize).sum();
+            Some((threads, worst_case, with_memory.len(), max_concurrent))
+        })
+        .max_by_key(|&(_, worst_case, _, _)| worst_case);
+
+    if let Some((threads, worst_case, count, max_conc)) = most_dangerous {
+        if worst_case >= 8 * 1024 * 1024 * 1024 {
+            // 8 GB
+            println!();
+            println!(
+                "  Highest contention risk: {}T tier ({} tests, {} max concurrent, {} worst-case RSS)",
+                threads,
+                count,
+                max_conc,
+                format_rss(worst_case),
+            );
+        }
+    }
+
+    // Show specific high-RSS 1T tests that are the biggest risk
+    if let Some(default_tests) = by_tier.get(&config.default_threads) {
+        let mut high_rss: Vec<_> = default_tests
+            .iter()
+            .filter_map(|r| {
+                r.stats
+                    .avg_peak_rss_bytes
+                    .filter(|&rss| rss >= MEMORY_PRESSURE_RSS_BYTES)
+                    .map(|rss| (&r.test_name, rss))
+            })
+            .collect();
+        high_rss.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if !high_rss.is_empty() {
+            println!();
+            println!(
+                "  {} tests at {}T with peak RSS >= {} (top 10):",
+                high_rss.len(),
+                config.default_threads,
+                format_rss(MEMORY_PRESSURE_RSS_BYTES),
+            );
+            for (name, rss) in high_rss.iter().take(10) {
+                let short = if name.len() > 60 {
+                    format!("...{}", &name[name.len() - 57..])
+                } else {
+                    name.to_string()
+                };
+                println!("    {} {}", format_rss(*rss), short);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Schedule analysis
+// ============================================================================
+
+/// A single test's timeline entry for schedule reconstruction.
+struct ScheduleEntry {
+    test_name: String,
+    start_secs: f64, // seconds since run start
+    end_secs: f64,
+    threads: u32,
+}
+
+/// Detect run boundaries in the raw stats.
+///
+/// Uses a two-phase approach:
+/// 1. Find the largest gaps between consecutive test start times
+/// 2. Use these as run boundaries
+///
+/// Falls back to estimating run count from the number of unique test names
+/// (each test runs once per run) if gap detection doesn't produce clean splits.
+fn split_into_runs(stats: &AggregatedStats) -> Vec<Vec<usize>> {
+    if stats.tests.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort indices by started_at
+    let mut indices: Vec<usize> = (0..stats.tests.len()).collect();
+    indices.sort_by_key(|&i| stats.tests[i].started_at);
+
+    // Estimate run count from unique test names
+    let unique_tests: std::collections::HashSet<&str> = stats
+        .tests
+        .iter()
+        .filter_map(|t| t.test_name.as_deref())
+        .collect();
+    let tests_per_run = unique_tests.len().max(1);
+    let estimated_runs = (stats.tests.len() + tests_per_run / 2) / tests_per_run;
+
+    if estimated_runs <= 1 {
+        return vec![indices];
+    }
+
+    // Find the top N-1 largest gaps as run boundaries
+    let mut gaps: Vec<(f64, usize)> = Vec::new();
+    for i in 1..indices.len() {
+        let prev_ts = stats.tests[indices[i - 1]].started_at.timestamp_millis() as f64 / 1000.0;
+        let curr_ts = stats.tests[indices[i]].started_at.timestamp_millis() as f64 / 1000.0;
+        gaps.push((curr_ts - prev_ts, i));
+    }
+    gaps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n_boundaries = estimated_runs - 1;
+    let mut split_points: Vec<usize> = gaps
+        .iter()
+        .take(n_boundaries)
+        .map(|&(_, idx)| idx)
+        .collect();
+    split_points.sort();
+
+    // Build runs from split points
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for &split in &split_points {
+        runs.push(indices[start..split].to_vec());
+        start = split;
+    }
+    runs.push(indices[start..].to_vec());
+
+    runs
+}
+
+/// Build schedule entries for a run, computing times relative to the first test start.
+fn build_schedule(
+    stats: &AggregatedStats,
+    run_indices: &[usize],
+    config: &ClassificationConfig,
+) -> Vec<ScheduleEntry> {
+    if run_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let first_ts = stats.tests[run_indices[0]].started_at.timestamp_millis() as f64 / 1000.0;
+
+    run_indices
+        .iter()
+        .map(|&idx| {
+            let t = &stats.tests[idx];
+            let name = t.test_name.clone().unwrap_or_else(|| t.binary.clone());
+            let classification = config.classify(&name);
+            let start_secs = t.started_at.timestamp_millis() as f64 / 1000.0 - first_ts;
+            let end_secs = start_secs + t.duration_ms as f64 / 1000.0;
+
+            ScheduleEntry {
+                test_name: name,
+                start_secs,
+                end_secs,
+                threads: classification.effective_threads,
+            }
+        })
+        .collect()
+}
+
+/// Per-test contribution to slot waste during saturation periods.
+struct SaturationBlame {
+    test_name: String,
+    threads: u32,
+    /// Slot-seconds this test consumed while the scheduler was at capacity.
+    slot_secs_during_saturation: f64,
+    /// The "excess" slot-seconds: (threads - 1) * time during saturation.
+    /// This is what would be freed if the test were downgraded to 1T.
+    excess_slot_secs: f64,
+    duration_secs: f64,
+}
+
+fn cmd_schedule(
+    stats: &AggregatedStats,
+    config: &ClassificationConfig,
+    available_threads: u32,
+    top: usize,
+) {
+    // Split raw test entries into runs
+    let runs = split_into_runs(stats);
+
+    if runs.is_empty() {
+        println!("No test data found.");
+        return;
+    }
+
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                        SCHEDULE ANALYSIS                                    ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "Available threads: {} (override with --threads N)",
+        available_threads
+    );
+    println!(
+        "Detected {} run(s) across {} test entries",
+        runs.len(),
+        stats.tests.len()
+    );
+    println!();
+
+    // Aggregate blame across all runs
+    let mut blame_totals: HashMap<String, (u32, f64, f64, f64, usize)> = HashMap::new();
+    // key -> (threads, total_slot_secs_sat, total_excess, total_duration, run_count)
+
+    for (run_idx, run_indices) in runs.iter().enumerate() {
+        let schedule = build_schedule(stats, run_indices, config);
+        if schedule.is_empty() {
+            continue;
+        }
+
+        let wall_clock = schedule.iter().map(|e| e.end_secs).fold(0.0f64, f64::max);
+
+        // Build event timeline
+        let mut events: Vec<(f64, i32)> = Vec::new(); // (time, delta_threads)
+        for entry in &schedule {
+            events.push((entry.start_secs, entry.threads as i32));
+            events.push((entry.end_secs, -(entry.threads as i32)));
+        }
+        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Build saturation intervals: periods where slots >= available_threads
+        let mut current_slots: i32 = 0;
+        let mut saturation_intervals: Vec<(f64, f64)> = Vec::new();
+        let mut sat_start: Option<f64> = None;
+        let mut last_time = 0.0f64;
+
+        // Also compute histogram
+        let mut slot_seconds_by_level = BTreeMap::new();
+
+        for &(time, delta) in &events {
+            let dt = time - last_time;
+            if dt > 0.0 {
+                *slot_seconds_by_level
+                    .entry(current_slots.min(available_threads as i32 + 1) as u32)
+                    .or_insert(0.0f64) += dt;
+            }
+
+            if current_slots >= available_threads as i32 && sat_start.is_none() {
+                sat_start = Some(last_time.max(time - dt).max(0.0));
+                // more precisely, saturation started at last_time if we were already saturated
+            }
+            // Track transitions in/out of saturation
+            let was_saturated = current_slots >= available_threads as i32;
+            last_time = time;
+            current_slots += delta;
+            let is_saturated = current_slots >= available_threads as i32;
+
+            if was_saturated && !is_saturated {
+                if let Some(start) = sat_start.take() {
+                    saturation_intervals.push((start, time));
+                }
+            }
+            if !was_saturated && is_saturated {
+                sat_start = Some(time);
+            }
+        }
+        // Close any open saturation interval
+        if let Some(start) = sat_start {
+            saturation_intervals.push((start, last_time));
+        }
+
+        let total_saturation: f64 = saturation_intervals.iter().map(|(s, e)| e - s).sum();
+
+        // Compute total slot-seconds
+        let total_slot_secs: f64 = schedule
+            .iter()
+            .map(|e| (e.end_secs - e.start_secs) * e.threads as f64)
+            .sum();
+        let total_cpu_secs: f64 = schedule.iter().map(|e| e.end_secs - e.start_secs).sum();
+        let total_possible = wall_clock * available_threads as f64;
+
+        // Blame: for each test, compute how much of its runtime overlaps saturation
+        for entry in &schedule {
+            let mut sat_overlap = 0.0f64;
+            for &(sat_s, sat_e) in &saturation_intervals {
+                let overlap_start = entry.start_secs.max(sat_s);
+                let overlap_end = entry.end_secs.min(sat_e);
+                if overlap_end > overlap_start {
+                    sat_overlap += overlap_end - overlap_start;
+                }
+            }
+
+            if sat_overlap > 0.0 {
+                let slot_secs_sat = sat_overlap * entry.threads as f64;
+                let excess = sat_overlap * (entry.threads.saturating_sub(1)) as f64;
+
+                let e = blame_totals.entry(entry.test_name.clone()).or_insert((
+                    entry.threads,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                ));
+                e.1 += slot_secs_sat;
+                e.2 += excess;
+                e.3 += entry.end_secs - entry.start_secs;
+                e.4 += 1;
+            }
+        }
+
+        // Per-run summary
+        println!(
+            "Run {}: {} tests, wall={:.0}s",
+            run_idx + 1,
+            schedule.len(),
+            wall_clock
+        );
+        println!(
+            "  Slot utilization: {:.0}/{:.0} slot-seconds ({:.0}%)",
+            total_slot_secs,
+            total_possible,
+            total_slot_secs / total_possible * 100.0
+        );
+        println!(
+            "  CPU utilization:  {:.0}/{:.0} ({:.0}%)",
+            total_cpu_secs,
+            total_possible,
+            total_cpu_secs / total_possible * 100.0
+        );
+        println!(
+            "  Saturation (>={} slots): {:.1}s ({:.0}% of run)",
+            available_threads,
+            total_saturation,
+            total_saturation / wall_clock * 100.0
+        );
+
+        // Histogram
+        println!("  Slot usage:");
+        let max_secs = slot_seconds_by_level
+            .values()
+            .copied()
+            .fold(0.0f64, f64::max);
+        for (&slots, &secs) in &slot_seconds_by_level {
+            if secs < 0.5 {
+                continue;
+            }
+            let bar_len = if max_secs > 0.0 {
+                (secs / max_secs * 30.0) as usize
+            } else {
+                0
+            };
+            let marker = if slots >= available_threads { ">" } else { " " };
+            println!(
+                "   {}{:>2} slots: {:>6.1}s ({:>4.0}%) {}",
+                marker,
+                slots,
+                secs,
+                secs / wall_clock * 100.0,
+                "#".repeat(bar_len),
+            );
+        }
+        println!();
+    }
+
+    // Aggregate blame across runs
+    let mut blame_list: Vec<SaturationBlame> = blame_totals
+        .into_iter()
+        .map(
+            |(name, (threads, sat, excess, dur, count))| SaturationBlame {
+                test_name: name,
+                threads,
+                slot_secs_during_saturation: sat / runs.len() as f64,
+                excess_slot_secs: excess / runs.len() as f64,
+                duration_secs: dur / count as f64,
+            },
+        )
+        .collect();
+
+    // Sort by excess slot-seconds (what would be freed by downgrading to 1T)
+    blame_list.sort_by(|a, b| {
+        b.excess_slot_secs
+            .partial_cmp(&a.excess_slot_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_excess: f64 = blame_list.iter().map(|b| b.excess_slot_secs).sum();
+
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                 SATURATION BLAME (averaged across runs)                      ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "Tests holding excess slots during saturation — these block other tests from starting."
+    );
+    println!(
+        "\"Excess\" = (threads - 1) * time_during_saturation — slot-seconds freed by downgrading to 1T."
+    );
+    println!();
+    println!(
+        "{:<45} {:>5} {:>8} {:>8} {:>8}",
+        "Test", "Alloc", "Duration", "SatTime", "Excess"
+    );
+    println!("{}", "-".repeat(80));
+
+    let to_show = if top > 0 {
+        top.min(blame_list.len())
+    } else {
+        blame_list.len()
+    };
+
+    for blame in blame_list.iter().take(to_show) {
+        let name = if blame.test_name.len() > 43 {
+            format!("...{}", &blame.test_name[blame.test_name.len() - 40..])
+        } else {
+            blame.test_name.clone()
+        };
+        println!(
+            "{:<45} {:>4}T {:>7.1}s {:>7.1}s {:>7.1}s",
+            name,
+            blame.threads,
+            blame.duration_secs,
+            blame.slot_secs_during_saturation / blame.threads as f64,
+            blame.excess_slot_secs,
+        );
+    }
+
+    if blame_list.len() > to_show {
+        println!("  ... and {} more", blame_list.len() - to_show);
+    }
+
+    println!();
+    println!(
+        "Total excess slot-seconds during saturation: {:.0}s (avg per run)",
+        total_excess
+    );
+    println!(
+        "Potential wall-clock savings if all excess freed: ~{:.0}s (= {:.0}s / {} threads)",
+        total_excess / available_threads as f64,
+        total_excess,
+        available_threads,
+    );
+
+    // Show breakdown: how much comes from each allocation tier
+    let mut by_tier: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
+    for blame in &blame_list {
+        let e = by_tier.entry(blame.threads).or_insert((0.0, 0));
+        e.0 += blame.excess_slot_secs;
+        e.1 += 1;
+    }
+    println!();
+    println!("Excess by allocation tier:");
+    for (&threads, &(excess, count)) in &by_tier {
+        if threads <= 1 {
+            continue; // 1T tests have no excess
+        }
+        println!(
+            "  {}T: {:.0}s excess from {} tests ({:.0}% of total)",
+            threads,
+            excess,
+            count,
+            if total_excess > 0.0 {
+                excess / total_excess * 100.0
+            } else {
+                0.0
+            }
+        );
     }
 }
 
@@ -1648,6 +2508,582 @@ fn cmd_export(
         None => {
             println!("{}", content);
         }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Apply reclassifications
+// ============================================================================
+
+/// Metadata for one capacity class derived from the nextest config.
+#[derive(Debug, Clone)]
+struct CapacityClass {
+    name: String,
+    threads: Option<u32>,
+    timeout_ms: Option<u64>,
+    /// True when this class represents a semantic grouping (e.g. "spiky", "serial")
+    /// rather than a resource requirement beyond defaults. Semantic classes are
+    /// preserved from existing prefixes even when their thread/timeout values
+    /// match or don't exceed the defaults.
+    is_semantic: bool,
+}
+
+/// Collect the set of known capacity-class names from the loaded config rules.
+fn capacity_classes_from_config(config: &ClassificationConfig) -> Vec<CapacityClass> {
+    config
+        .rules
+        .iter()
+        .map(|r| {
+            let is_semantic = r
+                .threads_required
+                .is_none_or(|t| t <= config.default_threads)
+                && r.timeout_ms.is_none_or(|t| t <= config.default_timeout_ms);
+            CapacityClass {
+                name: r.name.clone(),
+                threads: r.threads_required,
+                timeout_ms: r.timeout_ms,
+                is_semantic,
+            }
+        })
+        .collect()
+}
+
+/// Parse the leading capacity-class prefix from a function name.
+///
+/// Greedily consumes segments (`"<class>_"`) from the start of the name as
+/// long as each segment is a recognised capacity class. Returns the list of
+/// matched class names and the byte length of the prefix consumed.
+///
+/// A segment only "counts" if every segment before it is also a capacity
+/// class — i.e. they must form a contiguous leading prefix.
+///
+/// Examples (given classes = ["slow", "heavy", "heavy3", "heavy4", "serial"]):
+///   `"slow_heavy_foo"`  → (["slow","heavy"], 11)
+///   `"heavy_slow_foo"`  → (["heavy","slow"], 11) — any order
+///   `"test_slow_foo"`   → ([], 0)                — `test` is not a class
+///   `"heavy3_bar"`      → (["heavy3"], 7)
+fn parse_capacity_prefix(func_name: &str, classes: &[CapacityClass]) -> (Vec<String>, usize) {
+    let mut matched = Vec::new();
+    let mut pos = 0;
+    // Sort class names longest-first so "heavy3" is tried before "heavy".
+    let mut sorted_names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+    sorted_names.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    loop {
+        let remaining = &func_name[pos..];
+        let mut found = false;
+        for &name in &sorted_names {
+            let token = format!("{name}_");
+            if remaining.starts_with(&token) {
+                matched.push(name.to_string());
+                pos += token.len();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            break;
+        }
+    }
+    (matched, pos)
+}
+
+/// Build the canonical prefix string for a set of capacity classes.
+///
+/// The canonical order is: timeout classes first (e.g. `slow_`), then thread
+/// classes in ascending order (`heavy_`, `heavy3_`, `heavy4_`), then others
+/// (e.g. `serial_`).
+fn classes_to_prefix(matched: &[String], all_classes: &[CapacityClass]) -> String {
+    // Partition into timeout-only, thread, and other classes
+    let mut timeout_parts = Vec::new();
+    let mut thread_parts: Vec<(u32, &str)> = Vec::new();
+    let mut other_parts = Vec::new();
+    for name in matched {
+        if let Some(cls) = all_classes.iter().find(|c| c.name == *name) {
+            // Semantic classes (e.g. "spiky", "serial") go in other_parts
+            // even if they have threads/timeout values, since those values
+            // just match defaults and shouldn't compete with resource classes.
+            if cls.is_semantic {
+                other_parts.push(name.as_str());
+            } else if let Some(threads) = cls.threads {
+                thread_parts.push((threads, name.as_str()));
+            } else if cls.timeout_ms.is_some() {
+                timeout_parts.push(name.as_str());
+            } else {
+                other_parts.push(name.as_str());
+            }
+        } else {
+            other_parts.push(name.as_str());
+        }
+    }
+    // Only keep the highest thread class (don't emit both heavy_ and heavy3_)
+    thread_parts.sort_by(|a, b| b.0.cmp(&a.0));
+    thread_parts.truncate(1);
+
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(timeout_parts);
+    parts.extend(thread_parts.iter().map(|(_, n)| *n));
+    parts.extend(other_parts);
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}_", parts.join("_"))
+    }
+}
+
+/// Convert a suggested classification (threads, timeout) into the canonical
+/// function-name prefix, using the class names from the loaded config.
+fn classification_to_prefix(
+    threads: u32,
+    timeout_ms: u64,
+    config: &ClassificationConfig,
+    all_classes: &[CapacityClass],
+    old_classes: &[String],
+) -> String {
+    let mut matched = Vec::new();
+
+    // Preserve semantic classes (e.g. "serial", "spiky") from the old prefix.
+    // These don't imply resource requirements beyond defaults, so they would
+    // otherwise be dropped when rebuilding the prefix from resource values alone.
+    for cls in all_classes {
+        if cls.is_semantic && old_classes.contains(&cls.name) {
+            matched.push(cls.name.clone());
+        }
+    }
+
+    // Find the timeout class (if any)
+    if timeout_ms > config.default_timeout_ms {
+        if let Some(cls) = all_classes
+            .iter()
+            .find(|c| c.timeout_ms == Some(timeout_ms))
+        {
+            matched.push(cls.name.clone());
+        }
+    }
+
+    // Find the thread class (if any)
+    if threads > config.default_threads {
+        if let Some(cls) = all_classes.iter().find(|c| c.threads == Some(threads)) {
+            matched.push(cls.name.clone());
+        }
+    }
+
+    classes_to_prefix(&matched, all_classes)
+}
+
+/// Map a thread class name to its thread count for step-down comparison.
+fn thread_class_tier(name: &str, all_classes: &[CapacityClass]) -> u32 {
+    all_classes
+        .iter()
+        .find(|c| c.name == name)
+        .and_then(|c| c.threads)
+        .unwrap_or(1)
+}
+
+/// Clamp a suggested thread count so it drops at most one tier from the
+/// current thread class. Up-allocations are never clamped.
+fn clamp_thread_downsize(
+    current_thread_class: Option<&str>,
+    suggested_threads: u32,
+    all_classes: &[CapacityClass],
+) -> u32 {
+    let current_tier = current_thread_class
+        .map(|n| thread_class_tier(n, all_classes))
+        .unwrap_or(1);
+    if suggested_threads >= current_tier {
+        return suggested_threads;
+    }
+    // Build sorted list of available thread tiers
+    let mut tiers: Vec<u32> = vec![1]; // default
+    tiers.extend(all_classes.iter().filter_map(|c| c.threads));
+    tiers.sort();
+    tiers.dedup();
+    // Find the tier one step below current
+    let current_idx = tiers.iter().position(|&t| t == current_tier).unwrap_or(0);
+    let min_tier = if current_idx > 0 {
+        tiers[current_idx - 1]
+    } else {
+        1
+    };
+    suggested_threads.max(min_tier)
+}
+
+/// Format a prefix string for display (showing "(default)" for empty prefix).
+fn display_prefix(prefix: &str) -> &str {
+    if prefix.is_empty() {
+        "(default)"
+    } else {
+        prefix.trim_end_matches('_')
+    }
+}
+
+/// Extract the full module::function path from a test path (strips only case suffixes).
+///
+/// Preserves the module segments so that tests with the same bare function name
+/// in different modules are kept distinct when used as grouping keys.
+fn extract_func_from_path(test_path: &str) -> &str {
+    // Strip rstest case suffixes: both numeric (::case_N) and named (::case::name)
+    let numeric = test_path.find("::case_");
+    let named = test_path.find("::case::");
+    match (numeric, named) {
+        (Some(a), Some(b)) => &test_path[..a.min(b)],
+        (Some(a), None) => &test_path[..a],
+        (None, Some(b)) => &test_path[..b],
+        (None, None) => test_path,
+    }
+}
+
+/// Extract just the bare function name (last `::` segment) from a test path.
+fn bare_func_name(test_path: &str) -> &str {
+    test_path.rsplit("::").next().unwrap_or(test_path)
+}
+
+/// A rename action: old function name → new function name, with the file it was found in.
+#[derive(Debug, Clone)]
+struct RenameAction {
+    old_name: String,
+    new_name: String,
+    file_path: PathBuf,
+    line_number: usize,
+}
+
+/// Recursively find all .rs files under `root`, skipping target/ and hidden directories.
+fn find_rs_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip hidden dirs, target/, .worktrees/
+                if name.starts_with('.') || name == "target" {
+                    continue;
+                }
+            }
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+    walk(root, &mut files);
+    files
+}
+
+/// Find the file and line where `fn <func_name>` is defined.
+///
+/// `module_hint` contains `::` separated module segments from the test path
+/// (e.g. `"crate_name::module::submod::func"`). When multiple files contain a
+/// matching definition the hint is used to pick the best match — files whose
+/// path contains more of the module segments are preferred.
+fn find_function_def(
+    func_name: &str,
+    rs_files: &[PathBuf],
+    module_hint: &str,
+) -> Option<(PathBuf, usize)> {
+    // Match patterns like: `fn func_name(`, `fn func_name (`, `async fn func_name(`
+    let pattern = format!("fn {func_name}");
+    let mut candidates: Vec<(PathBuf, usize, usize)> = Vec::new();
+
+    // Collect module segments from the hint for scoring (exclude the func name itself)
+    let hint_segments: Vec<&str> = module_hint
+        .rsplit("::")
+        .skip(1) // skip the bare function name
+        .collect();
+
+    for file_path in rs_files {
+        let Ok(content) = fs::read_to_string(file_path) else {
+            continue;
+        };
+        for (line_idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.contains(&pattern) {
+                // Verify it's actually a function definition, not just a comment or string
+                let before_fn = trimmed.split("fn ").next().unwrap_or("");
+                // Should be empty, start with pub/async/unsafe, or be a #[test] etc.
+                if before_fn.is_empty()
+                    || before_fn.ends_with("pub ")
+                    || before_fn.ends_with("async ")
+                    || before_fn.ends_with("pub async ")
+                    || before_fn.ends_with("pub(crate) ")
+                    || before_fn.ends_with("pub(crate) async ")
+                    || before_fn.ends_with("unsafe ")
+                    || before_fn.ends_with("pub unsafe ")
+                    || before_fn.ends_with("const ")
+                    || before_fn.ends_with("pub const ")
+                {
+                    // Confirm the character after the name is `(` or `<` or whitespace
+                    let after_name_start = trimmed.find(&pattern).unwrap() + pattern.len();
+                    if let Some(ch) = trimmed[after_name_start..].chars().next() {
+                        if ch == '(' || ch == '<' || ch == ' ' {
+                            // Score: how many module hint segments appear in the file path
+                            let path_str = file_path.to_string_lossy();
+                            let score = hint_segments
+                                .iter()
+                                .filter(|seg| path_str.contains(**seg))
+                                .count();
+                            candidates.push((file_path.clone(), line_idx + 1, score));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Pick the candidate with the highest module-hint score (first found on ties)
+    candidates
+        .into_iter()
+        .max_by_key(|(_, _, score)| *score)
+        .map(|(path, line, _)| (path, line))
+}
+
+fn cmd_apply(
+    stats: &AggregatedStats,
+    config: &ClassificationConfig,
+    root: &Path,
+    dry_run: bool,
+) -> std::io::Result<()> {
+    let all_classes = capacity_classes_from_config(config);
+    let reclassifications = analyze_reclassifications(stats, config);
+
+    let skipped_count = reclassifications
+        .iter()
+        .filter(|r| r.needs_change() && !r.safe_to_apply)
+        .count();
+
+    let needs_change: Vec<_> = reclassifications
+        .iter()
+        .filter(|r| r.is_auto_applicable())
+        .collect();
+
+    if needs_change.is_empty() {
+        if skipped_count > 0 {
+            println!(
+                "No auto-applicable changes. {} tests have spike-justified allocations (use `analyze` to review).",
+                skipped_count
+            );
+        } else {
+            println!("All tests are correctly classified. Nothing to apply.");
+        }
+        return Ok(());
+    }
+
+    if skipped_count > 0 {
+        println!(
+            "Skipping {} tests where CPU spikes justify current allocation (use `analyze` to review).",
+            skipped_count
+        );
+        println!();
+    }
+
+    // Group by function name (stripping case suffixes) and take max tier across all cases
+    let mut func_suggestions: BTreeMap<String, (u32, u64)> = BTreeMap::new();
+    for r in &needs_change {
+        let func = extract_func_from_path(&r.test_name).to_string();
+        let entry = func_suggestions
+            .entry(func)
+            .or_insert((r.suggested.threads_required, r.suggested.timeout_ms));
+        entry.0 = entry.0.max(r.suggested.threads_required);
+        entry.1 = entry.1.max(r.suggested.timeout_ms);
+    }
+
+    // Compute rename pairs: (full_path, old_bare_func_name, new_bare_func_name)
+    let mut rename_pairs: Vec<(String, String, String)> = Vec::new();
+    let mut clamped_count = 0;
+    for (full_path, (suggested_threads, timeout_ms)) in &func_suggestions {
+        let func_name = bare_func_name(full_path);
+        let (old_classes, prefix_len) = parse_capacity_prefix(func_name, &all_classes);
+        let base_name = &func_name[prefix_len..];
+
+        // Find the current thread class (the one with threads_required set)
+        let current_thread_class = old_classes.iter().find_map(|c| {
+            let cls = all_classes.iter().find(|ac| ac.name == *c)?;
+            cls.threads.map(|_| c.as_str())
+        });
+
+        // Clamp downsize: drop at most one thread tier per apply run
+        let clamped_threads =
+            clamp_thread_downsize(current_thread_class, *suggested_threads, &all_classes);
+        if clamped_threads != *suggested_threads {
+            clamped_count += 1;
+        }
+
+        let new_prefix = classification_to_prefix(
+            clamped_threads,
+            *timeout_ms,
+            config,
+            &all_classes,
+            &old_classes,
+        );
+        // Compare canonical forms so ordering differences don't cause spurious renames
+        let old_canonical = classes_to_prefix(&old_classes, &all_classes);
+        if old_canonical == new_prefix {
+            continue;
+        }
+        let new_name = format!("{new_prefix}{base_name}");
+        rename_pairs.push((full_path.clone(), func_name.to_string(), new_name));
+    }
+
+    if rename_pairs.is_empty() {
+        println!("Analysis found issues but no renames are needed.");
+        return Ok(());
+    }
+
+    if clamped_count > 0 {
+        println!(
+            "Note: {} tests had their downsize clamped to one tier step.",
+            clamped_count
+        );
+        println!("Run `apply` again after verifying stability to continue stepping down.\n");
+    }
+
+    println!("Finding {} test functions to rename...", rename_pairs.len());
+
+    // Collect all .rs files once
+    let rs_files = find_rs_files(root);
+    println!("Scanning {} source files...", rs_files.len());
+
+    // Find each function definition
+    let mut actions: Vec<RenameAction> = Vec::new();
+    let mut not_found: Vec<String> = Vec::new();
+
+    for (full_path, old_name, new_name) in &rename_pairs {
+        match find_function_def(old_name, &rs_files, full_path) {
+            Some((file_path, line_number)) => {
+                actions.push(RenameAction {
+                    old_name: old_name.clone(),
+                    new_name: new_name.clone(),
+                    file_path,
+                    line_number,
+                });
+            }
+            None => {
+                not_found.push(old_name.clone());
+            }
+        }
+    }
+
+    // Group actions by file for efficient batch editing
+    let mut by_file: BTreeMap<PathBuf, Vec<&RenameAction>> = BTreeMap::new();
+    for action in &actions {
+        by_file
+            .entry(action.file_path.clone())
+            .or_default()
+            .push(action);
+    }
+
+    // Print summary
+    println!();
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                         APPLY RECLASSIFICATIONS                             ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Group by change direction for display
+    let mut by_change: BTreeMap<String, Vec<&RenameAction>> = BTreeMap::new();
+    for action in &actions {
+        let (old_classes, _) = parse_capacity_prefix(&action.old_name, &all_classes);
+        let old_pfx = classes_to_prefix(&old_classes, &all_classes);
+        let (new_classes, _) = parse_capacity_prefix(&action.new_name, &all_classes);
+        let new_pfx = classes_to_prefix(&new_classes, &all_classes);
+        let key = format!(
+            "'{}' → '{}'",
+            display_prefix(&old_pfx),
+            display_prefix(&new_pfx),
+        );
+        by_change.entry(key).or_default().push(action);
+    }
+
+    for (change, items) in &by_change {
+        println!("{} ({} functions):", change, items.len());
+        for action in items {
+            println!("  {} → {}", action.old_name, action.new_name);
+            println!(
+                "    in {}:{}",
+                action.file_path.display(),
+                action.line_number
+            );
+        }
+        println!();
+    }
+
+    if !not_found.is_empty() {
+        println!(
+            "⚠️  {} functions not found in source (skipped):",
+            not_found.len()
+        );
+        for name in &not_found {
+            println!("  {}", name);
+        }
+        println!();
+    }
+
+    if dry_run {
+        println!(
+            "DRY RUN: {} renames across {} files would be applied.",
+            actions.len(),
+            by_file.len()
+        );
+        if clamped_count > 0 {
+            println!(
+                "({} downsizes were clamped to one tier step)",
+                clamped_count
+            );
+        }
+        return Ok(());
+    }
+
+    // Apply renames
+    let mut files_modified = 0;
+    let mut renames_applied = 0;
+
+    for (file_path, file_actions) in &by_file {
+        let content = fs::read_to_string(file_path)?;
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+
+        for action in file_actions {
+            // line_number is 1-based; only replace on the exact line to avoid
+            // renaming unrelated occurrences of the same identifier elsewhere
+            let idx = action.line_number.saturating_sub(1);
+            if idx < lines.len() {
+                let old_pattern = format!("fn {}", action.old_name);
+                let new_pattern = format!("fn {}", action.new_name);
+                lines[idx] = lines[idx].replace(&old_pattern, &new_pattern);
+            }
+        }
+
+        let mut new_content = lines.join("\n");
+        // Preserve trailing newline if the original file had one
+        if content.ends_with('\n') && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        if new_content != content {
+            fs::write(file_path, &new_content)?;
+            files_modified += 1;
+            renames_applied += file_actions.len();
+        }
+    }
+
+    println!(
+        "Applied {} renames across {} files.",
+        renames_applied, files_modified
+    );
+    println!();
+    println!("Next steps:");
+    println!("  1. Run `cargo fmt --all` to format changed files");
+    println!("  2. Run `cargo xtask check` to verify compilation");
+    println!("  3. Run `cargo xtask test --monitor` to verify with updated classifications");
+    if clamped_count > 0 {
+        println!("  4. Run `apply` again to continue stepping down clamped tests");
     }
 
     Ok(())

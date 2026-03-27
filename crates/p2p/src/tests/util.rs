@@ -458,6 +458,11 @@ impl GossipServiceTestFixture {
     }
 
     #[must_use]
+    pub(crate) fn gossip_addr(&self) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.gossip_port)
+    }
+
+    #[must_use]
     pub(crate) fn create_default_peer_entry(&self) -> PeerListItem {
         PeerListItem {
             peer_id: self.config.peer_id(),
@@ -1112,6 +1117,38 @@ pub(crate) async fn wait_for_block(
             panic!("Timeout waiting for block at height {}", block_height);
         }
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Probe a TCP address until a connection succeeds or the deadline expires.
+/// Use after spawning an HTTP server to wait for it to accept connections.
+pub(crate) async fn wait_until_listening(addr: SocketAddr) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Server at {addr} failed to start accepting connections"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Poll `check` every 100ms until it returns `true`, failing after `timeout`.
+pub(crate) async fn poll_until(
+    timeout: Duration,
+    msg: &str,
+    check: impl Fn() -> bool,
+) -> eyre::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if check() {
+            return Ok(());
+        }
+        eyre::ensure!(tokio::time::Instant::now() < deadline, "{msg}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

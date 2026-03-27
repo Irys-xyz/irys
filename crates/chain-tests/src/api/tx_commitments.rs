@@ -340,7 +340,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy3_no_commitments_basic_test() -> eyre::Result<()> {
+async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
@@ -395,7 +395,7 @@ async fn heavy3_no_commitments_basic_test() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
+async fn test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
     // ===== TEST SETUP =====
     // Create test environment with a funded signer for transaction creation
@@ -637,7 +637,7 @@ fn validate_pledge_assignments(
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_update_reward_address() -> eyre::Result<()> {
+async fn test_update_reward_address() -> eyre::Result<()> {
     initialize_tracing();
 
     // Setup: 2-block epochs for fast transitions
@@ -760,7 +760,7 @@ async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<
 /// - They are ordered by fee ascending (lowest fee first, highest fee last)
 /// - The highest-fee update wins and takes effect at epoch boundary
 #[test_log::test(tokio::test)]
-async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
+async fn test_multiple_update_reward_address() -> eyre::Result<()> {
     initialize_tracing();
 
     // Use 4 blocks per epoch to have room for testing within an epoch

@@ -2733,7 +2733,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_handle_data_retrieval_score_slow_response() {
+        async fn test_handle_data_retrieval_score_sluggish_response() {
             const EXPECTED_DECREASE_OF_ONE: u16 = 1;
             let test_cases = vec![
                 (Duration::from_secs(3), EXPECTED_DECREASE_OF_ONE),
