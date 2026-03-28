@@ -441,6 +441,7 @@ impl GossipServiceTestFixture {
                     )))),
                     std::time::Instant::now(),
                     None,
+                    None, // pd_chunk_sender
                 )
                 .expect("failed to run the gossip service");
 
