@@ -1,5 +1,6 @@
 pub mod cache;
 pub(crate) mod fetch;
+mod inbound_push_tracker;
 pub mod provisioning;
 
 use cache::{ChunkCache, ChunkKey};
@@ -694,6 +695,10 @@ impl PdService {
             }
             PdChunkMessage::ReleaseBlockChunks { block_hash } => {
                 self.handle_release_block_chunks(&block_hash);
+            }
+            PdChunkMessage::OptimisticPush { .. } => {
+                // TODO: Task 9 will implement handle_optimistic_push
+                tracing::warn!("optimistic push received but handler not yet implemented");
             }
         }
     }
