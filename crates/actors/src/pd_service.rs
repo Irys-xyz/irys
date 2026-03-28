@@ -355,11 +355,15 @@ impl PdService {
             waiting_txs.len()
         );
         if let Some((&first, rest)) = all_waiters.split_first() {
-            self.cache.insert(key, data, first);
+            self.cache
+                .insert_with_data_path(key, data, first, Some(data_path));
             for &waiter in rest {
                 self.cache.add_reference(&key, waiter);
             }
         }
+
+        // 6b. Optimistically push to peers.
+        self.schedule_outbound_push(&key);
 
         // 7. Notify waiting blocks.
         for block_hash in &waiting_blocks {
@@ -688,6 +692,92 @@ impl PdService {
         peers
     }
 
+    /// Returns the set of peer IDs that are assigned to the same partition slot
+    /// as the given chunk key. Used to exclude partition assignees from outbound
+    /// push targets (they already have the data or will fetch it themselves).
+    fn resolve_partition_assignee_ids(&self, key: &ChunkKey) -> HashSet<IrysPeerId> {
+        let slot_index = key.offset / self.num_chunks_in_partition;
+        let publish_ledger_id: u32 = DataLedger::Publish.into();
+
+        let tree = self.block_tree.read();
+        let epoch_snapshot = tree.canonical_epoch_snapshot();
+        let assignments = &epoch_snapshot.partition_assignments.data_partitions;
+
+        let mut ids = HashSet::new();
+        for (_hash, assignment) in assignments.iter() {
+            if assignment.ledger_id == Some(publish_ledger_id)
+                && assignment.slot_index == Some(slot_index as usize)
+                && assignment.miner_address != self.own_miner_address
+                && let Some(item) = self
+                    .peer_list
+                    .peer_by_mining_address(&assignment.miner_address)
+            {
+                ids.insert(item.peer_id);
+            }
+        }
+        ids
+    }
+
+    /// Optimistically push a cached chunk to a selection of peers.
+    ///
+    /// Selects targets using the configured fanout, excluding peers that already
+    /// have the chunk (inbound push sources) and partition assignees (who store
+    /// the data themselves). Does nothing if fanout is 0 or the chunk lacks a
+    /// data_path (merkle proof) needed for the push message.
+    fn schedule_outbound_push(&self, key: &ChunkKey) {
+        if self.pd_optimistic_push_fanout == 0 {
+            return;
+        }
+
+        let entry = match self.cache.peek_entry(key) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let data_path = match &entry.data_path {
+            Some(dp) => dp.clone(),
+            None => return,
+        };
+
+        // Build exclusion set: peers that pushed this chunk to us + partition assignees.
+        let mut excluded_ids = self
+            .inbound_push_tracker
+            .get_known_sources(key.ledger, key.offset);
+        excluded_ids.extend(self.resolve_partition_assignee_ids(key));
+
+        let candidates: Vec<_> = self
+            .peer_list
+            .all_peers_with_score()
+            .into_iter()
+            .filter(|(id, _, _)| !excluded_ids.contains(id))
+            .collect();
+
+        let targets = push::select_push_targets(self.pd_optimistic_push_fanout, &candidates);
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let push_msg = PdChunkPush {
+            ledger: key.ledger,
+            offset: key.offset,
+            chunk_bytes: irys_types::Base64(entry.data.to_vec()),
+            data_path,
+        };
+
+        debug!(
+            ledger = key.ledger,
+            offset = key.offset,
+            num_targets = targets.len(),
+            "Scheduling outbound PD chunk push"
+        );
+
+        for (peer_id, peer_addr) in targets {
+            self.chunk_pusher
+                .push_pd_chunk(peer_id, &peer_addr, &push_msg);
+        }
+    }
+
     /// Handle an optimistically pushed PD chunk from a peer.
     ///
     /// Validates the chunk against trusted MDBX state (block index + merkle proof)
@@ -885,6 +975,7 @@ impl PdService {
                 // Already cached — just add reference
                 self.cache.add_reference(key, tx_hash);
                 fetched += 1;
+                self.schedule_outbound_push(key);
                 trace!(
                     tx_hash = %tx_hash,
                     ledger = key.ledger,
@@ -892,14 +983,36 @@ impl PdService {
                     "Chunk already cached, added reference"
                 );
             } else {
-                // Fetch from storage
+                // Fetch from local storage via get_chunk_for_pd (returns ChunkFormat)
                 match self
                     .storage_provider
-                    .get_unpacked_chunk_by_ledger_offset(key.ledger, key.offset)
+                    .get_chunk_for_pd(key.ledger, key.offset)
                 {
-                    Ok(Some(chunk)) => {
-                        self.cache.insert(*key, Arc::new(chunk), tx_hash);
+                    Ok(Some(chunk_format)) => {
+                        let config = self.storage_provider.config();
+                        let (unpacked_bytes, data_path) = match chunk_format {
+                            irys_types::ChunkFormat::Unpacked(unpacked) => {
+                                (unpacked.bytes.0, Some(unpacked.data_path))
+                            }
+                            irys_types::ChunkFormat::Packed(packed) => {
+                                let dp = packed.data_path.clone();
+                                let unpacked = irys_packing::unpack(
+                                    &packed,
+                                    config.entropy_packing_iterations,
+                                    config.chunk_size as usize,
+                                    config.chain_id,
+                                );
+                                (unpacked.bytes.0, Some(dp))
+                            }
+                        };
+                        self.cache.insert_with_data_path(
+                            *key,
+                            Arc::new(Bytes::from(unpacked_bytes)),
+                            tx_hash,
+                            data_path,
+                        );
                         fetched += 1;
+                        self.schedule_outbound_push(key);
                         trace!(
                             tx_hash = %tx_hash,
                             ledger = key.ledger,
@@ -1356,7 +1469,13 @@ mod tests {
             _ledger: u32,
             _ledger_offset: u64,
         ) -> eyre::Result<Option<irys_types::ChunkFormat>> {
-            Ok(None)
+            Ok(Some(irys_types::ChunkFormat::Unpacked(
+                irys_types::UnpackedChunk {
+                    bytes: irys_types::Base64(self.cached_chunk.to_vec()),
+                    data_path: irys_types::Base64(vec![0_u8; 64]),
+                    ..Default::default()
+                },
+            )))
         }
 
         fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
