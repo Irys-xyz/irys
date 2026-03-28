@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    Base64, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
     IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::B256;
@@ -459,6 +459,20 @@ impl<T> GossipRequestV1<T> {
             data: self.data,
         }
     }
+}
+
+/// A single unpacked PD chunk pushed optimistically before block validation.
+/// The receiver derives all verification info from the block index using (ledger, offset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdChunkPush {
+    /// Ledger ID (0 = Publish). PD operates exclusively on the Publish ledger.
+    pub ledger: u32,
+    /// Absolute ledger chunk offset.
+    pub offset: u64,
+    /// Unpacked chunk bytes (up to 256 KiB).
+    pub chunk_bytes: Base64,
+    /// Merkle proof (data_path) for verification against the data_root.
+    pub data_path: Base64,
 }
 
 /// Legacy type alias for backward compatibility - maps to V1

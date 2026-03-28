@@ -85,6 +85,16 @@ pub trait PdChunkFetcher: Send + Sync + 'static {
     ) -> Result<PdChunkFetchSuccess, PdChunkFetchFailure>;
 }
 
+/// Pushes a PD chunk to a peer. Fire-and-forget (detached tokio task).
+pub trait PdChunkPusher: Send + Sync + 'static {
+    fn push_pd_chunk(
+        &self,
+        peer_id: crate::IrysPeerId,
+        peer_addr: &crate::PeerAddress,
+        push: &crate::gossip::PdChunkPush,
+    );
+}
+
 // ============================================================================
 // PD Chunk Manager Message Types
 // ============================================================================
@@ -107,6 +117,11 @@ pub enum PdChunkMessage {
     },
     /// Release chunks provisioned for a block after validation completes.
     ReleaseBlockChunks { block_hash: B256 },
+    /// A PD chunk pushed optimistically by a peer before block validation.
+    OptimisticPush {
+        peer_id: crate::IrysPeerId,
+        push: crate::gossip::PdChunkPush,
+    },
 }
 
 /// Sender for PD chunk messages.
