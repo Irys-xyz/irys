@@ -1,3 +1,4 @@
+use irys_types::Base64;
 use lru::LruCache;
 use reth::revm::primitives::{B256, bytes::Bytes};
 use std::collections::HashSet;
@@ -19,6 +20,8 @@ pub struct ChunkKey {
 pub struct CachedChunkEntry {
     /// The unpacked chunk data.
     pub data: Arc<Bytes>,
+    /// The Merkle data path for this chunk, if known.
+    pub data_path: Option<Base64>,
     /// Transactions currently referencing this chunk (prevents eviction when non-empty).
     pub referencing_txs: HashSet<B256>,
     /// When this chunk was first cached.
@@ -69,6 +72,11 @@ impl ChunkCache {
         self.chunks.peek(key).map(|entry| Arc::clone(&entry.data))
     }
 
+    /// Peek at the full cache entry without promoting it in LRU order.
+    pub fn peek_entry(&self, key: &ChunkKey) -> Option<&CachedChunkEntry> {
+        self.chunks.peek(key)
+    }
+
     /// Check if a chunk is present in the cache.
     pub fn contains(&self, key: &ChunkKey) -> bool {
         self.chunks.contains(key)
@@ -81,6 +89,22 @@ impl ChunkCache {
     ///
     /// Returns `true` if the chunk was newly inserted (not already present).
     pub fn insert(&mut self, key: ChunkKey, data: Arc<Bytes>, tx_hash: B256) -> bool {
+        self.insert_with_data_path(key, data, tx_hash, None)
+    }
+
+    /// Insert a chunk with an optional data path, referenced by the given transaction.
+    ///
+    /// If the cache is at capacity, unreferenced entries may be evicted first.
+    /// If the chunk already exists, just adds the tx reference (data_path is not updated).
+    ///
+    /// Returns `true` if the chunk was newly inserted (not already present).
+    pub fn insert_with_data_path(
+        &mut self,
+        key: ChunkKey,
+        data: Arc<Bytes>,
+        tx_hash: B256,
+        data_path: Option<Base64>,
+    ) -> bool {
         if let Some(entry) = self.chunks.get_mut(&key) {
             entry.referencing_txs.insert(tx_hash);
             return false;
@@ -98,6 +122,7 @@ impl ChunkCache {
             key,
             CachedChunkEntry {
                 data: Arc::clone(&data),
+                data_path,
                 referencing_txs,
                 cached_at: Instant::now(),
             },
@@ -106,6 +131,45 @@ impl ChunkCache {
         // Mirror into shared index for lock-free reads
         self.shared_index.insert((key.ledger, key.offset), data);
 
+        true
+    }
+
+    /// Insert an unreferenced chunk into the cache (e.g. received via gossip,
+    /// not yet claimed by any executing transaction).
+    ///
+    /// If the key already exists, the entry is left in place and its `data_path`
+    /// is filled in if it was previously `None`. Returns `false` without replacing
+    /// data or evicting anything.
+    ///
+    /// If the key is absent, inserts a new entry with an empty `referencing_txs`
+    /// set, making it immediately eligible for LRU eviction.
+    ///
+    /// Returns `true` if the chunk was newly inserted.
+    pub fn insert_unreferenced(
+        &mut self,
+        key: ChunkKey,
+        data: Arc<Bytes>,
+        data_path: Base64,
+    ) -> bool {
+        if let Some(existing) = self.chunks.peek_mut(&key) {
+            // Fill in data_path if missing
+            if existing.data_path.is_none() {
+                existing.data_path = Some(data_path);
+            }
+            return false;
+        }
+
+        self.make_room_for_insert();
+        self.shared_index.insert((key.ledger, key.offset), data.clone());
+        self.chunks.push(
+            key,
+            CachedChunkEntry {
+                data,
+                data_path: Some(data_path),
+                referencing_txs: HashSet::new(),
+                cached_at: Instant::now(),
+            },
+        );
         true
     }
 
@@ -196,6 +260,8 @@ mod tests {
     use super::*;
     use dashmap::DashMap;
     use std::sync::Arc;
+
+    type ChunkDataIndex = irys_types::chunk_provider::ChunkDataIndex;
 
     fn make_key(offset: u64) -> ChunkKey {
         ChunkKey { ledger: 0, offset }
@@ -391,5 +457,93 @@ mod tests {
         cache.try_shrink_to_fit();
         // Should shrink because len (2) <= initial cap (2)
         assert_eq!(cache.chunks.cap().get(), 2);
+    }
+
+    #[test]
+    fn test_insert_unreferenced_creates_evictable_entry() {
+        let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+        let key = ChunkKey { ledger: 0, offset: 100 };
+        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let data_path = Base64(vec![2u8; 64]);
+
+        let inserted = cache.insert_unreferenced(key, data.clone(), data_path.clone());
+        assert!(inserted);
+        assert!(cache.contains(&key));
+        assert!(shared_index.contains_key(&(0, 100)));
+
+        let entry = cache.peek_entry(&key).unwrap();
+        assert!(entry.referencing_txs.is_empty());
+        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+    }
+
+    #[test]
+    fn test_insert_unreferenced_noop_when_exists() {
+        let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+        let key = ChunkKey { ledger: 0, offset: 100 };
+        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let tx_hash = B256::from([0xAA; 32]);
+
+        cache.insert(key, data.clone(), tx_hash);
+
+        let data_path = Base64(vec![2u8; 64]);
+        let inserted = cache.insert_unreferenced(key, data.clone(), data_path);
+        assert!(!inserted);
+
+        let entry = cache.peek_entry(&key).unwrap();
+        assert!(entry.referencing_txs.contains(&tx_hash));
+    }
+
+    #[test]
+    fn test_insert_unreferenced_fills_missing_data_path() {
+        let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+        let key = ChunkKey { ledger: 0, offset: 100 };
+        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let tx_hash = B256::from([0xAA; 32]);
+
+        cache.insert(key, data.clone(), tx_hash);
+        assert!(cache.peek_entry(&key).unwrap().data_path.is_none());
+
+        let data_path = Base64(vec![2u8; 64]);
+        let inserted = cache.insert_unreferenced(key, data.clone(), data_path.clone());
+        assert!(!inserted);
+
+        let entry = cache.peek_entry(&key).unwrap();
+        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+    }
+
+    #[test]
+    fn test_insert_with_data_path_stores_it() {
+        let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+        let key = ChunkKey { ledger: 0, offset: 100 };
+        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let tx_hash = B256::from([0xAA; 32]);
+        let data_path = Base64(vec![2u8; 64]);
+
+        cache.insert_with_data_path(key, data, tx_hash, Some(data_path.clone()));
+        let entry = cache.peek_entry(&key).unwrap();
+        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+    }
+
+    #[test]
+    fn test_lru_eviction_prefers_unreferenced() {
+        let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+
+        let key1 = ChunkKey { ledger: 0, offset: 1 };
+        let key2 = ChunkKey { ledger: 0, offset: 2 };
+        let key3 = ChunkKey { ledger: 0, offset: 3 };
+        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+
+        cache.insert(key1, data.clone(), B256::from([0xAA; 32]));
+        cache.insert_unreferenced(key2, data.clone(), Base64(vec![]));
+
+        cache.insert(key3, data.clone(), B256::from([0xBB; 32]));
+        assert!(cache.contains(&key1));
+        assert!(!cache.contains(&key2));
+        assert!(cache.contains(&key3));
     }
 }
