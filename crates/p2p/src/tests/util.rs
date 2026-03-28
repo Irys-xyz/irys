@@ -1045,6 +1045,7 @@ pub(crate) fn data_handler_stub(
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
         storage_provider: None,
+        pd_chunk_sender: None,
     })
 }
 
@@ -1101,6 +1102,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
         storage_provider: None,
+        pd_chunk_sender: None,
     })
 }
 

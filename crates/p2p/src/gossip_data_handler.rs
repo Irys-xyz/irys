@@ -22,7 +22,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
-use irys_types::chunk_provider::ChunkStorageProvider;
+use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkSender};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
 use irys_types::{
@@ -86,6 +86,9 @@ where
     pub consensus_config_hash: H256,
     pub runtime_handle: tokio::runtime::Handle,
     pub storage_provider: Option<Arc<dyn ChunkStorageProvider>>,
+    /// Sender for PD chunk messages (optimistic push from gossip peers).
+    /// `None` when PD is not active (e.g. test configurations).
+    pub pd_chunk_sender: Option<PdChunkSender>,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -111,6 +114,7 @@ where
             consensus_config_hash: self.consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
             storage_provider: self.storage_provider.clone(),
+            pd_chunk_sender: self.pd_chunk_sender.clone(),
         }
     }
 }

@@ -1778,6 +1778,7 @@ impl IrysNode {
             Some(
                 chunk_provider.clone() as Arc<dyn irys_types::chunk_provider::ChunkStorageProvider>
             ),
+            Some(pd_chunk_sender.clone()),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
