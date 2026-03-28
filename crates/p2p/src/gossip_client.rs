@@ -10,6 +10,8 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
+    chunk_provider::PdChunkPusher,
+    gossip::PdChunkPush,
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, ChunkFormat, GossipCacheKey,
     HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress,
     IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem,
@@ -2329,6 +2331,50 @@ impl GossipClient {
             offset,
             peers.len()
         )))
+    }
+}
+
+impl PdChunkPusher for GossipClient {
+    /// Push a single PD chunk to a peer. Fire-and-forget: spawns a detached tokio task.
+    /// Checks the circuit breaker before sending and records success/failure on it.
+    fn push_pd_chunk(&self, peer_id: IrysPeerId, peer_addr: &PeerAddress, push: &PdChunkPush) {
+        let req = self.create_request_v2(push.clone());
+        let body = match serde_json::to_vec(&req) {
+            Ok(b) => bytes::Bytes::from(b),
+            Err(e) => {
+                error!("Failed to serialize PdChunkPush for peer {}: {:?}", peer_id, e);
+                return;
+            }
+        };
+
+        let client = self.clone();
+        let gossip_addr = peer_addr.gossip;
+        let span = tracing::Span::current();
+
+        self.runtime_handle.spawn(
+            async move {
+                if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                    record_gossip_outbound_error(gossip_error_type(&e));
+                    return;
+                }
+
+                let result = client
+                    .send_preserialized(&gossip_addr, GossipRoutes::PdChunkPush, body)
+                    .await;
+
+                match &result {
+                    Ok(_) => {
+                        client.circuit_breaker.record_success(&peer_id);
+                    }
+                    Err(e) => {
+                        record_gossip_outbound_error(gossip_error_type(e));
+                        client.circuit_breaker.record_failure(&peer_id);
+                        debug!("Failed to push PD chunk to peer {}: {:?}", peer_id, e);
+                    }
+                }
+            }
+            .instrument(span),
+        );
     }
 }
 
