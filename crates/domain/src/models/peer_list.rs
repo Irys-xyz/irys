@@ -460,6 +460,20 @@ impl PeerList {
         peers
     }
 
+    /// Returns all online peers with their address and reputation score as f64.
+    /// Does not sort — caller is responsible for selection logic.
+    #[must_use]
+    pub fn all_peers_with_score(&self) -> Vec<(IrysPeerId, PeerAddress, f64)> {
+        let guard = self.read();
+        guard
+            .persistent_peers_cache
+            .iter()
+            .chain(guard.unstaked_peer_purgatory.iter())
+            .filter(|(_, item)| item.is_online)
+            .map(|(id, item)| (*id, item.address.clone(), item.reputation_score.get() as f64))
+            .collect()
+    }
+
     pub fn inactive_peers(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
