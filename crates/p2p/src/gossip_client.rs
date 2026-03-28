@@ -10,12 +10,11 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    chunk_provider::PdChunkPusher,
-    gossip::PdChunkPush,
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, ChunkFormat, GossipCacheKey,
-    HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress,
-    IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
+    chunk_provider::PdChunkPusher, gossip::PdChunkPush, BlockBody, BlockHash, BlockIndexItem,
+    BlockIndexQuery, ChunkFormat, GossipCacheKey, HandshakeRequest, HandshakeRequestV2,
+    HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader, IrysPeerId,
+    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
+    ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
@@ -2342,7 +2341,10 @@ impl PdChunkPusher for GossipClient {
         let body = match serde_json::to_vec(&req) {
             Ok(b) => bytes::Bytes::from(b),
             Err(e) => {
-                error!("Failed to serialize PdChunkPush for peer {}: {:?}", peer_id, e);
+                error!(
+                    "Failed to serialize PdChunkPush for peer {}: {:?}",
+                    peer_id, e
+                );
                 return;
             }
         };

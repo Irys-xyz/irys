@@ -160,7 +160,8 @@ impl ChunkCache {
         }
 
         self.make_room_for_insert();
-        self.shared_index.insert((key.ledger, key.offset), data.clone());
+        self.shared_index
+            .insert((key.ledger, key.offset), data.clone());
         self.chunks.push(
             key,
             CachedChunkEntry {
@@ -463,32 +464,40 @@ mod tests {
     fn test_insert_unreferenced_creates_evictable_entry() {
         let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
         let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
-        let key = ChunkKey { ledger: 0, offset: 100 };
-        let data = Arc::new(Bytes::from(vec![1u8; 256]));
-        let data_path = Base64(vec![2u8; 64]);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 100,
+        };
+        let data = Arc::new(Bytes::from(vec![1_u8; 256]));
+        let data_path = Base64(vec![2_u8; 64]);
 
-        let inserted = cache.insert_unreferenced(key, data.clone(), data_path.clone());
+        let expected_path = data_path.0.clone();
+        let inserted = cache.insert_unreferenced(key, data, data_path);
         assert!(inserted);
         assert!(cache.contains(&key));
         assert!(shared_index.contains_key(&(0, 100)));
 
         let entry = cache.peek_entry(&key).unwrap();
         assert!(entry.referencing_txs.is_empty());
-        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+        assert_eq!(entry.data_path.as_ref().unwrap().0, expected_path);
     }
 
     #[test]
     fn test_insert_unreferenced_noop_when_exists() {
         let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
-        let key = ChunkKey { ledger: 0, offset: 100 };
-        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 100,
+        };
+        let data = Arc::new(Bytes::from(vec![1_u8; 256]));
         let tx_hash = B256::from([0xAA; 32]);
 
-        cache.insert(key, data.clone(), tx_hash);
+        cache.insert(key, data, tx_hash);
 
-        let data_path = Base64(vec![2u8; 64]);
-        let inserted = cache.insert_unreferenced(key, data.clone(), data_path);
+        let data_path = Base64(vec![2_u8; 64]);
+        let new_data = Arc::new(Bytes::from(vec![1_u8; 256]));
+        let inserted = cache.insert_unreferenced(key, new_data, data_path);
         assert!(!inserted);
 
         let entry = cache.peek_entry(&key).unwrap();
@@ -498,50 +507,68 @@ mod tests {
     #[test]
     fn test_insert_unreferenced_fills_missing_data_path() {
         let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
-        let key = ChunkKey { ledger: 0, offset: 100 };
-        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 100,
+        };
+        let data = Arc::new(Bytes::from(vec![1_u8; 256]));
         let tx_hash = B256::from([0xAA; 32]);
 
-        cache.insert(key, data.clone(), tx_hash);
+        cache.insert(key, data, tx_hash);
         assert!(cache.peek_entry(&key).unwrap().data_path.is_none());
 
-        let data_path = Base64(vec![2u8; 64]);
-        let inserted = cache.insert_unreferenced(key, data.clone(), data_path.clone());
+        let data_path = Base64(vec![2_u8; 64]);
+        let expected_path = data_path.0.clone();
+        let new_data = Arc::new(Bytes::from(vec![1_u8; 256]));
+        let inserted = cache.insert_unreferenced(key, new_data, data_path);
         assert!(!inserted);
 
         let entry = cache.peek_entry(&key).unwrap();
-        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+        assert_eq!(entry.data_path.as_ref().unwrap().0, expected_path);
     }
 
     #[test]
     fn test_insert_with_data_path_stores_it() {
         let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
-        let key = ChunkKey { ledger: 0, offset: 100 };
-        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 100,
+        };
+        let data = Arc::new(Bytes::from(vec![1_u8; 256]));
         let tx_hash = B256::from([0xAA; 32]);
-        let data_path = Base64(vec![2u8; 64]);
+        let data_path = Base64(vec![2_u8; 64]);
+        let expected_path = data_path.0.clone();
 
-        cache.insert_with_data_path(key, data, tx_hash, Some(data_path.clone()));
+        cache.insert_with_data_path(key, data, tx_hash, Some(data_path));
         let entry = cache.peek_entry(&key).unwrap();
-        assert_eq!(entry.data_path.as_ref().unwrap().0, data_path.0);
+        assert_eq!(entry.data_path.as_ref().unwrap().0, expected_path);
     }
 
     #[test]
     fn test_lru_eviction_prefers_unreferenced() {
         let shared_index: ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index.clone());
+        let mut cache = ChunkCache::new(NonZeroUsize::new(2).unwrap(), shared_index);
 
-        let key1 = ChunkKey { ledger: 0, offset: 1 };
-        let key2 = ChunkKey { ledger: 0, offset: 2 };
-        let key3 = ChunkKey { ledger: 0, offset: 3 };
-        let data = Arc::new(Bytes::from(vec![1u8; 256]));
+        let key1 = ChunkKey {
+            ledger: 0,
+            offset: 1,
+        };
+        let key2 = ChunkKey {
+            ledger: 0,
+            offset: 2,
+        };
+        let key3 = ChunkKey {
+            ledger: 0,
+            offset: 3,
+        };
+        let data = Arc::new(Bytes::from(vec![1_u8; 256]));
 
         cache.insert(key1, data.clone(), B256::from([0xAA; 32]));
         cache.insert_unreferenced(key2, data.clone(), Base64(vec![]));
 
-        cache.insert(key3, data.clone(), B256::from([0xBB; 32]));
+        cache.insert(key3, data, B256::from([0xBB; 32]));
         assert!(cache.contains(&key1));
         assert!(!cache.contains(&key2));
         assert!(cache.contains(&key3));

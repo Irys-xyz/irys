@@ -12,8 +12,9 @@ use irys_types::app_state::DatabaseProvider;
 use irys_types::chunk_provider::{
     ChunkStorageProvider, PdChunkFetcher, PdChunkMessage, PdChunkReceiver,
 };
+use irys_types::gossip::PdChunkPush;
 use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::{DataLedger, IrysAddress, PeerAddress, TokioServiceHandle};
+use irys_types::{DataLedger, IrysAddress, IrysPeerId, PeerAddress, TokioServiceHandle};
 use provisioning::{ProvisioningState, ProvisioningTracker};
 use reth::revm::primitives::B256;
 use reth::revm::primitives::bytes::Bytes;
@@ -78,6 +79,12 @@ pub struct PdService {
     /// Monotonically increasing counter used to stamp each new fetch state.
     /// Allows stale retry callbacks to be discarded when a key is re-fetched.
     next_generation: u64,
+    /// Tracks which peers have pushed each chunk, for fan-out deduplication.
+    inbound_push_tracker: inbound_push_tracker::InboundPushTracker,
+    /// Pushes PD chunks to peers (trait object bridging irys-p2p).
+    chunk_pusher: Arc<dyn irys_types::chunk_provider::PdChunkPusher>,
+    /// Number of peers to fan out each optimistic push to.
+    pd_optimistic_push_fanout: u32,
 }
 
 impl PdService {
@@ -96,6 +103,8 @@ impl PdService {
         db: DatabaseProvider,
         num_chunks_in_partition: u64,
         own_miner_address: IrysAddress,
+        chunk_pusher: Arc<dyn irys_types::chunk_provider::PdChunkPusher>,
+        pd_optimistic_push_fanout: u32,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
@@ -119,6 +128,9 @@ impl PdService {
             num_chunks_in_partition,
             own_miner_address,
             next_generation: 0,
+            inbound_push_tracker: inbound_push_tracker::InboundPushTracker::new(),
+            chunk_pusher,
+            pd_optimistic_push_fanout,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -676,6 +688,90 @@ impl PdService {
         peers
     }
 
+    /// Handle an optimistically pushed PD chunk from a peer.
+    ///
+    /// Validates the chunk against trusted MDBX state (block index + merkle proof)
+    /// before inserting into the cache as an unreferenced entry. Invalid or
+    /// unverifiable chunks are silently rejected with a debug log.
+    fn handle_optimistic_push(&mut self, peer_id: IrysPeerId, push: PdChunkPush) {
+        // 0. Ledger constraint — PD operates exclusively on the Publish ledger.
+        if push.ledger != 0 {
+            debug!(
+                ledger = push.ledger,
+                "optimistic push rejected: non-Publish ledger"
+            );
+            return;
+        }
+
+        // 1. Block index validation — derive the expected data_root, data_size,
+        //    and tx-relative chunk offset from trusted MDBX state.
+        let key = ChunkKey {
+            ledger: push.ledger,
+            offset: push.offset,
+        };
+        let info = match self.derive_chunk_verification_info(&key) {
+            Ok(info) => info,
+            Err(e) => {
+                debug!(
+                    ?e,
+                    offset = push.offset,
+                    "optimistic push rejected: invalid offset"
+                );
+                return;
+            }
+        };
+
+        // 2. Merkle proof verification (same logic as on_fetch_success).
+        let chunk_size = self.storage_provider.config().chunk_size;
+        let num_chunks = info.data_size.div_ceil(chunk_size);
+        let last_chunk_offset = num_chunks.saturating_sub(1);
+        let target_byte_offset: u128 = if info.tx_chunk_offset == last_chunk_offset {
+            u128::from(info.data_size).saturating_sub(1)
+        } else {
+            u128::from(info.tx_chunk_offset + 1) * u128::from(chunk_size) - 1
+        };
+
+        let path_result = match irys_types::validate_path(
+            info.expected_data_root.0,
+            &push.data_path,
+            target_byte_offset,
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                debug!(
+                    ?e,
+                    offset = push.offset,
+                    "optimistic push rejected: bad merkle proof"
+                );
+                return;
+            }
+        };
+
+        // 3. Leaf hash verification — sha256(chunk_bytes) must match the Merkle leaf.
+        let computed_hash = irys_types::hash_sha256(&push.chunk_bytes.0);
+        if computed_hash != path_result.leaf_hash {
+            debug!(
+                offset = push.offset,
+                "optimistic push rejected: leaf hash mismatch"
+            );
+            return;
+        }
+
+        // 4. Cache insert (unreferenced — not yet claimed by any executing transaction).
+        let data = Arc::new(Bytes::copy_from_slice(&push.chunk_bytes.0));
+        self.cache.insert_unreferenced(key, data, push.data_path);
+
+        // 5. Record inbound source for fan-out deduplication.
+        self.inbound_push_tracker
+            .record_inbound(push.ledger, push.offset, peer_id);
+
+        trace!(
+            offset = push.offset,
+            ?peer_id,
+            "accepted optimistic pd chunk push"
+        );
+    }
+
     fn handle_message(&mut self, msg: PdChunkMessage) {
         match msg {
             PdChunkMessage::NewTransaction {
@@ -697,9 +793,8 @@ impl PdService {
             PdChunkMessage::ReleaseBlockChunks { block_hash } => {
                 self.handle_release_block_chunks(&block_hash);
             }
-            PdChunkMessage::OptimisticPush { .. } => {
-                // TODO: Task 9 will implement handle_optimistic_push
-                tracing::warn!("optimistic push received but handler not yet implemented");
+            PdChunkMessage::OptimisticPush { peer_id, push } => {
+                self.handle_optimistic_push(peer_id, push);
             }
         }
     }
@@ -1239,6 +1334,14 @@ mod tests {
         }
     }
 
+    /// Mock pusher that does nothing — tests don't need outbound push.
+    #[derive(Debug)]
+    struct MockPdChunkPusher;
+
+    impl irys_types::chunk_provider::PdChunkPusher for MockPdChunkPusher {
+        fn push_pd_chunk(&self, _: IrysPeerId, _: &PeerAddress, _: &PdChunkPush) {}
+    }
+
     impl irys_types::chunk_provider::ChunkStorageProvider for MockChunkProvider {
         fn get_unpacked_chunk_by_ledger_offset(
             &self,
@@ -1306,6 +1409,9 @@ mod tests {
             num_chunks_in_partition: 100,
             own_miner_address: IrysAddress::default(),
             next_generation: 0,
+            inbound_push_tracker: inbound_push_tracker::InboundPushTracker::new(),
+            chunk_pusher: Arc::new(MockPdChunkPusher),
+            pd_optimistic_push_fanout: 0,
         };
         (service, tmp_dir)
     }
@@ -1943,5 +2049,47 @@ mod tests {
         );
         let result = resp_rx.blocking_recv().unwrap();
         assert!(result.is_err(), "block should receive an error");
+    }
+
+    #[test]
+    fn test_optimistic_push_rejects_invalid_offset() {
+        let (mut service, _tmpdir) = test_service();
+        let peer_id = IrysPeerId::from([0xAA; 20]);
+        let push = PdChunkPush {
+            ledger: 0,
+            offset: 999_999_999,
+            chunk_bytes: irys_types::Base64(vec![0_u8; 256]),
+            data_path: irys_types::Base64(vec![0_u8; 64]),
+        };
+        service.handle_optimistic_push(peer_id, push);
+        let key = ChunkKey {
+            ledger: 0,
+            offset: 999_999_999,
+        };
+        assert!(
+            !service.cache.contains(&key),
+            "chunk with invalid offset should not be cached"
+        );
+    }
+
+    #[test]
+    fn test_optimistic_push_rejects_non_publish_ledger() {
+        let (mut service, _tmpdir) = test_service();
+        let peer_id = IrysPeerId::from([0xAA; 20]);
+        let push = PdChunkPush {
+            ledger: 1,
+            offset: 0,
+            chunk_bytes: irys_types::Base64(vec![0_u8; 256]),
+            data_path: irys_types::Base64(vec![0_u8; 64]),
+        };
+        service.handle_optimistic_push(peer_id, push);
+        let key = ChunkKey {
+            ledger: 1,
+            offset: 0,
+        };
+        assert!(
+            !service.cache.contains(&key),
+            "chunk on non-Publish ledger should not be cached"
+        );
     }
 }

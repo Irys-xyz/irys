@@ -1852,6 +1852,8 @@ impl IrysNode {
                 gossip_data_handler.gossip_client.clone(),
                 peer_list_guard.clone(),
             ));
+        let pd_chunk_pusher: std::sync::Arc<dyn irys_types::chunk_provider::PdChunkPusher> =
+            std::sync::Arc::new(gossip_data_handler.gossip_client.clone());
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
             pd_chunk_rx,
             chunk_provider.clone(),
@@ -1865,6 +1867,8 @@ impl IrysNode {
             irys_db.clone(),
             config.consensus.num_chunks_in_partition,
             config.node_config.miner_address(),
+            pd_chunk_pusher,
+            config.node_config.p2p_gossip.pd_optimistic_push_fanout,
         );
         debug!("PD service initialized");
 

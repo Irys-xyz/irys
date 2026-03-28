@@ -470,7 +470,7 @@ impl PeerList {
             .iter()
             .chain(guard.unstaked_peer_purgatory.iter())
             .filter(|(_, item)| item.is_online)
-            .map(|(id, item)| (*id, item.address.clone(), item.reputation_score.get() as f64))
+            .map(|(id, item)| (*id, item.address, item.reputation_score.get() as f64))
             .collect()
     }
 

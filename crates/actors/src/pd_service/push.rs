@@ -33,7 +33,7 @@ pub fn select_push_targets(
     // Take the top-scored half.
     for (id, addr, _) in sorted.iter().take(half) {
         if selected.insert(*id) {
-            result.push((*id, addr.clone()));
+            result.push((*id, *addr));
         }
     }
 
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_returns_exactly_k_when_enough_candidates() {
-        let candidates: Vec<_> = (1..=10u8)
+        let candidates: Vec<_> = (1..=10_u8)
             .map(|i| make_candidate(i, 10.0 - i as f64))
             .collect();
         let result = select_push_targets(4, &candidates);
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_no_duplicates() {
-        let candidates: Vec<_> = (1..=10u8)
+        let candidates: Vec<_> = (1..=10_u8)
             .map(|i| make_candidate(i, 10.0 - i as f64))
             .collect();
         let result = select_push_targets(4, &candidates);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_k1_returns_one() {
-        let candidates: Vec<_> = (1..=5u8).map(|i| make_candidate(i, i as f64)).collect();
+        let candidates: Vec<_> = (1..=5_u8).map(|i| make_candidate(i, i as f64)).collect();
         // k=1 → half=0, other_half=1 → one random peer from the full set.
         let result = select_push_targets(1, &candidates);
         assert_eq!(result.len(), 1);
@@ -151,7 +151,7 @@ mod tests {
         // With k=1 and half=0, the random half draws from the entire sorted
         // list, so there is no deterministic top bias — just check count and
         // uniqueness.
-        let candidates: Vec<_> = (1..=5u8).map(|i| make_candidate(i, i as f64)).collect();
+        let candidates: Vec<_> = (1..=5_u8).map(|i| make_candidate(i, i as f64)).collect();
         let result = select_push_targets(1, &candidates);
         assert_eq!(result.len(), 1);
         let ids: HashSet<_> = result.iter().map(|(id, _)| *id).collect();
