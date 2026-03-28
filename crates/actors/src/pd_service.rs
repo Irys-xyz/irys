@@ -2,6 +2,7 @@ pub mod cache;
 pub(crate) mod fetch;
 mod inbound_push_tracker;
 pub mod provisioning;
+pub(crate) mod push;
 
 use cache::{ChunkCache, ChunkKey};
 use dashmap::DashSet;
