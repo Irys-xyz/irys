@@ -1231,6 +1231,131 @@ impl NodeConfig {
         }
     }
 
+    pub fn devnet() -> Self {
+        use k256::ecdsa::SigningKey;
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let mut consensus = ConsensusConfig::devnet();
+        let signer = IrysSigner {
+            signer: mining_key,
+            chain_id: consensus.chain_id,
+            chunk_size: consensus.chunk_size,
+        };
+
+        let mining_key = signer.signer.clone();
+        let reward_address = signer.address();
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
+        consensus.expected_genesis_hash = Some(H256::zero());
+        Self {
+            node_mode: NodeMode::Peer,
+            sync_mode: SyncMode::Full,
+            consensus: ConsensusOptions::Custom(consensus),
+            base_directory: default_irys_path(),
+
+            oracles: vec![OracleConfig::Mock {
+                initial_price: Amount::token(dec!(1)).expect("valid token amount"),
+                incremental_change: Amount::token(dec!(0.00000000000001))
+                    .expect("valid token amount"),
+                smoothing_interval: 15,
+                initial_direction_up: true,
+                poll_interval_ms: default_mock_oracle_poll_interval_ms(),
+            }],
+            mining_key,
+            reward_address,
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            data_sync: DataSyncServiceConfig {
+                max_pending_chunk_requests: 1000,
+                max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+                bandwidth_adjustment_interval: Duration::from_secs(5),
+                chunk_request_timeout: Duration::from_secs(10),
+            },
+            trusted_peers: vec![],
+            // trusted_peers: vec![PeerAddress {
+            //     api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
+            // }],
+            initial_stake_and_pledge_whitelist: vec![],
+            initial_whitelist: vec![],
+            peer_filter_mode: PeerFilterMode::TrustedOnly,
+            network_defaults: NetworkDefaults {
+                public_ip: "127.0.0.1".to_string(),
+                bind_ip: "0.0.0.0".to_string(),
+            },
+            gossip: GossipConfig {
+                public_ip: None,
+                public_port: 8081,
+                bind_ip: None,
+                bind_port: 8081,
+            },
+            reth: RethConfig {
+                network: RethNetworkConfig {
+                    use_random_ports: false,
+                    public_ip: None,
+                    public_port: 9009,
+                    bind_ip: Some("127.0.0.1".to_string()),
+                    bind_port: 9009,
+                    peer_id: Default::default(),
+                },
+            },
+            packing: PackingConfig {
+                local: LocalPackingConfig {
+                    cpu_packing_concurrency: 4,
+                    gpu_packing_batch_size: 1024,
+                },
+                remote: Default::default(),
+            },
+            cache: CacheConfig {
+                cache_clean_lag: 2,
+                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
+                prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
+            },
+            http: HttpConfig {
+                public_ip: None,
+                public_port: 8080,
+                bind_ip: None,
+                bind_port: 8080,
+            },
+
+            mempool: MempoolNodeConfig {
+                max_pending_pledge_items: 100,
+                max_pledges_per_item: 100,
+                max_pending_chunk_items: 30,
+                max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
+                max_invalid_items: 10_000,
+                max_valid_items: 10_000,
+                max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
+                max_concurrent_mempool_tasks: 30,
+                max_concurrent_chunk_ingress_tasks: 30,
+                chunk_writer_buffer_size: 4096,
+            },
+
+            vdf: VdfNodeConfig {
+                parallel_verification_thread_limit: 4,
+            },
+
+            p2p_handshake: P2PHandshakeConfig::default(),
+            p2p_gossip: P2PGossipConfig::default(),
+            p2p_pull: P2PPullConfig::default(),
+
+            genesis_peer_discovery_timeout_millis: 10000,
+            stake_pledge_drives: false,
+
+            sync: SyncConfig::default(),
+        }
+    }
+
     /// get the storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
         self.base_directory.join("storage_modules")
