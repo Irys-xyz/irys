@@ -684,6 +684,7 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        const MAX_REBUILD_ATTEMPTS: usize = 20;
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -693,6 +694,16 @@ pub trait BlockProdStrategy {
 
         // Check if we need to rebuild on a new parent
         while let Some((ref block, _, _)) = result {
+            if rebuild_attempts >= MAX_REBUILD_ATTEMPTS {
+                warn!(
+                    solution.hash = %solution.solution_hash,
+                    solution.vdf_step = solution.vdf_step,
+                    rebuild.count = rebuild_attempts,
+                    rebuild.max_attempts = MAX_REBUILD_ATTEMPTS,
+                    "Max rebuild attempts reached, discarding solution"
+                );
+                return Ok(None);
+            }
             let parent_hash = &block.header().previous_block_hash;
 
             match self
