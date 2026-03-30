@@ -17,6 +17,13 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 #[tokio::main]
 #[tracing::instrument(level = "trace", skip_all)]
 async fn main() -> eyre::Result<()> {
+    // IMPORTANT: Must run before any code that calls `build_version()` (e.g. handshake defaults).
+    // The OnceLock is set-once, so late initialization silently loses git metadata.
+    irys_types::init_build_version(
+        env!("GIT_SHA"),
+        env!("GIT_HAS_TAG").parse().expect("GIT_HAS_TAG must be 'true' or 'false'"),
+    );
+
     // Load .env file if present (silently ignore if not found)
     let _ = dotenvy::dotenv();
 

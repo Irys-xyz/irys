@@ -28,7 +28,6 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth_ethereum_primitives::Block;
-use semver::Version;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1101,7 +1100,7 @@ where
             .unwrap_or_default();
 
         let response = wire_types::HandshakeResponseV1 {
-            version: Version::new(1, 2, 0),
+            version: irys_types::build_version(),
             protocol_version: version_request.protocol_version,
             peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
@@ -1223,7 +1222,7 @@ where
             .unwrap_or_default();
 
         let response = wire_types::HandshakeResponseV2 {
-            version: Version::new(1, 2, 0),
+            version: irys_types::build_version(),
             protocol_version: version_request.protocol_version,
             peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
