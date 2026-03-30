@@ -20,6 +20,7 @@ async fn main() -> eyre::Result<()> {
     // IMPORTANT: Must run before any code that calls `build_version()` (e.g. handshake defaults).
     // The OnceLock is set-once, so late initialization silently loses git metadata.
     irys_types::init_build_version(
+        env!("CARGO_PKG_VERSION"),
         env!("GIT_SHA"),
         env!("GIT_HAS_TAG")
             .parse()
