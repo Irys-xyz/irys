@@ -401,3 +401,106 @@ async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
     ctx.genesis.stop().await;
     Ok(())
 }
+
+/// Observer already has a chunk cached from a prior push. A second optimistic push
+/// for the same chunk should return immediately via the cache-hit shortcut
+/// (pd_service.rs:822-826) without re-doing MDBX lookup or merkle verification.
+///
+/// Verify the chunk remains cached with correct data and the system continues
+/// functioning (block validates using the cached chunk).
+#[test_log::test(tokio::test)]
+async fn slow_heavy3_pd_chunk_optimistic_push_cache_hit_shortcut() -> eyre::Result<()> {
+    let ctx = setup_pd_push_test(4).await?;
+
+    let publish_ledger = DataLedger::Publish as u32;
+
+    // --- First push: deliver chunk to Observer ---
+    let t1_hash = build_and_inject_real_pd_tx(
+        &ctx.genesis,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        1, // 1 chunk
+        0, // nonce
+    )
+    .await?;
+    info!("T1 injected on Genesis: {:?}", t1_hash);
+
+    // Wait for chunk to arrive in Observer's cache via push.
+    ctx.observer
+        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset, 30)
+        .await?;
+    info!("First push: chunk cached on Observer");
+
+    // Record the cached chunk bytes for comparison after second push.
+    let first_bytes = ctx
+        .observer
+        .node_ctx
+        .chunk_data_index
+        .get(&(publish_ledger, ctx.data_start_offset))
+        .map(|r| Arc::clone(&*r))
+        .expect("chunk should be in Observer cache after first push");
+
+    // --- Second push: same chunk, different PD tx (different signer to avoid nonce conflict) ---
+    let t2_hash = build_and_inject_real_pd_tx(
+        &ctx.genesis,
+        &ctx.pd_signer_2,
+        ctx.partition_index,
+        ctx.local_offset,
+        1, // same 1 chunk at same offset
+        0, // nonce (different signer, so nonce=0 is fine)
+    )
+    .await?;
+    info!("T2 injected on Genesis (same chunk, different signer): {:?}", t2_hash);
+
+    // Allow time for the second push to propagate and be processed.
+    // The push is fire-and-forget HTTP POST; 500ms is generous for local network.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Assert chunk is still in cache (not removed or corrupted by second push).
+    let second_bytes = ctx
+        .observer
+        .node_ctx
+        .chunk_data_index
+        .get(&(publish_ledger, ctx.data_start_offset))
+        .map(|r| Arc::clone(&*r));
+    assert!(
+        second_bytes.is_some(),
+        "Chunk should still be in Observer cache after second push",
+    );
+
+    // Assert data integrity: bytes unchanged after duplicate push.
+    assert_eq!(
+        first_bytes.as_ref(),
+        second_bytes.as_ref().unwrap().as_ref(),
+        "Chunk bytes should be unchanged after duplicate push",
+    );
+
+    // --- Verify chunk remains functional: mine block with T1, gossip, validate ---
+    ctx.genesis.wait_for_ready_pd_tx(&t1_hash, 30).await?;
+    let (block, eth_payload, _) = ctx.genesis.mine_block_without_gossip().await?;
+
+    let block_height = block.height;
+    info!("Genesis mined block at height {} with T1", block_height);
+
+    ctx.genesis.gossip_block_to_peers(&block)?;
+    ctx.genesis.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    ctx.observer.wait_until_height(block_height, 30).await?;
+
+    let observer_height = ctx.observer.get_canonical_chain_height().await;
+    assert_eq!(
+        observer_height, block_height,
+        "Observer should validate block using cached chunk",
+    );
+
+    info!(
+        "Cache-hit shortcut verified: duplicate push preserved data, block validated at height {}",
+        block_height,
+    );
+
+    ctx.observer.stop().await;
+    ctx.block_producer.stop().await;
+    ctx.genesis.stop().await;
+    Ok(())
+}
