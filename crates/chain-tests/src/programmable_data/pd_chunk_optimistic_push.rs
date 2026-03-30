@@ -10,6 +10,7 @@
 //! 2. Cache-hit shortcut: duplicate push exits early without re-verification
 //! 3. Pending fetch reconciliation: push wins over in-flight P2P fetch
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
@@ -18,13 +19,15 @@ use alloy_network::TxSignerSync as _;
 use alloy_primitives::{aliases::U200, Address, U256};
 use alloy_signer_local::LocalSigner;
 use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
-use irys_types::chunk_provider::{ChunkStorageProvider as _, PdChunkPusher as _};
+use irys_types::chunk_provider::ChunkStorageProvider as _;
 use irys_types::gossip::PdChunkPush;
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::ChunkFormat;
 use irys_types::PeerAddress;
-use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{
+    Base64, DataLedger, LedgerChunkOffset, NodeConfig, PeerFilterMode, TxChunkOffset, UnpackedChunk,
+};
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
@@ -436,6 +439,13 @@ async fn slow_heavy3_pd_chunk_optimistic_push_cache_hit_shortcut() -> eyre::Resu
         .await?;
     info!("First push: chunk cached on Observer");
 
+    // Record cache-hit counter before the second push.
+    let cache_hits_before = ctx
+        .observer
+        .node_ctx
+        .pd_push_cache_hit_count
+        .load(Ordering::Relaxed);
+
     // Record the cached chunk bytes for comparison after second push.
     let first_bytes = ctx
         .observer
@@ -481,6 +491,18 @@ async fn slow_heavy3_pd_chunk_optimistic_push_cache_hit_shortcut() -> eyre::Resu
         first_bytes.as_ref(),
         second_bytes.as_ref().unwrap().as_ref(),
         "Chunk bytes should be unchanged after duplicate push",
+    );
+
+    // Assert the cache-hit shortcut fired exactly once for the duplicate push.
+    let cache_hits_after = ctx
+        .observer
+        .node_ctx
+        .pd_push_cache_hit_count
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        cache_hits_after,
+        cache_hits_before + 1,
+        "Cache-hit shortcut should fire exactly once for the duplicate push",
     );
 
     // --- Verify chunk remains functional: mine block with T1, gossip, validate ---
@@ -623,6 +645,12 @@ async fn setup_pd_push_test_for_reconciliation() -> eyre::Result<PdPushTestConte
     // --- Start Observer (Node C) with trusted_peers pointing to Node B (NOT Genesis) ---
     let mut observer_config = genesis.testing_peer_with_signer(&observer_signer);
 
+    // Restrict Observer to trusted peers only so it cannot discover Genesis via
+    // handshake gossip. Without this, Node B's peer list includes Genesis, and
+    // Observer would learn about Genesis during handshake, making its P2P fetch
+    // succeed without the push — defeating the test.
+    observer_config.peer_filter_mode = PeerFilterMode::TrustedOnly;
+
     // Override trusted_peers: Observer trusts Node B only.
     // This means Observer's P2P chunk fetch will target Node B, which doesn't have PD data.
     observer_config.trusted_peers = vec![PeerAddress {
@@ -739,11 +767,27 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
         .await?;
     info!("Block Producer validated block at height {}", block_height);
 
+    // Verify Observer does NOT know about Genesis — its peer list should contain only Node B.
+    let genesis_peer_id = ctx.genesis.node_ctx.config.peer_id();
+    assert!(
+        ctx.observer
+            .node_ctx
+            .peer_list
+            .peer_by_id(&genesis_peer_id)
+            .is_none(),
+        "Observer should NOT have Genesis in its peer list (TrustedOnly mode, trusted_peers = [Node B])",
+    );
+
     // Give Observer time to receive the block from Node B and start its fetch.
     // The fetch will target Node B (Observer's only peer) and fail.
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // --- Construct and send manual push from Genesis to Observer ---
+    // --- Construct and send manual push directly to Observer's PdService ---
+    //
+    // We bypass the HTTP gossip layer (gossip_client.push_pd_chunk) because Observer
+    // uses TrustedOnly mode, which rejects gossip from unknown peers (Genesis is not
+    // in Observer's trusted_peers). Sending directly to the PdService channel tests
+    // the same reconciliation logic without the HTTP-level peer check.
 
     // Get packed chunk from Genesis's storage.
     let chunk_format = ctx
@@ -774,20 +818,23 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
         data_path,
     };
 
-    // Push directly from Genesis to Observer via gossip_client.
-    let observer_peer_id = ctx.observer.node_ctx.config.peer_id();
-    let observer_addr = ctx.observer.cfg.peer_address();
-
     info!(
-        "Sending manual push to Observer (peer_id={:?}, gossip={})",
-        observer_peer_id, observer_addr.gossip
+        "Sending manual push directly to Observer PdService (genesis_peer_id={:?})",
+        genesis_peer_id,
     );
 
-    ctx.genesis
+    // Send OptimisticPush directly into Observer's PdService channel.
+    ctx.observer
         .node_ctx
         .gossip_data_handler
-        .gossip_client
-        .push_pd_chunk(observer_peer_id, &observer_addr, &push_msg);
+        .pd_chunk_sender
+        .as_ref()
+        .expect("Observer should have a pd_chunk_sender")
+        .send(irys_types::chunk_provider::PdChunkMessage::OptimisticPush {
+            peer_id: genesis_peer_id,
+            push: push_msg,
+        })
+        .expect("PdService channel should be open");
 
     // Wait for Observer to validate the block. Without the push, this would time out
     // because Observer's fetch to Node B (its only peer) fails -- Node B doesn't have

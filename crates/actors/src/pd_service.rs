@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
 use tracing::{Instrument as _, debug, info, trace, warn};
@@ -105,13 +106,14 @@ impl PdService {
         own_miner_address: IrysAddress,
         chunk_pusher: Arc<dyn irys_types::chunk_provider::PdChunkPusher>,
         pd_optimistic_push_fanout: u32,
+        push_cache_hit_count: Arc<AtomicU64>,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
         let service = Self {
             shutdown,
             msg_rx,
-            cache: ChunkCache::with_default_capacity(chunk_data_index),
+            cache: ChunkCache::with_default_capacity(chunk_data_index, push_cache_hit_count),
             tracker: ProvisioningTracker::new(),
             storage_provider,
             block_tracker: HashMap::new(),
@@ -820,6 +822,7 @@ impl PdService {
 
         // Early cache-hit — skip full MDBX lookup + merkle verification.
         if self.cache.contains(&key) {
+            self.cache.record_push_cache_hit();
             self.inbound_push_tracker
                 .record_inbound(key.ledger, key.offset, peer_id);
             return;
@@ -1557,7 +1560,10 @@ mod tests {
         let service = PdService {
             shutdown,
             msg_rx: rx,
-            cache: ChunkCache::with_default_capacity(chunk_data_index),
+            cache: ChunkCache::with_default_capacity(
+                chunk_data_index,
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ),
             tracker: ProvisioningTracker::new(),
             storage_provider: provider,
             block_tracker: HashMap::new(),
