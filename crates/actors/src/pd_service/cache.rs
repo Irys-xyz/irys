@@ -41,6 +41,8 @@ pub struct ChunkCache {
     initial_capacity: NonZeroUsize,
     /// Counter incremented each time an optimistic push hits the cache-hit shortcut.
     push_cache_hit_count: Arc<AtomicU64>,
+    /// Counter incremented each time an optimistic push reconciles a pending fetch.
+    push_reconciliation_count: Arc<AtomicU64>,
 }
 
 impl ChunkCache {
@@ -49,12 +51,14 @@ impl ChunkCache {
         capacity: NonZeroUsize,
         shared_index: irys_types::chunk_provider::ChunkDataIndex,
         push_cache_hit_count: Arc<AtomicU64>,
+        push_reconciliation_count: Arc<AtomicU64>,
     ) -> Self {
         Self {
             chunks: LruCache::new(capacity),
             shared_index,
             initial_capacity: capacity,
             push_cache_hit_count,
+            push_reconciliation_count,
         }
     }
 
@@ -62,18 +66,26 @@ impl ChunkCache {
     pub fn with_default_capacity(
         shared_index: irys_types::chunk_provider::ChunkDataIndex,
         push_cache_hit_count: Arc<AtomicU64>,
+        push_reconciliation_count: Arc<AtomicU64>,
     ) -> Self {
         Self::new(
             NonZeroUsize::new(DEFAULT_CACHE_CAPACITY)
                 .expect("DEFAULT_CACHE_CAPACITY must be non-zero"),
             shared_index,
             push_cache_hit_count,
+            push_reconciliation_count,
         )
     }
 
     /// Record that an optimistic push was short-circuited by a cache hit.
     pub fn record_push_cache_hit(&self) {
         self.push_cache_hit_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that an optimistic push reconciled a pending P2P fetch.
+    pub fn record_push_reconciliation(&self) {
+        self.push_reconciliation_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get a chunk from the cache, promoting it in the LRU order.
@@ -297,7 +309,8 @@ mod tests {
     #[test]
     fn test_insert_and_get() {
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::with_default_capacity(shared_index, default_counter());
+        let mut cache =
+            ChunkCache::with_default_capacity(shared_index, default_counter(), default_counter());
         let key = make_key(1);
         let data = make_data(0xAA);
         let tx = B256::ZERO;
@@ -310,7 +323,8 @@ mod tests {
     #[test]
     fn test_duplicate_insert_adds_reference() {
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::with_default_capacity(shared_index, default_counter());
+        let mut cache =
+            ChunkCache::with_default_capacity(shared_index, default_counter(), default_counter());
         let key = make_key(1);
         let data = make_data(0xAA);
         let tx1 = B256::ZERO;
@@ -325,7 +339,8 @@ mod tests {
     #[test]
     fn test_reference_removal() {
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::with_default_capacity(shared_index, default_counter());
+        let mut cache =
+            ChunkCache::with_default_capacity(shared_index, default_counter(), default_counter());
         let key = make_key(1);
         let tx1 = B256::ZERO;
         let tx2 = B256::with_last_byte(1);
@@ -343,7 +358,7 @@ mod tests {
     fn test_lru_eviction_skips_referenced() {
         let cap = NonZeroUsize::new(2).unwrap();
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(cap, shared_index, default_counter());
+        let mut cache = ChunkCache::new(cap, shared_index, default_counter(), default_counter());
         let tx = B256::ZERO;
 
         // Fill cache
@@ -364,7 +379,7 @@ mod tests {
     fn test_lru_eviction_removes_unreferenced() {
         let cap = NonZeroUsize::new(2).unwrap();
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(cap, shared_index, default_counter());
+        let mut cache = ChunkCache::new(cap, shared_index, default_counter(), default_counter());
         let tx = B256::ZERO;
 
         cache.insert(make_key(1), make_data(1), tx);
@@ -385,8 +400,11 @@ mod tests {
     #[test]
     fn test_shared_index_mirrors_insert_and_remove() {
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache =
-            ChunkCache::with_default_capacity(Arc::clone(&shared_index), default_counter());
+        let mut cache = ChunkCache::with_default_capacity(
+            Arc::clone(&shared_index),
+            default_counter(),
+            default_counter(),
+        );
         let key = make_key(1);
         let tx = B256::ZERO;
 
@@ -401,7 +419,12 @@ mod tests {
     fn test_shared_index_mirrors_lru_eviction() {
         let cap = NonZeroUsize::new(2).unwrap();
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(cap, Arc::clone(&shared_index), default_counter());
+        let mut cache = ChunkCache::new(
+            cap,
+            Arc::clone(&shared_index),
+            default_counter(),
+            default_counter(),
+        );
         let tx = B256::ZERO;
 
         cache.insert(make_key(1), make_data(1), tx);
@@ -420,7 +443,7 @@ mod tests {
     fn test_capacity_shrinks_after_burst() {
         let cap = NonZeroUsize::new(2).unwrap();
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(cap, shared_index, default_counter());
+        let mut cache = ChunkCache::new(cap, shared_index, default_counter(), default_counter());
         let tx1 = B256::ZERO;
         let tx2 = B256::with_last_byte(1);
         let tx3 = B256::with_last_byte(2);
@@ -452,7 +475,8 @@ mod tests {
     #[test]
     fn test_shrink_noop_when_not_inflated() {
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::with_default_capacity(shared_index, default_counter());
+        let mut cache =
+            ChunkCache::with_default_capacity(shared_index, default_counter(), default_counter());
         let original_cap = cache.chunks.cap();
 
         cache.try_shrink_to_fit();
@@ -463,7 +487,7 @@ mod tests {
     fn test_shrink_waits_until_len_below_initial() {
         let cap = NonZeroUsize::new(2).unwrap();
         let shared_index: irys_types::chunk_provider::ChunkDataIndex = Arc::new(DashMap::new());
-        let mut cache = ChunkCache::new(cap, shared_index, default_counter());
+        let mut cache = ChunkCache::new(cap, shared_index, default_counter(), default_counter());
         let tx1 = B256::ZERO;
         let tx2 = B256::with_last_byte(1);
         let tx3 = B256::with_last_byte(2);
@@ -489,6 +513,7 @@ mod tests {
         let mut cache = ChunkCache::new(
             NonZeroUsize::new(2).unwrap(),
             shared_index.clone(),
+            default_counter(),
             default_counter(),
         );
         let key = ChunkKey {
@@ -516,6 +541,7 @@ mod tests {
             NonZeroUsize::new(2).unwrap(),
             shared_index,
             default_counter(),
+            default_counter(),
         );
         let key = ChunkKey {
             ledger: 0,
@@ -541,6 +567,7 @@ mod tests {
         let mut cache = ChunkCache::new(
             NonZeroUsize::new(2).unwrap(),
             shared_index,
+            default_counter(),
             default_counter(),
         );
         let key = ChunkKey {
@@ -570,6 +597,7 @@ mod tests {
             NonZeroUsize::new(2).unwrap(),
             shared_index,
             default_counter(),
+            default_counter(),
         );
         let key = ChunkKey {
             ledger: 0,
@@ -591,6 +619,7 @@ mod tests {
         let mut cache = ChunkCache::new(
             NonZeroUsize::new(2).unwrap(),
             shared_index,
+            default_counter(),
             default_counter(),
         );
 

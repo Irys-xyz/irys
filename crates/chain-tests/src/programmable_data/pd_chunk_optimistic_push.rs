@@ -818,6 +818,13 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
         data_path,
     };
 
+    // Record reconciliation counter before the push.
+    let reconciliations_before = ctx
+        .observer
+        .node_ctx
+        .pd_push_reconciliation_count
+        .load(Ordering::Relaxed);
+
     info!(
         "Sending manual push directly to Observer PdService (genesis_peer_id={:?})",
         genesis_peer_id,
@@ -846,6 +853,21 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
     assert_eq!(
         observer_height, block_height,
         "Observer should validate block after push reconciles pending fetch",
+    );
+
+    // Check whether the reconciliation path was exercised. This is timing-dependent:
+    // if the push arrives before Observer starts the P2P fetch, the chunk goes into
+    // cache directly and handle_provision_block_chunks finds it via cache hit (no
+    // pending fetch to reconcile). Both paths prove the push delivered the chunk.
+    let reconciliations_after = ctx
+        .observer
+        .node_ctx
+        .pd_push_reconciliation_count
+        .load(Ordering::Relaxed);
+    let reconciled = reconciliations_after > reconciliations_before;
+    info!(
+        "Push reconciliation counter: before={}, after={}, reconciled={}",
+        reconciliations_before, reconciliations_after, reconciled,
     );
 
     // Note: we do NOT assert chunk_data_index here. After block validation,

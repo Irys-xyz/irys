@@ -107,13 +107,18 @@ impl PdService {
         chunk_pusher: Arc<dyn irys_types::chunk_provider::PdChunkPusher>,
         pd_optimistic_push_fanout: u32,
         push_cache_hit_count: Arc<AtomicU64>,
+        push_reconciliation_count: Arc<AtomicU64>,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
         let service = Self {
             shutdown,
             msg_rx,
-            cache: ChunkCache::with_default_capacity(chunk_data_index, push_cache_hit_count),
+            cache: ChunkCache::with_default_capacity(
+                chunk_data_index,
+                push_cache_hit_count,
+                push_reconciliation_count,
+            ),
             tracker: ProvisioningTracker::new(),
             storage_provider,
             block_tracker: HashMap::new(),
@@ -884,6 +889,7 @@ impl PdService {
         // 5. Reconcile any in-flight P2P fetch for this chunk: the optimistic push
         //    arrived first, so cancel the fetch, add cache references, and wake waiters.
         if let Some(state) = self.pending_fetches.remove(&key) {
+            self.cache.record_push_reconciliation();
             if let Some(retry_key) = state.retry_queue_key {
                 self.retry_queue.try_remove(&retry_key);
             }
@@ -1562,6 +1568,7 @@ mod tests {
             msg_rx: rx,
             cache: ChunkCache::with_default_capacity(
                 chunk_data_index,
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ),
             tracker: ProvisioningTracker::new(),
