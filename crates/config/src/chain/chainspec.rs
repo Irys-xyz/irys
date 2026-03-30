@@ -218,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_genesis_block_without_cascade_has_two_ledgers() {
-        let block = build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, None).unwrap();
+        let block =
+            build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, None).unwrap();
         assert_eq!(block.data_ledgers.len(), 2);
         assert_eq!(block.data_ledgers[0].ledger_id, DataLedger::Publish as u32);
         assert_eq!(block.data_ledgers[1].ledger_id, DataLedger::Submit as u32);
