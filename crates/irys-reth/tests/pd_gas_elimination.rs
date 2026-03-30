@@ -43,7 +43,7 @@ const NUM_CHUNKS_IN_PARTITION: u64 = 200;
 /// 2. STATICCALLs the PD precompile (0x500) with that calldata
 /// 3. Checks success (reverts if inner call failed)
 /// 4. RETURNDATACOPYs the full return buffer to memory offset 0
-/// 5. RETURNs the copied data
+/// 5. Returns the copied data via RETURN
 ///
 /// This exercises the custom irys_returndatacopy handler because the
 /// RETURNDATACOPY opcode is used to copy PD precompile return data.
