@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
+use irys_types::{CommitmentTransaction, DataLedger, H256, NodeConfig, irys::IrysSigner};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {

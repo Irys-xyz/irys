@@ -1,10 +1,10 @@
 use crate::{Arbitrary, IrysAddress, Signature};
-use alloy_primitives::{bytes, U256 as RethU256};
+use alloy_primitives::{U256 as RethU256, bytes};
 use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_primitives_traits::crypto::secp256k1::recover_signer;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 //==============================================================================
 // IrysSignature
@@ -201,7 +201,7 @@ mod tests {
         BoundedFee, CommitmentTransaction, CommitmentTypeV2, DataLedger, IrysAddress, Signable as _,
     };
 
-    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
+    use crate::{ConsensusConfig, DataTransaction, DataTransactionHeader, H256, irys::IrysSigner};
     use alloy_core::hex;
 
     use alloy_rlp::{Decodable as _, Encodable as _};

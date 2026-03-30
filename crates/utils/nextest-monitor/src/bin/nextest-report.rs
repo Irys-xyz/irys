@@ -1420,16 +1420,16 @@ fn cmd_analyze(
                         fmt_opt_pct(pct_at_p90),
                         fmt_opt_pct(pct_near_peak)
                     );
-                    if let Some(time_above) = time_above_ms {
-                        if time_above > 0 {
-                            let pct_str = fmt_opt_pct(pct_above);
-                            println!(
-                                "│  Above {}T: {:.1}s ({} of runtime)",
-                                threshold,
-                                time_above as f64 / 1000.0,
-                                pct_str
-                            );
-                        }
+                    if let Some(time_above) = time_above_ms
+                        && time_above > 0
+                    {
+                        let pct_str = fmt_opt_pct(pct_above);
+                        println!(
+                            "│  Above {}T: {:.1}s ({} of runtime)",
+                            threshold,
+                            time_above as f64 / 1000.0,
+                            pct_str
+                        );
                     }
                     if let Some(peak_rss) = r.stats.avg_peak_rss_bytes {
                         let avg_rss_str = r
@@ -1655,18 +1655,18 @@ fn print_memory_contention_summary(
         })
         .max_by_key(|&(_, worst_case, _, _)| worst_case);
 
-    if let Some((threads, worst_case, count, max_conc)) = most_dangerous {
-        if worst_case >= 8 * 1024 * 1024 * 1024 {
-            // 8 GB
-            println!();
-            println!(
-                "  Highest contention risk: {}T tier ({} tests, {} max concurrent, {} worst-case RSS)",
-                threads,
-                count,
-                max_conc,
-                format_rss(worst_case),
-            );
-        }
+    if let Some((threads, worst_case, count, max_conc)) = most_dangerous
+        && worst_case >= 8 * 1024 * 1024 * 1024
+    {
+        // 8 GB
+        println!();
+        println!(
+            "  Highest contention risk: {}T tier ({} tests, {} max concurrent, {} worst-case RSS)",
+            threads,
+            count,
+            max_conc,
+            format_rss(worst_case),
+        );
     }
 
     // Show specific high-RSS 1T tests that are the biggest risk
@@ -1892,10 +1892,11 @@ fn cmd_schedule(
             current_slots += delta;
             let is_saturated = current_slots >= available_threads as i32;
 
-            if was_saturated && !is_saturated {
-                if let Some(start) = sat_start.take() {
-                    saturation_intervals.push((start, time));
-                }
+            if was_saturated
+                && !is_saturated
+                && let Some(start) = sat_start.take()
+            {
+                saturation_intervals.push((start, time));
             }
             if !was_saturated && is_saturated {
                 sat_start = Some(time);
@@ -2654,20 +2655,19 @@ fn classification_to_prefix(
     }
 
     // Find the timeout class (if any)
-    if timeout_ms > config.default_timeout_ms {
-        if let Some(cls) = all_classes
+    if timeout_ms > config.default_timeout_ms
+        && let Some(cls) = all_classes
             .iter()
             .find(|c| c.timeout_ms == Some(timeout_ms))
-        {
-            matched.push(cls.name.clone());
-        }
+    {
+        matched.push(cls.name.clone());
     }
 
     // Find the thread class (if any)
-    if threads > config.default_threads {
-        if let Some(cls) = all_classes.iter().find(|c| c.threads == Some(threads)) {
-            matched.push(cls.name.clone());
-        }
+    if threads > config.default_threads
+        && let Some(cls) = all_classes.iter().find(|c| c.threads == Some(threads))
+    {
+        matched.push(cls.name.clone());
     }
 
     classes_to_prefix(&matched, all_classes)
@@ -2819,16 +2819,16 @@ fn find_function_def(
                 {
                     // Confirm the character after the name is `(` or `<` or whitespace
                     let after_name_start = trimmed.find(&pattern).unwrap() + pattern.len();
-                    if let Some(ch) = trimmed[after_name_start..].chars().next() {
-                        if ch == '(' || ch == '<' || ch == ' ' {
-                            // Score: how many module hint segments appear in the file path
-                            let path_str = file_path.to_string_lossy();
-                            let score = hint_segments
-                                .iter()
-                                .filter(|seg| path_str.contains(**seg))
-                                .count();
-                            candidates.push((file_path.clone(), line_idx + 1, score));
-                        }
+                    if let Some(ch) = trimmed[after_name_start..].chars().next()
+                        && (ch == '(' || ch == '<' || ch == ' ')
+                    {
+                        // Score: how many module hint segments appear in the file path
+                        let path_str = file_path.to_string_lossy();
+                        let score = hint_segments
+                            .iter()
+                            .filter(|seg| path_str.contains(**seg))
+                            .count();
+                        candidates.push((file_path.clone(), line_idx + 1, score));
                     }
                 }
             }

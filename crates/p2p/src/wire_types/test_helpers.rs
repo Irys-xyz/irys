@@ -1,5 +1,9 @@
 use irys_types::RethPeerInfo;
 use irys_types::{
+    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, H256, HandshakeRequestV1,
+    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysPeerId,
+    IrysSignature, PeerAddress, ProtocolVersion, Signature, SystemTransactionLedger, TxChunkOffset,
+    U256, UnixTimestampMs,
     block::{IrysBlockHeader, IrysBlockHeaderV1, PoaData, VDFLimiterInfo},
     chunk::UnpackedChunk,
     commitment_common::{
@@ -14,10 +18,6 @@ use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
     },
-    BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, HandshakeRequestV1,
-    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysPeerId,
-    IrysSignature, PeerAddress, ProtocolVersion, Signature, SystemTransactionLedger, TxChunkOffset,
-    UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;

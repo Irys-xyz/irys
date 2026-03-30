@@ -8,8 +8,8 @@ use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
-    IrysAddress, NodeConfig, H256, U256,
+    CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2, H256, IrysAddress,
+    NodeConfig, U256, irys::IrysSigner,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -29,7 +29,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // Configure logging to reduce noise while keeping relevant commitment outputs
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
-        std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off")
+        std::env::set_var(
+            "RUST_LOG",
+            "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off",
+        )
     };
     initialize_tracing();
 
@@ -598,7 +601,7 @@ fn validate_pledge_assignments(
             return Err(eyre!(
                 "Expected to find commitment entries for {}",
                 address_name
-            ))
+            ));
         }
     };
 
@@ -1002,20 +1005,20 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
     let mut found_term_fee_reward = false;
     for tx in block_txs {
         let mut input = tx.input().as_ref();
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut input) {
-            if let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
-                info!(
-                    "Found TermFeeReward at height {}: target={}, amount={}",
-                    expiry_height, reward.target, reward.amount
-                );
-                // KEY ASSERTION: TermFeeReward must go to reward_recipient
-                assert_eq!(
-                    reward.target,
-                    reward_recipient.to_alloy_address(),
-                    "TermFeeReward must go to custom reward_address, not genesis miner address"
-                );
-                found_term_fee_reward = true;
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut input)
+            && let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1()
+        {
+            info!(
+                "Found TermFeeReward at height {}: target={}, amount={}",
+                expiry_height, reward.target, reward.amount
+            );
+            // KEY ASSERTION: TermFeeReward must go to reward_recipient
+            assert_eq!(
+                reward.target,
+                reward_recipient.to_alloy_address(),
+                "TermFeeReward must go to custom reward_address, not genesis miner address"
+            );
+            found_term_fee_reward = true;
         }
     }
 

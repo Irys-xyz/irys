@@ -2,12 +2,12 @@ use alloy_core::primitives::FixedBytes;
 use alloy_eips::HashOrNumber;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
-    shadow_tx_topics, ShadowTransaction, TransactionPacket,
+    ShadowTransaction, TransactionPacket, shadow_tx_topics,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    partition::PartitionAssignment, CommitmentTransaction, ConsensusConfig, IrysAddress,
-    NodeConfig, PledgeDataProvider as _, U256,
+    CommitmentTransaction, ConsensusConfig, IrysAddress, NodeConfig, PledgeDataProvider as _, U256,
+    partition::PartitionAssignment,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 use reth::rpc::types::BlockNumberOrTag;
@@ -15,7 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::warn;
 
 use crate::utils::IrysNodeTest;
@@ -163,21 +163,21 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     let mut found_unpledge_debit = false;
     for tx in txs_inclusion {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                assert_eq!(
-                    debit.target,
-                    peer_addr.to_alloy_address(),
-                    "Unpledge target mismatch"
-                );
-                let expected_irys_ref: FixedBytes<32> = unpledge_tx.id().into();
-                assert_eq!(
-                    debit.irys_ref, expected_irys_ref,
-                    "Unpledge irys_ref should match commitment tx id"
-                );
-                found_unpledge_debit = true;
-                break;
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1()
+        {
+            assert_eq!(
+                debit.target,
+                peer_addr.to_alloy_address(),
+                "Unpledge target mismatch"
+            );
+            let expected_irys_ref: FixedBytes<32> = unpledge_tx.id().into();
+            assert_eq!(
+                debit.irys_ref, expected_irys_ref,
+                "Unpledge irys_ref should match commitment tx id"
+            );
+            found_unpledge_debit = true;
+            break;
         }
     }
     assert!(
@@ -261,18 +261,17 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     let mut matched = false;
     for tx in txs_epoch {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == peer_addr.to_alloy_address() {
-                    let expected_amount: alloy_primitives::U256 = expected_refund_amount.into();
-                    assert_eq!(
-                        inc.amount, expected_amount,
-                        "Refund amount should equal last pledge value (builder's value)"
-                    );
-                    matched = true;
-                    break;
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1()
+            && inc.target == peer_addr.to_alloy_address()
+        {
+            let expected_amount: alloy_primitives::U256 = expected_refund_amount.into();
+            assert_eq!(
+                inc.amount, expected_amount,
+                "Refund amount should equal last pledge value (builder's value)"
+            );
+            matched = true;
+            break;
         }
     }
     assert!(
@@ -497,14 +496,12 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         unpledge_txs.iter().map(|(tx, _)| tx.id().into()).collect();
     let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
     for tx in inclusion_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                if debit.target == miner_addr.to_alloy_address()
-                    && expected_irys_refs.contains(&debit.irys_ref)
-                {
-                    matched_irys_refs.insert(debit.irys_ref);
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1()
+            && debit.target == miner_addr.to_alloy_address()
+            && expected_irys_refs.contains(&debit.irys_ref)
+        {
+            matched_irys_refs.insert(debit.irys_ref);
         }
     }
     assert_eq!(
@@ -568,20 +565,18 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         .collect();
     let mut matched_refunds: HashMap<FixedBytes<32>, U256> = HashMap::new();
     for tx in epoch_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == miner_addr.to_alloy_address() {
-                    if let Some(expected_amount) = expected_refunds.get(&inc.irys_ref) {
-                        assert_eq!(
-                            U256::from(inc.amount),
-                            *expected_amount,
-                            "Refund amount mismatch for commitment {:?}",
-                            inc.irys_ref
-                        );
-                        matched_refunds.insert(inc.irys_ref, U256::from(inc.amount));
-                    }
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1()
+            && inc.target == miner_addr.to_alloy_address()
+            && let Some(expected_amount) = expected_refunds.get(&inc.irys_ref)
+        {
+            assert_eq!(
+                U256::from(inc.amount),
+                *expected_amount,
+                "Refund amount mismatch for commitment {:?}",
+                inc.irys_ref
+            );
+            matched_refunds.insert(inc.irys_ref, U256::from(inc.amount));
         }
     }
     assert_eq!(
@@ -761,14 +756,12 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         unpledge_txs.iter().map(|(tx, _)| tx.id().into()).collect();
     let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
     for tx in inclusion_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                if debit.target == genesis_signer.alloy_address()
-                    && expected_irys_refs.contains(&debit.irys_ref)
-                {
-                    matched_irys_refs.insert(debit.irys_ref);
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1()
+            && debit.target == genesis_signer.alloy_address()
+            && expected_irys_refs.contains(&debit.irys_ref)
+        {
+            matched_irys_refs.insert(debit.irys_ref);
         }
     }
     assert_eq!(
@@ -846,15 +839,13 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     let mut seen_refs: HashSet<FixedBytes<32>> = HashSet::new();
     let mut refund_amounts: Vec<U256> = Vec::new();
     for tx in epoch_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == genesis_signer.alloy_address()
-                    && expected_refunds.contains(&inc.irys_ref)
-                {
-                    seen_refs.insert(inc.irys_ref);
-                    refund_amounts.push(U256::from(inc.amount));
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1()
+            && inc.target == genesis_signer.alloy_address()
+            && expected_refunds.contains(&inc.irys_ref)
+        {
+            seen_refs.insert(inc.irys_ref);
+            refund_amounts.push(U256::from(inc.amount));
         }
     }
     assert_eq!(

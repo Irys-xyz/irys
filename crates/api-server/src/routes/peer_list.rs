@@ -1,5 +1,5 @@
-use crate::{error::ApiError, ApiState};
-use actix_web::{http::header::ContentType, web, HttpResponse, ResponseError as _};
+use crate::{ApiState, error::ApiError};
+use actix_web::{HttpResponse, ResponseError as _, http::header::ContentType, web};
 use awc::http::StatusCode;
 use serde_json::to_string;
 

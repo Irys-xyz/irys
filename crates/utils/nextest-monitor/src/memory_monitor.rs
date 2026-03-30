@@ -32,10 +32,10 @@ mod platform {
             if let Ok(content) = fs::read_to_string(&statm_path) {
                 let fields: Vec<&str> = content.split_whitespace().collect();
                 // Field 0 = total pages, Field 1 = resident pages
-                if fields.len() > 1 {
-                    if let Ok(resident_pages) = fields[1].parse::<u64>() {
-                        return resident_pages * self.page_size;
-                    }
+                if fields.len() > 1
+                    && let Ok(resident_pages) = fields[1].parse::<u64>()
+                {
+                    return resident_pages * self.page_size;
                 }
             }
             0

@@ -5,32 +5,32 @@ use crate::{
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
 use actix_web::dev::Server;
-use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpResponse, HttpServer, middleware, web};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
-use futures::{future, FutureExt as _};
+use futures::{FutureExt as _, future};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::mempool_guard::MempoolReadGuard;
-use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
+use irys_actors::mempool_service::{AtomicMempoolState, TxIngressError, TxReadError, create_state};
 use irys_actors::services::ServiceSenders;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, MempoolFacade};
+use irys_actors::{MempoolFacade, block_discovery::BlockDiscoveryFacade};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::TempDirBuilder;
+use irys_types::IrysAddress;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
-use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, DbSyncMode, GossipRequest,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, DbSyncMode, GossipRequest, H256,
     IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
+    TokioServiceHandle, Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -667,9 +667,9 @@ impl FakeGossipServer {
     pub(crate) fn set_on_pull_data_request(
         &self,
         on_pull_data_request: impl Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) {
         self.handler
             .write()
@@ -690,9 +690,9 @@ impl FakeGossipServer {
     pub(crate) fn set_on_block_index_request(
         &self,
         on_block_index_request: impl Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) {
         self.handler
             .write()

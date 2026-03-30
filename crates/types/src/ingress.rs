@@ -1,9 +1,9 @@
 use crate::irys::IrysSigner;
 use crate::{
-    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
-    IrysAddress, IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
+    DataRoot, H256, IrysAddress, IrysSignature, Node, Signable, VersionDiscriminant, Versioned,
+    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves,
 };
-use alloy_primitives::{keccak256, ChainId};
+use alloy_primitives::{ChainId, keccak256};
 use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
@@ -238,8 +238,8 @@ mod tests {
     use rand::Rng as _;
 
     use crate::{
-        generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
-        irys::IrysSigner, ConsensusConfig, H256,
+        ConsensusConfig, H256, generate_data_root, generate_leaves, hash_sha256,
+        ingress::verify_ingress_proof, irys::IrysSigner,
     };
 
     use super::generate_ingress_proof;
@@ -256,7 +256,7 @@ mod tests {
             testing_config.chunk_size as usize,
         )?;
         let interleave_value = signer.address();
-        let interleave_hash = hash_sha256(&interleave_value.0 .0);
+        let interleave_hash = hash_sha256(&interleave_value.0.0);
 
         // interleave the interleave hash with the leaves
         // TODO improve
@@ -344,7 +344,7 @@ mod tests {
             .collect();
 
         let anchor = H256::random(); // example anchor for testing
-                                     // Generate proof for testnet (chain_id = 1)
+        // Generate proof for testnet (chain_id = 1)
         let testnet_chain_id = 1;
 
         let testnet_proof = generate_ingress_proof(

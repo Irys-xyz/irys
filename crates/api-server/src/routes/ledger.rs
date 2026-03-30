@@ -1,8 +1,8 @@
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 use actix_web::web::{Data, Json, Path};
 use irys_types::{
-    partition::PartitionAssignment, serialization::string_u64, DataLedger, IrysAddress, H256,
+    DataLedger, H256, IrysAddress, partition::PartitionAssignment, serialization::string_u64,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,7 +64,7 @@ fn analyze_partition_hashes(assignments: &[PartitionAssignment]) -> HashAnalysis
     let unique_hashes = hash_counts.len();
     let duplicate_hashes: Vec<String> = hash_counts
         .iter()
-        .filter(|(_, &count)| count > 1)
+        .filter(|&(_, &count)| count > 1)
         .map(|(hash, count)| format!("{hash:?} ({count}x)"))
         .collect();
 

@@ -1,4 +1,5 @@
 use crate::{
+    GossipClient, GossipError, GossipResult,
     block_pool::BlockPool,
     cache::GossipCache,
     metrics::{
@@ -7,7 +8,6 @@ use crate::{
     },
     rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
-    GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
 use irys_actors::block_discovery::{
@@ -15,15 +15,15 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
     ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
+use irys_types::{BlockBody, Config, H256, IrysAddress, IrysPeerId, PeerNetworkError};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
@@ -34,7 +34,7 @@ use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, instrument, warn};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
 
@@ -484,7 +484,11 @@ where
         if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
                 "Node {}: Block {} height {} is out of the sync range (target: {}, highest processed: {}), skipping",
-                self.gossip_client.mining_address, block_hash, block_header.height, &sync_target, &self.sync_state.highest_processed_block()
+                self.gossip_client.mining_address,
+                block_hash,
+                block_header.height,
+                &sync_target,
+                &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
@@ -621,7 +625,11 @@ where
         if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
                 "Node {}: Block {} height {} is out of the sync range (target: {}, highest processed: {}), skipping",
-                self.gossip_client.mining_address, block_hash, block_header.height, &sync_target, &self.sync_state.highest_processed_block()
+                self.gossip_client.mining_address,
+                block_hash,
+                block_header.height,
+                &sync_target,
+                &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
@@ -807,8 +815,7 @@ where
         if payload_already_seen_before && !expecting_payload {
             debug!(
                 "Node {}: Execution payload for EVM block {:?} already seen, and no service requested it to be fetched again, skipping",
-                self.gossip_client.mining_address,
-                evm_block_hash
+                self.gossip_client.mining_address, evm_block_hash
             );
             return Ok(());
         }
@@ -891,13 +898,13 @@ where
         match request {
             GossipDataRequestV2::BlockHeader(block_hash) => {
                 let maybe_block = self.block_pool.get_block_header(block_hash).await?;
-                if let Some(block) = &maybe_block {
-                    if block.poa.chunk.is_none() {
-                        error!(
-                            block.hash = ?block.block_hash,
-                            "Block pool returned a block without a POA chunk"
-                        );
-                    }
+                if let Some(block) = &maybe_block
+                    && block.poa.chunk.is_none()
+                {
+                    error!(
+                        block.hash = ?block.block_hash,
+                        "Block pool returned a block without a POA chunk"
+                    );
                 }
                 Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
@@ -1050,7 +1057,11 @@ where
                     if !header.is_signature_valid() {
                         warn!(
                             "Node: {}: Block {} fetched from {} has an invalid signature (attempt {}/{})",
-                            self.gossip_client.mining_address, header.block_hash, source_peer_id, attempt, HEADER_AND_BODY_RETRIES
+                            self.gossip_client.mining_address,
+                            header.block_hash,
+                            source_peer_id,
+                            attempt,
+                            HEADER_AND_BODY_RETRIES
                         );
                         let error =
                             GossipError::InvalidData(InvalidDataError::InvalidBlockSignature);
@@ -1190,7 +1201,13 @@ where
                 Err(PeerNetworkError::InvalidBlockBody { peer_id, reason }) => {
                     warn!(
                         "Node {}: Peer {} served invalid block body for block {} height {} (attempt {}/{}): {}",
-                        self.gossip_client.mining_address, peer_id, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES, reason
+                        self.gossip_client.mining_address,
+                        peer_id,
+                        block_hash,
+                        header.height,
+                        attempt,
+                        HEADER_AND_BODY_RETRIES,
+                        reason
                     );
                     self.peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,

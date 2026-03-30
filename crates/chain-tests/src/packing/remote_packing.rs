@@ -4,13 +4,12 @@ use irys_actors::packing_service::PackingRequest;
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing_worker::worker::start_worker;
-use irys_testing_utils::{initialize_tracing, TempDirBuilder};
+use irys_testing_utils::{TempDirBuilder, initialize_tracing};
 use irys_types::{
-    ie,
+    Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+    RemotePackingConfig, StorageSyncConfig, ie,
     partition::{PartitionAssignment, PartitionHash},
     remote_packing::PackingWorkerConfig,
-    Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
-    RemotePackingConfig, StorageSyncConfig,
 };
 use irys_utils::listener::create_listener;
 use tokio::sync::mpsc::channel;
@@ -19,10 +18,10 @@ async fn wait_for_packing_worker_ready(base_url_v1: &str, timeout: Duration) -> 
     let client = reqwest::Client::new();
     let start = std::time::Instant::now();
     loop {
-        if let Ok(resp) = client.get(format!("{}/info", base_url_v1)).send().await {
-            if resp.status().is_success() {
-                return Ok(());
-            }
+        if let Ok(resp) = client.get(format!("{}/info", base_url_v1)).send().await
+            && resp.status().is_success()
+        {
+            return Ok(());
         }
         if start.elapsed() > timeout {
             eyre::bail!("remote packing worker not ready after {:?}", timeout);

@@ -1,4 +1,4 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::web::{self, Json};
 use irys_types::{BlockIndexItem, BlockIndexQuery};
 

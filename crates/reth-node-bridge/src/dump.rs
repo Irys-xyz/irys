@@ -2,8 +2,8 @@ use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, B256};
 use irys_database::reth_db::{
-    self, cursor::*, transaction::*, Bytecodes, PlainAccountState, PlainStorageState,
-    StageCheckpoints,
+    self, Bytecodes, PlainAccountState, PlainStorageState, StageCheckpoints, cursor::*,
+    transaction::*,
 };
 use reth_provider::HeaderProvider;
 use serde::{Deserialize, Serialize};

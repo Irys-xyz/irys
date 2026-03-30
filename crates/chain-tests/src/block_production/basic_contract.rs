@@ -7,7 +7,7 @@ use alloy_sol_macro::sol;
 use std::time::Duration;
 use tracing::info;
 
-use irys_types::{irys::IrysSigner, NodeConfig};
+use irys_types::{NodeConfig, irys::IrysSigner};
 
 use crate::utils::IrysNodeTest;
 // Codegen from artifact.

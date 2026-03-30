@@ -4,8 +4,8 @@ pub use irys_api_server::routes::block::BlockParam;
 use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
-    Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset,
-    UnpackedChunk, H256,
+    Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, H256, TxChunkOffset,
+    UnpackedChunk,
 };
 use std::{
     net::SocketAddr,

@@ -1,11 +1,11 @@
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
-use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLimiterInfo, H256};
+use irys_types::{BlockHash, BlockIndexItem, H256, VDFLimiterInfo, block_provider::BlockProvider};
 use tracing::debug;
 #[cfg(test)]
 use {
     irys_testing_utils::IrysBlockHeaderTestExt as _,
     irys_types::{
-        irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig,
+        ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig, irys::IrysSigner,
     },
     std::sync::{Arc, RwLock},
     tracing::warn,

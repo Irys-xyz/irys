@@ -3,7 +3,7 @@
 
 use crate::utils::IrysNodeTest;
 use irys_actors::anchor_validation::get_anchor_height;
-use irys_types::{NodeConfig, H256};
+use irys_types::{H256, NodeConfig};
 use std::sync::Arc;
 use tracing::debug;
 

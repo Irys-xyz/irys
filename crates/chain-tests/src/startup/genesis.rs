@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fs::remove_dir_all};
 
 use irys_reth_node_bridge::{dump::dump_state, genesis::init_state};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, IrysAddress};
+use irys_types::{IrysAddress, irys::IrysSigner};
 
 use crate::utils::IrysNodeTest;
 

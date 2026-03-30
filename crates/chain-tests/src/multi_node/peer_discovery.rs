@@ -4,15 +4,15 @@ use std::{
 };
 
 use crate::utils::IrysNodeTest;
-use actix_web::test::{call_service, read_body, TestRequest};
+use actix_web::test::{TestRequest, call_service, read_body};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
 use irys_domain::ScoreDecreaseReason;
 use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
-    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequestV2, HandshakeResponse,
-    IrysPeerId, NodeConfig, PeerAddress, RethPeerInfo,
+    BlockHash, HandshakeRequestV2, HandshakeResponse, IrysPeerId, NodeConfig, PeerAddress,
+    RethPeerInfo, build_user_agent, irys::IrysSigner,
 };
 use tracing::{debug, error, info};
 
@@ -496,14 +496,18 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         0
     );
     assert!(!ctx_genesis_node.node_ctx.sync_state.is_syncing());
-    assert!(ctx_genesis_node
-        .node_ctx
-        .sync_state
-        .is_gossip_broadcast_enabled());
-    assert!(ctx_genesis_node
-        .node_ctx
-        .sync_state
-        .is_gossip_reception_enabled());
+    assert!(
+        ctx_genesis_node
+            .node_ctx
+            .sync_state
+            .is_gossip_broadcast_enabled()
+    );
+    assert!(
+        ctx_genesis_node
+            .node_ctx
+            .sync_state
+            .is_gossip_reception_enabled()
+    );
     info!(
         "GENESIS sync state: {:?}",
         ctx_genesis_node.node_ctx.sync_state

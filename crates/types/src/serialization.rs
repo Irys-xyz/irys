@@ -1,23 +1,23 @@
 #![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
 
-use crate::ingress::IngressProof;
 use crate::Arbitrary;
-use alloy_primitives::{bytes, FixedBytes};
+use crate::ingress::IngressProof;
+use alloy_primitives::{FixedBytes, bytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use derive_more::Deref;
-use eyre::eyre;
 use eyre::Error;
+use eyre::eyre;
 use rand::RngCore as _;
 use reth_codecs::Compact;
 use reth_db::table::{Compress, Decompress};
-use reth_db_api::table::{Decode, Encode};
 use reth_db_api::DatabaseError;
+use reth_db_api::table::{Decode, Encode};
 use serde::{
-    de::{self, Error as _},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Error as _},
 };
 use std::fmt;
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
@@ -308,7 +308,7 @@ impl From<Vec<IngressProof>> for IngressProofsList {
 pub mod address_base58_stringify {
     use alloy_primitives::Address;
     use base58::{FromBase58, ToBase58 as _};
-    use serde::{self, de, Deserialize, Deserializer, Serializer};
+    use serde::{self, Deserialize, Deserializer, Serializer, de};
 
     pub fn serialize<S>(value: &Address, serializer: S) -> Result<S::Ok, S::Error>
     where

@@ -1,5 +1,5 @@
 use crate::ApiState;
-use actix_web::{web, HttpResponse, Result};
+use actix_web::{HttpResponse, Result, web};
 
 /// GET /v1/mempool/status
 pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpResponse> {

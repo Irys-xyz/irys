@@ -30,10 +30,12 @@ fn data_tx_signing_uses_discriminant() {
 
     // Verify the signature is valid
     let sig_hash = signed_tx.signature_hash();
-    assert!(signed_tx
-        .header
-        .signature
-        .validate_signature(sig_hash, signer.address()));
+    assert!(
+        signed_tx
+            .header
+            .signature
+            .validate_signature(sig_hash, signer.address())
+    );
 }
 
 #[test]
@@ -59,9 +61,10 @@ fn commitment_tx_signing_uses_discriminant() {
 
     // Verify the signature is valid
     let sig_hash = tx.signature_hash();
-    assert!(tx
-        .signature()
-        .validate_signature(sig_hash, signer.address()));
+    assert!(
+        tx.signature()
+            .validate_signature(sig_hash, signer.address())
+    );
 }
 
 #[test]
@@ -86,9 +89,11 @@ fn block_header_signing_uses_discriminant() {
 
     // Verify the signature is valid
     let sig_hash = block.signature_hash();
-    assert!(block
-        .signature
-        .validate_signature(sig_hash, signer.address()));
+    assert!(
+        block
+            .signature
+            .validate_signature(sig_hash, signer.address())
+    );
 }
 
 #[test]
@@ -113,7 +118,9 @@ fn ingress_proof_signing_uses_discriminant() {
 
     // Verify the signature is valid
     let sig_hash = proof.signature_hash();
-    assert!(proof
-        .signature
-        .validate_signature(sig_hash, signer.address()));
+    assert!(
+        proof
+            .signature
+            .validate_signature(sig_hash, signer.address())
+    );
 }

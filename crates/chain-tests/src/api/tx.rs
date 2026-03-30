@@ -6,8 +6,8 @@ use alloy_genesis::GenesisAccount;
 
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
-    IrysTransactionResponse, NodeConfig, H256,
+    CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256,
+    IrysTransactionResponse, NodeConfig, irys::IrysSigner,
 };
 use reth_db::Database as _;
 use tokio::time::Duration;

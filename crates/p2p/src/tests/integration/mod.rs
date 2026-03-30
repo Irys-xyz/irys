@@ -1,6 +1,6 @@
 use super::util::{
-    create_test_chunks, generate_test_tx, poll_until, wait_until_listening,
-    GossipServiceTestFixture,
+    GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
+    wait_until_listening,
 };
 use crate::SyncChainServiceMessage;
 use core::time::Duration;

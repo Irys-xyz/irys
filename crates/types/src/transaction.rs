@@ -1,14 +1,14 @@
 pub use crate::{
-    address_base58_stringify, decode_rlp_version, encode_rlp_version,
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
+    ConsensusConfig, DataTransactionMetadata, H256, IrysAddress, IrysSignature, Node, Proof,
+    Signature, TxChunkOffset, U256, UnpackedChunk, address_base58_stringify, decode_rlp_version,
+    encode_rlp_version,
     ingress::IngressProof,
     optional_string_u64, string_u64,
     versioning::{
-        compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
-        VersioningError,
+        Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
+        split_discriminant,
     },
-    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
-    ConsensusConfig, DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature,
-    TxChunkOffset, UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;
@@ -813,7 +813,7 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner, DataLedger};
+    use crate::{DataLedger, decode_rlp_version, encode_rlp_version, irys::IrysSigner};
 
     use alloy_rlp::Decodable as _;
     use k256::ecdsa::SigningKey;

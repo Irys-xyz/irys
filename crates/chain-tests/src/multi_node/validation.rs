@@ -1,21 +1,21 @@
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+    IrysNodeTest, assert_validation_error, read_block_from_state, solution_context,
 };
 use irys_actors::{
+    BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
     async_trait,
     block_discovery::{AnchorItemType, BlockDiscoveryError, BlockDiscoveryFacade as _},
     block_validation::ValidationError,
     reth_ethereum_primitives,
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
-    ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
-    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, SendTraced as _,
-    UnixTimestampMs, H256, U256,
+    CommitmentTransaction, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader,
+    NodeConfig, SendTraced as _, U256, UnixTimestampMs, ingress::generate_ingress_proof,
+    storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
@@ -427,9 +427,9 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
-    );
+            "RUST_LOG",
+            "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        );
     }
     irys_testing_utils::initialize_tracing();
 
@@ -796,7 +796,11 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
         })
     ) {
         info!("bug detected! this is now a regression test, panicking");
-        eyre::bail!("REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}", &edge_case_height, &preval_res );
+        eyre::bail!(
+            "REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}",
+            &edge_case_height,
+            &preval_res
+        );
     } else if preval_res.is_ok() {
         info!("block validation succeeded with edge case anchor");
     } else {

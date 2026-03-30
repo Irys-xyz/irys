@@ -3,8 +3,8 @@ use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction,
-    IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode, SyncMode,
+    BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction, IrysBlockHeader,
+    IrysTransactionId, NodeConfig, NodeMode, SyncMode, irys::IrysSigner,
 };
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -20,8 +20,8 @@ use tracing::{debug, warn};
 /// 3. Verifies non-reset blocks maintain seed continuity
 /// 4. Spins up a peer node to verify reset seeds propagate correctly during sync
 #[test_log::test(tokio::test)]
-async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
-) -> eyre::Result<()> {
+async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer()
+-> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
