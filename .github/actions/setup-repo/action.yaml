@@ -28,8 +28,3 @@ runs:
         cache-bin: "false"
         cache-all-crates: true
         cache-workspace-crates: "true"
-      # Force V1 REST API — modern runners set ACTIONS_CACHE_SERVICE_V2=true
-      # which uses a twirp protocol our self-hosted cache server doesn't
-      # fully support (prefix-based restore key matching fails in V2).
-      env:
-        ACTIONS_CACHE_SERVICE_V2: ""
