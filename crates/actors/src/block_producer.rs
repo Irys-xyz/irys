@@ -1708,9 +1708,13 @@ mod oracle_choice_tests {
     const MAX_AGE_SECS: u64 = 3 * 60;
 
     #[rstest]
+    // Oracle is more than 3 minutes behind parent - use parent
     #[case::stale_oracle(1000, 1000 - MAX_AGE_SECS - 1, true)]
+    // Oracle is exactly at the 3-minute tolerance boundary - still use oracle
     #[case::at_tolerance_boundary(1000, 1000 - MAX_AGE_SECS, false)]
+    // Oracle is fresher than parent - definitely use oracle
     #[case::fresher_oracle(100, 200, false)]
+    // Both at same second - prefer oracle (authoritative source)
     #[case::equal_timestamps(500, 500, false)]
     fn choose_oracle_price_scenarios(
         #[case] parent_ts_secs: u64,

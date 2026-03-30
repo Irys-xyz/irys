@@ -8,7 +8,9 @@ use std::sync::Mutex;
 #[derive(Debug)]
 struct PriceContext {
     price: Amount<(IrysPrice, Usd)>,
+    // Counts how many times `current_price` has been called
     calls: u64,
+    // Tracks whether the price is going up (true) or down (false)
     going_up: bool,
 }
 
@@ -16,7 +18,9 @@ struct PriceContext {
 #[derive(Debug)]
 pub struct MockOracle {
     context: Mutex<PriceContext>,
+    /// Const value change on each call
     incremental_change: Amount<(IrysPrice, Usd)>,
+    /// After this many calls, we toggle the direction of change (up/down)
     smoothing_interval: u64,
 }
 
@@ -52,6 +56,7 @@ impl MockOracle {
 
         guard.calls = guard.calls.wrapping_add(1);
 
+        // Each time we hit the smoothing interval, toggle the direction
         if guard
             .calls
             .checked_rem(self.smoothing_interval)
