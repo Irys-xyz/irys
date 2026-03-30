@@ -1,0 +1,60 @@
+# Build Versioning
+
+## Status
+
+Accepted
+
+## Context
+
+Nodes in a decentralized network need to identify themselves to peers — both the protocol-level version they speak and the specific software producing it. Without this, operators cannot diagnose version mismatches, coordinate upgrades, or distinguish between alternative implementations of the same protocol.
+
+The version reported by a node should:
+1. Follow a widely understood format (SemVer).
+2. Identify the implementation (vendor), since multiple implementations of the protocol may coexist.
+3. Distinguish tagged releases from development builds, so operators can tell "release 3.0.0" from "some commit on main after 3.0.0".
+4. Be derived automatically from the build environment — never manually maintained.
+
+## Decision
+
+### Version format
+
+Node versions follow [SemVer 2.0.0](https://semver.org/), using build metadata to carry implementation and provenance information:
+
+| Scenario | Format | Example |
+|---|---|---|
+| Tagged release | `MAJOR.MINOR.PATCH+VENDOR` | `3.0.0+irys-rs` |
+| Development build | `MAJOR.MINOR.PATCH+VENDOR.GIT_SHA` | `3.0.0+irys-rs.a1b2c3d` |
+
+**VENDOR** identifies the implementation (`irys-rs` for this codebase). Alternative implementations would use their own identifier (e.g. `irys-go`). **GIT_SHA** is the short commit hash, appended only for builds not on an exact release tag.
+
+Build metadata is ignored for SemVer precedence — `3.0.0+irys-rs.abc` and `3.0.0+irys-rs.def` are equal when compared for compatibility.
+
+### Workspace version
+
+All crates share a single version defined once in the workspace root. Individual crate manifests inherit it. Version bumps are a one-line change.
+
+### Build-time capture
+
+The main binary's build script captures the git SHA and tag status at compile time. The build **fails** if git is unavailable — release artifacts must always carry provenance. Cargo `rerun-if-changed` directives ensure the version updates when commits or tags change.
+
+### Runtime model
+
+A global, initialise-once cell holds the version. Binary crates populate it with git metadata as the first action in `main()`. Library crates and tests access it through a function that falls back to the plain workspace version with vendor metadata if no binary initialiser ran.
+
+### Role in P2P
+
+The version is **strictly informational** — it is carried in handshake messages for observability only. It **must not** be used for gossip decisions, peer acceptance/rejection, or compatibility checks. Peer compatibility is determined solely by the protocol version.
+
+Only `major.minor.patch` is included in handshake signature preimages — build metadata is excluded. This is intentional: the version is observability data, not a security or consensus input.
+
+### Wire format
+
+The version is serialized as a plain SemVer string (e.g. `"3.0.0+irys-rs.a1b2c3d"`). Deserialization accepts any valid SemVer 2.0.0 string, preserving unknown metadata from other implementations.
+
+## Consequences
+
+- Operators can identify exact builds in logs and peer handshakes.
+- The vendor tag prepares for a multi-implementation ecosystem.
+- Development builds are distinguishable from releases at a glance.
+- Builds require a git repository — source tarballs without `.git` will not compile. This is an intentional trade-off favouring provenance over convenience.
+- The initialise-once model has an ordering constraint: the binary must populate the version before any code reads it. This is documented at both the API and call-site level.
