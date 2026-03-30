@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774891794875,
+  "lastUpdate": 1774906251667,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1579,6 +1579,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "da9b36071025155ef3cd88c4eb0e4615b8176f1b",
+          "message": "fix: unify edition to 2024 via workspace inheritance (#1261)\n\nAll crate Cargo.toml files now use `edition.workspace = true` instead of\nhardcoding their own edition. This also fixes edition 2024 migration\nissues: reserved `gen` keyword, collapsible if-let chains, pattern\nmatching changes, and impl Trait lifetime capture rules.",
+          "timestamp": "2026-03-30T22:10:45+01:00",
+          "tree_id": "aff3defe1ea98490dbf7bee658886db076364796",
+          "url": "https://github.com/Irys-xyz/irys/commit/da9b36071025155ef3cd88c4eb0e4615b8176f1b"
+        },
+        "date": 1774906249757,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.080611,
+            "range": "± 0.003307",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 833.462782,
+            "range": "± 23.226416",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1022.517035,
+            "range": "± 15.396029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147696,
+            "range": "± 0.01404",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1242.668567,
+            "range": "± 38.031022",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1707.414069,
+            "range": "± 50.137991",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.494774,
+            "range": "± 0.039499",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 221.56362,
+            "range": "± 3.607211",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 284.718086,
+            "range": "± 2.686042",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
