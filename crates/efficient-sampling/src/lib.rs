@@ -288,12 +288,14 @@ mod tests {
         use rstest::rstest;
 
         #[rstest]
+        // Perfect division cases (no remainder)
         #[case(1000, 100, 10, "Simple exact division")]
         #[case(51_872_000, 800, 64_840, "Production mainnet config")]
         #[case(10, 2, 5, "Default testing config")]
         #[case(1, 1, 1, "Single chunk edge case")]
         #[case(8, 4, 2, "Small exact division")]
         #[case(1600, 800, 2, "Exact boundary for 2 ranges")]
+        // Division with remainder (ceiling division needed)
         #[case(1000, 800, 2, "Must round up to 2")]
         #[case(801, 800, 2, "Minimal remainder (1 chunk)")]
         #[case(1599, 800, 2, "Maximum chunks still needing 2 ranges")]
@@ -301,10 +303,12 @@ mod tests {
         #[case(999, 1000, 1, "Partition smaller than recall range")]
         #[case(101, 10, 11, "101 chunks / 10 per range = 11 ranges")]
         #[case(199, 100, 2, "Nearly double with remainder")]
+        // Edge cases
         #[case(1, 1000, 1, "Single chunk, large recall range")]
         #[case(2, 1, 2, "Two ranges of size 1")]
         #[case(100, 1, 100, "Many single-chunk ranges")]
         #[case(3, 2, 2, "Small numbers with remainder")]
+        // Large numbers with remainders
         #[case(10_000, 3_333, 4, "Large numbers with remainder")]
         #[case(1_000_000, 333_333, 4, "Very large with remainder")]
         #[case(123_456, 789, 157, "Random large numbers")]
