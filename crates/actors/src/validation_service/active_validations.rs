@@ -1112,6 +1112,19 @@ mod tests {
             CancelEnum::Continue as u8,
             "Cancel signal should NOT fire when pending has lower priority"
         );
+
+        // Replace pending with equal priority task
+        scheduler.pending.clear();
+        let (equal_task, _) = make_stub_task(&block_tree_guard);
+        scheduler.pending.push(equal_task, high_priority);
+
+        scheduler.check_preemption();
+
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "Cancel signal should NOT fire when pending has equal priority"
+        );
     }
 
     /// Verifies that submit() deduplicates a block already in the pending queue.
@@ -1129,6 +1142,7 @@ mod tests {
             vdf_step_count: 1,
         };
         let (blocker, _cancel) = make_running_vdf_task(blocker_priority);
+        let blocker_hash = blocker.hash;
         scheduler.current = Some(blocker);
 
         let (stub_task, _hash) = make_stub_task(&block_tree_guard);
@@ -1145,6 +1159,11 @@ mod tests {
             1,
             "First submit should enqueue into pending"
         );
+        assert_eq!(
+            scheduler.current.as_ref().unwrap().hash,
+            blocker_hash,
+            "Current task should still be the original blocker"
+        );
 
         // Second submit with the same block hash — must hit the
         // self.pending.get(&task) dedup branch.
@@ -1156,6 +1175,11 @@ mod tests {
             scheduler.pending.len(),
             1,
             "Duplicate submit should be rejected by pending dedup"
+        );
+        assert_eq!(
+            scheduler.current.as_ref().unwrap().hash,
+            blocker_hash,
+            "Current task should remain unchanged after duplicate submit"
         );
     }
 
@@ -1213,15 +1237,21 @@ mod tests {
             "start_next should return true when a task was started"
         );
         assert!(scheduler.current.is_some(), "Current task should be set");
+        let current = scheduler.current.as_ref().unwrap();
         assert_eq!(
-            scheduler.current.as_ref().unwrap().hash,
-            expected_hash,
+            current.hash, expected_hash,
             "Running task should have the expected block hash"
         );
         assert_eq!(
-            scheduler.current.as_ref().unwrap().priority,
-            priority,
+            current.priority, priority,
             "Running task should have the expected priority"
+        );
+        assert_eq!(
+            current
+                .cancel_signal
+                .load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "Newly promoted task should have cancel signal in Continue state"
         );
         assert!(
             scheduler.pending.is_empty(),
@@ -1367,6 +1397,10 @@ mod tests {
             .as_ref()
             .expect("current task should still exist");
         assert_eq!(
+            current.hash, ext_header.block_hash,
+            "Running task should still be the same block after reevaluation"
+        );
+        assert_eq!(
             current.priority.state,
             BlockPriority::Fork,
             "Running task priority should update from CanonicalExtension to Fork after reorg"
@@ -1399,27 +1433,49 @@ mod tests {
     /// Tests that reevaluate_priorities() starts pending tasks when no VDF task
     /// is currently running (current=None). After a reorg, the defensive
     /// start_next() at the end of reevaluate_priorities() should pick up work.
-    ///
-    /// NOTE: We can't populate the pending queue (requires BlockValidationTask
-    /// which needs ValidationServiceInner), so this test verifies the code path
-    /// doesn't panic and that start_next() is exercised with an empty queue.
-    /// The actual pending→running promotion is covered by start_next() tests.
     #[tokio::test]
     async fn test_reevaluate_priorities_with_no_current_task() {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let mut coordinator =
-            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+            ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
 
-        // No running task, no pending tasks
+        // --- Empty-queue branch: nothing pending, nothing running ---
         assert!(coordinator.vdf_scheduler.current.is_none());
         assert!(coordinator.vdf_scheduler.pending.is_empty());
 
-        // Should not panic — exercises the early-return in reevaluate_current_vdf
-        // and the defensive start_next() at the end
         coordinator.reevaluate_priorities();
 
         // Still no running task (nothing was pending)
         assert!(coordinator.vdf_scheduler.current.is_none());
+
+        // --- Idle-start branch: pending task gets promoted to current ---
+        let (stub_task, expected_hash) = make_stub_task(&block_tree_guard);
+        let priority = BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::Fork,
+            vdf_step_count: 1,
+        };
+        coordinator.vdf_scheduler.pending.push(stub_task, priority);
+        assert!(coordinator.vdf_scheduler.current.is_none());
+
+        coordinator.reevaluate_priorities();
+
+        // The defensive start_next() should have promoted the pending task
+        assert!(
+            coordinator.vdf_scheduler.current.is_some(),
+            "start_next() in reevaluate_priorities should promote a pending task"
+        );
+        assert_eq!(
+            coordinator.vdf_scheduler.current.as_ref().unwrap().hash,
+            expected_hash
+        );
+        assert!(
+            coordinator.vdf_scheduler.pending.is_empty(),
+            "pending queue should be empty after promotion"
+        );
+
+        // Clean up spawned task
+        coordinator.shutdown();
     }
 
     /// Tests that reevaluate_priorities() correctly handles the case where the
@@ -1490,8 +1546,12 @@ mod tests {
         // Reevaluate without any tree changes
         coordinator.reevaluate_priorities();
 
-        // Priority should remain unchanged
+        // Priority should remain unchanged and the same task should still be running
         let current = coordinator.vdf_scheduler.current.as_ref().unwrap();
+        assert_eq!(
+            current.hash, ext_hash,
+            "Same task should still be running after no-op reevaluation"
+        );
         assert_eq!(current.priority.state, BlockPriority::CanonicalExtension);
         // Cancel signal should NOT be set (no preemption)
         assert_eq!(
