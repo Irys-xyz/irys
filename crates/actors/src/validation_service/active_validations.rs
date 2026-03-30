@@ -349,6 +349,12 @@ impl ValidationCoordinator {
         // Reevaluate pending VDF tasks
         self.reevaluate_pending_vdf();
 
+        // Re-check preemption now that both current and pending priorities are
+        // up-to-date. The earlier check inside reevaluate_current_vdf() compared
+        // the updated current priority against stale pending priorities, so it
+        // could miss cases where a pending task's priority also rose.
+        self.vdf_scheduler.check_preemption();
+
         // Defensive: ensure a pending task starts if nothing is running.
         // Maintains the invariant even if future code paths add to pending
         // without calling start_next().
@@ -966,6 +972,206 @@ mod tests {
         );
     }
 
+    /// Helper: create a stub BlockValidationTask for queue-only operations.
+    fn make_stub_task(block_tree_guard: &BlockTreeReadGuard) -> (BlockValidationTask, BlockHash) {
+        use crate::validation_service::block_validation_task::BlockValidationTask;
+
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.block_hash = BlockHash::random();
+        header.test_sign();
+        let hash = header.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                header,
+                BlockBody {
+                    block_hash: hash,
+                    ..Default::default()
+                },
+            )
+            .expect("sealing block"),
+        );
+        let task = BlockValidationTask::test_stub(sealed, block_tree_guard.clone());
+        (task, hash)
+    }
+
+    /// Verifies that check_preemption() sets the cancel signal when a pending
+    /// task has strictly higher priority than the running task.
+    #[tokio::test]
+    async fn test_check_preemption_fires_when_pending_outranks_current() {
+        let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
+        let mut scheduler = VdfScheduler::new();
+
+        // Running task at Fork priority (low)
+        let low_priority = BlockPriorityMeta {
+            height: 10,
+            state: BlockPriority::Fork,
+            vdf_step_count: 1,
+        };
+        let (running, cancel) = make_running_vdf_task(low_priority);
+        scheduler.current = Some(running);
+
+        // Pending task at CanonicalExtension priority (high)
+        let (stub_task, _) = make_stub_task(&block_tree_guard);
+        let high_priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+        scheduler.pending.push(stub_task, high_priority);
+
+        // Before check: cancel is not set
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+        );
+
+        scheduler.check_preemption();
+
+        // After check: cancel IS set because pending outranks current
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Cancelled as u8,
+            "Cancel signal should fire when pending task has higher priority"
+        );
+    }
+
+    /// Verifies that check_preemption() does NOT fire when pending has equal
+    /// or lower priority than current.
+    #[tokio::test]
+    async fn test_check_preemption_no_fire_when_pending_lower_or_equal() {
+        let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
+        let mut scheduler = VdfScheduler::new();
+
+        // Running task at CanonicalExtension priority (high)
+        let high_priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+        let (running, cancel) = make_running_vdf_task(high_priority);
+        scheduler.current = Some(running);
+
+        // Pending task at Fork priority (lower)
+        let (stub_task, _) = make_stub_task(&block_tree_guard);
+        let low_priority = BlockPriorityMeta {
+            height: 10,
+            state: BlockPriority::Fork,
+            vdf_step_count: 1,
+        };
+        scheduler.pending.push(stub_task, low_priority);
+
+        scheduler.check_preemption();
+
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "Cancel signal should NOT fire when pending has lower priority"
+        );
+    }
+
+    /// Verifies that submit() deduplicates a block already in the pending queue.
+    #[tokio::test]
+    async fn test_submit_deduplicates_pending_task() {
+        let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
+        let mut scheduler = VdfScheduler::new();
+
+        let (stub_task, _hash) = make_stub_task(&block_tree_guard);
+        let priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+
+        // First submit — goes into pending and starts immediately
+        scheduler.submit(stub_task.clone(), priority);
+        assert!(
+            scheduler.current.is_some(),
+            "First submit should start the task"
+        );
+
+        // Create a second task with the same block_hash
+        let duplicate = stub_task;
+        scheduler.submit(duplicate, priority);
+
+        // Pending should still be empty (the duplicate was rejected,
+        // and the first task is already running)
+        assert_eq!(
+            scheduler.pending.len(),
+            0,
+            "Duplicate submit should be rejected"
+        );
+    }
+
+    /// Verifies that submit() deduplicates a block that is already the
+    /// currently running VDF task.
+    #[tokio::test]
+    async fn test_submit_deduplicates_current_task() {
+        let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
+        let mut scheduler = VdfScheduler::new();
+
+        let (stub_task, hash) = make_stub_task(&block_tree_guard);
+        let priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+
+        // Submit once — starts running
+        scheduler.submit(stub_task.clone(), priority);
+        assert_eq!(scheduler.current.as_ref().unwrap().hash, hash);
+
+        // Submit the same block again
+        let duplicate = stub_task;
+        scheduler.submit(duplicate, priority);
+
+        // Should not have added to pending
+        assert_eq!(
+            scheduler.pending.len(),
+            0,
+            "Duplicate of running task should be rejected"
+        );
+    }
+
+    /// Verifies that start_next() correctly promotes a pending task to running.
+    #[tokio::test]
+    async fn test_start_next_promotes_pending_to_running() {
+        let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
+        let mut scheduler = VdfScheduler::new();
+
+        let (stub_task, expected_hash) = make_stub_task(&block_tree_guard);
+        let priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+        scheduler.pending.push(stub_task, priority);
+
+        assert!(scheduler.current.is_none());
+        assert_eq!(scheduler.pending.len(), 1);
+
+        let started = scheduler.start_next();
+
+        assert!(
+            started,
+            "start_next should return true when a task was started"
+        );
+        assert!(scheduler.current.is_some(), "Current task should be set");
+        assert_eq!(
+            scheduler.current.as_ref().unwrap().hash,
+            expected_hash,
+            "Running task should have the expected block hash"
+        );
+        assert_eq!(
+            scheduler.current.as_ref().unwrap().priority,
+            priority,
+            "Running task should have the expected priority"
+        );
+        assert!(
+            scheduler.pending.is_empty(),
+            "Pending queue should be empty"
+        );
+    }
+
     /// Verifies that sequential handle awaits work correctly, simulating the
     /// "complete one task, start next" pattern used in the validation service.
     #[tokio::test]
@@ -1107,6 +1313,64 @@ mod tests {
             BlockPriority::Fork,
             "Running task priority should update from CanonicalExtension to Fork after reorg"
         );
+    }
+
+    /// Tests that check_preemption() is a no-op when the pending queue is empty,
+    /// and that it correctly preserves the cancel signal state.
+    ///
+    /// NOTE: Testing check_preemption with a populated pending queue requires
+    /// constructing a BlockValidationTask, which needs Arc<ValidationServiceInner>
+    /// (rayon pool, reth adapter, DB, etc.) — infeasible in unit tests. The
+    /// positive preemption case (pending outranks current → cancel fires) relies
+    /// on check_preemption's straightforward comparison:
+    ///   `if pending_priority > &current.priority { cancel_signal.store(Cancelled) }`
+    /// This logic is validated indirectly by:
+    /// - test_reevaluate_priorities_updates_running_task_priority (reorg triggers preemption)
+    /// - test_cancel_signal_produces_cancelled_result (cancel propagation works)
+    #[tokio::test]
+    async fn test_check_preemption_noop_with_empty_pending() {
+        let mut scheduler = VdfScheduler::new();
+
+        let priority = BlockPriorityMeta {
+            height: 5,
+            state: BlockPriority::Fork,
+            vdf_step_count: 1,
+        };
+        let (running_task, cancel) = make_running_vdf_task(priority);
+        scheduler.current = Some(running_task);
+
+        // check_preemption with empty pending — must NOT fire cancel
+        scheduler.check_preemption();
+        assert_eq!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "Cancel signal should not fire with empty pending queue"
+        );
+    }
+
+    /// Tests that reevaluate_priorities() starts pending tasks when no VDF task
+    /// is currently running (current=None). After a reorg, the defensive
+    /// start_next() at the end of reevaluate_priorities() should pick up work.
+    ///
+    /// NOTE: We can't populate the pending queue (requires BlockValidationTask
+    /// which needs ValidationServiceInner), so this test verifies the code path
+    /// doesn't panic and that start_next() is exercised with an empty queue.
+    /// The actual pending→running promotion is covered by start_next() tests.
+    #[tokio::test]
+    async fn test_reevaluate_priorities_with_no_current_task() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
+        let mut coordinator = ValidationCoordinator::new(block_tree_guard);
+
+        // No running task, no pending tasks
+        assert!(coordinator.vdf_scheduler.current.is_none());
+        assert!(coordinator.vdf_scheduler.pending.is_empty());
+
+        // Should not panic — exercises the early-return in reevaluate_current_vdf
+        // and the defensive start_next() at the end
+        coordinator.reevaluate_priorities();
+
+        // Still no running task (nothing was pending)
+        assert!(coordinator.vdf_scheduler.current.is_none());
     }
 
     /// Tests that reevaluate_priorities() correctly handles the case where the
