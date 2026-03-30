@@ -128,6 +128,7 @@ impl ValidationService {
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
 
+        let rt_handle = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let validation_service = Self {
@@ -154,7 +155,7 @@ impl ValidationService {
                 };
 
                 validation_service
-                    .start()
+                    .start(rt_handle)
                     .in_current_span()
                     .await
                     .expect("validation service encountered an irrecoverable error")
@@ -173,11 +174,13 @@ impl ValidationService {
 
     /// Main service loop
     #[tracing::instrument(name = "validation_service_start", level = "trace", skip_all)]
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         info!("starting validation service");
 
-        let mut coordinator =
-            active_validations::ValidationCoordinator::new(self.inner.block_tree_guard.clone());
+        let mut coordinator = active_validations::ValidationCoordinator::new(
+            self.inner.block_tree_guard.clone(),
+            runtime_handle,
+        );
 
         // Create a timer for periodic pipeline logging
         let mut pipeline_log_interval = tokio::time::interval(Duration::from_secs(5));
@@ -396,6 +399,7 @@ impl ValidationService {
         }
 
         info!("shutting down validation service");
+        coordinator.shutdown();
         Ok(())
     }
 }

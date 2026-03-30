@@ -132,13 +132,17 @@ pub(super) struct VdfScheduler {
 
     /// Pending VDF tasks ordered by priority.
     pub pending: PriorityQueue<BlockValidationTask, BlockPriorityMeta>,
+
+    /// Runtime handle used to spawn VDF tasks.
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl VdfScheduler {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
+            runtime_handle,
         }
     }
 
@@ -238,7 +242,7 @@ impl VdfScheduler {
         let cancel_signal = Arc::clone(&cancel_u8);
         let sealed_block = Arc::clone(&task.sealed_block);
 
-        let handle = tokio::spawn(
+        let handle = self.runtime_handle.spawn(
             async move {
                 let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
                 (hash, result, task)
@@ -277,9 +281,12 @@ pub(super) struct ValidationCoordinator {
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
+    pub(super) fn new(
+        block_tree_guard: BlockTreeReadGuard,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
         Self {
-            vdf_scheduler: VdfScheduler::new(),
+            vdf_scheduler: VdfScheduler::new(runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
             block_tree_guard,
@@ -355,6 +362,28 @@ impl ValidationCoordinator {
         );
         self.concurrent_task_blocks
             .insert(abort_handle.id(), block_hash);
+    }
+
+    /// Abort all running validation tasks for clean shutdown.
+    ///
+    /// Cancels and aborts the running VDF task (if any) and aborts all concurrent
+    /// validation tasks so that `SealedBlock` and `ValidationServiceInner` Arcs are
+    /// released promptly instead of being held by detached tasks.
+    pub(super) fn shutdown(&mut self) {
+        // Abort the running VDF task
+        if let Some(vdf_task) = self.vdf_scheduler.current.take() {
+            vdf_task
+                .cancel_signal
+                .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+            vdf_task.handle.abort();
+        }
+
+        // Clear pending VDF tasks (no spawned work, just drop queued items)
+        self.vdf_scheduler.pending.clear();
+
+        // Abort all concurrent validation tasks
+        self.concurrent_tasks.abort_all();
+        self.concurrent_task_blocks.clear();
     }
 
     /// Reevaluate all priorities after reorg
@@ -646,7 +675,8 @@ mod tests {
     async fn test_priority_calculation_after_fork_becomes_canonical() {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let coordinator = ValidationCoordinator::new(block_tree_guard.clone());
+        let coordinator =
+            ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
@@ -889,7 +919,7 @@ mod tests {
     /// allowing other select branches to fire.
     #[tokio::test]
     async fn test_select_skips_vdf_branch_when_no_task() {
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
         assert!(scheduler.current.is_none());
 
         // poll_vdf returns pending() when current is None,
@@ -950,7 +980,7 @@ mod tests {
     /// This enforces the single-task invariant: at most one VDF task at a time.
     #[tokio::test]
     async fn test_start_next_preserves_running_task() {
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
         let priority = BlockPriorityMeta {
             height: 1,
             state: BlockPriority::Canonical,
@@ -975,11 +1005,9 @@ mod tests {
     }
 
     /// Verifies that start_next() does nothing when the pending queue is empty.
-    #[test]
-    fn test_start_next_noop_when_pending_empty() {
-        // Safe to call outside a tokio runtime: start_next() early-returns `false`
-        // when pending.pop() returns None, before reaching the tokio::spawn call.
-        let mut scheduler = VdfScheduler::new();
+    #[tokio::test]
+    async fn test_start_next_noop_when_pending_empty() {
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         scheduler.start_next();
 
@@ -1016,7 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_preemption_fires_when_pending_outranks_current() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         // Running task at Fork priority (low)
         let low_priority = BlockPriorityMeta {
@@ -1057,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_preemption_no_fire_when_pending_lower_or_equal() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         // Running task at CanonicalExtension priority (high)
         let high_priority = BlockPriorityMeta {
@@ -1090,7 +1118,18 @@ mod tests {
     #[tokio::test]
     async fn test_submit_deduplicates_pending_task() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+
+        // Seed current with a different running task so that submit() is
+        // forced to enqueue into pending (start_next returns early when
+        // current.is_some()).
+        let blocker_priority = BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::CanonicalExtension,
+            vdf_step_count: 1,
+        };
+        let (blocker, _cancel) = make_running_vdf_task(blocker_priority);
+        scheduler.current = Some(blocker);
 
         let (stub_task, _hash) = make_stub_task(&block_tree_guard);
         let priority = BlockPriorityMeta {
@@ -1099,23 +1138,24 @@ mod tests {
             vdf_step_count: 1,
         };
 
-        // First submit — goes into pending and starts immediately
+        // First submit — goes into pending (current is occupied)
         scheduler.submit(stub_task.clone(), priority);
-        assert!(
-            scheduler.current.is_some(),
-            "First submit should start the task"
+        assert_eq!(
+            scheduler.pending.len(),
+            1,
+            "First submit should enqueue into pending"
         );
 
-        // Create a second task with the same block_hash
+        // Second submit with the same block hash — must hit the
+        // self.pending.get(&task) dedup branch.
         let duplicate = stub_task;
         scheduler.submit(duplicate, priority);
 
-        // Pending should still be empty (the duplicate was rejected,
-        // and the first task is already running)
+        // Pending should still have exactly one entry (the duplicate was rejected)
         assert_eq!(
             scheduler.pending.len(),
-            0,
-            "Duplicate submit should be rejected"
+            1,
+            "Duplicate submit should be rejected by pending dedup"
         );
     }
 
@@ -1124,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_deduplicates_current_task() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         let (stub_task, hash) = make_stub_task(&block_tree_guard);
         let priority = BlockPriorityMeta {
@@ -1153,7 +1193,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_next_promotes_pending_to_running() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         let (stub_task, expected_hash) = make_stub_task(&block_tree_guard);
         let priority = BlockPriorityMeta {
@@ -1221,7 +1261,8 @@ mod tests {
     #[tokio::test]
     async fn test_reevaluate_priorities_updates_running_task_priority() {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let mut coordinator = ValidationCoordinator::new(block_tree_guard.clone());
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
 
         // Add an extension block at height 4 (extends canonical tip)
         let (ext_header, ext_sealed) = {
@@ -1336,7 +1377,7 @@ mod tests {
     /// and that it correctly preserves the cancel signal state.
     #[tokio::test]
     async fn test_check_preemption_noop_with_empty_pending() {
-        let mut scheduler = VdfScheduler::new();
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
 
         let priority = BlockPriorityMeta {
             height: 5,
@@ -1366,7 +1407,8 @@ mod tests {
     #[tokio::test]
     async fn test_reevaluate_priorities_with_no_current_task() {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let mut coordinator = ValidationCoordinator::new(block_tree_guard);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
 
         // No running task, no pending tasks
         assert!(coordinator.vdf_scheduler.current.is_none());
@@ -1385,7 +1427,8 @@ mod tests {
     #[tokio::test]
     async fn test_reevaluate_priorities_noop_when_priority_unchanged() {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let mut coordinator = ValidationCoordinator::new(block_tree_guard.clone());
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
 
         // Add an extension block and set as current
         let ext_header = {
