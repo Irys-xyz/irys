@@ -1317,16 +1317,6 @@ mod tests {
 
     /// Tests that check_preemption() is a no-op when the pending queue is empty,
     /// and that it correctly preserves the cancel signal state.
-    ///
-    /// NOTE: Testing check_preemption with a populated pending queue requires
-    /// constructing a BlockValidationTask, which needs Arc<ValidationServiceInner>
-    /// (rayon pool, reth adapter, DB, etc.) — infeasible in unit tests. The
-    /// positive preemption case (pending outranks current → cancel fires) relies
-    /// on check_preemption's straightforward comparison:
-    ///   `if pending_priority > &current.priority { cancel_signal.store(Cancelled) }`
-    /// This logic is validated indirectly by:
-    /// - test_reevaluate_priorities_updates_running_task_priority (reorg triggers preemption)
-    /// - test_cancel_signal_produces_cancelled_result (cancel propagation works)
     #[tokio::test]
     async fn test_check_preemption_noop_with_empty_pending() {
         let mut scheduler = VdfScheduler::new();

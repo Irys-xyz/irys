@@ -439,9 +439,9 @@ mod tests {
         proc.kill().await.unwrap();
     }
 
-    /// Returns `true` when the temp directory used for test binaries allows
-    /// execution.  `/tmpfs` inside Docker is often mounted `noexec`.
-    fn can_exec_in_tmp() -> bool {
+    /// Cached result of the exec-in-tmp probe.  The probe runs at most once
+    /// per process — subsequent checks just read the cached bool.
+    static CAN_EXEC_IN_TMP: LazyLock<bool> = LazyLock::new(|| {
         let dir = TempDirBuilder::new().prefix("exec-probe-").build();
         let script = dir.path().join("probe");
         if std::fs::write(&script, "#!/bin/sh\ntrue\n").is_err() {
@@ -453,6 +453,12 @@ mod tests {
         std::process::Command::new(&script)
             .status()
             .is_ok_and(|s| s.success())
+    });
+
+    /// Returns `true` when the temp directory used for test binaries allows
+    /// execution.  `/tmpfs` inside Docker is often mounted `noexec`.
+    fn can_exec_in_tmp() -> bool {
+        *CAN_EXEC_IN_TMP
     }
 
     /// Returns `true` when the current environment allows sending `SIGSTOP`
