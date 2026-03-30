@@ -332,6 +332,24 @@ mod tests {
     }
 
     #[test]
+    fn count_assignments_none_ledger_id_returns_err() {
+        let miner = IrysAddress::ZERO;
+        let assignments = vec![PartitionAssignment {
+            partition_hash: nonzero_hash(1),
+            miner_address: miner,
+            ledger_id: None,
+            slot_index: Some(0),
+        }];
+        assert!(matches!(
+            count_assignments_by_ledger_type(miner, &assignments, DataLedger::Publish),
+            Err(ApiError::LedgerNotFound {
+                ledger_type: DataLedger::Publish,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn count_assignments_mixed_ledgers_counts_only_matching() {
         let miner = IrysAddress::ZERO;
         let assignments = vec![

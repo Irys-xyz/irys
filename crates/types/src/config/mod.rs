@@ -1008,9 +1008,10 @@ mod validate_tests {
             c.vdf.max_allowed_vdf_fork_steps = 0;
         });
         let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
         assert!(
-            format!("{err:?}").contains("max_allowed_vdf_fork_steps"),
-            "expected error about vdf fork steps, got: {err:?}"
+            msg.contains("max_allowed_vdf_fork_steps"),
+            "expected error about vdf fork steps, got: {msg}"
         );
     }
 
@@ -1027,9 +1028,10 @@ mod validate_tests {
             nc.cache.prune_at_capacity_percent = percent;
         });
         let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
         assert!(
-            format!("{err:?}").contains(expected_msg),
-            "expected error containing {expected_msg:?}, got: {err:?}"
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
         );
     }
 
@@ -1041,9 +1043,10 @@ mod validate_tests {
             c.vdf.max_allowed_vdf_fork_steps = 60_000;
         });
         let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
         assert!(
-            format!("{err:?}").contains("num_chunks_in_partition must be a multiple"),
-            "expected alignment error, got: {err:?}"
+            msg.contains("num_chunks_in_partition must be a multiple"),
+            "expected alignment error, got: {msg}"
         );
     }
 
@@ -1070,9 +1073,10 @@ mod validate_tests {
     ) {
         let cfg = config_with_node(mutate);
         let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
         assert!(
-            format!("{err:?}").contains(expected_msg),
-            "expected error containing {expected_msg:?}, got: {err:?}"
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
         );
     }
 }

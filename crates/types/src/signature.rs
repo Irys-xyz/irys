@@ -417,7 +417,13 @@ mod tests {
     #[test]
     fn from_base58_rejects_oversized_input() {
         let long_string = "A".repeat(MAX_BS58_SIG_STRING_LENGTH + 1);
-        assert!(IrysSignature::from_base58(&long_string).is_err());
+        let err_msg = IrysSignature::from_base58(&long_string)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err_msg.contains("Invalid signature length"),
+            "expected length-guard error, got: {err_msg}"
+        );
     }
 
     #[test]

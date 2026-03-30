@@ -43,6 +43,14 @@ jobs:
           IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
         run: cargo xtask test --coverage
 
+      - name: Ensure lcov artifact exists
+        if: ${{ always() && steps.coverage_tests.outcome != 'failure' }}
+        run: |
+          if [ ! -f target/llvm-cov/lcov.info ]; then
+            echo "Missing target/llvm-cov/lcov.info after coverage run" >&2
+            exit 1
+          fi
+
       - name: Build coverage summary
         if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         env:
