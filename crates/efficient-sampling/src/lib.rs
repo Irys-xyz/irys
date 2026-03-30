@@ -1,5 +1,5 @@
 use eyre::Result;
-use irys_types::{ConsensusConfig, H256List, SimpleRNG, H256};
+use irys_types::{ConsensusConfig, H256, H256List, SimpleRNG};
 use openssl::sha;
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -39,7 +39,10 @@ impl Ranges {
         };
 
         let range = self.next_recall_range(step, seed, partition_hash)?;
-        debug!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
+        debug!(
+            "Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}",
+            partition_hash, step, range, self.num_recall_ranges_in_partition
+        );
         Ok(range)
     }
 

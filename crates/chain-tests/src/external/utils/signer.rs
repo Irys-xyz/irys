@@ -1,5 +1,5 @@
 use eyre::Result;
-use irys_types::{irys::IrysSigner, ConsensusConfig, IrysAddress};
+use irys_types::{ConsensusConfig, IrysAddress, irys::IrysSigner};
 use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]

@@ -1,7 +1,7 @@
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::{Address, U256};
-use alloy_eips::eip2930::AccessListItem;
 use alloy_eips::BlockNumberOrTag;
+use alloy_eips::eip2930::AccessListItem;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
@@ -17,8 +17,8 @@ use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
-use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{IrysAddress, irys::IrysSigner};
 
 use crate::utils::IrysNodeTest;
 
@@ -118,10 +118,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let info_url = format!("{}/v1/info", http_url);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(resp) = client.get(&info_url).send().await {
-            if resp.status() == reqwest::StatusCode::OK {
-                break;
-            }
+        if let Ok(resp) = client.get(&info_url).send().await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,

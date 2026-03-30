@@ -237,10 +237,10 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(seconds_to_wait as u64);
         loop {
-            if let Ok(block) = genesis_node.get_block_by_height(5).await {
-                if block.block_hash == peer2_hash {
-                    break;
-                }
+            if let Ok(block) = genesis_node.get_block_by_height(5).await
+                && block.block_hash == peer2_hash
+            {
+                break;
             }
 
             eyre::ensure!(

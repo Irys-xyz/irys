@@ -1,8 +1,8 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::block_tree_service;
-use irys_types::{u64_stringify, BlockHash, IrysAddress, U256};
+use irys_types::{BlockHash, IrysAddress, U256, u64_stringify};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -167,11 +167,11 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
                 }
             }
 
-            if let Ok(decoded) = base58::FromBase58::from_base58(block) {
-                if decoded.len() == 32 {
-                    let irys_block_hash = BlockHash::from_slice(&decoded);
-                    return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
-                }
+            if let Ok(decoded) = base58::FromBase58::from_base58(block)
+                && decoded.len() == 32
+            {
+                let irys_block_hash = BlockHash::from_slice(&decoded);
+                return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
             }
 
             Err(ApiError::InvalidBlockParameter {

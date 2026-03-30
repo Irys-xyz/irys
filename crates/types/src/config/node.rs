@@ -1,12 +1,12 @@
 use crate::{
+    ConsensusConfig, H256, IrysAddress, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig,
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{IrysPrice, Usd},
         Amount,
+        phantoms::{IrysPrice, Usd},
     },
-    ConsensusConfig, IrysAddress, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
 };
-use crate::{serde_utils, ConsensusOptions};
+use crate::{ConsensusOptions, serde_utils};
 #[cfg(any(test, feature = "test-utils"))]
 use alloy_genesis::GenesisAccount;
 

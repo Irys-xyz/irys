@@ -425,13 +425,13 @@ pub(crate) async fn analyze_cluster_data(clients: &[RemoteNodeClient]) -> Result
             let publish_summary = get_ledger_summary(client, addr, DataLedger::Publish).await;
             let submit_summary = get_ledger_summary(client, addr, DataLedger::Submit).await;
 
-            if let (Ok(pub_sum), Ok(sub_sum)) = (publish_summary, submit_summary) {
-                if pub_sum.assignment_count > 0 || sub_sum.assignment_count > 0 {
-                    info!(
-                        "  {} has {} publish and {} submit assignments",
-                        addr, pub_sum.assignment_count, sub_sum.assignment_count
-                    );
-                }
+            if let (Ok(pub_sum), Ok(sub_sum)) = (publish_summary, submit_summary)
+                && (pub_sum.assignment_count > 0 || sub_sum.assignment_count > 0)
+            {
+                info!(
+                    "  {} has {} publish and {} submit assignments",
+                    addr, pub_sum.assignment_count, sub_sum.assignment_count
+                );
             }
         }
     }

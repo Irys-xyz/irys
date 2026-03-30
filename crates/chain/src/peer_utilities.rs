@@ -3,7 +3,7 @@ use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
 use irys_types::{
-    BlockIndexItem, CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, H256,
+    BlockIndexItem, CommitmentTransaction, H256, IrysBlockHeader, IrysTransactionResponse,
 };
 use std::net::SocketAddr;
 use tracing::warn;

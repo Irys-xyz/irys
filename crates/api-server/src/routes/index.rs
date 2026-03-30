@@ -1,8 +1,8 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::{
+    HttpResponse, ResponseError as _,
     http::header::ContentType,
     web::{self},
-    HttpResponse, ResponseError as _,
 };
 use awc::http::StatusCode;
 use irys_domain::get_node_info;

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use irys_types::{block::DataLedger, H256};
+use irys_types::{H256, block::DataLedger};
 use serde::{Deserialize, Serialize};
 
 /// V1 wire type for [`irys_types::block::BlockIndexItem`].

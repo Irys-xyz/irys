@@ -54,7 +54,7 @@ mod peer_id;
 
 pub use address::IrysAddress;
 
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 
 pub use block::*;
 pub use commitment_common::*;
@@ -81,7 +81,7 @@ pub use app_state::*;
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;
-pub use conversions::{parse_address, u256_from_le_bytes, AddressParseError};
+pub use conversions::{AddressParseError, parse_address, u256_from_le_bytes};
 pub use merkle::*;
 pub use nodit::Interval;
 pub use peer_list::*;

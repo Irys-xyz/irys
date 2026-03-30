@@ -1,9 +1,9 @@
 use crate::Versioned;
 pub use crate::{
-    address_base58_stringify, compare_commitment_transactions, ingress::IngressProof,
-    optional_string_u64, string_u64, Arbitrary, Base64, CommitmentTypeV1,
-    CommitmentValidationError, Compact, ConsensusConfig, IrysAddress, IrysSignature,
-    IrysTransactionId, Node, PledgeDataProvider, Proof, Signature, H256, U256,
+    Arbitrary, Base64, CommitmentTypeV1, CommitmentValidationError, Compact, ConsensusConfig, H256,
+    IrysAddress, IrysSignature, IrysTransactionId, Node, PledgeDataProvider, Proof, Signature,
+    U256, address_base58_stringify, compare_commitment_transactions, ingress::IngressProof,
+    optional_string_u64, string_u64,
 };
 use alloy_rlp::{Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable};
 use bytes::Buf as _;
@@ -540,7 +540,9 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         // Check minimum buffer size
         if buf.is_empty() {
-            panic!("CommitmentTypeV2::from_compact: buffer too short, expected at least 1 byte for type discriminant");
+            panic!(
+                "CommitmentTypeV2::from_compact: buffer too short, expected at least 1 byte for type discriminant"
+            );
         }
 
         let type_id = buf[0];
@@ -589,7 +591,8 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
                 if rem.len() < PARTITION_HASH_SIZE {
                     panic!(
                         "CommitmentTypeV2::from_compact: buffer too short for Unpledge partition hash, expected at least {} bytes but got {}",
-                        PARTITION_HASH_SIZE, rem.len()
+                        PARTITION_HASH_SIZE,
+                        rem.len()
                     );
                 }
                 let mut ph = [0_u8; 32];

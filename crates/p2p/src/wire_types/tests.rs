@@ -220,11 +220,13 @@ fn test_block_header_empty_ledgers() {
     let roundtrip: irys_types::IrysBlockHeader = deserialized.into();
     assert!(roundtrip.system_ledgers.is_empty());
     assert!(roundtrip.data_ledgers.is_empty());
-    assert!(roundtrip
-        .vdf_limiter_info
-        .last_step_checkpoints
-        .0
-        .is_empty());
+    assert!(
+        roundtrip
+            .vdf_limiter_info
+            .last_step_checkpoints
+            .0
+            .is_empty()
+    );
     assert!(roundtrip.vdf_limiter_info.steps.0.is_empty());
 }
 

@@ -13,8 +13,8 @@ use reth::{
 use reth_chainspec::ChainSpec;
 use reth_db::{init_db, mdbx::MEGABYTE};
 use reth_node_builder::{
-    rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
-    NodeComponentsBuilder, NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
+    FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder, NodeComponentsBuilder,
+    NodeConfig, NodeHandle, NodeTypesWithDBAdapter, rpc::RpcAddOns,
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
@@ -22,9 +22,9 @@ use std::future::IntoFuture as _;
 use std::net::SocketAddr;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::{warn, Instrument as _};
+use tracing::{Instrument as _, warn};
 
-use crate::{unwind::unwind_to, IrysRethNodeAdapter};
+use crate::{IrysRethNodeAdapter, unwind::unwind_to};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
 type NodeTypesAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;

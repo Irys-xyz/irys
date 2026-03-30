@@ -2,8 +2,8 @@
 
 use std::ops::Div as _;
 
-use alloy_primitives::{aliases::U200, B256};
-use eyre::{eyre, OptionExt as _};
+use alloy_primitives::{B256, aliases::U200};
+use eyre::{OptionExt as _, eyre};
 use ruint::Uint;
 use serde::{Deserialize, Serialize};
 

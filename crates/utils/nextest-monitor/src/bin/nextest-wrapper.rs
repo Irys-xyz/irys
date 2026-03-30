@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use nextest_monitor::cpu_monitor::CpuMonitor;
 use nextest_monitor::memory_monitor::MemoryMonitor;
-use nextest_monitor::types::{append_stats, CpuSample, MemorySample, TestStats};
+use nextest_monitor::types::{CpuSample, MemorySample, TestStats, append_stats};
 
 /// Flags known to take a following value argument.
 const VALUE_TAKING_FLAGS: &[&str] = &[
@@ -89,12 +89,11 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
         }
 
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                if content.contains("[workspace]") {
-                    return Some(current);
-                }
-            }
+        if cargo_toml.exists()
+            && let Ok(content) = fs::read_to_string(&cargo_toml)
+            && content.contains("[workspace]")
+        {
+            return Some(current);
         }
 
         if !current.pop() {
@@ -396,10 +395,9 @@ fn find_heaptrack_output(base_path: &Path) -> Option<PathBuf> {
                     if let (Ok(prev_time), Ok(cur_time)) = (
                         fs::metadata(prev).and_then(|m| m.modified()),
                         meta.modified(),
-                    ) {
-                        if cur_time > prev_time {
-                            best = Some(entry.path());
-                        }
+                    ) && cur_time > prev_time
+                    {
+                        best = Some(entry.path());
                     }
                 }
                 _ => {}

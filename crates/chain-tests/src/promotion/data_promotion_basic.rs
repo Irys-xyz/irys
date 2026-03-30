@@ -1,17 +1,17 @@
-use crate::utils::{post_chunk, verify_published_chunk};
 use crate::utils::{AddTxError, IrysNodeTest};
+use crate::utils::{post_chunk, verify_published_chunk};
 use actix_web::http::StatusCode;
-use actix_web::test::{self, call_service, TestRequest};
+use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
 use irys_actors::MempoolServiceMessage;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_testing_utils::initialize_tracing;
-use irys_types::ingress::generate_ingress_proof;
 use irys_types::SendTraced as _;
-use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
+use irys_types::ingress::generate_ingress_proof;
 use irys_types::{DataLedger, NodeConfig};
+use irys_types::{DataTransaction, DataTransactionHeader, LedgerChunkOffset, irys::IrysSigner};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -291,9 +291,9 @@ async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
-    );
+            "RUST_LOG",
+            "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        );
     }
     initialize_tracing();
 
@@ -410,9 +410,9 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
-    );
+            "RUST_LOG",
+            "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        );
     }
     initialize_tracing();
 
@@ -557,9 +557,9 @@ async fn test_ingress_proof_anchor_edge_case(
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
-    );
+            "RUST_LOG",
+            "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        );
     }
     initialize_tracing();
 
@@ -697,7 +697,7 @@ async fn test_ingress_proof_anchor_edge_case(
     genesis_node.node_ctx.db.update_eyre(|tx| {
         use reth_db::transaction::DbTxMut as _;
         tx.clear::<irys_database::tables::IngressProofs>()?; // wipe all existing ingress proofs
-                                                             // insert just our one, so it always gets included
+        // insert just our one, so it always gets included
         irys_database::store_ingress_proof_checked(tx, &edge_case_ingress_proof, &genesis_signer)
     })?;
 
@@ -713,7 +713,10 @@ async fn test_ingress_proof_anchor_edge_case(
             if error_str.contains("InvalidAnchor")
                 && error_str.contains(&edge_case_block.block_hash.to_string())
             {
-                eyre::bail!("Block validation failed with InvalidAnchor error for edge case anchor at height {}", edge_case_anchor_height)
+                eyre::bail!(
+                    "Block validation failed with InvalidAnchor error for edge case anchor at height {}",
+                    edge_case_anchor_height
+                )
             } else {
                 // different error - propagate it
                 eyre::bail!("Unexpected error, expected InvalidAnchor, got {}", &e)

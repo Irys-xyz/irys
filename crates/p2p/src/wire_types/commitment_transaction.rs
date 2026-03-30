@@ -1,4 +1,4 @@
-use irys_types::{IrysAddress, IrysSignature, H256, U256};
+use irys_types::{H256, IrysAddress, IrysSignature, U256};
 use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, impl_mirror_enum_from, impl_versioned_tx_from};

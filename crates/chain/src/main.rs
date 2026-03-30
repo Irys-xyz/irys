@@ -1,11 +1,11 @@
-use irys_chain::{utils::load_config, IrysNode};
+use irys_chain::{IrysNode, utils::load_config};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
+    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 #[cfg(feature = "telemetry")]
@@ -21,7 +21,9 @@ async fn main() -> eyre::Result<()> {
     let _ = dotenvy::dotenv();
 
     if cfg!(debug_assertions) {
-        eprintln!("WARNING: Running a debug build. Performance will be degraded. RECOMPILE WITH --release for production use.");
+        eprintln!(
+            "WARNING: Running a debug build. Performance will be degraded. RECOMPILE WITH --release for production use."
+        );
     }
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -57,7 +59,9 @@ async fn main() -> eyre::Result<()> {
     let config = load_config()?;
 
     if config.run_mode.is_test() {
-        eprintln!("WARNING: run_mode is set to Test. Durability and performance settings are optimized for testing, not production. If this is unintentional, check your node configuration.");
+        eprintln!(
+            "WARNING: run_mode is set to Test. Durability and performance settings are optimized for testing, not production. If this is unintentional, check your node configuration."
+        );
     }
 
     // start the node

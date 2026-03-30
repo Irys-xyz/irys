@@ -1,5 +1,5 @@
 use crate::utils::*;
-use alloy_core::primitives::{Bytes, TxKind, B256, U256};
+use alloy_core::primitives::{B256, Bytes, TxKind, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
@@ -7,14 +7,14 @@ use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::{
-    ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
-    IrysRethNodeAdapter,
+    IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _,
+    reth_e2e_test_utils::transaction::TransactionTestContext,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, SystemLedger, H256,
+    CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction, H256, IngressProofsList,
+    IrysBlockHeader, NodeConfig, SystemLedger, irys::IrysSigner,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -22,8 +22,8 @@ use reth::rpc::{
     api::EthApiClient,
     types::{Block, Header, TransactionRequest},
 };
-use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -561,10 +561,12 @@ async fn heavy_mempool_persistence_test() -> eyre::Result<()> {
         .atomic_state()
         .batch_valid_submit_ledger_tx_cloned(&[storage_tx.header.id])
         .await;
-    assert!(data_tx_from_mempool
-        .first()
-        .expect("expected a data tx")
-        .is_some());
+    assert!(
+        data_tx_from_mempool
+            .first()
+            .expect("expected a data tx")
+            .is_some()
+    );
 
     // confirm the commitment tx has appeared back in the mempool after a restart
     let result = restarted_node
@@ -583,9 +585,9 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
+            "RUST_LOG",
+            "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+        );
     }
 
     initialize_tracing();
@@ -851,7 +853,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
         );
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
-                             // Wait for the fork block's tx to be processed into peer2's mempool before mining
+        // Wait for the fork block's tx to be processed into peer2's mempool before mining
         peer2_node
             .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
             .await?;
@@ -864,7 +866,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
         );
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
-                             // Wait for the fork block's tx to be processed into peer1's mempool before mining
+        // Wait for the fork block's tx to be processed into peer1's mempool before mining
         peer1_node
             .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
             .await?;
@@ -932,9 +934,11 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
 
-    assert!(reorg_block.data_ledgers[DataLedger::Submit]
-        .tx_ids
-        .contains(&reorg_tx.header.id));
+    assert!(
+        reorg_block.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .contains(&reorg_tx.header.id)
+    );
 
     // Wind down test
     tokio::join!(genesis_node.stop(), peer1_node.stop(), peer2_node.stop());
@@ -979,9 +983,9 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
+            "RUST_LOG",
+            "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+        );
     }
     initialize_tracing();
 
@@ -1333,11 +1337,13 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     assert!(b_blk3.data_ledgers[DataLedger::Publish].proofs.is_some());
 
     // a_blk1_tx1 should have a new ingress proof (assert it's not the original from a_blk2)
-    assert!(b_blk3.data_ledgers[DataLedger::Publish]
-        .proofs
-        .clone()
-        .unwrap()
-        .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
+    assert!(
+        b_blk3.data_ledgers[DataLedger::Publish]
+            .proofs
+            .clone()
+            .unwrap()
+            .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()]))
+    );
 
     // now we send (bypassing gossip) B3 back to A
     // it shouldn't reorg, and should accept the block
@@ -2001,12 +2007,12 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let height = peer1.get_canonical_chain_height().await;
     peer1.mine_block().await?;
     // peers should be able to sync
-    let (gen, p2) = tokio::join!(
+    let (genesis_result, p2) = tokio::join!(
         genesis.wait_until_height(height + 1, 20),
         peer2.wait_until_height(height + 1, 20)
     );
 
-    let _block_hash = gen?;
+    let _block_hash = genesis_result?;
     let _block_hash = p2?;
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
@@ -2255,7 +2261,10 @@ async fn heavy_staked_stake_and_pledge_tampered_id_rejected_on_ingress_test() ->
         .expect_err("expected failure but got success");
     match res {
         AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
-            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
+            tracing::info!(
+                "Transaction from address {} failed to ingress with invalid signature, as expected!",
+                address
+            );
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2292,7 +2301,10 @@ async fn heavy_staked_stake_and_pledge_tampered_id_rejected_on_ingress_test() ->
         .expect_err("expected failure but got success");
     match res {
         AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
-            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
+            tracing::info!(
+                "Transaction from address {} failed to ingress with invalid signature, as expected!",
+                address
+            );
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2797,10 +2809,12 @@ async fn commitment_tx_cumulative_fee_validation_test(
         .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
         .unwrap_or_else(HashSet::new);
 
-    assert!(block3_tx_ids
-        .difference(&third_block_commitments)
-        .collect::<Vec<_>>()
-        .is_empty());
+    assert!(
+        block3_tx_ids
+            .difference(&third_block_commitments)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 
     assert_eq!(
         first_block_commitments.len() + third_block_commitments.len(),

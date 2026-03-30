@@ -1,6 +1,6 @@
 [package]
 name = "irys-chain-tests"
-edition = "2021"
+edition.workspace = true
 version = "0.1.0"
 
 [features]

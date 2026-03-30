@@ -8,7 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
-use crate::{IrysPeerId, UnixTimestamp, H256};
+use crate::{H256, IrysPeerId, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -108,7 +108,12 @@ impl Config {
             .consensus
             .num_chunks_in_partition
             .div_ceil(self.consensus.num_chunks_in_recall_range);
-        ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
+        ensure!(
+            self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity,
+            "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})",
+            &self.consensus.vdf.max_allowed_vdf_fork_steps,
+            &minimum_step_capacity
+        );
 
         // ensure that prune_at_capacity_percent is a sane value
         let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
@@ -561,7 +566,7 @@ pub mod serde_utils {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{PeerAddress, RethPeerInfo, H256};
+    use crate::{H256, PeerAddress, RethPeerInfo};
 
     use super::*;
     use pretty_assertions::assert_eq;

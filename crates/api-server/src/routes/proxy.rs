@@ -1,6 +1,6 @@
 use actix_web::{
-    web::{self, Data, Payload},
     HttpRequest, HttpResponse,
+    web::{self, Data, Payload},
 };
 use awc::Client;
 use std::time::Duration;

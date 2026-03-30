@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
+use irys_types::{NodeConfig, OracleConfig, storage_pricing::Amount};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 use std::time::Duration;

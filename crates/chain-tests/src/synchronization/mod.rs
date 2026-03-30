@@ -4,7 +4,7 @@ use alloy_genesis::GenesisAccount;
 
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{CommitmentTransaction, H256, NodeConfig, irys::IrysSigner};
 use irys_types::{CommitmentTransactionV2, CommitmentTypeV2};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
@@ -210,8 +210,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources(
-) -> eyre::Result<()> {
+async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources()
+-> eyre::Result<()> {
     // settings
     let max_seconds = 10;
 

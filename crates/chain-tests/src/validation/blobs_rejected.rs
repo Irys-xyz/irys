@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use super::send_block_and_read_state;
-use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
-use alloy_primitives::{Bytes, B256, U256};
-use irys_actors::block_validation::ValidationError;
+use alloy_primitives::{B256, Bytes, U256};
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
+use irys_actors::block_validation::ValidationError;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     BlockBody, BlockTransactions, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock,

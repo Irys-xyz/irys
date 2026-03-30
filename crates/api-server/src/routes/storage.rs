@@ -1,5 +1,5 @@
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 use actix_web::web::{Data, Json, Path};
 use irys_domain::ChunkType;
 use irys_types::DataLedger;

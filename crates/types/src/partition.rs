@@ -1,7 +1,7 @@
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
-use crate::{DataLedger, IrysAddress, H256};
+use crate::{DataLedger, H256, IrysAddress};
 
 /// A H256 hash that uniquely identifies a partition
 pub type PartitionHash = H256;

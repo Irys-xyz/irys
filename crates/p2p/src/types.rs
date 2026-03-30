@@ -1,7 +1,7 @@
 use crate::block_pool::{AdvisoryBlockPoolError, BlockPoolError, CriticalBlockPoolError};
 use irys_actors::{
-    chunk_ingress_service::IngressProofError, mempool_service::TxIngressError,
-    AdvisoryChunkIngressError, ChunkIngressError,
+    AdvisoryChunkIngressError, ChunkIngressError, chunk_ingress_service::IngressProofError,
+    mempool_service::TxIngressError,
 };
 use irys_types::{CommitmentValidationError, PeerNetworkError};
 use serde::{Deserialize, Serialize};

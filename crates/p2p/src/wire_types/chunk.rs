@@ -1,4 +1,4 @@
-use irys_types::{serialization::Base64, DataRoot, TxChunkOffset};
+use irys_types::{DataRoot, TxChunkOffset, serialization::Base64};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

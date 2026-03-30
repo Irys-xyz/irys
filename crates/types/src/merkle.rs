@@ -1,15 +1,15 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
-use crate::chunked::ChunkedIterator;
 use crate::Base64;
 use crate::ChunkBytes;
-use crate::IrysAddress;
 use crate::H256;
+use crate::IrysAddress;
+use crate::chunked::ChunkedIterator;
 use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
-use eyre::eyre;
 use eyre::Error;
 use eyre::OptionExt as _;
+use eyre::eyre;
 use openssl::sha;
 use tracing::debug;
 

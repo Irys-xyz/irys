@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
-use irys_types::{DataLedger, DataTransaction, NodeConfig, UnixTimestamp, H256, U256};
+use irys_types::{DataLedger, DataTransaction, H256, NodeConfig, U256, UnixTimestamp};
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;

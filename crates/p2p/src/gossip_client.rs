@@ -2,19 +2,19 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::GossipCache;
 use crate::metrics::record_gossip_outbound_error;
 use crate::types::{GossipError, GossipResult, GossipRoutes};
 use crate::wire_types::{self, GossipResponse, RejectionReason};
-use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
-    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerResponse, ProtocolVersion, SealedBlock, DATA_REQUEST_RETRIES, H256,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, DATA_REQUEST_RETRIES, GossipCacheKey,
+    H256, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress,
+    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
@@ -25,7 +25,7 @@ use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, instrument, warn};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
@@ -43,10 +43,10 @@ struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
 
 impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
-        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(&value) {
-                self.0.insert(name, val);
-            }
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(&value)
+        {
+            self.0.insert(name, val);
         }
     }
 }
@@ -283,7 +283,7 @@ impl GossipClient {
                     commitment_transactions.push(tx)
                 }
                 Ok((_, IrysTransactionResponse::Storage(_))) => {
-                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
+                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData));
                 }
                 Err(err) => {
                     debug!("Failed to pull commitment tx {}: {:?}", tx_id, err);
@@ -300,7 +300,7 @@ impl GossipClient {
             {
                 Ok((_, IrysTransactionResponse::Storage(tx))) => data_transactions.push(tx),
                 Ok((_, IrysTransactionResponse::Commitment(_))) => {
-                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
+                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData));
                 }
                 Err(err) => {
                     debug!("Failed to pull data tx {}: {:?}", tx_id, err);
@@ -405,15 +405,14 @@ impl GossipClient {
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         self.check_circuit_breaker(&peer.0)?;
 
-        if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
-            if let GossipDataRequestV2::BlockBody(_block_hash) = requested_data {
-                let header = fallback_header.expect(
-                    "BlockBody request must have fallback header for v1 peer compatibility",
-                );
-                return self
-                    .pull_block_body_from_v1_peer(peer, header, peer_list)
-                    .await;
-            }
+        if peer.1.protocol_version == irys_types::ProtocolVersion::V1
+            && let GossipDataRequestV2::BlockBody(_block_hash) = requested_data
+        {
+            let header = fallback_header
+                .expect("BlockBody request must have fallback header for v1 peer compatibility");
+            return self
+                .pull_block_body_from_v1_peer(peer, header, peer_list)
+                .await;
         }
         self.pull_primitive_data_and_update_the_score(peer, requested_data, peer_list)
             .await
@@ -433,7 +432,7 @@ impl GossipClient {
             .send()
             .await;
 
-        let gossip_result = match response {
+        match response {
             Ok(resp) => {
                 if !resp.status().is_success() {
                     Err(GossipClientError::GetRequest(
@@ -458,9 +457,7 @@ impl GossipClient {
                 peer.gossip.to_string(),
                 e.to_string(),
             )),
-        };
-
-        gossip_result
+        }
     }
 
     pub async fn get_peer_list(
@@ -656,7 +653,7 @@ impl GossipClient {
             .send()
             .await;
 
-        let gossip_result = match response {
+        match response {
             Ok(resp) => {
                 if !resp.status().is_success() {
                     Err(GossipClientError::GetRequest(
@@ -686,9 +683,7 @@ impl GossipClient {
                 peer.gossip.to_string(),
                 e.to_string(),
             )),
-        };
-
-        gossip_result
+        }
     }
 
     pub async fn get_protocol_versions(
@@ -2178,20 +2173,21 @@ impl GossipClient {
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::RateLimited => {
-                                last_error =
-                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!("{}: Peer {:?} rate limited the request when updating the stake and pledge list", url, peer.0),
-                                    )));
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Peer {:?} rate limited the request when updating the stake and pledge list",
+                                        url, peer.0
+                                    )),
+                                ));
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::UnableToVerifyOrigin => {
-                                last_error =
-                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!(
-                                            "{}: Peer {:?} unable to verify our origin when updating the stake and pledge list",
-                                            url, peer.0
-                                        ),
-                                    )));
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Peer {:?} unable to verify our origin when updating the stake and pledge list",
+                                        url, peer.0
+                                    )),
+                                ));
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidCredentials

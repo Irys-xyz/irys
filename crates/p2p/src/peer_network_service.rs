@@ -1,20 +1,20 @@
 use crate::wire_types::{GossipResponse, RejectionReason};
-use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
+use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
 use eyre::{Report, Result as EyreResult};
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
+use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
-    HandshakeRequest, HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress,
-    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
-    PeerResponse, ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle,
+    AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage, HandshakeRequest,
+    HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
+    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
+    ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
-use reth::tasks::shutdown::{signal, Shutdown};
+use reth::tasks::shutdown::{Shutdown, signal};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,8 +22,8 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
-use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tokio::time::{MissedTickBehavior, interval, sleep};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -505,14 +505,14 @@ impl PeerNetworkService {
                 return;
             }
 
-            if let Some(until) = state.blocklist_until.get(&api_address).copied() {
-                if std::time::Instant::now() < until {
-                    debug!(
-                        "Peer {:?} is blacklisted until {:?}, skipping announce",
-                        api_address, until
-                    );
-                    return;
-                }
+            if let Some(until) = state.blocklist_until.get(&api_address).copied()
+                && std::time::Instant::now() < until
+            {
+                debug!(
+                    "Peer {:?} is blacklisted until {:?}, skipping announce",
+                    api_address, until
+                );
+                return;
             }
 
             debug!("Need to announce yourself to peer {:?}", api_address);
@@ -1159,7 +1159,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::test;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
 
     fn create_test_peer(
         mining_addr: &str,
@@ -1511,12 +1511,16 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
-        assert!(new_peer_list
-            .peer_by_gossip_address(peer1.address.gossip)
-            .is_some());
-        assert!(new_peer_list
-            .peer_by_gossip_address(peer2.address.gossip)
-            .is_some());
+        assert!(
+            new_peer_list
+                .peer_by_gossip_address(peer1.address.gossip)
+                .is_some()
+        );
+        assert!(
+            new_peer_list
+                .peer_by_gossip_address(peer2.address.gossip)
+                .is_some()
+        );
         let TokioServiceHandle {
             shutdown_signal,
             handle,

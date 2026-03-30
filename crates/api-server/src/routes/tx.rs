@@ -1,8 +1,8 @@
-use crate::error::{ApiError, ApiStatusResponse};
 use crate::ApiState;
+use crate::error::{ApiError, ApiStatusResponse};
 use actix_web::{
-    web::{self, Json},
     HttpResponse, Result,
+    web::{self, Json},
 };
 use awc::http::StatusCode;
 use irys_actors::{
@@ -11,8 +11,8 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
-    IrysTransactionResponse, SendTraced as _, H256,
+    CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IrysTransactionResponse,
+    SendTraced as _, option_u64_stringify, u64_stringify,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -198,18 +198,16 @@ pub async fn get_transaction(
     let vec = vec![tx_id];
     if let Ok(mut result) =
         get_commitment_tx_in_parallel(&vec, &state.mempool_guard, &state.db).await
+        && let Some(tx) = result.pop()
     {
-        if let Some(tx) = result.pop() {
-            return Ok(IrysTransactionResponse::Commitment(tx));
-        }
+        return Ok(IrysTransactionResponse::Commitment(tx));
     };
 
     if let Ok(mut result) =
         get_data_tx_in_parallel(vec.clone(), &state.mempool_guard, &state.db).await
+        && let Some(tx) = result.pop()
     {
-        if let Some(tx) = result.pop() {
-            return Ok(IrysTransactionResponse::Storage(tx));
-        }
+        return Ok(IrysTransactionResponse::Storage(tx));
     };
 
     Err(ApiError::ErrNoId {

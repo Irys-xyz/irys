@@ -1,13 +1,13 @@
 use irys_types::{
+    BlockHash, H256, IrysAddress, IrysSignature, U256, UnixTimestampMs,
     block::IrysTokenPrice,
     partition::PartitionHash,
     serialization::{Base64, H256List, IngressProofsList},
-    BlockHash, IrysAddress, IrysSignature, UnixTimestampMs, H256, U256,
 };
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 
-use super::{impl_json_version_tagged_serde, CommitmentTransaction, DataTransactionHeader};
+use super::{CommitmentTransaction, DataTransactionHeader, impl_json_version_tagged_serde};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

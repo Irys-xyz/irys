@@ -1,6 +1,6 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk, H256,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, H256, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
@@ -11,7 +11,7 @@ use std::fmt::Debug;
 pub mod v1 {
     use crate::{
         BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey,
-        IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+        H256, IngressProof, IrysBlockHeader, UnpackedChunk,
     };
     use alloy_primitives::B256;
     use reth_ethereum_primitives::Block;
@@ -181,7 +181,7 @@ pub mod v1 {
 pub mod v2 {
     use crate::{
         BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
-        GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+        GossipCacheKey, H256, IngressProof, IrysBlockHeader, UnpackedChunk,
     };
     use alloy_primitives::B256;
     use reth_ethereum_primitives::Block;

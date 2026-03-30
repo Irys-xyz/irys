@@ -1,9 +1,9 @@
 use crate::block_pool::{BlockRemovalReason, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
+use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::RethServiceMessage;
-use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::Traced;
@@ -14,14 +14,14 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::{
     sync::{mpsc, oneshot},
     time::{interval, timeout},
 };
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, instrument, trace, warn};
 
 /// Grace period after triggering a retry block request, giving validation time to start
 /// before the sync loop continues.
@@ -215,12 +215,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
             debug!("Sync task: Sync already in progress, skipping the new sync request");
-            if let Some(response_sender) = response {
-                if let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
+            if let Some(response_sender) = response
+                && let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
                     "Sync already in progress".to_string(),
-                ))) {
-                    error!("Failed to send the sync response: {:?}", e);
-                }
+                )))
+            {
+                error!("Failed to send the sync response: {:?}", e);
             }
             return;
         }
@@ -297,11 +297,10 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     }
                 }
 
-                if let Some(response_sender) = response {
-                    if let Err(e) = response_sender.send(res) {
+                if let Some(response_sender) = response
+                    && let Err(e) = response_sender.send(res) {
                         error!("Failed to send the sync response: {:?}", e);
                     }
-                }
             }
             .in_current_span(),
         );
@@ -367,7 +366,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let is_task_already_running =
             stake_and_pledge_whitelist_running_flag.load(Ordering::Relaxed);
         if is_task_already_running {
-            debug!("Stake and pledge whitelist update task is already running, skipping new task spawn");
+            debug!(
+                "Stake and pledge whitelist update task is already running, skipping new task spawn"
+            );
             return;
         } else {
             stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
@@ -558,17 +559,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 block_hash,
                 response,
             } => {
-                debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
+                debug!(
+                    "SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants",
+                    block_hash
+                );
                 let inner = self.inner.clone();
                 // Check for whitelist updates after every block validation
                 self.inner.spawn_stake_and_pledge_update_task();
                 self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.process_orphaned_ancestors(block_hash).await;
-                        if let Some(sender) = response {
-                            if let Err(e) = sender.send(result) {
-                                tracing::error!("Failed to send response: {:?}", e);
-                            }
+                        if let Some(sender) = response
+                            && let Err(e) = sender.send(result)
+                        {
+                            tracing::error!("Failed to send response: {:?}", e);
                         }
                     }
                     .instrument(tracing::info_span!("process_orphaned_ancestors")),
@@ -586,10 +590,10 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.request_parent_block(parent_block_hash).await;
-                        if let Some(sender) = response {
-                            if let Err(e) = sender.send(result) {
-                                tracing::error!("Failed to send response: {:?}", e);
-                            }
+                        if let Some(sender) = response
+                            && let Err(e) = sender.send(result)
+                        {
+                            tracing::error!("Failed to send response: {:?}", e);
                         }
                     }
                     .instrument(tracing::info_span!("request_parent_block")),
@@ -823,10 +827,18 @@ async fn initialize_sync_mode(
     gossip_client: &GossipClient,
     start_sync_from_height: usize,
 ) -> ChainSyncResult<bool> {
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", params.sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
+    debug!(
+        "Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}",
+        params.sync_mode,
+        start_sync_from_height,
+        sync_state.is_trusted_sync()
+    );
 
     if params.is_a_genesis_node {
-        warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", params.genesis_peer_discovery_timeout_millis);
+        warn!(
+            "Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task",
+            params.genesis_peer_discovery_timeout_millis
+        );
         match timeout(
             Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
             peer_list.wait_for_active_peers(),
@@ -837,7 +849,10 @@ async fn initialize_sync_mode(
                 info!("Genesis node has active peers");
             }
             Err(elapsed) => {
-                warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
+                warn!(
+                    "Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task",
+                    elapsed
+                );
                 sync_state.finish_sync();
                 return Ok(false);
             }
@@ -872,7 +887,10 @@ async fn initialize_sync_mode(
         .await
         {
             if params.is_a_genesis_node {
-                warn!("Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}", err);
+                warn!(
+                    "Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}",
+                    err
+                );
             } else {
                 return Err(err);
             }
@@ -908,7 +926,9 @@ async fn fetch_initial_block_index(
         Err(err) => {
             error!("Sync task: Failed to fetch block index: {}", err);
             if params.is_a_genesis_node {
-                warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
+                warn!(
+                    "Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers"
+                );
                 vec![]
             } else {
                 return Err(err);
@@ -921,7 +941,9 @@ async fn fetch_initial_block_index(
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
     if block_queue.is_empty() {
-        debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
+        debug!(
+            "Sync task: No new blocks to process, marking the current sync target height as processed"
+        );
         sync_state.mark_processed(sync_state.sync_target_height());
     } else {
         sync_state.set_is_syncing(true);
@@ -998,7 +1020,9 @@ async fn finalize_sync<B: BlockDiscoveryFacade, M: MempoolFacade>(
     gossip_client: &GossipClient,
     gossip_data_handler: &Arc<GossipDataHandler<M, B>>,
 ) {
-    debug!("Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height");
+    debug!(
+        "Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height"
+    );
     sync_state
         .wait_for_processed_block_to_reach_target()
         .in_current_span()
@@ -1446,9 +1470,9 @@ async fn check_and_update_full_validation_switch_height(
                 Ok(info) => info,
                 Err(err) => {
                     warn!(
-                            "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                            peer.address.gossip, err
-                        );
+                        "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                        peer.address.gossip, err
+                    );
                     continue;
                 }
             };
@@ -1599,7 +1623,10 @@ async fn is_local_index_is_behind_trusted_peers(
         let node_info = match gossip_client.get_info(peer.address).await {
             Ok(info) => info,
             Err(err) => {
-                warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
+                warn!(
+                    "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                    peer.address.gossip, err
+                );
                 continue;
             }
         };
@@ -1636,7 +1663,9 @@ async fn estimate_canonical_height(
     // Don't wait for hydration, since we're just asking the API endpoints of trusted peers
     let trusted_peers = peer_list.all_trusted_peers();
     if trusted_peers.is_empty() {
-        warn!("The node has no trusted peers configured, falling back to local index height for canonical height estimation");
+        warn!(
+            "The node has no trusted peers configured, falling back to local index height for canonical height estimation"
+        );
         return highest_trusted_peer_height;
     }
 
@@ -1765,7 +1794,7 @@ mod tests {
     use crate::peer_network_service::spawn_peer_network_service_with_client;
     use crate::tests::util::FakeGossipServer;
     use futures::future::BoxFuture;
-    use futures::{future, FutureExt as _};
+    use futures::{FutureExt as _, future};
     use irys_types::RethPeerInfo;
     use std::sync::Arc;
 
@@ -1969,8 +1998,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers(
-        ) -> eyre::Result<()> {
+        async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers()
+        -> eyre::Result<()> {
             let temp_dir = TempDirBuilder::new().with_tracing().build();
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
@@ -2046,8 +2075,8 @@ mod tests {
 
     mod post_sync_unique_highest_blocks {
         use super::*;
-        use crate::tests::util::data_handler_stub;
         use crate::tests::util::FakeGossipServer;
+        use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;

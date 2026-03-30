@@ -1,15 +1,15 @@
 use crate::CommitmentTypeV2;
 pub use crate::{
+    Arbitrary, Base64, CommitmentTransactionMetadata, CommitmentTransactionV1,
+    CommitmentTransactionV2, CommitmentTypeV1, CommitmentValidationError, Compact, ConsensusConfig,
+    H256, IrysAddress, IrysSignature, Node, PledgeDataProvider, Proof, Signature, U256,
     address_base58_stringify, decode_rlp_version, encode_rlp_version,
     ingress::IngressProof,
     optional_string_u64, string_u64,
     versioning::{
-        compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
-        VersioningError,
+        Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
+        split_discriminant,
     },
-    Arbitrary, Base64, CommitmentTransactionMetadata, CommitmentTransactionV1,
-    CommitmentTransactionV2, CommitmentTypeV1, CommitmentValidationError, Compact, ConsensusConfig,
-    IrysAddress, IrysSignature, Node, PledgeDataProvider, Proof, Signature, H256, U256,
 };
 
 use alloy_rlp::Encodable as _;
