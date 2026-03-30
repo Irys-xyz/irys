@@ -546,9 +546,10 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_millis_to_secs_max_u64() {
-        let result = timestamp_millis_to_secs(u128::from(u64::MAX));
-        assert!(result.is_ok(), "u64::MAX in millis should be convertible");
+    fn test_timestamp_millis_to_secs_max_valid_millis() {
+        let result = timestamp_millis_to_secs(u128::from(u64::MAX) * 1000 + 999)
+            .expect("max valid millis should convert");
+        assert_eq!(result, u64::MAX);
     }
 
     mod proptest_fuzz {
@@ -562,7 +563,7 @@ mod tests {
             }
 
             #[test]
-            fn timestamp_millis_to_secs_valid_range(millis in 0_u128..=u128::from(u64::MAX) * 1000) {
+            fn timestamp_millis_to_secs_valid_range(millis in 0_u128..=(u128::from(u64::MAX) * 1000 + 999)) {
                 let result = timestamp_millis_to_secs(millis);
                 prop_assert!(result.is_ok());
                 let secs = result.unwrap();

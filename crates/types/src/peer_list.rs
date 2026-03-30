@@ -291,11 +291,13 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
         _ => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
     };
 
-    let consumed = match tag {
+    let expected = match tag {
         IPV4_TAG => TAG_SIZE + IPV4_ADDR_SIZE + PORT_SIZE,
         IPV6_TAG => TAG_SIZE + IPV6_ADDR_SIZE + PORT_SIZE,
-        _ => TAG_SIZE, // unknown tag: we only consumed the tag byte
+        _ => TAG_SIZE,
     };
+    // Cap consumed to available bytes to prevent panic on truncated input
+    let consumed = expected.min(buf.len());
     (address, consumed)
 }
 

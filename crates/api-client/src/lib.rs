@@ -32,6 +32,7 @@ fn extend_url(base: &Url, segments: &[&str]) -> Result<Url> {
     let mut url = base.clone(); // clone: Url has no borrow-friendly path_segments_mut API
     url.path_segments_mut()
         .map_err(|()| eyre::eyre!("URL cannot be a base: {}", base))?
+        .pop_if_empty()
         .extend(segments);
     Ok(url)
 }

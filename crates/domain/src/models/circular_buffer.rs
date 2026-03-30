@@ -96,6 +96,8 @@ mod tests {
             if items.len() >= capacity {
                 let expected = items[items.len() - capacity];
                 prop_assert_eq!(buf.front(), Some(&expected));
+            } else {
+                prop_assert_eq!(buf.front(), items.first());
             }
         }
 

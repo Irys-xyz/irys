@@ -729,6 +729,7 @@ mod tests {
 
     #[rstest]
     #[case::past_target(10, 11, false)]
+    #[case::caught_up(100, 100, false)]
     #[case::at_capacity(200, 100, true)]
     #[case::below_capacity(150, 100, false)]
     fn is_queue_full_cases(

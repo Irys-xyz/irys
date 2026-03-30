@@ -515,7 +515,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     println!("  LCOV report: target/llvm-cov/lcov.info");
                 }
 
-                lcov_result?;
+                if let Err(e) = lcov_result {
+                    eprintln!("Warning: LCOV report generation failed: {e}");
+                }
             }
 
             test_result?;

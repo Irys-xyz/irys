@@ -90,7 +90,10 @@ impl Config {
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.tx_anchor_expiry_depth)
+                <= (self.consensus.mempool.tx_anchor_expiry_depth),
+            "tx_anchor_expiry_depth ({}) must be >= block_migration_depth ({})",
+            self.consensus.mempool.tx_anchor_expiry_depth,
+            self.consensus.block_migration_depth,
         );
 
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
@@ -963,7 +966,7 @@ mod validate_tests {
             c.block_migration_depth = 6;
             c.mempool.tx_anchor_expiry_depth = 5;
         },
-        "Condition failed"
+        "tx_anchor_expiry_depth"
     )]
     fn validate_rejects_depth_invariant_violations(
         #[case] mutate: fn(&mut ConsensusConfig),
