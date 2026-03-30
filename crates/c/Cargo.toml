@@ -3,7 +3,7 @@ build = "build/main.rs"
 edition.workspace = true
 name = "irys-c"
 rust-version.workspace = true
-version = "0.1.0"
+version.workspace = true
 
 [dependencies]
 irys-types.workspace = true
