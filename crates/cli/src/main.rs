@@ -81,7 +81,7 @@ pub fn parse_rollback_target(target: &str) -> eyre::Result<RollbackTarget> {
         return Ok(RollbackTarget::Hash(hash));
     }
     bail!(
-        "Invalid target {} - could not parse as a height or a valid irys block hash",
+        "Invalid target {} - could not parse as a height or a valid base58 irys block hash",
         target
     )
 }
@@ -568,6 +568,12 @@ mod tests {
                 prop_assert!(result.is_ok());
                 let secs = result.unwrap();
                 prop_assert_eq!(secs, u64::try_from(millis / 1000).unwrap());
+            }
+
+            #[test]
+            fn timestamp_millis_to_secs_overflow_is_error(offset in 1_u128..=10_000) {
+                let millis = u128::from(u64::MAX) * 1000 + 999 + offset;
+                prop_assert!(timestamp_millis_to_secs(millis).is_err());
             }
         }
     }
