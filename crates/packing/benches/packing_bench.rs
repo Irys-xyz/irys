@@ -85,22 +85,25 @@ fn bench_entropy_rust_vs_c(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("packing/entropy_rust");
         for tier in &tiers {
-            let mut entropy = Vec::with_capacity(CHUNK_SIZE);
             group.sample_size(tier.sample_size);
             group.measurement_time(tier.measurement_time);
             group.throughput(Throughput::Bytes(CHUNK_SIZE_U64));
             group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
-                b.iter(|| {
-                    capacity_single::compute_entropy_chunk(
-                        mining_address,
-                        chunk_offset,
-                        partition_hash_bytes.0,
-                        tier.iterations,
-                        CHUNK_SIZE,
-                        &mut entropy,
-                        tier.chain_id,
-                    );
-                });
+                b.iter_batched(
+                    || Vec::with_capacity(CHUNK_SIZE),
+                    |mut entropy| {
+                        capacity_single::compute_entropy_chunk(
+                            mining_address,
+                            chunk_offset,
+                            partition_hash_bytes.0,
+                            tier.iterations,
+                            CHUNK_SIZE,
+                            &mut entropy,
+                            tier.chain_id,
+                        );
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
             });
         }
         group.finish();
@@ -110,21 +113,24 @@ fn bench_entropy_rust_vs_c(c: &mut Criterion) {
     {
         let mut group = c.benchmark_group("packing/entropy_c");
         for tier in &tiers {
-            let mut entropy = Vec::with_capacity(CHUNK_SIZE);
             group.sample_size(tier.sample_size);
             group.measurement_time(tier.measurement_time);
             group.throughput(Throughput::Bytes(CHUNK_SIZE_U64));
             group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
-                b.iter(|| {
-                    capacity_pack_range_c(
-                        mining_address,
-                        chunk_offset,
-                        partition_hash,
-                        &mut entropy,
-                        tier.iterations,
-                        tier.chain_id,
-                    );
-                });
+                b.iter_batched(
+                    || Vec::with_capacity(CHUNK_SIZE),
+                    |mut entropy| {
+                        capacity_pack_range_c(
+                            mining_address,
+                            chunk_offset,
+                            partition_hash,
+                            &mut entropy,
+                            tier.iterations,
+                            tier.chain_id,
+                        );
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
             });
         }
         group.finish();
