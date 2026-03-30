@@ -4,5 +4,6 @@ pub(crate) mod min_transaction_cost;
 pub(crate) mod pd_chunk_limit;
 pub(crate) mod pd_chunk_p2p_pull;
 pub(crate) mod pd_content_verification;
+pub(crate) mod pd_chunk_optimistic_push;
 pub(crate) mod pd_mock_e2e;
 pub(crate) mod preloaded_chunk_table;
