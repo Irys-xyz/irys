@@ -694,7 +694,7 @@ pub trait BlockProdStrategy {
 
         // Check if we need to rebuild on a new parent
         while let Some((ref block, _, _)) = result {
-            if rebuild_attempts >= MAX_REBUILD_ATTEMPTS {
+            if rebuild_attempts > MAX_REBUILD_ATTEMPTS {
                 warn!(
                     solution.hash = %solution.solution_hash,
                     solution.vdf_step = solution.vdf_step,
