@@ -18,8 +18,12 @@ use alloy_network::TxSignerSync as _;
 use alloy_primitives::{aliases::U200, Address, U256};
 use alloy_signer_local::LocalSigner;
 use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_types::chunk_provider::{ChunkStorageProvider as _, PdChunkPusher as _};
+use irys_types::gossip::PdChunkPush;
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::ChunkFormat;
+use irys_types::PeerAddress;
 use irys_types::{Base64, DataLedger, LedgerChunkOffset, NodeConfig, TxChunkOffset, UnpackedChunk};
 use tracing::info;
 
@@ -451,7 +455,10 @@ async fn slow_heavy3_pd_chunk_optimistic_push_cache_hit_shortcut() -> eyre::Resu
         0, // nonce (different signer, so nonce=0 is fine)
     )
     .await?;
-    info!("T2 injected on Genesis (same chunk, different signer): {:?}", t2_hash);
+    info!(
+        "T2 injected on Genesis (same chunk, different signer): {:?}",
+        t2_hash
+    );
 
     // Allow time for the second push to propagate and be processed.
     // The push is fire-and-forget HTTP POST; 500ms is generous for local network.
@@ -496,6 +503,313 @@ async fn slow_heavy3_pd_chunk_optimistic_push_cache_hit_shortcut() -> eyre::Resu
 
     info!(
         "Cache-hit shortcut verified: duplicate push preserved data, block validated at height {}",
+        block_height,
+    );
+
+    ctx.observer.stop().await;
+    ctx.block_producer.stop().await;
+    ctx.genesis.stop().await;
+    Ok(())
+}
+
+/// Custom setup for the fetch reconciliation test.
+///
+/// Key differences from `setup_pd_push_test`:
+/// - Genesis `pd_optimistic_push_fanout = 0` (no automatic push)
+/// - Observer's `trusted_peers` points to Block Producer (Node B), NOT Genesis
+/// - This means Observer's P2P chunk fetch targets Node B, which doesn't have PD data
+async fn setup_pd_push_test_for_reconciliation() -> eyre::Result<PdPushTestContext> {
+    let chunk_size: u64 = 32;
+    let num_chunks_in_partition: u64 = 10;
+    let num_chunks_uploaded: u64 = 16;
+    let seconds_to_wait = 30;
+
+    // --- Configure Genesis (Node A) with push disabled ---
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().block_migration_depth = 2;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_chunks_in_partition = num_chunks_in_partition;
+    config.p2p_gossip.pd_optimistic_push_fanout = 0; // No automatic push
+
+    let data_signer = config.new_random_signer();
+    let peer_signer = config.new_random_signer();
+    let observer_signer = config.new_random_signer();
+    let pd_signer = config.new_random_signer();
+    let pd_signer_2 = config.new_random_signer();
+    config.fund_genesis_accounts(vec![
+        &data_signer,
+        &peer_signer,
+        &observer_signer,
+        &pd_signer,
+        &pd_signer_2,
+    ]);
+
+    let genesis = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // --- Upload data on Genesis (same as setup_pd_push_test) ---
+    let data_bytes: Vec<u8> = (0..num_chunks_uploaded * chunk_size)
+        .map(|i| (i & 0xff) as u8)
+        .collect();
+
+    let offset_before = {
+        let block_index = genesis.node_ctx.block_index_guard.read();
+        block_index
+            .get_latest_item()
+            .and_then(|item| {
+                item.ledgers
+                    .iter()
+                    .find(|l| l.ledger == DataLedger::Publish)
+                    .map(|l| l.total_chunks)
+            })
+            .unwrap_or(0)
+    };
+
+    let tx = genesis
+        .post_publish_data_tx(&data_signer, data_bytes.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+    let client = reqwest::Client::new();
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        genesis.node_ctx.config.node_config.http.bind_port
+    );
+    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+        let min = chunk_node.min_byte_range;
+        let max = chunk_node.max_byte_range;
+        let chunk = UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+            bytes: Base64(data_bytes[min..max].to_vec()),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            ),
+        };
+        let resp = client
+            .post(format!("{}/v1/chunk", &http_url))
+            .json(&chunk)
+            .send()
+            .await?;
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    genesis
+        .wait_for_migrated_txs(vec![tx.header.clone()], seconds_to_wait)
+        .await?;
+    genesis
+        .wait_for_chunk_in_storage(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(offset_before),
+            seconds_to_wait,
+        )
+        .await?;
+
+    let data_start_offset = offset_before;
+    info!(
+        "Data uploaded and migrated on Genesis: {} chunks, data_start_offset={}",
+        num_chunks_uploaded, data_start_offset
+    );
+
+    // --- Start Block Producer (Node B) with partition assignments ---
+    let block_producer = genesis.testing_peer_with_assignments(&peer_signer).await?;
+    info!("Block Producer started with partition assignments");
+
+    let genesis_index_height = genesis.get_block_index_height();
+
+    // --- Start Observer (Node C) with trusted_peers pointing to Node B (NOT Genesis) ---
+    let mut observer_config = genesis.testing_peer_with_signer(&observer_signer);
+
+    // Override trusted_peers: Observer trusts Node B only.
+    // This means Observer's P2P chunk fetch will target Node B, which doesn't have PD data.
+    observer_config.trusted_peers = vec![PeerAddress {
+        api: format!(
+            "127.0.0.1:{}",
+            block_producer.node_ctx.config.node_config.http.public_port
+        )
+        .parse()
+        .expect("valid SocketAddr"),
+        gossip: format!(
+            "127.0.0.1:{}",
+            block_producer
+                .node_ctx
+                .config
+                .node_config
+                .gossip
+                .public_port
+        )
+        .parse()
+        .expect("valid SocketAddr"),
+        execution: Default::default(),
+    }];
+
+    let observer = IrysNodeTest::new(observer_config)
+        .start_with_name("OBSERVER")
+        .await;
+
+    // Sync Observer block index via Node B (which relays from Genesis).
+    observer
+        .wait_until_block_index_height(genesis_index_height, seconds_to_wait)
+        .await?;
+    info!(
+        "Observer block index synced to height {} (via Node B)",
+        genesis_index_height
+    );
+
+    let partition_index = data_start_offset / num_chunks_in_partition;
+    let local_offset = (data_start_offset % num_chunks_in_partition) as u32;
+
+    Ok(PdPushTestContext {
+        genesis,
+        block_producer,
+        observer,
+        data_start_offset,
+        partition_index,
+        local_offset,
+        num_chunks_in_partition,
+        chunk_size,
+        num_chunks_uploaded,
+        data_bytes,
+        data_signer,
+        peer_signer,
+        observer_signer,
+        pd_signer,
+        pd_signer_2,
+    })
+}
+
+/// Observer needs a PD chunk for block validation. Its P2P fetch targets Node B
+/// (the only peer in trusted_peers), which does NOT have the PD data. The fetch
+/// fails/retries. A manual optimistic push from Genesis delivers the chunk,
+/// reconciling with the pending fetch and unblocking block validation.
+///
+/// Without the push, block validation would time out because Observer has no
+/// fetchable source for the PD data. Block validation success proves the
+/// reconciliation path worked (pd_service.rs:883-898).
+#[test_log::test(tokio::test)]
+async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre::Result<()> {
+    let ctx = setup_pd_push_test_for_reconciliation().await?;
+
+    // Inject PD tx on Genesis referencing 1 chunk. Genesis provisions from local
+    // storage but does NOT push (fanout=0).
+    let tx_hash = build_and_inject_real_pd_tx(
+        &ctx.genesis,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        1, // chunk_count
+        0, // nonce
+    )
+    .await?;
+    info!(
+        "PD tx injected on Genesis (fanout=0, no auto push): {:?}",
+        tx_hash
+    );
+
+    // Wait for Genesis to provision the chunk locally.
+    ctx.genesis.wait_for_ready_pd_tx(&tx_hash, 30).await?;
+
+    // Mine block on Genesis without gossip.
+    let (block, eth_payload, _) = ctx.genesis.mine_block_without_gossip().await?;
+
+    let pd_tx_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| tx.hash() == &tx_hash);
+    assert!(pd_tx_included, "PD tx should be in Genesis's mined block");
+
+    let block_height = block.height;
+    info!("Genesis mined block at height {} with PD tx", block_height);
+
+    // Gossip block to Block Producer (Node B). Node B will validate and auto-gossip
+    // to Observer. Observer will receive the block and start ProvisionBlockChunks,
+    // which triggers a P2P fetch to Node B (Observer's only peer). Node B does NOT
+    // have the PD data, so the fetch fails/retries.
+    ctx.genesis.gossip_block_to_peers(&block)?;
+    ctx.genesis.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    // Wait for Node B to validate the block first (it can fetch chunks from Genesis).
+    ctx.block_producer
+        .wait_until_height(block_height, 30)
+        .await?;
+    info!("Block Producer validated block at height {}", block_height);
+
+    // Give Observer time to receive the block from Node B and start its fetch.
+    // The fetch will target Node B (Observer's only peer) and fail.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // --- Construct and send manual push from Genesis to Observer ---
+
+    // Get packed chunk from Genesis's storage.
+    let chunk_format = ctx
+        .genesis
+        .node_ctx
+        .chunk_provider
+        .get_chunk_for_pd(0, ctx.data_start_offset)?
+        .expect("chunk must be in Genesis storage");
+
+    let (chunk_bytes, data_path) = match chunk_format {
+        ChunkFormat::Packed(ref packed) => {
+            let consensus = &ctx.genesis.node_ctx.config.consensus;
+            let unpacked = irys_packing::unpack(
+                packed,
+                consensus.entropy_packing_iterations,
+                consensus.chunk_size as usize,
+                consensus.chain_id,
+            );
+            (unpacked.bytes, packed.data_path.clone())
+        }
+        ChunkFormat::Unpacked(ref chunk) => (chunk.bytes.clone(), chunk.data_path.clone()),
+    };
+
+    let push_msg = PdChunkPush {
+        ledger: 0,
+        offset: ctx.data_start_offset,
+        chunk_bytes,
+        data_path,
+    };
+
+    // Push directly from Genesis to Observer via gossip_client.
+    let observer_peer_id = ctx.observer.node_ctx.config.peer_id();
+    let observer_addr = ctx.observer.cfg.peer_address();
+
+    info!(
+        "Sending manual push to Observer (peer_id={:?}, gossip={})",
+        observer_peer_id, observer_addr.gossip
+    );
+
+    ctx.genesis
+        .node_ctx
+        .gossip_data_handler
+        .gossip_client
+        .push_pd_chunk(observer_peer_id, &observer_addr, &push_msg);
+
+    // Wait for Observer to validate the block. Without the push, this would time out
+    // because Observer's fetch to Node B (its only peer) fails -- Node B doesn't have
+    // the PD data at the test offset.
+    ctx.observer.wait_until_height(block_height, 30).await?;
+
+    // Assert Observer's canonical tip matches Genesis.
+    let observer_height = ctx.observer.get_canonical_chain_height().await;
+    assert_eq!(
+        observer_height, block_height,
+        "Observer should validate block after push reconciles pending fetch",
+    );
+
+    // Note: we do NOT assert chunk_data_index here. After block validation,
+    // handle_release_block_chunks removes chunk references and evicts unreferenced
+    // entries from both the LRU cache and the shared_index (ChunkDataIndex).
+    // The proof that reconciliation worked is that wait_until_height succeeded:
+    // without the push, Observer's fetch to Node B would fail indefinitely and
+    // block validation would time out.
+
+    info!(
+        "Fetch reconciliation verified: push delivered chunk, block validated at height {}",
         block_height,
     );
 
