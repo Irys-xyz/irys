@@ -33,7 +33,12 @@ impl InboundPushTracker {
     pub fn get_known_sources(&self, ledger: u32, offset: u64) -> HashSet<IrysPeerId> {
         self.cache
             .get(&(ledger, offset))
-            .map(|entry| entry.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone())
+            .map(|entry| {
+                entry
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
             .unwrap_or_default()
     }
 }
