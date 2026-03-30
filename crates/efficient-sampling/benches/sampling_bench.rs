@@ -34,7 +34,7 @@ fn bench_next_recall_range(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{num_ranges}_ranges")),
             |b| {
                 b.iter_batched(
-                    || Ranges::new(num_ranges),
+                    || Ranges::new(num_ranges).expect("ranges"),
                     |mut ranges| ranges.next_recall_range(1, &seeds[0], &partition_hash),
                     criterion::BatchSize::SmallInput,
                 );
@@ -54,7 +54,7 @@ fn bench_reconstruct(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::from_parameter(format!("gap_{gap}")), |b| {
             b.iter_batched(
-                || Ranges::new(64_840),
+                || Ranges::new(64_840).expect("ranges"),
                 |mut ranges| ranges.reconstruct(&step_seeds, &partition_hash),
                 criterion::BatchSize::SmallInput,
             );
@@ -71,8 +71,10 @@ fn bench_recall_range_is_valid(c: &mut Criterion) {
         let seeds = make_seeds(num_steps);
         let step_seeds = H256List(seeds);
 
-        let mut ranges = Ranges::new(64_840);
-        ranges.reconstruct(&step_seeds, &partition_hash);
+        let mut ranges = Ranges::new(64_840).expect("ranges");
+        ranges
+            .reconstruct(&step_seeds, &partition_hash)
+            .expect("reconstruct");
         let expected_range = ranges.get_last_recall_range().unwrap();
 
         group.bench_function(
