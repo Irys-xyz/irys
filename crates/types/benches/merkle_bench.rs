@@ -48,11 +48,14 @@ fn bench_generate_data_root(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::from_parameter(format!("{count}_chunks")),
             |b| {
-                b.iter(|| {
-                    let leaves = generate_leaves_from_chunks(chunks.iter().map(|c| Ok(c.clone())))
-                        .expect("leaf generation");
-                    black_box(generate_data_root(leaves).expect("data root"))
-                });
+                b.iter_batched(
+                    || {
+                        generate_leaves_from_chunks(chunks.iter().map(|c| Ok(c.clone())))
+                            .expect("leaf generation")
+                    },
+                    |leaves| black_box(generate_data_root(leaves).expect("data root")),
+                    criterion::BatchSize::SmallInput,
+                );
             },
         );
     }
@@ -92,12 +95,16 @@ fn bench_generate_leaves(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::from_parameter(format!("{count}_chunks")),
             |b| {
-                b.iter(|| {
-                    black_box(
-                        generate_leaves_from_chunks(chunks.iter().map(|c| Ok(c.clone())))
-                            .expect("leaf generation"),
-                    )
-                });
+                b.iter_batched(
+                    || chunks.iter().map(|c| Ok(c.clone())).collect::<Vec<_>>(),
+                    |owned_chunks| {
+                        black_box(
+                            generate_leaves_from_chunks(owned_chunks.into_iter())
+                                .expect("leaf generation"),
+                        )
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
             },
         );
     }
