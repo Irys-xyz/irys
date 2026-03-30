@@ -789,9 +789,10 @@ mod tests {
 
             #[test]
             fn roundtrip_full_chunk(
-                chunk_data in proptest::collection::vec(any::<u8>(), 32..=32)
+                chunk_data in proptest::collection::vec(any::<u8>(), 32..=32),
+                mining_address_bytes in proptest::array::uniform20(any::<u8>()),
             ) {
-                let mining_address = IrysAddress::random();
+                let mining_address = IrysAddress::from(mining_address_bytes);
                 let partition_hash: [u8; SHA_HASH_SIZE] = [0xAB; SHA_HASH_SIZE];
                 let chunk_offset: u64 = 42;
                 let iterations = 64_u32;
@@ -827,9 +828,10 @@ mod tests {
 
             #[test]
             fn roundtrip_partial_last_chunk(
-                data_len in 1..32_usize
+                data_len in 1..32_usize,
+                mining_address_bytes in proptest::array::uniform20(any::<u8>()),
             ) {
-                let mining_address = IrysAddress::random();
+                let mining_address = IrysAddress::from(mining_address_bytes);
                 let partition_hash: [u8; SHA_HASH_SIZE] = [0xCD; SHA_HASH_SIZE];
                 let chunk_offset: u64 = 7;
                 let iterations = 64_u32;

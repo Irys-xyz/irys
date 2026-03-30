@@ -251,7 +251,12 @@ where
 }
 
 pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
-    let tag = buf[0];
+    let Some(&tag) = buf.first() else {
+        return (
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+            0,
+        );
+    };
     let address = match tag {
         IPV4_TAG => {
             // IPv4 address (needs 4 bytes IP + 2 bytes port after tag)
@@ -939,6 +944,16 @@ mod tests {
         assert_ne!(decoded.protocol_version, item.protocol_version);
         // For the records that don't have a protocol version, it should default to V1
         assert_eq!(decoded.protocol_version, ProtocolVersion::V1);
+    }
+
+    #[test]
+    fn decode_address_empty_buffer_returns_zero() {
+        let (addr, consumed) = decode_address(&[]);
+        assert_eq!(
+            addr,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
+        );
+        assert_eq!(consumed, 0);
     }
 
     #[rstest]

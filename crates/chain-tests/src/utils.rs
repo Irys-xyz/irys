@@ -2908,6 +2908,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunk_offset: LedgerChunkOffset,
         max_seconds: usize,
     ) -> eyre::Result<PackedChunk> {
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
         for _attempt in 1..=max_seconds {
             if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
                 return Ok(chunk);

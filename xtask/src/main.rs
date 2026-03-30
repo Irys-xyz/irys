@@ -509,9 +509,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 if lcov_result.is_ok() {
                     println!("  LCOV report: target/llvm-cov/lcov.info");
                 }
+
+                lcov_result?;
             }
 
-            // Propagate the test result
             test_result?;
         }
         Commands::Check { args } => {

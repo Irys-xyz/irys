@@ -14,6 +14,11 @@ pub use ext::ApiClientExt;
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn peer_base_url(peer: SocketAddr) -> Result<Url> {
+    if let std::net::SocketAddr::V6(v6) = &peer {
+        if v6.scope_id() != 0 {
+            eyre::bail!("scoped IPv6 addresses are not supported in peer URLs: {peer}");
+        }
+    }
     let mut url = Url::parse("http://placeholder/v1")
         .map_err(|e| eyre::eyre!("failed to parse base URL: {e}"))?;
     url.set_ip_host(peer.ip())
@@ -643,11 +648,9 @@ mod tests {
             let addr_str = format!("{}.{}.{}.{}:{}", a, b, c, d, port);
             let addr: SocketAddr = addr_str.parse().unwrap();
             let url = peer_base_url(addr).unwrap();
-            let url_str = url.as_str();
-            let port_str = port.to_string();
-            prop_assert!(url_str.starts_with("http://"));
-            prop_assert!(url_str.ends_with("/v1"));
-            prop_assert!(url_str.contains(&port_str));
+            prop_assert_eq!(url.scheme(), "http");
+            prop_assert_eq!(url.port(), Some(port));
+            prop_assert_eq!(url.path(), "/v1");
         }
 
         #[test]

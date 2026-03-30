@@ -244,5 +244,12 @@ mod tests {
                 prop_assert_eq!(count, multiplier);
             }
         }
+
+        #[test]
+        fn chunk_count_overflow_is_error(extra in 1_u64..=1024) {
+            // u32::MAX + extra chunks with chunk_size=1 exceeds u32
+            let data_size = u64::from(u32::MAX) + extra;
+            prop_assert!(data_size_to_chunk_count(data_size, 1).is_err());
+        }
     }
 }
