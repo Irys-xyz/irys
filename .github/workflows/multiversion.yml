@@ -14,6 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_BUILD_RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: /shared/sccache
+  SCCACHE_CACHE_SIZE: 40G
 
 jobs:
   multiversion-tests:
@@ -55,3 +58,7 @@ jobs:
 
       - name: Run multiversion tests
         run: cargo xtask multiversion-test --profile dev --old-ref ${{ steps.refs.outputs.old_ref }} --new-ref HEAD --clean
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
