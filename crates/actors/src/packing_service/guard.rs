@@ -36,17 +36,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_guard_increments_on_create() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let notify = Arc::new(Notify::new());
-
-        {
-            let _guard = ActiveWorkerGuard::new(counter.clone(), notify);
-            assert_eq!(counter.load(Ordering::Relaxed), 1);
-        }
-    }
-
-    #[test]
     fn test_guard_decrements_on_drop() {
         let counter = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());

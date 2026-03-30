@@ -608,7 +608,7 @@ impl IrysNode {
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
             number_of_ingress_proofs_total,
-        );
+        )?;
 
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
@@ -621,11 +621,15 @@ impl IrysNode {
         let (commitments, initial_treasury) =
             add_genesis_commitments(&mut genesis_block, &self.config).await;
 
-        // Calculate initial difficulty based on number of storage modules
-        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
-        let difficulty =
-            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
-                .expect("valid calculated initial difficulty");
+        // Subtract 1 for stake commitment
+        let storage_module_count = commitments
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| eyre::eyre!("commitments must contain at least the stake commitment"))?;
+        let difficulty = calculate_initial_difficulty(
+            &self.config.consensus,
+            f64::from(u32::try_from(storage_module_count)?),
+        )?;
         genesis_block.diff = difficulty;
 
         // Set the genesis treasury to the total value of all commitments
@@ -1003,7 +1007,7 @@ impl IrysNode {
                 loop {
                     interval.tick().await;
 
-                    let info = irys_domain::get_node_info(
+                    let info = match irys_domain::get_node_info(
                         &block_index,
                         &block_tree,
                         &peer_list,
@@ -1012,7 +1016,14 @@ impl IrysNode {
                         mining_address,
                         chain_id,
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(info) => info,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to retrieve node info");
+                            continue;
+                        }
+                    };
 
                     let pl_info = peer_list
                         .all_peers_sorted_by_score()

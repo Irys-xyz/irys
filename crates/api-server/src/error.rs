@@ -129,3 +129,41 @@ impl From<ApiStatusResponse> for HttpResponse {
         res.set_body(BoxBody::new(body))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(ApiError::ErrNoId { id: "x".into(), err: "y".into() }, StatusCode::NOT_FOUND)]
+    #[case(ApiError::Internal { err: "x".into() }, StatusCode::INTERNAL_SERVER_ERROR)]
+    #[case(ApiError::NotImplemented { feature: "x".into() }, StatusCode::FORBIDDEN)]
+    #[case(ApiError::MinerNotFound { miner_address: IrysAddress::from([0_u8; 20]) }, StatusCode::NOT_FOUND)]
+    #[case(ApiError::LedgerNotFound { miner_address: IrysAddress::from([0_u8; 20]), ledger_type: DataLedger::Publish }, StatusCode::NOT_FOUND)]
+    #[case(ApiError::CanonicalChainError("x".into()), StatusCode::INTERNAL_SERVER_ERROR)]
+    #[case(ApiError::EmptyCanonicalChain, StatusCode::SERVICE_UNAVAILABLE)]
+    #[case(ApiError::BlockNotFound { block_hash: "x".into() }, StatusCode::NOT_FOUND)]
+    #[case(ApiError::InvalidAddressFormat { address: "x".into(), error: "y".into() }, StatusCode::BAD_REQUEST)]
+    #[case(ApiError::BalanceUnavailable { reason: "x".into() }, StatusCode::SERVICE_UNAVAILABLE)]
+    #[case(ApiError::InvalidBlockParameter { parameter: "x".into() }, StatusCode::BAD_REQUEST)]
+    #[case(ApiError::InvalidTransactionVersion { version: 0, minimum: 1 }, StatusCode::BAD_REQUEST)]
+    #[case(ApiError::InvalidAddress(AddressParseError::InvalidFormat("bad".into())), StatusCode::BAD_REQUEST)]
+    #[case(ApiError::Custom("x".into()), StatusCode::BAD_REQUEST)]
+    #[case(ApiError::CustomWithStatus("x".into(), StatusCode::CONFLICT), StatusCode::CONFLICT)]
+    fn status_code_mapping(#[case] error: ApiError, #[case] expected: StatusCode) {
+        assert_eq!(ResponseError::status_code(&error), expected);
+    }
+
+    #[test]
+    fn from_str_status_tuple() {
+        let error = ApiError::from(("msg", StatusCode::CONFLICT));
+        match error {
+            ApiError::CustomWithStatus(msg, sc) => {
+                assert_eq!(msg, "msg");
+                assert_eq!(sc, StatusCode::CONFLICT);
+            }
+            other => panic!("Expected CustomWithStatus, got {other:?}"),
+        }
+    }
+}

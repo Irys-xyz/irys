@@ -393,6 +393,31 @@ overflow-checks = true
 lto = "thin"
 codegen-units = 1
 
+# Release-like testing with faster builds: `cargo test --profile test-release`
+# Use for performance/regression tests where debug builds are too slow but full
+# release LTO is unnecessary. Not intended for production binaries.
+[profile.test-release]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+
+[profile.test-release.package.irys-vdf]
+opt-level = 3
+
+[profile.test-release.package.irys-packing]
+opt-level = 3
+
+[profile.test-release.package.irys-c]
+opt-level = 3
+
+[profile.test-release.package.sha2]
+opt-level = 3
+
+[profile.test-release.package.openssl]
+opt-level = 3
+
 [profile.debug-release]
 inherits = "release"
 debug = true

@@ -17,6 +17,10 @@ openssl-src = "300.3.2"
 pkg-config = "0.3.31"
 vcpkg = "0.2.8"
 
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
 
 [lints]
 workspace = true

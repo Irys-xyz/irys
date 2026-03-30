@@ -7,7 +7,6 @@ use std::sync::Mutex;
 
 #[derive(Debug)]
 struct PriceContext {
-    // Shared price
     price: Amount<(IrysPrice, Usd)>,
     // Counts how many times `current_price` has been called
     calls: u64,
@@ -18,7 +17,6 @@ struct PriceContext {
 /// Mock oracle that will return fluctuating prices for the Irys token
 #[derive(Debug)]
 pub struct MockOracle {
-    /// Mutable price state
     context: Mutex<PriceContext>,
     /// Const value change on each call
     incremental_change: Amount<(IrysPrice, Usd)>,
@@ -56,7 +54,6 @@ impl MockOracle {
     pub fn current_price(&self) -> Result<Amount<(IrysPrice, Usd)>> {
         let mut guard = self.context.lock().expect("irrecoverable lock poisoned");
 
-        // increment the amount of calls we have made
         guard.calls = guard.calls.wrapping_add(1);
 
         // Each time we hit the smoothing interval, toggle the direction
@@ -71,9 +68,7 @@ impl MockOracle {
             tracing::debug!(new_direction_is_up =? guard.going_up, "inverting the delta direction");
         }
 
-        // Update the price in the current direction
         if guard.going_up {
-            // Price goes up
             guard.price = Amount::new(
                 guard
                     .price
@@ -81,7 +76,6 @@ impl MockOracle {
                     .saturating_add(self.incremental_change.amount),
             );
         } else {
-            // Price goes down
             guard.price = Amount::new(
                 guard
                     .price
@@ -101,7 +95,6 @@ mod tests {
     use irys_types::storage_pricing::Amount;
     use rust_decimal_macros::dec;
 
-    /// Test that the initial price returned by `MockOracle` matches what was configured.
     #[test_log::test(tokio::test)]
     async fn test_initial_price() {
         let smoothing_interval = 2;
@@ -112,7 +105,6 @@ mod tests {
             true,
         );
 
-        // Because this is an async method, we must block on the returned Future in a synchronous test.
         let price = oracle.current_price().expect("Unable to get current price");
         assert_eq!(
             price,
@@ -121,7 +113,6 @@ mod tests {
         );
     }
 
-    /// Test that the price increases when `going_up` is true.
     #[test_log::test(tokio::test)]
     async fn test_price_increases() {
         let smoothing_interval = 3;
@@ -132,15 +123,12 @@ mod tests {
             true,
         );
 
-        // First call -> should go up by 0.10 to 1.10
         let _unused_price = oracle.current_price().unwrap();
-        // Second call -> should go up by another 0.10 to 1.20
         let price_after_first = oracle.current_price().unwrap();
 
         assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.20));
     }
 
-    /// Test that after the smoothing interval is reached, the direction toggles (up to down).
     #[test_log::test(tokio::test)]
     async fn test_toggle_direction() {
         let smoothing_interval = 2;
@@ -151,14 +139,32 @@ mod tests {
             true,
         );
 
-        // Call #1 -> going_up = true => 1.0 + 0.10 = 1.10
         let price_after_first = oracle.current_price().unwrap();
         assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.10));
 
-        // Call #2 -> we've now hit the smoothing interval (2),
-        //            so it toggles going_up to false before applying the change
-        //            => 1.10 - 0.10 = 1.00
+        // Call #2 hits smoothing interval, toggles to down: 1.10 - 0.10 = 1.00
         let price_after_second = oracle.current_price().unwrap();
         assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(1.00));
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use irys_types::U256;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_mock_oracle_price_always_positive(num_updates in 1_u32..200) {
+            let initial_price = Amount::new(U256::from(1_000_000_000_000_000_000_u64));
+            let increment = Amount::new(U256::from(10_000_000_000_000_000_u64));
+            let oracle = MockOracle::new(initial_price, increment, 5, true);
+
+            for _ in 0..num_updates {
+                let price = oracle.current_price().expect("should not fail");
+                prop_assert!(price.amount > U256::zero(), "price must always be > 0");
+            }
+        }
     }
 }

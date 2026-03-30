@@ -191,4 +191,40 @@ mod tests {
 
         assert_eq!(chunk, c_chunk, "Chunks should be equal")
     }
+
+    mod seed_hash_props {
+        use crate::capacity_single;
+        use irys_types::IrysAddress;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn deterministic(
+                addr_bytes in any::<[u8; 20]>(),
+                partition_offset in any::<std::ffi::c_ulong>(),
+                hash_bytes in any::<[u8; 32]>(),
+                chain_id in any::<u64>(),
+            ) {
+                let addr = IrysAddress::from(addr_bytes);
+                let result1 = capacity_single::compute_seed_hash(addr, partition_offset, hash_bytes, chain_id);
+                let result2 = capacity_single::compute_seed_hash(addr, partition_offset, hash_bytes, chain_id);
+                prop_assert_eq!(result1, result2);
+            }
+
+            #[test]
+            fn differs_with_different_offset(
+                addr_bytes in any::<[u8; 20]>(),
+                offset_a in any::<std::ffi::c_ulong>(),
+                offset_b in any::<std::ffi::c_ulong>(),
+                hash_bytes in any::<[u8; 32]>(),
+                chain_id in any::<u64>(),
+            ) {
+                prop_assume!(offset_a != offset_b);
+                let addr = IrysAddress::from(addr_bytes);
+                let result_a = capacity_single::compute_seed_hash(addr, offset_a, hash_bytes, chain_id);
+                let result_b = capacity_single::compute_seed_hash(addr, offset_b, hash_bytes, chain_id);
+                prop_assert_ne!(result_a, result_b);
+            }
+        }
+    }
 }

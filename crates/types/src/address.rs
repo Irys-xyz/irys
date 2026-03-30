@@ -146,6 +146,21 @@ mod tests {
         let result = IrysAddress::from_str(input);
         assert_eq!(result.is_ok(), should_succeed);
     }
+
+    mod serde_roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn irys_address_json_roundtrip(bytes in proptest::array::uniform20(0u8..)) {
+                let addr = IrysAddress::from(bytes);
+                let json = serde_json::to_string(&addr).unwrap();
+                let decoded: IrysAddress = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(decoded, addr);
+            }
+        }
+    }
 }
 
 // Recursive expansion of wrap_fixed_bytes! macro

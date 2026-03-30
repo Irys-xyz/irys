@@ -151,7 +151,7 @@ fn extract_quote_from_cmc(
 }
 
 fn chrono_to_unix_timestamp(dt: DateTime<Utc>) -> UnixTimestamp {
-    UnixTimestamp::from_secs(dt.timestamp() as u64)
+    UnixTimestamp::from_secs(u64::try_from(dt.timestamp()).unwrap_or(0))
 }
 
 fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
@@ -179,6 +179,7 @@ where
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "simpler tests")]
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
@@ -245,5 +246,110 @@ mod tests {
         let expected = chrono_to_unix_timestamp(expected_dt);
         let actual = chrono_to_unix_timestamp(quote.last_updated);
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod extract_quote_tests {
+    use super::*;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+
+    fn build_response(asset_id: &str, currency: &str, price: Decimal) -> CoinMarketCapResponse {
+        let mut quote_map = HashMap::new();
+        quote_map.insert(
+            currency.to_string(),
+            CmcQuoteCurrency {
+                price,
+                last_updated: Utc::now(),
+            },
+        );
+        let mut data = HashMap::new();
+        data.insert(asset_id.to_string(), CmcAsset { quote: quote_map });
+        CoinMarketCapResponse { status: None, data }
+    }
+
+    #[test]
+    fn test_extract_quote_empty_data() {
+        let response = CoinMarketCapResponse {
+            status: None,
+            data: HashMap::new(),
+        };
+        let result = extract_quote_from_cmc(&response, "USD", "1");
+        assert!(result.is_err(), "expected error for empty data map");
+    }
+
+    #[test]
+    fn test_extract_quote_missing_currency() {
+        let response = build_response("1", "USD", dec!(100.0));
+        let result = extract_quote_from_cmc(&response, "EUR", "1");
+        assert!(
+            result.is_err(),
+            "expected error when requesting non-existent currency"
+        );
+    }
+
+    #[test]
+    fn test_extract_quote_missing_asset_id() {
+        let response = build_response("1", "USD", dec!(100.0));
+        let result = extract_quote_from_cmc(&response, "USD", "999");
+        assert!(
+            result.is_err(),
+            "expected error when requesting non-existent asset id"
+        );
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "simpler tests")]
+mod deserialize_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::standard_rfc3339("\"2024-01-15T10:30:00.000Z\"", true)]
+    #[case::no_fractional_seconds("\"2024-01-15T10:30:00Z\"", true)]
+    #[case::with_offset("\"2024-01-15T10:30:00+00:00\"", true)]
+    #[case::invalid_format("\"not-a-date\"", false)]
+    #[case::empty_string("\"\"", false)]
+    fn test_deserialize_datetime_formats(#[case] json_input: &str, #[case] should_succeed: bool) {
+        let result: Result<DateTime<Utc>, _> = serde_json::from_str(&format!(
+            "{{\"dt\": {json_input}}}"
+        ))
+        .and_then(|v: serde_json::Value| {
+            deserialize_datetime(v.get("dt").unwrap().clone()).map_err(serde::de::Error::custom)
+        });
+        assert_eq!(
+            result.is_ok(),
+            should_succeed,
+            "input={json_input}, result={result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // chrono's DateTime::from_timestamp supports up to year ~262143 (8_210_298_412_799 secs)
+    const CHRONO_MAX_SECS: i64 = 8_210_298_412_799;
+
+    #[test]
+    fn chrono_to_unix_timestamp_negative_clamps_to_zero() {
+        let dt = DateTime::from_timestamp(-1, 0).expect("valid negative timestamp");
+        let result = chrono_to_unix_timestamp(dt);
+        assert_eq!(result, UnixTimestamp::from_secs(0));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_chrono_to_unix_timestamp_non_negative(ts in 0_i64..=CHRONO_MAX_SECS) {
+            if let Some(dt) = DateTime::from_timestamp(ts, 0) {
+                let result = chrono_to_unix_timestamp(dt);
+                let expected = u64::try_from(ts).expect("ts is non-negative");
+                prop_assert_eq!(result, UnixTimestamp::from_secs(expected));
+            }
+        }
     }
 }

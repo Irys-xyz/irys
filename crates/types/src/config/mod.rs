@@ -89,8 +89,11 @@ impl Config {
 
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
-            std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.tx_anchor_expiry_depth)
+            self.consensus.block_migration_depth
+                <= u32::from(self.consensus.mempool.tx_anchor_expiry_depth),
+            "tx_anchor_expiry_depth ({}) must be >= block_migration_depth ({})",
+            self.consensus.mempool.tx_anchor_expiry_depth,
+            self.consensus.block_migration_depth,
         );
 
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
@@ -913,5 +916,170 @@ mod tests {
         assert_eq!(updated.consensus.expected_genesis_hash, Some(hash));
         assert_eq!(updated.consensus.chain_id, config.consensus.chain_id);
         assert_eq!(updated.peer_id(), config.peer_id());
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn valid_config() -> Config {
+        Config::new_with_random_peer_id(NodeConfig::testing())
+    }
+
+    fn config_with_consensus(f: impl FnOnce(&mut ConsensusConfig)) -> Config {
+        let mut nc = NodeConfig::testing();
+        f(nc.consensus.get_mut());
+        Config::new_with_random_peer_id(nc)
+    }
+
+    fn config_with_node(f: impl FnOnce(&mut NodeConfig)) -> Config {
+        let mut nc = NodeConfig::testing();
+        f(&mut nc);
+        Config::new_with_random_peer_id(nc)
+    }
+
+    #[test]
+    fn valid_testing_config_passes_validation() {
+        valid_config()
+            .validate()
+            .expect("testing config should pass validation");
+    }
+
+    #[rstest]
+    #[case::tree_depth_equal_to_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_tree_depth = u64::from(c.block_migration_depth);
+        },
+        "Block tree depth"
+    )]
+    #[case::tree_depth_less_than_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_tree_depth = 1;
+            c.block_migration_depth = 2;
+        },
+        "Block tree depth"
+    )]
+    #[case::anchor_expiry_less_than_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 6;
+            c.mempool.tx_anchor_expiry_depth = 5;
+        },
+        "tx_anchor_expiry_depth"
+    )]
+    fn validate_rejects_depth_invariant_violations(
+        #[case] mutate: fn(&mut ConsensusConfig),
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_consensus(mutate);
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_peer_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Peer;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("expected_genesis_hash"),
+            "expected error about genesis hash, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_genesis_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Genesis;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        cfg.validate()
+            .expect("genesis mode should not require expected_genesis_hash");
+    }
+
+    #[test]
+    fn validate_rejects_insufficient_vdf_fork_steps() {
+        let cfg = config_with_consensus(|c| {
+            c.vdf.max_allowed_vdf_fork_steps = 0;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_allowed_vdf_fork_steps"),
+            "expected error about vdf fork steps, got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::zero_percent(0.0, "too low")]
+    #[case::negative_percent(-1.0, "too low")]
+    #[case::hundred_percent(100.0, "too high")]
+    #[case::over_hundred_percent(200.0, "too high")]
+    fn validate_rejects_bad_prune_capacity_percent(
+        #[case] percent: f64,
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.cache.prune_at_capacity_percent = percent;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_misaligned_partition_chunks() {
+        let cfg = config_with_consensus(|c| {
+            c.num_chunks_in_partition = 11;
+            c.num_chunks_in_recall_range = 2;
+            c.vdf.max_allowed_vdf_fork_steps = 60_000;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("num_chunks_in_partition must be a multiple"),
+            "expected alignment error, got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::max_valid_chunks(
+        |nc: &mut NodeConfig| { nc.mempool.max_valid_chunks = 0; },
+        "max_valid_chunks"
+    )]
+    #[case::max_preheader_chunks_per_item(
+        |nc: &mut NodeConfig| { nc.mempool.max_preheader_chunks_per_item = 0; },
+        "max_preheader_chunks_per_item"
+    )]
+    #[case::max_concurrent_chunk_ingress_tasks(
+        |nc: &mut NodeConfig| { nc.mempool.max_concurrent_chunk_ingress_tasks = 0; },
+        "max_concurrent_chunk_ingress_tasks"
+    )]
+    #[case::max_pending_chunk_items(
+        |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
+        "max_pending_chunk_items"
+    )]
+    fn validate_rejects_zero_mempool_capacities(
+        #[case] mutate: fn(&mut NodeConfig),
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_node(mutate);
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
+        );
     }
 }

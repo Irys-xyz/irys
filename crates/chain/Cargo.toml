@@ -59,6 +59,11 @@ reth-cli-util = { workspace = true, features = ["jemalloc"] }
 reqwest = { workspace = true, features = ["json"] }
 dotenvy = "0.15"
 
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
+
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]
 

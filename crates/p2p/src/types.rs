@@ -308,3 +308,76 @@ impl std::fmt::Display for GossipRoutes {
         write!(f, "{}", self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(GossipRoutes::Transaction, "/transaction")]
+    #[case(GossipRoutes::CommitmentTx, "/commitment_tx")]
+    #[case(GossipRoutes::Chunk, "/chunk")]
+    #[case(GossipRoutes::Block, "/block")]
+    #[case(GossipRoutes::BlockBody, "/block_body")]
+    #[case(GossipRoutes::IngressProof, "/ingress_proof")]
+    #[case(GossipRoutes::ExecutionPayload, "/execution_payload")]
+    #[case(GossipRoutes::GetData, "/get_data")]
+    #[case(GossipRoutes::PullData, "/pull_data")]
+    #[case(GossipRoutes::Handshake, "/handshake")]
+    #[case(GossipRoutes::Health, "/health")]
+    #[case(GossipRoutes::StakeAndPledgeWhitelist, "/stake_and_pledge_whitelist")]
+    #[case(GossipRoutes::Info, "/info")]
+    #[case(GossipRoutes::PeerList, "/peer-list")]
+    #[case(GossipRoutes::BlockIndex, "/block-index")]
+    #[case(GossipRoutes::Version, "/version")]
+    #[case(GossipRoutes::ProtocolVersion, "/protocol_version")]
+    fn route_as_str_and_display(#[case] route: GossipRoutes, #[case] expected: &str) {
+        assert_eq!(route.as_str(), expected);
+        assert_eq!(format!("{route}"), expected);
+    }
+
+    fn arb_rejection_reason() -> impl Strategy<Value = RejectionReason> {
+        prop_oneof![
+            Just(RejectionReason::HandshakeRequired(None)),
+            Just(RejectionReason::HandshakeRequired(Some(
+                HandshakeRequirementReason::RequestOriginIsNotInThePeerList
+            ))),
+            Just(RejectionReason::HandshakeRequired(Some(
+                HandshakeRequirementReason::RequestOriginDoesNotMatchExpected
+            ))),
+            Just(RejectionReason::HandshakeRequired(Some(
+                HandshakeRequirementReason::MinerAddressIsUnknown
+            ))),
+            Just(RejectionReason::GossipDisabled),
+            Just(RejectionReason::InvalidData),
+            Just(RejectionReason::RateLimited),
+            Just(RejectionReason::UnableToVerifyOrigin),
+            Just(RejectionReason::InvalidCredentials),
+            Just(RejectionReason::ProtocolMismatch),
+            any::<u32>().prop_map(RejectionReason::UnsupportedProtocolVersion),
+            Just(RejectionReason::UnsupportedFeature),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn gossip_response_accepted_json_roundtrip(value: u64) {
+            let resp = GossipResponse::Accepted(value);
+            let json = serde_json::to_string(&resp).unwrap();
+            let decoded: GossipResponse<u64> = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&decoded).unwrap();
+            prop_assert_eq!(json, json2);
+        }
+
+        #[test]
+        fn gossip_response_rejected_json_roundtrip(reason in arb_rejection_reason()) {
+            let resp: GossipResponse<u64> = GossipResponse::Rejected(reason);
+            let json = serde_json::to_string(&resp).unwrap();
+            let decoded: GossipResponse<u64> = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&decoded).unwrap();
+            prop_assert_eq!(json, json2);
+        }
+    }
+}

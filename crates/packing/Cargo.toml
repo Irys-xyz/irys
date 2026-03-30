@@ -22,6 +22,10 @@ eyre.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
+proptest.workspace = true
+rstest.workspace = true
+serde_json.workspace = true
+test-log.workspace = true
 
 [features]
 nvidia = ["irys-c/nvidia"]

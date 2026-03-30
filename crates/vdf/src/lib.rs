@@ -719,4 +719,131 @@ mod tests {
             prop_assert_eq!(checkpoints, verification);
         }
     }
+
+    mod checkpoint_validation_error_paths {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::zero_step_number(0, vec![H256::from_low_u64_be(1)], vec![H256::from_low_u64_be(2)], "must be greater than 0")]
+        #[case::empty_steps(1, vec![], vec![H256::from_low_u64_be(3)], "No steps")]
+        #[case::empty_checkpoints(1, vec![H256::from_low_u64_be(4)], vec![], "No last checkpoints")]
+        #[tokio::test]
+        async fn last_step_checkpoints_rejects_invalid_input(
+            #[case] global_step_number: u64,
+            #[case] steps: Vec<H256>,
+            #[case] checkpoints: Vec<H256>,
+            #[case] expected_error: &str,
+        ) {
+            let vdf_info = VDFLimiterInfo {
+                global_step_number,
+                output: steps.last().copied().unwrap_or_default(),
+                steps: H256List(steps),
+                last_step_checkpoints: H256List(checkpoints),
+                ..VDFLimiterInfo::default()
+            };
+            let config = irys_types::NodeConfig::testing().vdf();
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            assert!(result.is_err());
+            assert!(
+                result.unwrap_err().to_string().contains(expected_error),
+                "expected error containing '{expected_error}'"
+            );
+        }
+
+        #[tokio::test]
+        async fn last_step_output_mismatch_rejected() {
+            let step_hash = H256::from_low_u64_be(1);
+            let different_hash = H256::from_low_u64_be(2);
+            let vdf_info = VDFLimiterInfo {
+                global_step_number: 1,
+                output: different_hash,
+                steps: H256List(vec![step_hash]),
+                last_step_checkpoints: H256List(vec![step_hash]),
+                ..VDFLimiterInfo::default()
+            };
+            let config = irys_types::NodeConfig::testing().vdf();
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not match the output")
+            );
+        }
+
+        #[tokio::test]
+        async fn last_step_checkpoint_mismatch_rejected() {
+            let step_hash = H256::from_low_u64_be(3);
+            let different_checkpoint = H256::from_low_u64_be(4);
+            let vdf_info = VDFLimiterInfo {
+                global_step_number: 1,
+                output: step_hash,
+                steps: H256List(vec![step_hash]),
+                last_step_checkpoints: H256List(vec![different_checkpoint]),
+                ..VDFLimiterInfo::default()
+            };
+            let config = irys_types::NodeConfig::testing().vdf();
+            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not match the last checkpoint")
+            );
+        }
+    }
+
+    mod pure_fn_props {
+        use crate::{apply_reset_seed, step_number_to_salt_number};
+        use irys_types::H256;
+        use proptest::prelude::*;
+
+        #[test]
+        fn step_number_to_salt_zero_is_zero() {
+            let config = irys_types::NodeConfig::testing().vdf();
+            assert_eq!(step_number_to_salt_number(&config, 0), 0);
+        }
+
+        proptest! {
+            #[test]
+            fn apply_reset_seed_deterministic(
+                seed_bytes in any::<[u8; 32]>(),
+                reset_seed_bytes in any::<[u8; 32]>(),
+            ) {
+                let seed = H256::from(seed_bytes);
+                let reset_seed = H256::from(reset_seed_bytes);
+                let result1 = apply_reset_seed(seed, reset_seed);
+                let result2 = apply_reset_seed(seed, reset_seed);
+                prop_assert_eq!(result1, result2);
+            }
+
+            #[test]
+            fn step_number_to_salt_formula(step_number in 1_u64..10000) {
+                let config = irys_types::NodeConfig::testing().vdf();
+                let checkpoints = u64::try_from(config.num_checkpoints_in_vdf_step).unwrap();
+                let expected = (step_number - 1) * checkpoints + 1;
+                prop_assert_eq!(step_number_to_salt_number(&config, step_number), expected);
+            }
+
+            #[test]
+            fn step_number_to_salt_monotonic(
+                a in 1_u64..10000,
+                b in 1_u64..10000,
+            ) {
+                let config = irys_types::NodeConfig::testing().vdf();
+                let salt_a = step_number_to_salt_number(&config, a);
+                let salt_b = step_number_to_salt_number(&config, b);
+                if a < b {
+                    prop_assert!(salt_a < salt_b);
+                } else if a > b {
+                    prop_assert!(salt_a > salt_b);
+                } else {
+                    prop_assert_eq!(salt_a, salt_b);
+                }
+            }
+        }
+    }
 }
