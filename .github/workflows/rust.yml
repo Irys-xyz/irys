@@ -166,6 +166,7 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
 
   cargo-check:
@@ -190,6 +191,7 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
 
   cargo-fmt:
@@ -228,6 +230,7 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
 
   cargo-doc:
@@ -252,6 +255,7 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
 
   cargo-unused-deps:
@@ -273,6 +277,7 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
 
   typos:
