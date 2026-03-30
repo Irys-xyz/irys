@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774563204164,
+  "lastUpdate": 1774891794875,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1494,6 +1494,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1e2e89894e35e9a90c3ea89cb894c3e8278ca3b6",
+          "message": "test: add additional tests (#1206)\n\n* refactor(tests): delete redundant tests, add missing coverage\n\n* refactor: review comments\n\n* refactor(tests): address review comments\n\n* fix(tests): wait for last expected chunk offset in migration guards\n\n* fix(xtask): resolve ownership errors in coverage path\n\n* fix(xtask): drop invalid --workspace flag from coverage report\n\n* fix(coverage): guard missing artifacts and warn on unsupported scope flags\n\n* fix: address review findings across crates\n\n* fix: address review comments\n\n* fix(tests): use shorter activation delay in epoch boundary test\n\n* fix: address review comments\n\n* fix(database): slice buffer to len in GlobalChunkOffset::from_compact\n\n* fix(coverage): guard HTML copy on directory existence\n\n* docs(efficient-sampling): restore comments\n\n* docs(tests): restore helpful comments removed during test consolidation\n\n* refactor: address review findings\n\n* refactor: address review findings\n\n* refactor: address review findings\n\n* refactor: address review findings\n\n* refactor: address review findings\n\n* refactor: address review findings",
+          "timestamp": "2026-03-30T18:05:54+01:00",
+          "tree_id": "c85997ced0bbd1509f3504ded083680e623ec411",
+          "url": "https://github.com/Irys-xyz/irys/commit/1e2e89894e35e9a90c3ea89cb894c3e8278ca3b6"
+        },
+        "date": 1774891793475,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078858,
+            "range": "± 0.001266",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 753.497253,
+            "range": "± 19.213899",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 983.98926,
+            "range": "± 9.744591",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.124021,
+            "range": "± 0.003771",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1175.468338,
+            "range": "± 26.664278",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1525.346941,
+            "range": "± 2.127444",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.472973,
+            "range": "± 0.019063",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.121346,
+            "range": "± 1.69199",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.684256,
+            "range": "± 1.32394",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0",
             "unit": "ms/iter"
           }
