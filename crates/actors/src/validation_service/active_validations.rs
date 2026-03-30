@@ -135,6 +135,13 @@ pub(super) struct VdfScheduler {
 
     /// Runtime handle used to spawn VDF tasks.
     runtime_handle: tokio::runtime::Handle,
+
+    /// When true, `start_next()` spawns a perpetually-pending no-op future
+    /// instead of calling `PreemptibleVdfTask::execute()`. This allows tests
+    /// to exercise queue/scheduling logic with `BlockValidationTask::test_stub`
+    /// tasks whose `service_inner` field is uninitialized.
+    #[cfg(test)]
+    test_no_spawn: bool,
 }
 
 impl VdfScheduler {
@@ -143,6 +150,25 @@ impl VdfScheduler {
             current: None,
             pending: PriorityQueue::new(),
             runtime_handle,
+            #[cfg(test)]
+            test_no_spawn: false,
+        }
+    }
+
+    /// Create a scheduler that never spawns real VDF tasks.
+    ///
+    /// `start_next()` will still move tasks from pending → current and set up
+    /// the `RunningVdfTask` metadata, but the spawned future pends forever
+    /// instead of calling `PreemptibleVdfTask::execute()`. This is safe to use
+    /// with `BlockValidationTask::test_stub` tasks whose `service_inner` is
+    /// uninitialized.
+    #[cfg(test)]
+    pub(super) fn new_test_mode(runtime_handle: tokio::runtime::Handle) -> Self {
+        Self {
+            current: None,
+            pending: PriorityQueue::new(),
+            runtime_handle,
+            test_no_spawn: true,
         }
     }
 
@@ -242,17 +268,22 @@ impl VdfScheduler {
         let cancel_signal = Arc::clone(&cancel_u8);
         let sealed_block = Arc::clone(&task.sealed_block);
 
-        let handle = self.runtime_handle.spawn(
-            async move {
-                let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
-                (hash, result, task)
-            }
-            .instrument(tracing::info_span!(
-                "vdf_validation",
-                block.hash = %hash,
-                block.priority = ?priority
-            )),
-        );
+        #[cfg(test)]
+        let handle = { self.runtime_handle.spawn(std::future::pending()) };
+        #[cfg(not(test))]
+        let handle = {
+            self.runtime_handle.spawn(
+                async move {
+                    let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
+                    (hash, result, task)
+                }
+                .instrument(tracing::info_span!(
+                    "vdf_validation",
+                    block.hash = %hash,
+                    block.priority = ?priority
+                )),
+            )
+        };
 
         self.current = Some(RunningVdfTask {
             hash,
@@ -1188,7 +1219,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_deduplicates_current_task() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+        let mut scheduler = VdfScheduler::new_test_mode(tokio::runtime::Handle::current());
 
         let (stub_task, hash) = make_stub_task(&block_tree_guard);
         let priority = BlockPriorityMeta {
@@ -1217,7 +1248,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_next_promotes_pending_to_running() {
         let (block_tree_guard, _) = setup_canonical_chain_scenario(1);
-        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+        let mut scheduler = VdfScheduler::new_test_mode(tokio::runtime::Handle::current());
 
         let (stub_task, expected_hash) = make_stub_task(&block_tree_guard);
         let priority = BlockPriorityMeta {
@@ -1438,6 +1469,7 @@ mod tests {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let mut coordinator =
             ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
+        coordinator.vdf_scheduler.test_no_spawn = true;
 
         // --- Empty-queue branch: nothing pending, nothing running ---
         assert!(coordinator.vdf_scheduler.current.is_none());
