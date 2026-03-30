@@ -403,6 +403,21 @@ lto = false
 codegen-units = 16
 debug = "line-tables-only"
 
+[profile.test-release.package.irys-vdf]
+opt-level = 3
+
+[profile.test-release.package.irys-packing]
+opt-level = 3
+
+[profile.test-release.package.irys-c]
+opt-level = 3
+
+[profile.test-release.package.sha2]
+opt-level = 3
+
+[profile.test-release.package.openssl]
+opt-level = 3
+
 [profile.debug-release]
 inherits = "release"
 debug = true

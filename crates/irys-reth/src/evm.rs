@@ -946,7 +946,11 @@ where
             ))
         })?;
 
-        if beneficiary_before.as_ref() == Some(&aft) {
+        let beneficiary_before_balance = beneficiary_before
+            .as_ref()
+            .map(|account| account.info.balance)
+            .unwrap_or(U256::ZERO);
+        if aft.info.balance == beneficiary_before_balance {
             return Err(Self::create_internal_error(format!(
                 "priority fee distribution had no effect on beneficiary {beneficiary}"
             )));

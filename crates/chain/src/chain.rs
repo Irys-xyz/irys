@@ -629,8 +629,7 @@ impl IrysNode {
         let difficulty = calculate_initial_difficulty(
             &self.config.consensus,
             f64::from(u32::try_from(storage_module_count)?),
-        )
-        .expect("valid calculated initial difficulty");
+        )?;
         genesis_block.diff = difficulty;
 
         // Set the genesis treasury to the total value of all commitments

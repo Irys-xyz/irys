@@ -22,25 +22,19 @@ async fn wait_for_mempool_len(
     expected_len: usize,
     timeout: Duration,
 ) -> eyre::Result<()> {
-    let start = tokio::time::Instant::now();
-    let poll_interval = Duration::from_millis(100);
-
-    loop {
-        let current_len = fixture
-            .mempool_txs
-            .read()
-            .expect("to read mempool txs")
-            .len();
-        if current_len == expected_len {
-            return Ok(());
-        }
-        if start.elapsed() >= timeout {
-            eyre::bail!(
-                "Timed out after {timeout:?}: expected {expected_len} transactions in mempool, found {current_len}"
-            );
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
+    poll_until(
+        timeout,
+        &format!("expected {expected_len} transactions in mempool"),
+        || {
+            fixture
+                .mempool_txs
+                .read()
+                .expect("to read mempool txs")
+                .len()
+                == expected_len
+        },
+    )
+    .await
 }
 
 #[tokio::test]

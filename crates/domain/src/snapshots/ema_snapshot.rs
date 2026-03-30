@@ -850,7 +850,7 @@ mod test {
             fn result_always_within_safe_range(
                 base in 1_u64..1_000_000,
                 desired in 0_u64..2_000_000,
-                pct in 1_u32..50,
+                pct in 0_u32..=100,
             ) {
                 let base_price = IrysTokenPrice::token(Decimal::from(base)).unwrap();
                 let desired_price = IrysTokenPrice::token(Decimal::from(desired)).unwrap();
@@ -864,6 +864,9 @@ mod test {
                 let min = base_price.sub_multiplier(safe_range).unwrap_or(base_price);
                 prop_assert!(result <= max, "result {result:?} > max {max:?}");
                 prop_assert!(result >= min, "result {result:?} < min {min:?}");
+                if desired_price >= min && desired_price <= max {
+                    prop_assert_eq!(result, desired_price, "in-range value should pass through unchanged");
+                }
             }
         }
     }

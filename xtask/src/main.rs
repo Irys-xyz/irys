@@ -208,6 +208,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
                 )
                 .remove_and_run()?;
+                cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
             }
 
             // this is needed otherwise some tests will fail (that assert panic messages)

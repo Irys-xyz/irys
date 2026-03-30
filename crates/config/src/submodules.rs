@@ -99,7 +99,7 @@ impl StorageSubmodulesConfig {
             });
 
         if config_path_local.exists() {
-            let config = Self::from_toml(config_path_local).expect("To load the submodule config");
+            let config = Self::from_toml(config_path_local)?;
             if config.is_using_hardcoded_paths {
                 return Ok(config);
             };

@@ -419,4 +419,17 @@ mod tests {
         let long_string = "A".repeat(MAX_BS58_SIG_STRING_LENGTH + 1);
         assert!(IrysSignature::from_base58(&long_string).is_err());
     }
+
+    #[test]
+    fn from_base58_accepts_max_length_input() {
+        // Passes length check but fails on invalid base58 decode
+        let max_length_string = "1".repeat(MAX_BS58_SIG_STRING_LENGTH);
+        let result = IrysSignature::from_base58(&max_length_string);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.contains("exceeds maximum"),
+            "should not fail on length check at boundary, got: {err_msg}"
+        );
+    }
 }

@@ -276,6 +276,9 @@ mod tests {
     #[test]
     fn test_current_snapshot_no_oracles_returns_error() {
         let aggregator = IrysPriceOracle { oracles: vec![] };
-        assert!(aggregator.current_snapshot().is_err());
+        assert!(matches!(
+            aggregator.current_snapshot(),
+            Err(PriceOracleError::NoOraclesConfigured)
+        ));
     }
 }

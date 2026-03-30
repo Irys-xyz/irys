@@ -170,16 +170,14 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
             LedgerChunkOffset::from(8),
             seconds_to_wait,
         )
-        .await
-        .expect("last valid_tx chunk at submit offset 8 should appear after migration");
+        .await?;
     genesis_node
         .wait_for_chunk_http(
             DataLedger::Publish,
             LedgerChunkOffset::from(5),
             seconds_to_wait,
         )
-        .await
-        .expect("last publish ledger offset 5 should exist after migration");
+        .await?;
 
     // Verify the chunks of the first and second tx
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
@@ -259,8 +257,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
             LedgerChunkOffset::from(11),
             seconds_to_wait,
         )
-        .await
-        .expect("last wrong_data_size_tx2 chunk at submit offset 11 should appear after migration");
+        .await?;
 
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);

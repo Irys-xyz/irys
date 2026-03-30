@@ -229,9 +229,13 @@ pub fn capacity_pack_range_with_data(
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
+        let pos = u64::try_from(pos).expect("chunk position exceeds u64");
+        let offset = chunk_offset
+            .checked_add(pos)
+            .expect("chunk offset overflow");
         capacity_single::compute_entropy_chunk(
             mining_address,
-            chunk_offset + u64::try_from(pos).expect("chunk position exceeds u64"),
+            offset,
             partition_hash.0,
             iterations,
             chunk_size,
@@ -254,9 +258,13 @@ pub fn capacity_pack_range_with_data_c(
 ) {
     let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
+        let pos = u64::try_from(pos).expect("chunk position exceeds u64");
+        let offset = chunk_offset
+            .checked_add(pos)
+            .expect("chunk offset overflow");
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + u64::try_from(pos).expect("chunk position exceeds u64"),
+            offset,
             partition_hash,
             &mut entropy_chunk,
             entropy_packing_iterations,

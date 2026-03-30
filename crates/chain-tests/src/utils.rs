@@ -2927,15 +2927,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
         timeout_secs: usize,
-    ) -> Option<PackedChunk> {
+    ) -> eyre::Result<PackedChunk> {
         let timeout_secs = coverage_adjusted_timeout(timeout_secs);
         for _ in 0..timeout_secs {
             if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
-                return Some(chunk);
+                return Ok(chunk);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        self.get_chunk(ledger, chunk_offset).await
+        self.get_chunk(ledger, chunk_offset).await.ok_or_else(|| {
+            eyre::eyre!(
+                "Chunk not found over HTTP after {}s: {} ledger chunk_offset: {}",
+                timeout_secs,
+                ledger,
+                chunk_offset,
+            )
+        })
     }
 
     pub async fn verify_migrated_chunk_32b(

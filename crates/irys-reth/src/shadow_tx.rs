@@ -945,8 +945,7 @@ mod tests {
 
         #[test]
         fn shadow_transaction_prefixed_roundtrip(tx in arb_shadow_transaction()) {
-            let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
-            tx.serialize(&mut buf).unwrap();
+            let buf = encode_prefixed_input(&tx);
             let decoded = ShadowTransaction::decode(&mut &buf[..]).unwrap();
             prop_assert_eq!(&decoded, &tx);
         }

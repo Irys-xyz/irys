@@ -37,12 +37,14 @@ jobs:
           git show origin/gh-pages:coverage/history.json > previous-coverage/history.json 2>/dev/null || echo '[]' > previous-coverage/history.json
 
       - name: Run tests with coverage
+        id: coverage_tests
+        continue-on-error: true
         env:
           IRYS_CUSTOM_TMP_DIR: ${{ runner.temp }}
         run: cargo xtask test --coverage
 
       - name: Build coverage summary
-        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         env:
           COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -89,6 +91,7 @@ jobs:
           PYEOF
 
       - name: Checkout gh-pages
+        if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         uses: actions/checkout@v4
         with:
           ref: gh-pages
@@ -96,7 +99,7 @@ jobs:
           fetch-depth: 1
 
       - name: Update coverage data
-        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         run: |
           mkdir -p gh-pages-deploy/coverage
           if [ -d target/llvm-cov/html ]; then
@@ -109,7 +112,7 @@ jobs:
           cp target/llvm-cov/history.json gh-pages-deploy/coverage/
 
       - name: Push to gh-pages
-        if: hashFiles('target/llvm-cov/lcov.info') != ''
+        if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         run: |
           cd gh-pages-deploy
           git config user.name "github-actions[bot]"
@@ -122,3 +125,7 @@ jobs:
             git pull --rebase origin gh-pages
             git push origin gh-pages
           fi
+
+      - name: Fail if coverage tests failed
+        if: ${{ always() && steps.coverage_tests.outcome == 'failure' }}
+        run: exit 1
