@@ -142,13 +142,32 @@ impl VdfScheduler {
         }
     }
 
-    /// Await the current VDF task's completion. Returns `pending` if no task is running,
-    /// which naturally disables this branch in `tokio::select!`.
-    pub(super) async fn recv_vdf_result(
+    /// Await the current VDF task's completion and take it from `current`.
+    /// Returns `pending` if no task is running, which naturally disables this
+    /// branch in `tokio::select!`.
+    ///
+    /// Uses `as_mut()` rather than `take()` so that if `tokio::select!` drops
+    /// this future (another branch fired), `current` remains `Some` and the
+    /// running task isn't orphaned.
+    pub(super) async fn poll_vdf(
         &mut self,
-    ) -> Result<(BlockHash, VdfValidationResult, BlockValidationTask), tokio::task::JoinError> {
+    ) -> (
+        RunningVdfTask,
+        Result<(BlockHash, VdfValidationResult, BlockValidationTask), tokio::task::JoinError>,
+    ) {
+        // IMPORTANT: we use as_mut() here, NOT take(). This future is polled
+        // inside tokio::select! — if another branch completes first, this future
+        // is dropped. With take(), that would leave `current` as None while the
+        // spawned VDF task is still running, orphaning it and allowing start_next()
+        // to launch a second concurrent VDF task. With as_mut(), dropping this
+        // future leaves `current` intact so the next select iteration re-polls it.
         match self.current.as_mut() {
-            Some(task) => (&mut task.handle).await,
+            Some(task) => {
+                let result = (&mut task.handle).await;
+                // The handle resolved, so select will choose this branch — take() is safe.
+                let task = self.current.take().unwrap();
+                (task, result)
+            }
             None => std::future::pending().await,
         }
     }
@@ -381,13 +400,11 @@ impl ValidationCoordinator {
             "Current VDF task priority changed after reorg"
         );
 
-        // Update priority and check for preemption
+        // Update priority. Preemption is checked by the caller
+        // (reevaluate_priorities) after pending priorities are also refreshed.
         if let Some(current_mut) = &mut self.vdf_scheduler.current {
             current_mut.priority = new_priority;
         }
-
-        // Use consolidated preemption check
-        self.vdf_scheduler.check_preemption();
     }
 
     /// Reevaluate pending VDF task priorities
@@ -868,23 +885,23 @@ mod tests {
         );
     }
 
-    /// Verifies that recv_vdf_result() pends forever when no VDF task is running,
+    /// Verifies that poll_vdf() pends forever when no VDF task is running,
     /// allowing other select branches to fire.
     #[tokio::test]
     async fn test_select_skips_vdf_branch_when_no_task() {
         let mut scheduler = VdfScheduler::new();
         assert!(scheduler.current.is_none());
 
-        // recv_vdf_result returns pending() when current is None,
+        // poll_vdf returns pending() when current is None,
         // so the timer branch fires instead.
         let which_branch = tokio::select! {
-            _r = scheduler.recv_vdf_result() => "handle",
+            _r = scheduler.poll_vdf() => "handle",
             _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => "timer",
         };
 
         assert_eq!(
             which_branch, "timer",
-            "recv_vdf_result should pend when no task is running"
+            "poll_vdf should pend when no task is running"
         );
     }
 
@@ -960,8 +977,8 @@ mod tests {
     /// Verifies that start_next() does nothing when the pending queue is empty.
     #[test]
     fn test_start_next_noop_when_pending_empty() {
-        // Note: safe to call outside a tokio runtime because start_next returns
-        // before reaching tokio::spawn when pending is empty.
+        // Safe to call outside a tokio runtime: start_next() early-returns `false`
+        // when pending.pop() returns None, before reaching the tokio::spawn call.
         let mut scheduler = VdfScheduler::new();
 
         scheduler.start_next();

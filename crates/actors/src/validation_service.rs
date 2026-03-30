@@ -235,9 +235,7 @@ impl ValidationService {
                 }
 
                 // Process VDF task completion
-                result = coordinator.vdf_scheduler.recv_vdf_result() => {
-                    let current = coordinator.vdf_scheduler.current.take().unwrap();
-
+                (current, result) = coordinator.vdf_scheduler.poll_vdf() => {
                     match result {
                         Ok((hash, vdf_result, task)) => match vdf_result {
                             VdfValidationResult::Valid => {
@@ -269,7 +267,7 @@ impl ValidationService {
                                 coordinator.vdf_scheduler.pending.push(task, priority);
                             }
                         }
-                        Err(join_error) => {
+                        Err(join_error) => if join_error.is_panic() {
                             error!(
                                 block.hash = %current.hash,
                                 custom.error = %join_error,
@@ -291,6 +289,14 @@ impl ValidationService {
                                     "Failed to send VDF panic result to block tree service"
                                 );
                             }
+                        } else {
+                            // Task was cancelled (e.g. during shutdown) — not a
+                            // validation failure, so don't report it as invalid.
+                            warn!(
+                                block.hash = %current.hash,
+                                custom.error = %join_error,
+                                "VDF validation task was cancelled"
+                            );
                         }
                     }
                     // Start next pending VDF task
