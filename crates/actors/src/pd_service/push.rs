@@ -2,7 +2,7 @@ use irys_types::{IrysPeerId, PeerAddress};
 use rand::seq::SliceRandom as _;
 use std::collections::HashSet;
 
-/// Select k push targets: k/2 from top-scored, k/2 random from the remainder.
+/// Select k push targets: ⌈k/2⌉ from top-scored, remainder random from the rest.
 ///
 /// Candidates must already be filtered — excluded peers (e.g. the chunk
 /// origin or peers that already have the chunk) should be removed before
@@ -20,7 +20,7 @@ pub fn select_push_targets(
     }
 
     let k = k as usize;
-    let half = k / 2;
+    let half = k.div_ceil(2);
     let other_half = k - half;
 
     // Sort by score descending for top-half selection.
@@ -141,20 +141,22 @@ mod tests {
     #[test]
     fn test_k1_returns_one() {
         let candidates: Vec<_> = (1..=5_u8).map(|i| make_candidate(i, i as f64)).collect();
-        // k=1 → half=0, other_half=1 → one random peer from the full set.
+        // k=1 → half=1, other_half=0 → the single top-scored peer.
         let result = select_push_targets(1, &candidates);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_k1_top_scored_bias() {
-        // With k=1 and half=0, the random half draws from the entire sorted
-        // list, so there is no deterministic top bias — just check count and
-        // uniqueness.
+        // With k=1 and half=1 (ceiling division), the single selected peer
+        // is always the top-scored one.
         let candidates: Vec<_> = (1..=5_u8).map(|i| make_candidate(i, i as f64)).collect();
         let result = select_push_targets(1, &candidates);
         assert_eq!(result.len(), 1);
-        let ids: HashSet<_> = result.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            result[0].0,
+            IrysPeerId::from([5; 20]),
+            "k=1 must select the highest-scored peer"
+        );
     }
 }

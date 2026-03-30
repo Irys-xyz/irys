@@ -365,10 +365,24 @@ impl PdService {
         // 6b. Optimistically push to peers.
         self.schedule_outbound_push(&key);
 
-        // 7. Notify waiting blocks.
+        // 7-8. Notify block and transaction waiters.
+        self.notify_chunk_waiters(&key, waiting_blocks, waiting_txs);
+    }
+
+    /// Notify block and transaction waiters that a chunk is now available in the cache.
+    ///
+    /// Called after a chunk has been inserted into the cache (either via P2P fetch
+    /// or optimistic push). Updates pending block provisions and transaction
+    /// provisioning states accordingly.
+    fn notify_chunk_waiters(
+        &mut self,
+        key: &ChunkKey,
+        waiting_blocks: Vec<B256>,
+        waiting_txs: Vec<B256>,
+    ) {
         for block_hash in &waiting_blocks {
             if let Some(pending) = self.pending_blocks.get_mut(block_hash) {
-                pending.remaining_keys.remove(&key);
+                pending.remaining_keys.remove(key);
                 if pending.remaining_keys.is_empty() {
                     let pending = self.pending_blocks.remove(block_hash).unwrap();
                     if pending.response.send(Ok(())).is_ok() {
@@ -384,14 +398,13 @@ impl PdService {
             }
         }
 
-        // 8. Notify waiting transactions.
         for tx_hash in &waiting_txs {
             if let Some(tx_state) = self.tracker.get_mut(tx_hash) {
-                tx_state.missing_chunks.remove(&key);
+                tx_state.missing_chunks.remove(key);
                 if tx_state.missing_chunks.is_empty() {
                     tx_state.state = provisioning::ProvisioningState::Ready;
                     self.ready_pd_txs.insert(*tx_hash);
-                    debug!(tx_hash = %tx_hash, "PD transaction fully provisioned via P2P fetch");
+                    debug!(tx_hash = %tx_hash, "PD transaction fully provisioned");
                 } else {
                     let found = tx_state.required_chunks.len() - tx_state.missing_chunks.len();
                     let total = tx_state.required_chunks.len();
@@ -405,7 +418,7 @@ impl PdService {
             ?key,
             waiting_blocks = waiting_blocks.len(),
             waiting_txs = waiting_txs.len(),
-            "Fetch completed and waiters notified"
+            "Chunk available — waiters notified"
         );
     }
 
@@ -747,7 +760,7 @@ impl PdService {
 
         let candidates: Vec<_> = self
             .peer_list
-            .all_peers_with_score()
+            .v2_peers_with_score()
             .into_iter()
             .filter(|(id, _, _)| !excluded_ids.contains(id))
             .collect();
@@ -783,6 +796,11 @@ impl PdService {
     /// Validates the chunk against trusted MDBX state (block index + merkle proof)
     /// before inserting into the cache as an unreferenced entry. Invalid or
     /// unverifiable chunks are silently rejected with a debug log.
+    ///
+    /// If a P2P fetch for the same chunk is already in flight, the push wins:
+    /// the fetch is cancelled, cache references are added for all waiters, and
+    /// block/transaction waiters are notified — the same reconciliation that
+    /// `on_fetch_success` performs.
     fn handle_optimistic_push(&mut self, peer_id: IrysPeerId, push: PdChunkPush) {
         // 0. Ledger constraint — PD operates exclusively on the Publish ledger.
         if push.ledger != 0 {
@@ -799,6 +817,14 @@ impl PdService {
             ledger: push.ledger,
             offset: push.offset,
         };
+
+        // Early cache-hit — skip full MDBX lookup + merkle verification.
+        if self.cache.contains(&key) {
+            self.inbound_push_tracker
+                .record_inbound(key.ledger, key.offset, peer_id);
+            return;
+        }
+
         let info = match self.derive_chunk_verification_info(&key) {
             Ok(info) => info,
             Err(e) => {
@@ -848,15 +874,35 @@ impl PdService {
         }
 
         // 4. Cache insert (unreferenced — not yet claimed by any executing transaction).
-        let data = Arc::new(Bytes::copy_from_slice(&push.chunk_bytes.0));
+        //    Takes ownership of chunk_bytes to avoid a 256 KiB memcpy.
+        let data = Arc::new(Bytes::from(push.chunk_bytes.0));
         self.cache.insert_unreferenced(key, data, push.data_path);
 
-        // 5. Record inbound source for fan-out deduplication.
+        // 5. Reconcile any in-flight P2P fetch for this chunk: the optimistic push
+        //    arrived first, so cancel the fetch, add cache references, and wake waiters.
+        if let Some(state) = self.pending_fetches.remove(&key) {
+            if let Some(retry_key) = state.retry_queue_key {
+                self.retry_queue.try_remove(&retry_key);
+            }
+            if let Some(handle) = state.abort_handle {
+                handle.abort();
+            }
+            let waiting_blocks: Vec<B256> = state.waiting_blocks.into_iter().collect();
+            let waiting_txs: Vec<B256> = state.waiting_txs.into_iter().collect();
+
+            for waiter in waiting_blocks.iter().chain(waiting_txs.iter()) {
+                self.cache.add_reference(&key, *waiter);
+            }
+
+            self.notify_chunk_waiters(&key, waiting_blocks, waiting_txs);
+        }
+
+        // 6. Record inbound source for fan-out deduplication.
         self.inbound_push_tracker
-            .record_inbound(push.ledger, push.offset, peer_id);
+            .record_inbound(key.ledger, key.offset, peer_id);
 
         trace!(
-            offset = push.offset,
+            offset = key.offset,
             ?peer_id,
             "accepted optimistic pd chunk push"
         );

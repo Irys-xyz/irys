@@ -1158,7 +1158,8 @@ async fn heavy3_block_validation_discards_a_block_if_its_too_old() -> eyre::Resu
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
-    for _ in 0..10 {
+    let blocks_to_mine = genesis_config.consensus.get_mut().block_tree_depth + 2;
+    for _ in 0..blocks_to_mine {
         let (header, eth_block, txs) = fork_creator_2.mine_block_without_gossip().await?;
         tracing::error!(block_heght = header.height,  ?header.cumulative_diff, "block");
         let block = Arc::new(SealedBlock::new(

@@ -608,6 +608,12 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
+    /// Handle an optimistically pushed PD chunk from a peer.
+    ///
+    /// Returns `Accepted` immediately — validation happens asynchronously in
+    /// `PdService`. Bad pushes won't trigger peer score penalties, but the
+    /// block-index + merkle verification in `PdService::handle_optimistic_push`
+    /// prevents invalid data from being cached.
     #[expect(
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
@@ -642,6 +648,15 @@ where
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
+
+        // Backpressure: reject if too many chunk operations in flight.
+        let _permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
+        };
 
         let Some(ref sender) = server.data_handler.pd_chunk_sender else {
             warn!("PD chunk push received but pd_chunk_sender is not configured");

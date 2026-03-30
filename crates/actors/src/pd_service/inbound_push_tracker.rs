@@ -14,6 +14,7 @@ impl InboundPushTracker {
     pub fn new() -> Self {
         Self {
             cache: Cache::builder()
+                .max_capacity(100_000)
                 .time_to_live(INBOUND_PUSH_TRACKER_TTL)
                 .build(),
         }
@@ -23,13 +24,16 @@ impl InboundPushTracker {
         let entry = self
             .cache
             .get_with((ledger, offset), || Arc::new(RwLock::new(HashSet::new())));
-        entry.write().unwrap().insert(peer_id);
+        entry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id);
     }
 
     pub fn get_known_sources(&self, ledger: u32, offset: u64) -> HashSet<IrysPeerId> {
         self.cache
             .get(&(ledger, offset))
-            .map(|entry| entry.read().unwrap().clone())
+            .map(|entry| entry.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone())
             .unwrap_or_default()
     }
 }

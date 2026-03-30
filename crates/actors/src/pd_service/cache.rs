@@ -95,7 +95,8 @@ impl ChunkCache {
     /// Insert a chunk with an optional data path, referenced by the given transaction.
     ///
     /// If the cache is at capacity, unreferenced entries may be evicted first.
-    /// If the chunk already exists, just adds the tx reference (data_path is not updated).
+    /// If the chunk already exists, adds the tx reference and backfills `data_path`
+    /// if the existing entry doesn't have one.
     ///
     /// Returns `true` if the chunk was newly inserted (not already present).
     pub fn insert_with_data_path(
@@ -107,6 +108,9 @@ impl ChunkCache {
     ) -> bool {
         if let Some(entry) = self.chunks.get_mut(&key) {
             entry.referencing_txs.insert(tx_hash);
+            if entry.data_path.is_none() {
+                entry.data_path = data_path;
+            }
             return false;
         }
 

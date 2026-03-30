@@ -474,6 +474,20 @@ impl PeerList {
             .collect()
     }
 
+    /// Returns all online V2 peers with their address and reputation score.
+    /// Used for PD chunk push which requires V2 protocol support.
+    #[must_use]
+    pub fn v2_peers_with_score(&self) -> Vec<(IrysPeerId, PeerAddress, f64)> {
+        let guard = self.read();
+        guard
+            .persistent_peers_cache
+            .iter()
+            .chain(guard.unstaked_peer_purgatory.iter())
+            .filter(|(_, item)| item.is_online && item.protocol_version == ProtocolVersion::V2)
+            .map(|(id, item)| (*id, item.address, item.reputation_score.get() as f64))
+            .collect()
+    }
+
     pub fn inactive_peers(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
