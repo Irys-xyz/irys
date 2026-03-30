@@ -10,6 +10,8 @@
 //! 2. Cache-hit shortcut: duplicate push exits early without re-verification
 //! 3. Pending fetch reconciliation: push wins over in-flight P2P fetch
 
+use std::sync::Arc;
+
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
@@ -175,9 +177,7 @@ pub(crate) async fn setup_pd_push_test(fanout: u32) -> eyre::Result<PdPushTestCo
     );
 
     // --- Start Block Producer (Node B) with partition assignments ---
-    let block_producer = genesis
-        .testing_peer_with_assignments(&peer_signer)
-        .await?;
+    let block_producer = genesis.testing_peer_with_assignments(&peer_signer).await?;
     info!("Block Producer started with partition assignments");
 
     // Record Genesis block index height for Observer sync.
@@ -277,4 +277,127 @@ pub(crate) async fn build_and_inject_real_pd_tx(
         .await?;
 
     Ok(tx_hash)
+}
+
+/// Genesis pushes PD chunks to Observer via optimistic push. Observer verifies
+/// (block index + merkle + leaf hash) and caches. Block validates with cache hits.
+///
+/// Key assertion: chunks appear in Observer's ChunkDataIndex BEFORE any block
+/// is gossiped, proving they arrived via push (not P2P fetch during validation).
+#[test_log::test(tokio::test)]
+async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
+    let ctx = setup_pd_push_test(4).await?;
+
+    let publish_ledger = DataLedger::Publish as u32;
+
+    // Pre-test invariant: Observer should NOT have chunks at the target offset.
+    for i in 0..2_u64 {
+        let offset = ctx.data_start_offset + i;
+        assert!(
+            ctx.observer
+                .node_ctx
+                .chunk_data_index
+                .get(&(publish_ledger, offset))
+                .is_none(),
+            "Observer should NOT have chunk at ({}, {}) before push",
+            publish_ledger,
+            offset,
+        );
+    }
+
+    // Inject a PD tx on Genesis referencing 2 real chunks.
+    // This triggers: handle_provision_chunks → cache hit (local storage) → schedule_outbound_push
+    let tx_hash = build_and_inject_real_pd_tx(
+        &ctx.genesis,
+        &ctx.pd_signer,
+        ctx.partition_index,
+        ctx.local_offset,
+        2, // chunk_count
+        0, // nonce
+    )
+    .await?;
+    info!("PD tx injected on Genesis: {:?}", tx_hash);
+
+    // Wait for Genesis to provision and push. The push is fire-and-forget,
+    // so we wait for the chunk to appear in Observer's cache.
+    ctx.observer
+        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset, 30)
+        .await?;
+    ctx.observer
+        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + 1, 30)
+        .await?;
+    info!("Chunks arrived in Observer cache via optimistic push (before block gossip)");
+
+    // Verify byte-level correctness of pushed chunks.
+    let chunk_size = ctx.chunk_size as usize;
+    for i in 0..2_u64 {
+        let global_offset = ctx.data_start_offset + i;
+        let fetched_bytes = ctx
+            .observer
+            .node_ctx
+            .chunk_data_index
+            .get(&(publish_ledger, global_offset))
+            .map(|r| Arc::clone(&*r));
+        assert!(
+            fetched_bytes.is_some(),
+            "Chunk at ({}, {}) should be in Observer's ChunkDataIndex after push",
+            publish_ledger,
+            global_offset,
+        );
+
+        let fetched = fetched_bytes.unwrap();
+        let chunk_byte_start = i as usize * chunk_size;
+        let chunk_byte_end = chunk_byte_start + chunk_size;
+        let expected = &ctx.data_bytes[chunk_byte_start..chunk_byte_end];
+        assert_eq!(
+            fetched.as_ref(),
+            expected,
+            "Pushed chunk at offset {} bytes should match uploaded data",
+            global_offset,
+        );
+    }
+
+    // Wait for Genesis to mark the PD tx as ready, then mine.
+    ctx.genesis.wait_for_ready_pd_tx(&tx_hash, 30).await?;
+    let (block, eth_payload, _) = ctx.genesis.mine_block_without_gossip().await?;
+
+    // Verify PD tx is in the block.
+    let pd_tx_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| tx.hash() == &tx_hash);
+    assert!(
+        pd_tx_included,
+        "PD tx {:?} should be included in Genesis's mined block",
+        tx_hash,
+    );
+
+    let block_height = block.height;
+    info!("Genesis mined block at height {} with PD tx", block_height);
+
+    // Gossip the block to Observer.
+    ctx.genesis.gossip_block_to_peers(&block)?;
+    ctx.genesis.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    // Wait for Observer to validate and accept the block.
+    // Chunks are already cached from push — this should be a fast cache hit.
+    ctx.observer.wait_until_height(block_height, 30).await?;
+
+    let observer_height = ctx.observer.get_canonical_chain_height().await;
+    assert_eq!(
+        observer_height, block_height,
+        "Observer canonical tip should match Genesis after validation",
+    );
+
+    info!(
+        "Observer validated PD block at height {} — push delivered chunks before block arrived",
+        block_height,
+    );
+
+    ctx.observer.stop().await;
+    ctx.block_producer.stop().await;
+    ctx.genesis.stop().await;
+    Ok(())
 }
