@@ -38,6 +38,10 @@ fn build_version_ref() -> &'static Version {
 /// Untagged commits produce `3.0.0+irys-rs.a1b2c3d`, tagged commits produce `3.0.0+irys-rs`.
 /// No-op if already initialized.
 pub fn init_build_version(git_sha: &str, has_tag: bool) {
+    debug_assert!(
+        has_tag || !git_sha.is_empty(),
+        "untagged build must have a non-empty git_sha for version metadata"
+    );
     let _ = BUILD_VERSION.set({
         let mut version =
             Version::parse(env!("CARGO_PKG_VERSION")).expect("valid CARGO_PKG_VERSION semver");
