@@ -21,7 +21,9 @@ async fn main() -> eyre::Result<()> {
     // The OnceLock is set-once, so late initialization silently loses git metadata.
     irys_types::init_build_version(
         env!("GIT_SHA"),
-        env!("GIT_HAS_TAG").parse().expect("GIT_HAS_TAG must be 'true' or 'false'"),
+        env!("GIT_HAS_TAG")
+            .parse()
+            .expect("GIT_HAS_TAG must be 'true' or 'false'"),
     );
 
     // Load .env file if present (silently ignore if not found)

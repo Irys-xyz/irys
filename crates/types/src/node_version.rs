@@ -99,7 +99,10 @@ mod tests {
     fn version_tagged_includes_vendor_only() {
         let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
         v.build = semver::BuildMetadata::new(VENDOR).unwrap();
-        assert_eq!(v.to_string(), format!("{}+{}", env!("CARGO_PKG_VERSION"), VENDOR));
+        assert_eq!(
+            v.to_string(),
+            format!("{}+{}", env!("CARGO_PKG_VERSION"), VENDOR)
+        );
     }
 
     // -- Golden-string fixture tests for serialization / deserialization --
