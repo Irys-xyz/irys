@@ -184,10 +184,15 @@ pub(crate) fn irys_returndatacopy<W: InterpreterTypes, H: Host + ?Sized>(
         return;
     };
 
-    // 6d. Memory resize — PD-exempt path skips expansion gas.
+    // 6d. Memory resize — PD-exempt path skips expansion gas, but only when the
+    //     destination is contiguous with (or within) the current memory. This
+    //     prevents a sparse-write DoS where a small PD buffer is copied to a huge
+    //     offset, forcing the node to allocate gigabytes of RAM without paying gas.
+    //     When memory_offset <= hwm_bytes the free expansion is bounded by `len`.
     let is_pd = is_current_pd_return_marker(context.interpreter.return_data.buffer());
+    let current_hwm_bytes = context.interpreter.gas.memory().words_num * 32;
 
-    if is_pd {
+    if is_pd && memory_offset <= current_hwm_bytes {
         if !resize_memory_without_gas(context.interpreter, gas_params, memory_offset, len) {
             return;
         }
@@ -624,6 +629,51 @@ mod tests {
         assert!(
             gas_spent >= expected_copy + expected_expansion - 1,
             "After failed PD call, gas ({gas_spent}) should include copy ({expected_copy}) + expansion ({expected_expansion})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: sparse PD destination charges expansion gas
+    // -----------------------------------------------------------------------
+
+    /// Copying a small PD return buffer to a large sparse memory offset must
+    /// charge expansion gas. Without this guard a malicious contract could
+    /// allocate gigabytes of memory for free by RETURNDATACOPY-ing a tiny PD
+    /// buffer to offset 2^30+.
+    #[test]
+    fn pd_sparse_destination_charges_expansion_gas() {
+        let _scope = PdReturnMarkerScope::new();
+
+        let size = 32;
+        let data = Bytes::from(vec![0xAA_u8; size]);
+        set_pd_return_marker(&data);
+
+        // Copy 32 bytes of PD data to a destination 1 MB into memory.
+        // Current hwm is 0, so memory_offset (1_000_000) > hwm (0).
+        // The exemption should NOT apply — expansion gas must be charged.
+        let dest_offset = 1_000_000;
+        let gas_limit = 10_000_000;
+        let mut interp = build_interpreter(gas_limit, data, dest_offset, 0, size);
+
+        call_handler(&mut interp);
+
+        assert!(
+            !interp
+                .bytecode
+                .instruction_result()
+                .is_some_and(InstructionResult::is_error),
+            "Should succeed with enough gas"
+        );
+
+        let words = num_words(dest_offset + size);
+        let expected_copy = copy_gas(size);
+        let expected_expansion = super::expected_memory_cost(words);
+        let gas_spent = interp.gas.spent();
+
+        // Gas must include memory expansion — sparse PD destination is not exempt.
+        assert!(
+            gas_spent >= expected_copy + expected_expansion - 1,
+            "Sparse PD dest: gas ({gas_spent}) should include copy ({expected_copy}) + expansion ({expected_expansion})"
         );
     }
 }
