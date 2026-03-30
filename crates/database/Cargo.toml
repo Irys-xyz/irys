@@ -30,6 +30,8 @@ strum.workspace = true
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rand.workspace = true
+proptest.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

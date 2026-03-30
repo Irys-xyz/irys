@@ -1221,27 +1221,6 @@ mod tests {
     }
 
     #[test]
-    fn test_btreemap_maintains_sorted_order() {
-        // Quick test to verify BTreeMap maintains sorted order
-        let mut rewards_map: BTreeMap<IrysAddress, u32> = BTreeMap::new();
-
-        // Insert addresses in random order
-        let addr1 = IrysAddress::from([5_u8; 20]);
-        let addr2 = IrysAddress::from([1_u8; 20]);
-        let addr3 = IrysAddress::from([9_u8; 20]);
-
-        rewards_map.insert(addr3, 3);
-        rewards_map.insert(addr1, 1);
-        rewards_map.insert(addr2, 2);
-
-        // Verify they come out sorted
-        let addresses: Vec<IrysAddress> = rewards_map.keys().copied().collect();
-        assert_eq!(addresses[0], addr2); // Smallest address first
-        assert_eq!(addresses[1], addr1);
-        assert_eq!(addresses[2], addr3); // Largest address last
-    }
-
-    #[test]
     fn test_publish_tx_with_reward_address_redirection() {
         let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test

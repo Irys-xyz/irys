@@ -943,15 +943,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_consensus_hash_deterministic() {
-        let config = ConsensusConfig::testing();
-        let hash1 = config.keccak256_hash();
-        let hash2 = config.keccak256_hash();
-        assert_eq!(hash1, hash2, "same config should hash to the same value");
-        assert_ne!(hash1, H256::zero(), "hash should not be zero");
-    }
-
-    #[test]
     fn test_consensus_hash_differs_on_change() {
         let config_a = ConsensusConfig::testing();
         let mut config_b = ConsensusConfig::testing();
@@ -1104,11 +1095,6 @@ mod tests {
 
     #[test]
     fn test_consensus_hash_regression() {
-        // This test verifies that the hash of the testing config remains stable.
-        // If this test fails, it indicates a breaking change in either:
-        // - The ConsensusConfig structure or field order
-        // - The canonical JSON serialization implementation
-        // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
         let expected_hash = H256::from_base58("CZCM35BPbUpiw9i7e3TEZWZcV3g8iYRE1tEqwCCzsTpz");
         assert_eq!(
@@ -1116,5 +1102,38 @@ mod tests {
             expected_hash,
             "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
         );
+    }
+
+    mod sort_json_keys_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use serde_json::{Map, Value};
+
+        fn arb_json() -> impl Strategy<Value = Value> {
+            let leaf = prop_oneof![
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::Number(n.into())),
+                ".*".prop_map(Value::String),
+                Just(Value::Null),
+            ];
+
+            leaf.prop_recursive(4, 64, 8, |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                    proptest::collection::btree_map("[a-z]{1,8}", inner, 0..8).prop_map(|m| {
+                        Value::Object(m.into_iter().collect::<Map<String, Value>>())
+                    }),
+                ]
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn sort_json_keys_is_idempotent(value in arb_json()) {
+                let sorted_once = sort_json_keys(value);
+                let sorted_twice = sort_json_keys(sorted_once.clone()); // clone: proptest comparison requires both values
+                prop_assert_eq!(sorted_once, sorted_twice);
+            }
+        }
     }
 }

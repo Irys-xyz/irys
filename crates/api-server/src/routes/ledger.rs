@@ -271,3 +271,99 @@ pub async fn get_current_epoch(
         unassigned_partitions: epoch_snapshot.unassigned_partitions.len(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn make_assignment(ledger: DataLedger, partition_hash: H256) -> PartitionAssignment {
+        PartitionAssignment {
+            partition_hash,
+            miner_address: IrysAddress::ZERO,
+            ledger_id: Some(ledger.into()),
+            slot_index: Some(0),
+        }
+    }
+
+    fn nonzero_hash(seed: u8) -> H256 {
+        H256::from([seed; 32])
+    }
+
+    #[rstest]
+    #[case(DataLedger::Publish, DataLedger::Publish, 3, Ok(3))]
+    #[case(DataLedger::Submit, DataLedger::Submit, 2, Ok(2))]
+    #[case(DataLedger::Publish, DataLedger::Submit, 2, Err(()))]
+    #[case(DataLedger::Submit, DataLedger::Publish, 2, Err(()))]
+    fn count_assignments_by_ledger_type_cases(
+        #[case] assignment_ledger: DataLedger,
+        #[case] query_ledger: DataLedger,
+        #[case] num_assignments: usize,
+        #[case] expected: Result<usize, ()>,
+    ) {
+        let miner = IrysAddress::ZERO;
+        let assignments: Vec<PartitionAssignment> = (0..num_assignments)
+            .map(|i| {
+                make_assignment(
+                    assignment_ledger,
+                    nonzero_hash(u8::try_from(i + 1).unwrap_or(1)),
+                )
+            })
+            .collect();
+
+        let result = count_assignments_by_ledger_type(miner, &assignments, query_ledger);
+
+        match expected {
+            Ok(count) => assert_eq!(result.unwrap(), count),
+            Err(()) => assert!(matches!(result, Err(ApiError::LedgerNotFound { .. }))),
+        }
+    }
+
+    #[test]
+    fn count_assignments_empty_slice_returns_err() {
+        let result = count_assignments_by_ledger_type(IrysAddress::ZERO, &[], DataLedger::Publish);
+        assert!(matches!(
+            result,
+            Err(ApiError::LedgerNotFound {
+                ledger_type: DataLedger::Publish,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn count_assignments_none_ledger_id_returns_err() {
+        let miner = IrysAddress::ZERO;
+        let assignments = vec![PartitionAssignment {
+            partition_hash: nonzero_hash(1),
+            miner_address: miner,
+            ledger_id: None,
+            slot_index: Some(0),
+        }];
+        assert!(matches!(
+            count_assignments_by_ledger_type(miner, &assignments, DataLedger::Publish),
+            Err(ApiError::LedgerNotFound {
+                ledger_type: DataLedger::Publish,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn count_assignments_mixed_ledgers_counts_only_matching() {
+        let miner = IrysAddress::ZERO;
+        let assignments = vec![
+            make_assignment(DataLedger::Publish, nonzero_hash(1)),
+            make_assignment(DataLedger::Publish, nonzero_hash(2)),
+            make_assignment(DataLedger::Submit, nonzero_hash(3)),
+        ];
+        assert_eq!(
+            count_assignments_by_ledger_type(miner, &assignments, DataLedger::Publish).unwrap(),
+            2
+        );
+        assert_eq!(
+            count_assignments_by_ledger_type(miner, &assignments, DataLedger::Submit).unwrap(),
+            1
+        );
+    }
+}

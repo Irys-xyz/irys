@@ -8,7 +8,7 @@ use awc::http::StatusCode;
 use irys_domain::get_node_info;
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
-    let node_info = get_node_info(
+    match get_node_info(
         &state.block_index,
         &state.block_tree,
         &state.peer_list,
@@ -17,10 +17,20 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         state.mining_address,
         state.config.consensus.chain_id,
     )
-    .await;
-    HttpResponse::Ok()
-        .content_type(ContentType::json())
-        .body(serde_json::to_string_pretty(&node_info).unwrap())
+    .await
+    {
+        Ok(node_info) => HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(node_info),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to retrieve node info");
+            ApiError::from((
+                "Failed to retrieve node info",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+            .error_response()
+        }
+    }
 }
 
 pub async fn ready_route() -> HttpResponse {

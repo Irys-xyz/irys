@@ -70,26 +70,6 @@ mod tests {
                 ));
             }
         }
-
-        #[rstest]
-        #[case("0x1234567890abcdef1234567890abcdef12345678")]
-        #[case("0xABCDEF1234567890ABCDEF1234567890ABCDEF12")]
-        fn should_parse_specific_valid_addresses(#[case] address: &str) {
-            let result = parse_address(address);
-            assert!(result.is_ok());
-        }
-
-        #[rstest]
-        #[case("invalid_address")]
-        #[case("0xinvalid")]
-        #[case("")]
-        fn should_reject_specific_invalid_addresses(#[case] address: &str) {
-            let result = parse_address(address);
-            assert!(result.is_err());
-            match result.unwrap_err() {
-                AddressParseError::InvalidFormat(_) => {}
-            }
-        }
     }
 
     #[test]

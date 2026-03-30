@@ -160,6 +160,13 @@ mod tests {
     }
 
     #[test]
+    fn calculate_inflation_progress_zero_cap_returns_zero() {
+        // Exercises the early-return guard that prevents division by zero.
+        let result = calculate_inflation_progress(U256::from(1_000_u64), U256::zero());
+        assert_eq!(result, "0.00");
+    }
+
+    #[test]
     fn test_estimated_emission_zero_height() {
         let config = ConsensusConfig::testing();
         let (emitted, method) = calculate_estimated_emission(&config, 0).unwrap();

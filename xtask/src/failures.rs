@@ -198,6 +198,7 @@ const NEXTEST_CONFIG_PATH: &str = ".config/nextest.toml";
 pub fn generate_nextest_config(
     wrapper_path: &str,
     failed_tests: Option<&[String]>,
+    coverage: bool,
 ) -> eyre::Result<tempfile::NamedTempFile> {
     let mut temp_file = tempfile::Builder::new()
         .prefix("nextest-config-")
@@ -249,6 +250,19 @@ pub fn generate_nextest_config(
     config_content.push_str("\n[[profile.heap-profile.scripts]]\n");
     config_content.push_str("filter = 'all()'\n");
     config_content.push_str("run-wrapper = 'xtask-monitor'\n");
+
+    // Coverage instrumentation adds overhead; give tests 3× the default timeout
+    if coverage {
+        if !config_content.contains("[profile.coverage]") {
+            config_content.push_str("\n[profile.coverage]\n");
+            config_content.push_str("slow-timeout = { period = \"90s\", terminate-after = 2 }\n\n");
+        }
+        if !config_content.contains("[[profile.coverage.scripts]]") {
+            config_content.push_str("[[profile.coverage.scripts]]\n");
+            config_content.push_str("filter = 'all()'\n");
+            config_content.push_str("run-wrapper = 'xtask-monitor'\n");
+        }
+    }
 
     temp_file.write_all(config_content.as_bytes())?;
     temp_file.flush()?;

@@ -2408,6 +2408,37 @@ mod tests {
         }
     }
 
+    mod pure_function_tests {
+        use super::*;
+        use crate::types::{InternalGossipError, InvalidDataError};
+        use rstest::rstest;
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+        #[rstest]
+        #[case(ProtocolVersion::V1, "http://127.0.0.1:8080/gossip")]
+        #[case(ProtocolVersion::V2, "http://127.0.0.1:8080/gossip/v2")]
+        fn base_url_format(#[case] version: ProtocolVersion, #[case] expected: &str) {
+            let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080));
+            assert_eq!(gossip_base_url(&addr, version), expected);
+        }
+
+        #[rstest]
+        #[case(GossipError::Network("x".into()), "network")]
+        #[case(GossipError::InvalidPeer("x".into()), "invalid_peer")]
+        #[case(GossipError::Cache("x".into()), "cache")]
+        #[case(GossipError::Internal(InternalGossipError::Unknown("x".into())), "internal")]
+        #[case(
+            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
+            "invalid_data"
+        )]
+        #[case(GossipError::TransactionIsAlreadyHandled, "already_handled")]
+        #[case(GossipError::RateLimited, "rate_limited")]
+        #[case(GossipError::CircuitBreakerOpen(IrysPeerId::from([0_u8; 20])), "circuit_breaker_open")]
+        fn error_type_mapping(#[case] err: GossipError, #[case] expected: &str) {
+            assert_eq!(gossip_error_type(&err), expected);
+        }
+    }
+
     mod connection_tests {
         use super::*;
 

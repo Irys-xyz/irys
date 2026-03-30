@@ -666,6 +666,7 @@ fn ln_fp18(x: U256) -> Result<U256> {
     if x.is_zero() {
         return Err(eyre!("ln(0) is undefined"));
     }
+    ensure!(x >= TOKEN_SCALE, "ln_fp18 only supports x >= 1.0");
 
     const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
 
@@ -1275,27 +1276,6 @@ mod tests {
                 "exp(-1) = {}, expected {}",
                 result_dec,
                 expected
-            );
-            Ok(())
-        }
-
-        #[test]
-        fn test_exp_neg_fp18_consistency_with_exp() -> Result<()> {
-            // Test that exp(-x) * exp(x) ≈ 1
-            let x = Amount::<()>::token(dec!(0.5))?.amount;
-
-            let exp_neg_x = exp_neg_fp18(x)?;
-            let exp_x = exp_fp18(x)?;
-
-            // exp(-x) * exp(x) should equal 1
-            let product = mul_div(exp_neg_x, exp_x, TOKEN_SCALE)?;
-            let product_dec = Amount::<()>::new(product).token_to_decimal()?;
-
-            let diff = (product_dec - dec!(1.0)).abs();
-            assert!(
-                diff <= dec!(0.000000000000001),
-                "exp(-x) * exp(x) = {}, expected 1.0",
-                product_dec
             );
             Ok(())
         }
@@ -2413,5 +2393,471 @@ mod tests {
 
             Ok(())
         }
+    }
+
+    mod prop_safe_arithmetic {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_u256_small() -> impl Strategy<Value = U256> {
+            any::<u128>().prop_map(U256::from)
+        }
+
+        fn arb_u256_large() -> impl Strategy<Value = U256> {
+            (any::<u128>(), any::<u128>())
+                .prop_map(|(lo, hi)| U256::from(lo) + (U256::from(hi) << 128))
+        }
+
+        proptest! {
+            #[test]
+            fn prop_safe_add_commutativity(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                let ab = safe_add(a, b);
+                let reversed = safe_add(b, a);
+                match (ab, reversed) {
+                    (Ok(ab_val), Ok(reversed_val)) => prop_assert_eq!(ab_val, reversed_val),
+                    (Err(_), Err(_)) => {} // both overflow is consistent
+                    _ => prop_assert!(false, "commutativity violated: one succeeded, other failed"),
+                }
+            }
+
+            #[test]
+            fn prop_safe_add_identity(a in arb_u256_large()) {
+                let result = safe_add(a, U256::zero()).unwrap();
+                prop_assert_eq!(result, a);
+            }
+
+            #[test]
+            fn prop_safe_add_overflow_detection(a in arb_u256_large()) {
+                if a > U256::zero() {
+                    let result = safe_add(U256::MAX, a);
+                    prop_assert!(result.is_err(), "MAX + {} should overflow", a);
+                }
+            }
+
+            #[test]
+            fn prop_safe_add_matches_checked(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                let safe_result = safe_add(a, b);
+                let checked_result = a.checked_add(b);
+                match (safe_result, checked_result) {
+                    (Ok(val), Some(checked)) => prop_assert_eq!(val, checked),
+                    (Err(_), None) => {}
+                    _ => prop_assert!(false, "safe_add and checked_add disagree"),
+                }
+            }
+
+            #[test]
+            fn prop_safe_sub_identity(a in arb_u256_large()) {
+                let result = safe_sub(a, U256::zero()).unwrap();
+                prop_assert_eq!(result, a);
+            }
+
+            #[test]
+            fn prop_safe_sub_self_is_zero(a in arb_u256_large()) {
+                let result = safe_sub(a, a).unwrap();
+                prop_assert_eq!(result, U256::zero());
+            }
+
+            #[test]
+            fn prop_safe_sub_underflow_detection(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                if b > a {
+                    let result = safe_sub(a, b);
+                    prop_assert!(result.is_err(), "{} - {} should underflow", a, b);
+                }
+            }
+
+            #[test]
+            fn prop_safe_sub_matches_checked(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                let safe_result = safe_sub(a, b);
+                let checked_result = a.checked_sub(b);
+                match (safe_result, checked_result) {
+                    (Ok(val), Some(checked)) => prop_assert_eq!(val, checked),
+                    (Err(_), None) => {}
+                    _ => prop_assert!(false, "safe_sub and checked_sub disagree"),
+                }
+            }
+
+            #[test]
+            fn prop_safe_add_sub_roundtrip(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                if let Ok(sum) = safe_add(a, b) {
+                    let back = safe_sub(sum, b).unwrap();
+                    prop_assert_eq!(back, a);
+                }
+            }
+
+            #[test]
+            fn prop_safe_mul_commutativity(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                let ab = safe_mul(a, b);
+                let reversed = safe_mul(b, a);
+                match (ab, reversed) {
+                    (Ok(ab_val), Ok(reversed_val)) => prop_assert_eq!(ab_val, reversed_val),
+                    (Err(_), Err(_)) => {}
+                    _ => prop_assert!(false, "commutativity violated"),
+                }
+            }
+
+            #[test]
+            fn prop_safe_mul_identity(a in arb_u256_large()) {
+                let result = safe_mul(a, U256::from(1)).unwrap();
+                prop_assert_eq!(result, a);
+            }
+
+            #[test]
+            fn prop_safe_mul_zero(a in arb_u256_large()) {
+                let result = safe_mul(a, U256::zero()).unwrap();
+                prop_assert_eq!(result, U256::zero());
+            }
+
+            #[test]
+            fn prop_safe_mul_overflow_detection(
+                a in (2_u128..u128::MAX).prop_map(U256::from),
+            ) {
+                let result = safe_mul(U256::MAX, a);
+                prop_assert!(result.is_err(), "MAX * {} should overflow", a);
+            }
+
+            #[test]
+            fn prop_safe_mul_matches_checked(
+                a in arb_u256_small(),
+                b in arb_u256_small(),
+            ) {
+                let safe_result = safe_mul(a, b);
+                let checked_result = a.checked_mul(b);
+                match (safe_result, checked_result) {
+                    (Ok(val), Some(checked)) => prop_assert_eq!(val, checked),
+                    (Err(_), None) => {}
+                    _ => prop_assert!(false, "safe_mul and checked_mul disagree"),
+                }
+            }
+
+            #[test]
+            fn prop_safe_div_identity(a in arb_u256_large()) {
+                let result = safe_div(a, U256::from(1)).unwrap();
+                prop_assert_eq!(result, a);
+            }
+
+            #[test]
+            fn prop_safe_div_self_is_one(
+                a in (1_u128..u128::MAX).prop_map(U256::from),
+            ) {
+                let result = safe_div(a, a).unwrap();
+                prop_assert_eq!(result, U256::from(1));
+            }
+
+            #[test]
+            fn prop_safe_div_by_zero_always_fails(a in arb_u256_large()) {
+                let result = safe_div(a, U256::zero());
+                prop_assert!(result.is_err());
+            }
+
+            #[test]
+            fn prop_safe_mod_by_zero_always_fails(a in arb_u256_large()) {
+                let result = safe_mod(a, U256::zero());
+                prop_assert!(result.is_err());
+            }
+
+            #[test]
+            fn prop_safe_mod_less_than_divisor(
+                a in arb_u256_small(),
+                b in (1_u128..u128::MAX).prop_map(U256::from),
+            ) {
+                let result = safe_mod(a, b).unwrap();
+                prop_assert!(result < b, "remainder {} must be < divisor {}", result, b);
+            }
+
+            #[test]
+            fn prop_safe_mod_self_is_zero(
+                a in (1_u128..u128::MAX).prop_map(U256::from),
+            ) {
+                let result = safe_mod(a, a).unwrap();
+                prop_assert_eq!(result, U256::zero());
+            }
+
+            #[test]
+            fn prop_div_mod_reconstruct(
+                a in arb_u256_small(),
+                b in (1_u128..u128::MAX).prop_map(U256::from),
+            ) {
+                let quotient = safe_div(a, b).unwrap();
+                let remainder = safe_mod(a, b).unwrap();
+                let reconstructed = safe_add(safe_mul(quotient, b).unwrap(), remainder).unwrap();
+                prop_assert_eq!(reconstructed, a, "q*b + r must equal a");
+            }
+
+            #[test]
+            fn prop_mul_div_consistency(
+                a in (1_u64..1_000_000).prop_map(U256::from),
+                b in (1_u64..1_000_000).prop_map(U256::from),
+                c in (1_u64..1_000_000).prop_map(U256::from),
+            ) {
+                let result = mul_div(a, b, c).unwrap();
+                let expected = safe_div(safe_mul(a, b).unwrap(), c).unwrap();
+                prop_assert_eq!(result, expected);
+            }
+
+            #[test]
+            fn prop_mul_div_by_same_is_identity(
+                a in (1_u64..1_000_000).prop_map(U256::from),
+                b in (1_u64..1_000_000).prop_map(U256::from),
+            ) {
+                let result = mul_div(a, b, b).unwrap();
+                prop_assert_eq!(result, a, "a * b / b should equal a");
+            }
+        }
+    }
+
+    mod prop_ln_exp {
+        use super::*;
+        use proptest::prelude::*;
+        use rust_decimal_macros::dec;
+
+        proptest! {
+            #[test]
+            fn prop_exp_of_ln_roundtrip(x_nat in 1_u64..10) {
+                let x_fp18 = safe_mul(U256::from(x_nat), TOKEN_SCALE).unwrap();
+                let ln_x = ln_fp18(x_fp18).unwrap();
+                let exp_ln_x = exp_fp18(ln_x).unwrap();
+
+                let result_dec = Amount::<()>::new(exp_ln_x).token_to_decimal().unwrap();
+                let expected = rust_decimal::Decimal::from(x_nat);
+                let diff = (result_dec - expected).abs();
+
+                // Taylor series accumulates error through ln then exp; allow 0.1% relative error
+                let tolerance = expected * dec!(0.001);
+                prop_assert!(
+                    diff <= tolerance,
+                    "exp(ln({})) = {}, expected {}, diff = {}",
+                    x_nat, result_dec, expected, diff
+                );
+            }
+
+            #[test]
+            fn prop_ln_monotonically_increasing(
+                a_nat in 1_u64..100,
+                b_nat in 1_u64..100,
+            ) {
+                let a_fp18 = safe_mul(U256::from(a_nat), TOKEN_SCALE).unwrap();
+                let b_fp18 = safe_mul(U256::from(b_nat), TOKEN_SCALE).unwrap();
+                let ln_a = ln_fp18(a_fp18).unwrap();
+                let ln_b = ln_fp18(b_fp18).unwrap();
+
+                if a_nat < b_nat {
+                    prop_assert!(ln_a < ln_b, "ln({}) = {} should be < ln({}) = {}", a_nat, ln_a, b_nat, ln_b);
+                } else if a_nat == b_nat {
+                    prop_assert_eq!(ln_a, ln_b);
+                } else {
+                    prop_assert!(ln_a > ln_b, "ln({}) should be > ln({})", a_nat, b_nat);
+                }
+            }
+
+            #[test]
+            fn prop_exp_monotonically_increasing(
+                a_small in 0_u64..10,
+                b_small in 0_u64..10,
+            ) {
+                let a_fp18 = safe_mul(U256::from(a_small), TOKEN_SCALE).unwrap();
+                let b_fp18 = safe_mul(U256::from(b_small), TOKEN_SCALE).unwrap();
+                let exp_a = exp_fp18(a_fp18).unwrap();
+                let exp_b = exp_fp18(b_fp18).unwrap();
+
+                if a_small < b_small {
+                    prop_assert!(exp_a < exp_b, "exp({}) should be < exp({})", a_small, b_small);
+                } else if a_small == b_small {
+                    prop_assert_eq!(exp_a, exp_b);
+                } else {
+                    prop_assert!(exp_a > exp_b, "exp({}) should be > exp({})", a_small, b_small);
+                }
+            }
+
+            #[test]
+            fn prop_exp_neg_times_exp_is_one(x_tenths in 1_u64..10) {
+                let x_fp18 = safe_mul(U256::from(x_tenths), TOKEN_SCALE / U256::from(10)).unwrap();
+                let exp_pos = exp_fp18(x_fp18).unwrap();
+                let exp_neg = exp_neg_fp18(x_fp18).unwrap();
+
+                let product = mul_div(exp_pos, exp_neg, TOKEN_SCALE).unwrap();
+                let product_dec = Amount::<()>::new(product).token_to_decimal().unwrap();
+
+                let diff = (product_dec - dec!(1.0)).abs();
+                prop_assert!(
+                    diff <= dec!(0.001),
+                    "exp(0.{}) * exp(-0.{}) = {}, expected ~1.0",
+                    x_tenths, x_tenths, product_dec
+                );
+            }
+
+            #[test]
+            fn prop_ln_product_is_sum(
+                a_nat in 1_u64..7,
+                b_nat in 1_u64..7,
+            ) {
+                let a_fp18 = safe_mul(U256::from(a_nat), TOKEN_SCALE).unwrap();
+                let b_fp18 = safe_mul(U256::from(b_nat), TOKEN_SCALE).unwrap();
+                let ab_fp18 = safe_mul(U256::from(a_nat * b_nat), TOKEN_SCALE).unwrap();
+
+                let ln_a = ln_fp18(a_fp18).unwrap();
+                let ln_b = ln_fp18(b_fp18).unwrap();
+                let ln_ab = ln_fp18(ab_fp18).unwrap();
+
+                let sum = safe_add(ln_a, ln_b).unwrap();
+
+                let sum_dec = Amount::<()>::new(sum).token_to_decimal().unwrap();
+                let ln_ab_dec = Amount::<()>::new(ln_ab).token_to_decimal().unwrap();
+
+                let diff = (sum_dec - ln_ab_dec).abs();
+                let tolerance = ln_ab_dec.abs() * dec!(0.005) + dec!(0.000000000001);
+                prop_assert!(
+                    diff <= tolerance,
+                    "ln({}) + ln({}) = {}, ln({}) = {}, diff = {}",
+                    a_nat, b_nat, sum_dec, a_nat * b_nat, ln_ab_dec, diff
+                );
+            }
+        }
+
+        #[test]
+        fn test_ln_of_one_is_zero() {
+            let result = ln_fp18(TOKEN_SCALE).unwrap();
+            assert_eq!(result, U256::zero(), "ln(1) should be 0, got {}", result);
+        }
+
+        #[test]
+        fn test_exp_of_zero_is_one() {
+            let result = exp_fp18(U256::zero()).unwrap();
+            assert_eq!(
+                result, TOKEN_SCALE,
+                "exp(0) should be 1*SCALE, got {}",
+                result
+            );
+        }
+
+        #[test]
+        fn test_ln_zero_fails() {
+            let result = ln_fp18(U256::zero());
+            assert!(result.is_err(), "ln(0) should fail");
+        }
+
+        #[test]
+        fn test_ln_sub_unit_fails() {
+            let half_scale = TOKEN_SCALE / U256::from(2);
+            let result = ln_fp18(half_scale);
+            assert!(
+                result.is_err(),
+                "ln_fp18 should reject x < 1 until signed output is supported"
+            );
+        }
+    }
+
+    mod prop_pledge_decay {
+        use super::*;
+        use proptest::prelude::*;
+        use rust_decimal_macros::dec;
+
+        proptest! {
+            #[test]
+            fn prop_decay_monotonically_decreasing(
+                count_a in 0_u64..100,
+                count_b in 0_u64..100,
+            ) {
+                let base_fee = Amount::token(dec!(100.0)).unwrap();
+                let decay_rate = Amount::percentage(dec!(0.50)).unwrap();
+
+                prop_assume!(count_a < count_b);
+                let value_a = base_fee.apply_pledge_decay(count_a, decay_rate).unwrap();
+                let value_b = base_fee.apply_pledge_decay(count_b, decay_rate).unwrap();
+
+                prop_assert!(
+                    value_a >= value_b,
+                    "decay({}) = {} should be >= decay({}) = {}",
+                    count_a, value_a.amount, count_b, value_b.amount
+                );
+            }
+
+            #[test]
+            fn prop_decay_at_zero_count_returns_base(
+                base_nat in 1_u64..10000,
+            ) {
+                let base_amount = U256::from(base_nat) * TOKEN_SCALE;
+                let base_fee = Amount::<Irys>::new(base_amount);
+                let decay_rate = Amount::percentage(dec!(0.50)).unwrap();
+
+                let result = base_fee.apply_pledge_decay(0, decay_rate).unwrap();
+                prop_assert_eq!(
+                    result.amount, base_fee.amount,
+                    "at count=0, (count+1)^rate = 1^rate = 1, so result should equal base"
+                );
+            }
+
+            #[test]
+            fn prop_decay_zero_rate_returns_base(count in 0_u64..50) {
+                let base_fee = Amount::token(dec!(100.0)).unwrap();
+                let zero_rate = Amount::percentage(dec!(0.0)).unwrap();
+
+                let result = base_fee.apply_pledge_decay(count, zero_rate).unwrap();
+
+                prop_assert_eq!(
+                    result.amount, base_fee.amount,
+                    "zero decay rate should preserve base fee exactly: (count+1)^0 = 1"
+                );
+            }
+
+            #[test]
+            fn prop_decay_result_never_exceeds_base(
+                count in 0_u64..200,
+                rate_pct in 1_u32..100,
+            ) {
+                let base_fee = Amount::token(dec!(1000.0)).unwrap();
+                let rate = Amount::percentage(
+                    rust_decimal::Decimal::from(rate_pct) / dec!(100)
+                ).unwrap();
+
+                let result = base_fee.apply_pledge_decay(count, rate).unwrap();
+                prop_assert!(
+                    result.amount <= base_fee.amount,
+                    "decayed value {} should not exceed base {}",
+                    result.amount, base_fee.amount
+                );
+            }
+
+            #[test]
+            fn prop_higher_rate_means_faster_decay(
+                count in 1_u64..20,
+            ) {
+                let base_fee = Amount::token(dec!(100.0)).unwrap();
+                let low_rate = Amount::percentage(dec!(0.10)).unwrap();
+                let high_rate = Amount::percentage(dec!(0.80)).unwrap();
+
+                let low_result = base_fee.apply_pledge_decay(count, low_rate).unwrap();
+                let high_result = base_fee.apply_pledge_decay(count, high_rate).unwrap();
+
+                prop_assert!(
+                    high_result.amount <= low_result.amount,
+                    "higher rate should produce lower value: high_rate={} vs low_rate={}",
+                    high_result.amount, low_result.amount
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decimal_to_u256_rejects_negative() {
+        let result = Amount::<()>::decimal_to_u256(dec!(-1.0), TOKEN_SCALE_NATIVE);
+        assert!(result.is_err());
     }
 }

@@ -896,4 +896,166 @@ mod tests {
             "expected 'Invalid target_byte_position: out of bounds', got: {err}"
         );
     }
+
+    #[test]
+    fn generate_data_root_rejects_empty_input() {
+        let err = generate_data_root(vec![])
+            .expect_err("empty input should be rejected")
+            .to_string();
+        assert!(
+            err.contains("At least one data node is required"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod prop_merkle_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn pairs_to_leaves(pairs: &[([u8; 32], usize)]) -> Vec<DataRootLeaf> {
+        pairs
+            .iter()
+            .map(|(hash, size)| DataRootLeaf {
+                data_root: H256(*hash),
+                tx_size: *size,
+            })
+            .collect()
+    }
+
+    fn arb_leaf_pairs(
+        min_count: usize,
+        max_count: usize,
+    ) -> impl Strategy<Value = Vec<([u8; 32], usize)>> {
+        prop::collection::vec(
+            (proptest::array::uniform32(any::<u8>()), 1_usize..1024_usize),
+            min_count..=max_count,
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn prop_all_proofs_validate_against_root(
+            pairs in arb_leaf_pairs(1, 8),
+        ) {
+            let leaf_data = pairs_to_leaves(&pairs);
+            let leaves = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let root = generate_data_root(leaves).unwrap();
+            let root_id = root.id;
+            let proofs = resolve_proofs(root, None).unwrap();
+
+            prop_assert_eq!(proofs.len(), leaf_data.len());
+
+            let mut cumulative_size: usize = 0;
+            for (i, proof) in proofs.iter().enumerate() {
+                let encoded = Base64(proof.proof.clone()); // clone: test code
+                let target = u128::from(u64::try_from(cumulative_size).unwrap());
+                let result = validate_path(root_id, &encoded, target);
+                prop_assert!(
+                    result.is_ok(),
+                    "proof {} failed validation at target {}: {:?}",
+                    i, target, result.err()
+                );
+                cumulative_size += leaf_data[i].tx_size;
+            }
+        }
+
+        #[test]
+        fn prop_proof_count_equals_leaf_count(
+            pairs in arb_leaf_pairs(1, 16),
+        ) {
+            let leaf_data = pairs_to_leaves(&pairs);
+            let leaves = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let root = generate_data_root(leaves).unwrap();
+            let proofs = resolve_proofs(root, None).unwrap();
+            prop_assert_eq!(proofs.len(), leaf_data.len());
+        }
+
+        #[test]
+        fn prop_data_root_deterministic(
+            pairs in arb_leaf_pairs(1, 8),
+        ) {
+            let leaf_data = pairs_to_leaves(&pairs);
+            let leaves1 = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let leaves2 = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let root1 = generate_data_root(leaves1).unwrap();
+            let root2 = generate_data_root(leaves2).unwrap();
+            prop_assert_eq!(root1.id, root2.id);
+        }
+
+        #[test]
+        fn prop_different_data_different_roots(
+            pairs_a in arb_leaf_pairs(1, 4),
+            pairs_b in arb_leaf_pairs(1, 4),
+        ) {
+            if pairs_a == pairs_b {
+                return Ok(());
+            }
+
+            let leaves_a = generate_leaves_from_data_roots(&pairs_to_leaves(&pairs_a)).unwrap();
+            let leaves_b = generate_leaves_from_data_roots(&pairs_to_leaves(&pairs_b)).unwrap();
+            let root_a = generate_data_root(leaves_a).unwrap();
+            let root_b = generate_data_root(leaves_b).unwrap();
+            prop_assert_ne!(root_a.id, root_b.id);
+        }
+
+        #[test]
+        fn prop_wrong_root_rejects(
+            pairs in arb_leaf_pairs(1, 4),
+            fake_root in proptest::array::uniform32(any::<u8>()),
+        ) {
+            let leaf_data = pairs_to_leaves(&pairs);
+            let leaves = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let root = generate_data_root(leaves).unwrap();
+            if fake_root == root.id {
+                return Ok(());
+            }
+            let proofs = resolve_proofs(root, None).unwrap();
+            let encoded = Base64(proofs[0].proof.clone()); // clone: test code
+            let result = validate_path(fake_root, &encoded, 0);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn prop_leaf_byte_ranges_contiguous(
+            pairs in arb_leaf_pairs(1, 8),
+        ) {
+            let leaf_data = pairs_to_leaves(&pairs);
+            let leaves = generate_leaves_from_data_roots(&leaf_data).unwrap();
+
+            let mut expected_min: usize = 0;
+            for (i, leaf) in leaves.iter().enumerate() {
+                prop_assert_eq!(
+                    leaf.min_byte_range, expected_min,
+                    "leaf {} min_byte_range mismatch", i
+                );
+                prop_assert_eq!(
+                    leaf.max_byte_range, expected_min + leaf_data[i].tx_size,
+                    "leaf {} max_byte_range mismatch", i
+                );
+                expected_min = leaf.max_byte_range;
+            }
+
+            let total_size: usize = leaf_data.iter().map(|d| d.tx_size).sum();
+            prop_assert_eq!(expected_min, total_size);
+        }
+
+        #[test]
+        fn prop_single_leaf_is_root(
+            hash in proptest::array::uniform32(any::<u8>()),
+            size in 1_usize..1024_usize,
+        ) {
+            let leaf_data = vec![DataRootLeaf {
+                data_root: H256(hash),
+                tx_size: size,
+            }];
+            let leaves = generate_leaves_from_data_roots(&leaf_data).unwrap();
+            let leaf_id = leaves[0].id;
+            let root = generate_data_root(leaves).unwrap();
+            prop_assert_eq!(root.id, leaf_id);
+        }
+    }
 }

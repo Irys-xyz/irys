@@ -656,3 +656,90 @@ impl ChainSyncState {
         self.is_queue_full() && !diagnostic.has_active_validations()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    proptest! {
+        #[test]
+        fn validation_error_queue_bounded(
+            errors in proptest::collection::vec("[a-z]{1,20}", 1..50),
+        ) {
+            let mut diag = SyncDiagnosticInfo::new();
+            let count = errors.len();
+            for error in errors {
+                diag.record_block_validation_error(error);
+            }
+            prop_assert!(diag.last_block_validation_errors.len() <= MAX_LAST_BLOCK_VALIDATION_ERRORS);
+            prop_assert_eq!(diag.total_block_validation_errors, count);
+        }
+
+        #[test]
+        fn processing_error_queue_bounded(
+            errors in proptest::collection::vec("[a-z]{1,20}", 1..50),
+        ) {
+            let mut diag = SyncDiagnosticInfo::new();
+            let count = errors.len();
+            for error in errors {
+                diag.record_block_processing_error(error);
+            }
+            prop_assert!(diag.last_block_processing_errors.len() <= MAX_LAST_BLOCK_VALIDATION_ERRORS);
+            prop_assert_eq!(diag.total_block_processing_errors, count);
+        }
+
+        #[test]
+        fn data_pull_error_queue_bounded(
+            errors in proptest::collection::vec("[a-z]{1,20}", 1..50),
+        ) {
+            let mut diag = SyncDiagnosticInfo::new();
+            let count = errors.len();
+            for error in errors {
+                diag.record_data_pull_error(error);
+            }
+            prop_assert!(diag.last_data_pull_errors.len() <= MAX_LAST_BLOCK_VALIDATION_ERRORS);
+            prop_assert_eq!(diag.total_data_pull_errors, count);
+        }
+    }
+
+    #[test]
+    fn validation_tracking_start_finish() {
+        let mut diag = SyncDiagnosticInfo::new();
+        let hash1 = BlockHash::default();
+        let mut h2_bytes = [0_u8; 32];
+        h2_bytes[0] = 1;
+        let hash2 = BlockHash::from(h2_bytes);
+
+        diag.record_validation_started(hash1);
+        assert_eq!(diag.active_validations_count(), 1);
+        assert!(diag.has_active_validations());
+
+        diag.record_validation_started(hash2);
+        assert_eq!(diag.active_validations_count(), 2);
+
+        diag.record_validation_finished(&hash1);
+        assert_eq!(diag.active_validations_count(), 1);
+
+        diag.record_validation_finished(&hash2);
+        assert_eq!(diag.active_validations_count(), 0);
+        assert!(!diag.has_active_validations());
+    }
+
+    #[rstest]
+    #[case::past_target(10, 11, false)]
+    #[case::caught_up(100, 100, false)]
+    #[case::at_capacity(200, 100, true)]
+    #[case::below_capacity(150, 100, false)]
+    fn is_queue_full_cases(
+        #[case] target: usize,
+        #[case] processed: usize,
+        #[case] expected_full: bool,
+    ) {
+        let state = ChainSyncState::new(true, false);
+        state.set_sync_target_height(target);
+        state.mark_processed(processed);
+        assert_eq!(state.is_queue_full(), expected_full);
+    }
+}

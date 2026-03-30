@@ -1071,26 +1071,6 @@ mod tests {
         Ok(())
     }
 
-    // ========================================================================
-    // FIFO Ordering Property Tests
-    // ========================================================================
-
-    #[cfg(test)]
-    mod fifo_properties {
-
-        use irys_types::UnixTimestamp;
-        use proptest::prelude::*;
-
-        prop_compose! {
-            fn unix_timestamps()(
-                // Realistic range: 2020-01-01 to 2030-01-01
-                secs in 1_577_836_800_u64..1_893_456_000_u64
-            ) -> UnixTimestamp {
-                UnixTimestamp::from_secs(secs)
-            }
-        }
-    }
-
     // Chunks should remain when there is an active ingress proof present for the data_root.
     #[tokio::test]
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {

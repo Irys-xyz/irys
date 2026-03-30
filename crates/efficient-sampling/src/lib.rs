@@ -38,7 +38,7 @@ impl Ranges {
             return Ok(range);
         };
 
-        let range = self.next_recall_range(step, seed, partition_hash);
+        let range = self.next_recall_range(step, seed, partition_hash)?;
         debug!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
         Ok(range)
     }
@@ -48,10 +48,19 @@ impl Ranges {
     }
 
     /// Picks next random (using seed as entropy) range idx in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval
-    pub fn next_recall_range(&mut self, step: u64, seed: &H256, partition_hash: &H256) -> usize {
+    pub fn next_recall_range(
+        &mut self,
+        step: u64,
+        seed: &H256,
+        partition_hash: &H256,
+    ) -> Result<usize> {
         // non consecutive vdf_steps is handled at mining level
-        if step != self.last_step_num + 1 {
-            panic!("Non consecutive vdf steps are not supported, last step num {}, current step num {}", self.last_step_num, step);
+        if step.checked_sub(1) != Some(self.last_step_num) {
+            return Err(eyre::eyre!(
+                "Non consecutive vdf steps are not supported, last step num {}, current step num {}",
+                self.last_step_num,
+                step
+            ));
         }
 
         let range = if self.last_range_pos == 0 {
@@ -62,12 +71,18 @@ impl Ranges {
             let mut hasher = sha::Sha256::new();
             hasher.update(&seed.0);
             hasher.update(&partition_hash.0);
-            let rng_seed: u32 = u32::from_be_bytes(hasher.finish()[28..32].try_into().unwrap());
+            let rng_seed: u32 = u32::from_be_bytes(
+                hasher.finish()[28..32]
+                    .try_into()
+                    .map_err(|_| eyre::eyre!("SHA256 slice [28..32] was not 4 bytes"))?,
+            );
             let mut rng = SimpleRNG::new(rng_seed);
 
-            let next_range_pos = (rng.next()
-                % TryInto::<u32>::try_into(self.last_range_pos).expect("Value exceeds u32::MAX"))
-                as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
+            let last_range_pos_u32 = u32::try_from(self.last_range_pos).map_err(|_| {
+                eyre::eyre!("last_range_pos {} exceeds u32::MAX", self.last_range_pos)
+            })?;
+            let next_range_pos = usize::try_from(rng.next() % last_range_pos_u32)
+                .map_err(|_| eyre::eyre!("range position exceeds usize"))?;
             let range = self.ranges[next_range_pos];
             self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
             self.last_range_pos -= 1;
@@ -76,7 +91,7 @@ impl Ranges {
 
         self.last_recall_ranges.insert(step, range);
         self.last_step_num = step;
-        range
+        Ok(range)
     }
 
     pub fn reinitialize(&mut self) {
@@ -92,34 +107,40 @@ impl Ranges {
             .retain(|k, _| *k > last_step_to_keep);
     }
 
-    pub fn new(num_recall_ranges_in_partition: usize) -> Self {
-        assert!(
-            num_recall_ranges_in_partition > 0,
-            "num_recall_ranges_in_partition must be > 0 (misconfiguration: partition size and/or recall range size)"
-        );
+    pub fn new(num_recall_ranges_in_partition: usize) -> Result<Self> {
+        if num_recall_ranges_in_partition == 0 {
+            return Err(eyre::eyre!(
+                "num_recall_ranges_in_partition must be > 0 (misconfiguration: partition size and/or recall range size)"
+            ));
+        }
         let mut ranges = Vec::with_capacity(num_recall_ranges_in_partition);
         for i in 0..num_recall_ranges_in_partition {
             ranges.push(i);
         }
-        Self {
+        Ok(Self {
             last_range_pos: num_recall_ranges_in_partition - 1,
             ranges,
             num_recall_ranges_in_partition,
             last_step_num: 0,
             last_recall_ranges: HashMap::new(),
-        }
+        })
     }
 
     /// Reconstructs recall ranges from given seeds assuming last step number + 1 is the step of the first seed
-    pub fn reconstruct(&mut self, next_steps: &H256List, partition_hash: &H256) {
+    pub fn reconstruct(&mut self, next_steps: &H256List, partition_hash: &H256) -> Result<()> {
         let step = self.last_step_num;
-        next_steps.0.iter().enumerate().for_each(|(i, seed)| {
-            self.next_recall_range(step + 1 + i as u64, seed, partition_hash);
-        });
+        next_steps.0.iter().enumerate().try_for_each(|(i, seed)| {
+            let offset =
+                u64::try_from(i).map_err(|_| eyre::eyre!("enumerate index {i} exceeds u64"))?;
+            self.next_recall_range(step + 1 + offset, seed, partition_hash)?;
+            Ok(())
+        })
     }
 
     pub fn reset_step(&mut self, step_num: u64) -> u64 {
-        reset_step(step_num, self.num_recall_ranges_in_partition as u64)
+        let num_ranges = u64::try_from(self.num_recall_ranges_in_partition)
+            .expect("num_recall_ranges_in_partition fits in u64 on all supported platforms");
+        reset_step(step_num, num_ranges)
     }
 }
 
@@ -149,8 +170,8 @@ pub fn get_recall_range(
     steps: &H256List,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
-    let mut ranges = Ranges::new(num_recall_ranges_in_partition);
-    ranges.reconstruct(steps, partition_hash);
+    let mut ranges = Ranges::new(num_recall_ranges_in_partition)?;
+    ranges.reconstruct(steps, partition_hash)?;
     if let Some(reconstructed_range) = ranges.get_last_recall_range() {
         Ok(reconstructed_range)
     } else {
@@ -186,7 +207,6 @@ mod tests {
     use super::*;
     use std::collections::hash_set::HashSet;
 
-    // Helper function to create test configs
     fn create_test_config(chunks: u64, recall_range: u64) -> ConsensusConfig {
         ConsensusConfig {
             num_chunks_in_partition: chunks,
@@ -197,30 +217,29 @@ mod tests {
 
     #[test]
     fn test_efficient_sampling() {
-        let num_recall_ranges = 100;
+        let num_recall_ranges: usize = 100;
         let partition_hash = H256::random();
-        let mut ranges = Ranges::new(100);
+        let mut ranges = Ranges::new(100).unwrap();
         let seed = H256::random();
 
         let mut got_ranges = HashSet::new();
 
-        // check for no repeated range index
         for i in 1..=num_recall_ranges {
-            let range = ranges.get_recall_range(i, &seed, &partition_hash).unwrap();
-            assert!(
-                (range as u64) < num_recall_ranges,
-                "Invalid range idx {range}"
-            );
+            let step = u64::try_from(i).unwrap();
+            let range = ranges
+                .get_recall_range(step, &seed, &partition_hash)
+                .unwrap();
+            assert!(range < num_recall_ranges, "Invalid range idx {range}");
             assert!(!got_ranges.contains(&range), "Repeated range {range}");
             got_ranges.insert(range);
 
-            // get the same cached range
-            let range2 = ranges.get_recall_range(i, &seed, &partition_hash).unwrap();
+            let range2 = ranges
+                .get_recall_range(step, &seed, &partition_hash)
+                .unwrap();
             assert_eq!(range, range2, "Cached range should be equal");
         }
 
-        // check ranges are reinitialized after all possible ranges are retrieved
-        assert_eq!(num_recall_ranges as usize, ranges.last_range_pos + 1,)
+        assert_eq!(num_recall_ranges, ranges.last_range_pos + 1);
     }
 
     #[test]
@@ -233,11 +252,15 @@ mod tests {
             seeds.0.push(H256::random());
         }
 
-        let mut ranges = Ranges::new(num_recall_ranges);
+        let mut ranges = Ranges::new(num_recall_ranges).unwrap();
 
         for step in 1..=num_recall_ranges {
             let range = ranges
-                .get_recall_range(step as u64, &seeds[step - 1], &partition_hash)
+                .get_recall_range(
+                    u64::try_from(step).unwrap(),
+                    &seeds[step - 1],
+                    &partition_hash,
+                )
                 .unwrap();
             let res = recall_range_is_valid(
                 range,
@@ -313,12 +336,10 @@ mod tests {
 
         #[test]
         fn test_large_number_handling() {
-            // Test with large numbers that might cause overflow in naive implementations
             let config = create_test_config(u64::MAX - 1, u64::MAX);
             let result = num_recall_ranges_in_partition(&config);
             assert_eq!(result, 1, "Should handle near-maximum values");
 
-            // Test with large dividend and small divisor
             let config2 = create_test_config(1_000_000_000, 3);
             let result2 = num_recall_ranges_in_partition(&config2);
             let expected2 = 1_000_000_000_u64.div_ceil(3);
@@ -327,26 +348,21 @@ mod tests {
 
         #[test]
         fn test_integration_with_ranges_struct() {
-            let configs_with_remainders = [
-                (1000, 800), // Should create Ranges with 2 ranges
-                (801, 800),  // Should create Ranges with 2 ranges
-                (1601, 800), // Should create Ranges with 3 ranges
-            ];
+            let configs_with_remainders = [(1000, 800), (801, 800), (1601, 800)];
 
             for (chunks, recall) in configs_with_remainders {
                 let config = create_test_config(chunks, recall);
                 let num_ranges = num_recall_ranges_in_partition(&config);
 
-                // Should be able to create a Ranges struct with this count
-                let ranges = Ranges::new(num_ranges as usize);
+                let nr = usize::try_from(num_ranges).unwrap();
+                let ranges = Ranges::new(nr).unwrap();
                 assert_eq!(
-                    ranges.num_recall_ranges_in_partition, num_ranges as usize,
+                    ranges.num_recall_ranges_in_partition, nr,
                     "Ranges struct should initialize with ceiling division result"
                 );
 
-                // Verify the ranges vector has the right capacity and contents
-                assert_eq!(ranges.ranges.len(), num_ranges as usize);
-                assert_eq!(ranges.last_range_pos, num_ranges as usize - 1);
+                assert_eq!(ranges.ranges.len(), nr);
+                assert_eq!(ranges.last_range_pos, nr - 1);
             }
         }
 
@@ -374,56 +390,9 @@ mod tests {
         }
 
         #[test]
-        fn test_range_exhaustion_with_ceiling() {
-            let config = create_test_config(101, 10); // Results in 11 ranges
-            let num_ranges = num_recall_ranges_in_partition(&config);
-            assert_eq!(num_ranges, 11);
-
-            let partition_hash = H256::random();
-            let mut ranges = Ranges::new(num_ranges as usize);
-
-            // Generate seeds for each step
-            let mut seeds = Vec::new();
-            for _ in 0..num_ranges {
-                seeds.push(H256::random());
-            }
-
-            let mut got_ranges = HashSet::new();
-
-            // Exhaust all ranges
-            for i in 1..=num_ranges {
-                let range = ranges
-                    .get_recall_range(i, &seeds[(i - 1) as usize], &partition_hash)
-                    .unwrap();
-                assert!(
-                    (range as u64) < num_ranges,
-                    "Invalid range idx {} for {} ranges",
-                    range,
-                    num_ranges
-                );
-                assert!(
-                    !got_ranges.contains(&range),
-                    "Repeated range {} at step {}",
-                    range,
-                    i
-                );
-                got_ranges.insert(range);
-            }
-
-            // Verify all ranges were used
-            assert_eq!(
-                got_ranges.len(),
-                num_ranges as usize,
-                "Should have used all {} ranges",
-                num_ranges
-            );
-        }
-
-        #[test]
         fn test_validation_with_partial_last_range() {
-            // Config with partial last range (101 chunks / 10 per range = 11 ranges)
             let config = create_test_config(101, 10);
-            let num_ranges = num_recall_ranges_in_partition(&config) as usize;
+            let num_ranges = usize::try_from(num_recall_ranges_in_partition(&config)).unwrap();
             let partition_hash = H256::random();
 
             let mut seeds = H256List(Vec::new());
@@ -431,11 +400,15 @@ mod tests {
                 seeds.0.push(H256::random());
             }
 
-            let mut ranges = Ranges::new(num_ranges);
+            let mut ranges = Ranges::new(num_ranges).unwrap();
 
             for step in 1..=num_ranges {
                 let range = ranges
-                    .get_recall_range(step as u64, &seeds[step - 1], &partition_hash)
+                    .get_recall_range(
+                        u64::try_from(step).unwrap(),
+                        &seeds[step - 1],
+                        &partition_hash,
+                    )
                     .unwrap();
                 let res = recall_range_is_valid(
                     range,
@@ -449,6 +422,152 @@ mod tests {
                     step
                 );
             }
+        }
+    }
+
+    mod proptest_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn reset_step_idempotent(
+                step in 1_u64..=100_000,
+                num_ranges in 1_u64..=1000,
+            ) {
+                let reset = reset_step(step, num_ranges);
+                let double_reset = reset_step(reset, num_ranges);
+                prop_assert_eq!(reset, double_reset);
+            }
+
+            #[test]
+            fn reset_step_within_bounds(
+                step in 1_u64..=100_000,
+                num_ranges in 1_u64..=1000,
+            ) {
+                let reset = reset_step(step, num_ranges);
+                prop_assert!(reset >= 1);
+                prop_assert!(reset <= step);
+            }
+
+            #[test]
+            fn reset_step_cycle_boundary(
+                cycle in 0_u64..=100,
+                num_ranges in 1_u64..=1000,
+            ) {
+                let first_step = cycle * num_ranges + 1;
+                let reset = reset_step(first_step, num_ranges);
+                prop_assert_eq!(reset, first_step);
+            }
+
+            #[test]
+            fn sampling_uniqueness(
+                num_ranges in 1_usize..=50,
+                seed_bytes in proptest::array::uniform32(0_u8..),
+                hash_bytes in proptest::array::uniform32(0_u8..),
+            ) {
+                let mut ranges = Ranges::new(num_ranges).unwrap();
+                let seed = H256(seed_bytes);
+                let partition_hash = H256(hash_bytes);
+                let mut seen = HashSet::new();
+                for step in 1..=num_ranges {
+                    let r = ranges.get_recall_range(u64::try_from(step).unwrap(), &seed, &partition_hash).unwrap();
+                    prop_assert!(seen.insert(r), "duplicate range index {} at step {}", r, step);
+                }
+            }
+
+            #[test]
+            fn sampling_determinism(
+                num_ranges in 1_usize..=30,
+                seed_bytes in proptest::array::uniform32(0_u8..),
+                hash_bytes in proptest::array::uniform32(0_u8..),
+            ) {
+                let seed = H256(seed_bytes);
+                let partition_hash = H256(hash_bytes);
+
+                let mut ranges_a = Ranges::new(num_ranges).unwrap();
+                let mut result_a = Vec::with_capacity(num_ranges);
+                for step in 1..=num_ranges {
+                    result_a.push(ranges_a.get_recall_range(u64::try_from(step).unwrap(), &seed, &partition_hash).unwrap());
+                }
+
+                let mut ranges_b = Ranges::new(num_ranges).unwrap();
+                let mut result_b = Vec::with_capacity(num_ranges);
+                for step in 1..=num_ranges {
+                    result_b.push(ranges_b.get_recall_range(u64::try_from(step).unwrap(), &seed, &partition_hash).unwrap());
+                }
+
+                prop_assert_eq!(result_a, result_b);
+            }
+        }
+    }
+
+    mod edge_case_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(0, 5, "zero ranges requested")]
+        #[case(1, 0, "zero available ranges")]
+        #[case(100, 1, "only 1 range available")]
+        fn k_gt_n_handling(#[case] k: usize, #[case] n: usize, #[case] description: &str) {
+            if n == 0 {
+                // Ranges::new(0) must return Err — zero partition ranges is a misconfiguration.
+                let result = Ranges::new(0);
+                assert!(
+                    result.is_err(),
+                    "{}: Ranges::new(0) should be Err",
+                    description
+                );
+                return;
+            }
+            let seed = H256::random();
+            let partition_hash = H256::random();
+            let mut ranges = Ranges::new(n).unwrap();
+            let samples: Vec<usize> = (1..=k)
+                .map(|step| {
+                    ranges
+                        .get_recall_range(u64::try_from(step).unwrap(), &seed, &partition_hash)
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                samples.len(),
+                k,
+                "{}: expected {} samples, got {}",
+                description,
+                k,
+                samples.len()
+            );
+        }
+
+        #[rstest]
+        #[case(0, 10, "recall_range out of bounds (0, 10 ranges)")]
+        #[case(10, 10, "recall_range equals num_ranges (boundary)")]
+        #[case(99, 5, "recall_range far exceeds num_ranges")]
+        fn recall_range_is_valid_err_path(
+            #[case] bad_range: usize,
+            #[case] num_ranges: usize,
+            #[case] description: &str,
+        ) {
+            let partition_hash = H256::random();
+            let mut seeds = H256List(Vec::new());
+            seeds.0.push(H256::random());
+
+            let valid_range = get_recall_range(num_ranges, &seeds, &partition_hash).unwrap();
+            let invalid_range = if bad_range == valid_range {
+                num_ranges
+            } else {
+                bad_range
+            };
+            let result = recall_range_is_valid(invalid_range, num_ranges, &seeds, &partition_hash);
+            assert!(
+                result.is_err(),
+                "{}: expected Err for range {} (valid was {})",
+                description,
+                invalid_range,
+                valid_range
+            );
         }
     }
 }

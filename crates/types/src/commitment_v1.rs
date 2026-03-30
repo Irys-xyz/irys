@@ -618,19 +618,4 @@ mod tests {
     ) {
         assert_eq!(commitment_type.length(), expected_length);
     }
-
-    #[test]
-    fn test_unpledge_rlp_roundtrip() {
-        use bytes::BytesMut;
-        let original = CommitmentTypeV1::Unpledge {
-            pledge_count_before_executing: 3,
-            partition_hash: H256::random(),
-        };
-        let mut buf = BytesMut::new();
-        original.encode(&mut buf);
-        let mut slice = buf.as_ref();
-        let decoded = CommitmentTypeV1::decode(&mut slice).unwrap();
-        assert_eq!(original, decoded);
-        assert!(slice.is_empty());
-    }
 }

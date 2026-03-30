@@ -12,7 +12,9 @@ pub(crate) fn set_test_time(nanos: u64) {
 
 pub(crate) fn advance_test_time(duration: Duration) {
     let current = TEST_TIME_OVERRIDE.load(Ordering::SeqCst);
-    let new_time = current.saturating_add(duration.as_nanos() as u64);
+    // Saturate at u64::MAX: test durations exceeding 584 years are not meaningful.
+    let delta = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    let new_time = current.saturating_add(delta);
     TEST_TIME_OVERRIDE.store(new_time, Ordering::SeqCst);
 }
 

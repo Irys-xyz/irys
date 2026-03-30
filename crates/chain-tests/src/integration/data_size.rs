@@ -163,6 +163,22 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
 
     genesis_node.mine_blocks(3).await?;
 
+    // Wait for chunk migration to complete (async relative to block height)
+    genesis_node
+        .wait_for_chunk_http(
+            DataLedger::Submit,
+            LedgerChunkOffset::from(8),
+            seconds_to_wait,
+        )
+        .await?;
+    genesis_node
+        .wait_for_chunk_http(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(5),
+            seconds_to_wait,
+        )
+        .await?;
+
     // Verify the chunks of the first and second tx
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
@@ -233,6 +249,15 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     }
 
     genesis_node.mine_blocks(3).await?;
+
+    // Wait for chunk migration to complete before verifying
+    genesis_node
+        .wait_for_chunk_http(
+            DataLedger::Submit,
+            LedgerChunkOffset::from(11),
+            seconds_to_wait,
+        )
+        .await?;
 
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);

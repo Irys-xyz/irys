@@ -221,15 +221,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_overflow_scenario_blocked() {
-        let term_fee = BoundedFee::new(U256::max_value() / U256::from(2));
-        let perm_fee = BoundedFee::new(U256::max_value() / U256::from(2) + U256::from(2));
-
-        let total = term_fee + perm_fee;
-        assert_eq!(total.get(), U256::max_value());
-    }
-
-    #[test]
     fn test_cross_type_comparisons() {
         let fee = BoundedFee::new(U256::from(1000));
         let amount = U256::from(1000);

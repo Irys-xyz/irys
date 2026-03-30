@@ -409,7 +409,9 @@ mod tests {
         providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
+    use reth_e2e_test_utils::{
+        NodeHelperType, transaction::TransactionTestContext, wallet::Wallet,
+    };
     use reth_payload_primitives::PayloadBuilderAttributes as _;
 
     use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
@@ -732,24 +734,21 @@ mod tests {
         Ok(())
     }
 
-    // expect that shadow txs get executed first, no matter what. Normal txs get executed only afterwards
     #[test_log::test(tokio::test)]
     async fn heavy_test_shadow_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
-        // Create normal transactions with high gas price
         let normal_tx_hashes = create_and_submit_multiple_normal_txs(
             &mut node,
             3,
             0,
-            10_000_000_000_u128, // High gas price
+            10_000_000_000_u128,
             Address::random(),
             &ctx.normal_signer,
         )
         .await?;
 
-        // Create shadow transactions with lower effective priority
         let shadow_tx = ShadowTransaction::from_type_id(UNSTAKE_ID, ctx.target_account.address());
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
@@ -766,50 +765,10 @@ mod tests {
         Ok(())
     }
 
-    // test decrementing when account does not exist (expect that even receipt not created)
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_decrement_nonexistent_account() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Create a random address that has never existed on chain
-        let nonexistent_address = Address::random();
-
-        // Verify the account doesn't exist
-        let account = node
-            .inner
-            .provider
-            .basic_account(&nonexistent_address)
-            .unwrap();
-        assert!(account.is_none(), "Test account should not exist");
-
-        // Create and submit a shadow transaction trying to decrement balance of non-existent account
-        let shadow_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Stake(BalanceDecrement {
-                amount: U256::ONE,
-                target: nonexistent_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-            alloy_primitives::FixedBytes::ZERO,
-        );
-        let shadow_tx =
-            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-
-        // Submit a normal transaction to ensure there's something in the mempool
-        let _normal_tx_hash = create_and_submit_normal_tx(
-            &mut node,
-            0,
-            U256::from(1000),
-            1_000_000_000_u128,
-            Address::random(),
-            &ctx.normal_signer,
-        )
-        .await?;
-
-        // Attempt to produce a new block - this should fail because the shadow transaction
-        // tries to deduct priority fees from a non-existent account
-
-        // Set up the payload attributes with shadow txs
+    async fn assert_nonexistent_account_fails_block_production(
+        node: &mut NodeHelperType<IrysEthereumNode>,
+        shadow_tx: EthPooledTransaction,
+    ) -> eyre::Result<()> {
         node.payload.timestamp += 1;
         let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
         let attributes = IrysPayloadBuilderAttributes {
@@ -818,24 +777,20 @@ mod tests {
             shadow_txs: vec![shadow_tx],
         };
 
-        // Send the payload - this will trigger block building
         node.payload
             .payload_builder
             .send_new_payload(attributes.clone())
             .await
             .unwrap()?;
 
-        // Wait briefly for the payload builder to process
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Try to get the payload - this should return an error
         let result = node
             .payload
             .payload_builder
             .best_payload(attributes.payload_id())
             .await;
 
-        // Verify the payload build failed with an error
         let err = result
             .expect("Expected Some result from best_payload")
             .expect_err("Block production should have failed due to non-existent account");
@@ -847,6 +802,25 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    #[rstest::rstest]
+    #[case::stake(stake)]
+    #[case::unpledge(unpledge)]
+    #[case::pledge(pledge)]
+    async fn test_nonexistent_account(
+        #[case] make_shadow_tx: fn(Address) -> ShadowTransaction,
+    ) -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+        let nonexistent_address = Address::random();
+
+        let shadow_tx = make_shadow_tx(nonexistent_address);
+        let shadow_tx =
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+
+        assert_nonexistent_account_fails_block_production(&mut node, shadow_tx).await
     }
 
     // test decrementing when account exists but not enough balance (expect block production failure)
@@ -1737,92 +1711,48 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge transaction (priority-fee-only at inclusion)
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_unpledge_fee_only() -> eyre::Result<()> {
+    async fn assert_fee_only_shadow_tx(
+        shadow_tx_fn: impl Fn(Address) -> ShadowTransaction,
+        label: &str,
+    ) -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
-        // Use a funded account
         let target_address = ctx.normal_signer.address();
-
-        let balance_after_initial_funding = get_balance(&node.inner, target_address);
+        let balance_before = get_balance(&node.inner, target_address);
         assert!(
-            balance_after_initial_funding > U256::ZERO,
+            balance_before > U256::ZERO,
             "Target account should have initial balance"
         );
 
-        // Create unpledge transaction: fee-only via priority fee
-        let unpledge_tx = unpledge(target_address);
-        let unpledge_tx =
-            sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let unpledge_tx_hash = *unpledge_tx.hash();
+        let tx = shadow_tx_fn(target_address);
+        let tx = sign_shadow_tx(tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let tx_hash = *tx.hash();
 
-        // Mine block with unpledge transaction
-        let block_payload = mine_block(&mut node, vec![unpledge_tx]).await?;
+        let block_payload = mine_block(&mut node, vec![tx]).await?;
 
-        // Verify transaction is included in block
-        assert_txs_in_block(&block_payload, &[unpledge_tx_hash], "Unpledge transaction");
-
-        // Verify balance decreased by exactly the priority fee
+        assert_txs_in_block(&block_payload, &[tx_hash], label);
         assert_balance_change(
             &node,
             target_address,
-            balance_after_initial_funding,
+            balance_before,
             U256::from(DEFAULT_PRIORITY_FEE),
             false,
-            "Target balance should decrease by priority fee only on unpledge",
+            &format!("Target balance should decrease by priority fee only on {label}"),
         );
 
         Ok(())
     }
 
-    /// Test unstake-debit transaction (priority-fee-only at inclusion)
     #[test_log::test(tokio::test)]
-    async fn heavy_test_unstake_debit_fee_only() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Use a funded account
-        let target_address = ctx.normal_signer.address();
-
-        let balance_after_initial_funding = get_balance(&node.inner, target_address);
-        assert!(
-            balance_after_initial_funding > U256::ZERO,
-            "Target account should have initial balance"
-        );
-
-        // Create unstake-debit transaction: fee-only via priority fee
-        let unstake_debit_tx = unstake_debit(target_address);
-        let unstake_debit_tx = sign_shadow_tx(
-            unstake_debit_tx,
-            &ctx.block_producer_a,
-            DEFAULT_PRIORITY_FEE,
-        )
-        .await?;
-        let unstake_debit_tx_hash = *unstake_debit_tx.hash();
-
-        // Mine block with unstake-debit transaction
-        let block_payload = mine_block(&mut node, vec![unstake_debit_tx]).await?;
-
-        // Verify transaction is included in block
-        assert_txs_in_block(
-            &block_payload,
-            &[unstake_debit_tx_hash],
-            "UnstakeDebit transaction",
-        );
-
-        // Verify balance decreased by exactly the priority fee
-        assert_balance_change(
-            &node,
-            target_address,
-            balance_after_initial_funding,
-            U256::from(DEFAULT_PRIORITY_FEE),
-            false,
-            "Target balance should decrease by priority fee only on UnstakeDebit",
-        );
-
-        Ok(())
+    #[rstest::rstest]
+    #[case::unpledge(unpledge, "Unpledge")]
+    #[case::unstake_debit(unstake_debit, "UnstakeDebit")]
+    async fn test_fee_only_shadow_tx(
+        #[case] make_shadow_tx: fn(Address) -> ShadowTransaction,
+        #[case] label: &str,
+    ) -> eyre::Result<()> {
+        assert_fee_only_shadow_tx(make_shadow_tx, label).await
     }
 
     /// Test pledge and unpledge transaction ordering
@@ -1947,220 +1877,6 @@ mod tests {
         assert_eq!(
             final_balance, expected_final_balance,
             "Final balance should reflect pledge/refund operations plus priority fees"
-        );
-
-        Ok(())
-    }
-
-    /// Test unpledge on non-existent account fails block production
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_unpledge_nonexistent_account() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Create a random address that has never existed on chain
-        let nonexistent_address = Address::random();
-
-        // Verify the account doesn't exist
-        let account = node
-            .inner
-            .provider
-            .basic_account(&nonexistent_address)
-            .unwrap();
-        assert!(account.is_none(), "Test account should not exist");
-
-        // Create unpledge transaction for non-existent account (priority-fee debit should fail)
-        let unpledge_tx = unpledge(nonexistent_address);
-        let unpledge_tx =
-            sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-
-        // Attempt to produce a new block - this should fail because the unpledge transaction
-        // tries to deduct priority fees from a non-existent account
-
-        // Set up the payload attributes with shadow txs
-        node.payload.timestamp += 1;
-        let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        let attributes = IrysPayloadBuilderAttributes {
-            inner: base_attributes.inner,
-            id: base_attributes.id,
-            shadow_txs: vec![unpledge_tx],
-        };
-
-        // Send the payload - this will trigger block building
-        node.payload
-            .payload_builder
-            .send_new_payload(attributes.clone())
-            .await
-            .unwrap()?;
-
-        // Wait briefly for the payload builder to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Try to get the payload - this should return an error
-        let result = node
-            .payload
-            .payload_builder
-            .best_payload(attributes.payload_id())
-            .await;
-
-        // Verify the payload build failed with an error
-        let err = result
-            .expect("Expected Some result from best_payload")
-            .expect_err(
-                "Block production should have failed due to non-existent account for unpledge",
-            );
-
-        let error_msg = format!("{err:?}");
-        assert!(
-            error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
-        );
-
-        Ok(())
-    }
-
-    /// Test pledge on non-existent account fails
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_pledge_nonexistent_account() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Create a random address that has never existed on chain
-        let nonexistent_address = Address::random();
-
-        // Verify the account doesn't exist
-        let account = node
-            .inner
-            .provider
-            .basic_account(&nonexistent_address)
-            .unwrap();
-        assert!(account.is_none(), "Test account should not exist");
-
-        // Create pledge transaction for non-existent account
-        let pledge_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Pledge(BalanceDecrement {
-                amount: U256::ONE,
-                target: nonexistent_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-            alloy_primitives::FixedBytes::ZERO,
-        );
-        let pledge_tx =
-            sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-
-        // Submit a normal transaction to ensure there's something in the mempool
-        let _normal_tx_hash = create_and_submit_normal_tx(
-            &mut node,
-            0,
-            U256::from(1000),
-            1_000_000_000_u128,
-            Address::random(),
-            &ctx.normal_signer,
-        )
-        .await?;
-
-        // Attempt to produce a new block - this should fail because the pledge transaction
-        // tries to deduct priority fees from a non-existent account
-
-        // Set up the payload attributes with shadow txs
-        node.payload.timestamp += 1;
-        let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        let attributes = IrysPayloadBuilderAttributes {
-            inner: base_attributes.inner,
-            id: base_attributes.id,
-            shadow_txs: vec![pledge_tx],
-        };
-
-        // Send the payload - this will trigger block building
-        node.payload
-            .payload_builder
-            .send_new_payload(attributes.clone())
-            .await
-            .unwrap()?;
-
-        // Wait briefly for the payload builder to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Try to get the payload - this should return an error
-        let result = node
-            .payload
-            .payload_builder
-            .best_payload(attributes.payload_id())
-            .await;
-
-        // Verify the payload build failed with an error
-        let err = result
-            .expect("Expected Some result from best_payload")
-            .expect_err(
-                "Block production should have failed due to non-existent account for pledge",
-            );
-
-        let error_msg = format!("{err:?}");
-        assert!(
-            error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
-        );
-
-        Ok(())
-    }
-
-    /// Test that shadow transactions with priority fees distribute fees to beneficiary
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_shadow_tx_priority_fee_distribution() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let (mut node, ctx) = ctx.get_single_node()?;
-
-        // Get initial balances
-        let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
-        let target_address = ctx.target_account.address();
-
-        // Fund the target account first to ensure it can pay priority fees
-        let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
-        let fund_tx = ShadowTransaction::new_v1(
-            TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount: funding_amount,
-            }),
-            alloy_primitives::FixedBytes::ZERO,
-        );
-        let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
-        mine_block(&mut node, vec![fund_tx]).await?;
-
-        let initial_beneficiary_balance = get_balance(&node.inner, beneficiary);
-        let initial_target_balance = get_balance(&node.inner, target_address);
-
-        // Create shadow transaction with significant priority fee
-        let priority_fee_per_gas = 10_000_000_000_u128; // 10 Gwei
-        // Use unstake instead of block_reward so there's a target for priority fee
-        let shadow_tx = unstake(target_address);
-        let shadow_tx_raw = shadow_tx.compose(1, priority_fee_per_gas);
-        let expected_priority_fee = U256::from(priority_fee_per_gas);
-
-        // Sign and prepare the transaction using the helper (signed by block producer)
-        let shadow_tx_pooled = sign_tx(shadow_tx_raw, &ctx.block_producer_a).await;
-
-        // Mine block with shadow transaction
-        let _block_payload = mine_block(&mut node, vec![shadow_tx_pooled]).await?;
-
-        // Verify beneficiary received the priority fee
-        assert_balance_change(
-            &node,
-            beneficiary,
-            initial_beneficiary_balance,
-            expected_priority_fee,
-            true,
-            "Beneficiary should receive priority fee",
-        );
-
-        // Verify target balance changed: received unstake amount (1 wei) minus priority fee
-        let unstake_amount = U256::from(1); // unstake gives 1 wei
-        let net_decrease = expected_priority_fee - unstake_amount; // Fee is larger than unstake amount
-        assert_balance_change(
-            &node,
-            target_address,
-            initial_target_balance,
-            net_decrease,
-            false, // This is a decrease
-            "Target balance should decrease by net of priority fee minus unstake amount",
         );
 
         Ok(())

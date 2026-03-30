@@ -118,55 +118,31 @@ impl From<U256> for alloy_primitives::U256 {
 #[cfg(test)]
 mod u256_le_be_to_from_tests {
     use super::*;
+    use proptest::prelude::*;
 
-    #[test]
-    fn roundtrip_le() {
-        let x = U256::from(0xdead_beef_cafe_babe_0123_4567_89ab_cdef_u128);
-        assert_eq!(U256::from_le_bytes(x.to_le_bytes()), x);
-    }
-
-    #[test]
-    fn roundtrip_be() {
-        let x = U256::from(0xfeed_face_baad_f00d_dead_beef_cafe_babe_u128);
-        assert_eq!(U256::from_be_bytes(x.to_be_bytes()), x);
-    }
-
-    #[test]
-    fn alloy_to_custom_and_back() {
-        // Pick a value exercising all limbs: 0x010203…1F
-        let mut raw = [0_u8; 32];
-        for i in 0..32 {
-            raw[i] = i as u8 + 1;
+    proptest! {
+        #[test]
+        fn le_roundtrip(raw in prop::array::uniform32(any::<u8>())) {
+            let x = U256::from_le_bytes(raw);
+            prop_assert_eq!(U256::from_le_bytes(x.to_le_bytes()), x);
         }
 
-        let alloy_original = alloy_primitives::U256::from_le_bytes(raw);
-
-        // alloy -> custom
-        let custom: U256 = alloy_original.into();
-        assert_eq!(custom.to_le_bytes(), raw);
-
-        // custom -> alloy
-        let alloy_roundtrip: alloy_primitives::U256 = custom.into();
-        assert_eq!(alloy_original, alloy_roundtrip);
-    }
-
-    #[test]
-    fn custom_to_alloy_and_back() {
-        // Same bytes but reverse order to ensure coverage.
-        let mut raw = [0_u8; 32];
-        for i in 0..32 {
-            raw[i] = 255 - i as u8;
+        #[test]
+        fn be_roundtrip(raw in prop::array::uniform32(any::<u8>())) {
+            let x = U256::from_le_bytes(raw);
+            prop_assert_eq!(U256::from_be_bytes(x.to_be_bytes()), x);
         }
 
-        let custom_original = U256::from_le_bytes(raw);
+        #[test]
+        fn alloy_conversion_roundtrip(raw in prop::array::uniform32(any::<u8>())) {
+            let custom_original = U256::from_le_bytes(raw);
 
-        // custom -> alloy
-        let alloy_val: alloy_primitives::U256 = custom_original.into();
-        assert_eq!(alloy_val.to_le_bytes(), raw);
+            let alloy_val: alloy_primitives::U256 = custom_original.into();
+            prop_assert_eq!(alloy_val.to_le_bytes(), raw);
 
-        // alloy -> custom
-        let custom_roundtrip: U256 = alloy_val.into();
-        assert_eq!(custom_original, custom_roundtrip);
+            let custom_roundtrip: U256 = alloy_val.into();
+            prop_assert_eq!(custom_original, custom_roundtrip);
+        }
     }
 }
 
@@ -243,19 +219,17 @@ pub use crate::h256::H256;
 impl H256 {
     /// Decodes a H256 from a string. This will panic if the input is malformed!
     pub fn from_base58(string: &str) -> Self {
-        let decoded = string.from_base58().expect("to parse base58 string");
-        let array: [u8; 32] = decoded.as_slice()[..32]
-            .try_into()
-            .expect("Decoded base58 string should have at least 32 bytes");
-
-        Self(array)
+        Self::from_base58_result(string).expect("to parse base58 string into H256")
     }
 
     pub fn from_base58_result(string: &str) -> eyre::Result<Self> {
         let decoded = string
             .from_base58()
             .map_err(|e| eyre!("Invalid base58 string: {:?}", &e))?;
-        let array: [u8; 32] = decoded.as_slice()[..32].try_into()?; // shouldn't happen
+        let array: [u8; 32] = decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| eyre!("Decoded base58 has {} bytes, expected 32", decoded.len()))?;
         Ok(Self(array))
     }
 }
@@ -946,20 +920,68 @@ pub mod unix_timestamp_string_serde {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use proptest::prelude::*;
     use serde_json::json;
 
-    #[test]
-    fn test_u256_rlp_round_trip() {
-        // setup
-        let data = U256::one();
+    fn arb_u256() -> impl Strategy<Value = U256> {
+        prop::array::uniform32(any::<u8>()).prop_map(U256::from_le_bytes)
+    }
 
-        // action
-        let mut buffer = vec![];
-        Encodable::encode(&data, &mut buffer);
-        let decoded: U256 = Decodable::decode(&mut buffer.as_slice()).unwrap();
+    proptest! {
+        #[test]
+        fn u256_rlp_roundtrip(val in arb_u256()) {
+            let mut buffer = vec![];
+            Encodable::encode(&val, &mut buffer);
+            let decoded: U256 = Decodable::decode(&mut buffer.as_slice()).unwrap();
+            prop_assert_eq!(val, decoded);
+        }
 
-        // Assert
-        assert_eq!(data, decoded);
+        #[test]
+        fn u256_compact_roundtrip(val in arb_u256()) {
+            let mut buf = BytesMut::with_capacity(32);
+            let bytes_written = val.to_compact(&mut buf);
+            prop_assert_eq!(bytes_written, 32);
+
+            let expected_bytes = {
+                let mut temp = [0_u8; 32];
+                val.to_big_endian(&mut temp);
+                temp
+            };
+            prop_assert_eq!(&buf[..], &expected_bytes[..]);
+
+            let (decoded, remaining) = U256::from_compact(&buf[..], buf.len());
+            prop_assert!(remaining.is_empty(), "U256 from_compact left trailing bytes");
+            prop_assert_eq!(val, decoded);
+        }
+
+        #[test]
+        fn h256_rlp_roundtrip(raw in prop::array::uniform32(any::<u8>())) {
+            let data = H256(raw);
+            let mut buffer = vec![];
+            Encodable::encode(&data, &mut buffer);
+            let decoded: H256 = Decodable::decode(&mut buffer.as_slice()).unwrap();
+            prop_assert_eq!(data, decoded);
+        }
+
+        #[test]
+        fn h256_compact_roundtrip(raw in prop::array::uniform32(any::<u8>())) {
+            let original = H256(raw);
+            let mut buf = BytesMut::with_capacity(32);
+            original.to_compact(&mut buf);
+            let (decoded, remaining) = H256::from_compact(&buf[..], buf.len());
+            prop_assert_eq!(original, decoded);
+            prop_assert!(remaining.is_empty(), "H256 from_compact left trailing bytes");
+        }
+
+        #[test]
+        fn base64_compact_roundtrip(data in prop::collection::vec(any::<u8>(), 0..256)) {
+            let original = Base64::from(data);
+            let mut buf = BytesMut::with_capacity(original.0.len());
+            original.to_compact(&mut buf);
+            let (decoded, remaining) = Base64::from_compact(&buf[..], buf.len());
+            prop_assert_eq!(original, decoded);
+            prop_assert!(remaining.is_empty(), "Base64 from_compact left trailing bytes");
+        }
     }
 
     #[test]
@@ -984,97 +1006,15 @@ mod tests {
         let mut buffer1 = vec![];
         data1.encode(&mut buffer1);
         let decoded = Test::decode(&mut &buffer1[..]).unwrap();
-        // Some(0) is decoded as None
+        // Some(0) is decoded as None -- RLP encodes zero as empty, indistinguishable from None
         assert_ne!(data1, decoded);
 
         let mut buffer2 = vec![];
         data2.encode(&mut buffer2);
-        // unequal(!) encodings
-        // note: why? seems like if we serialise a Some value it gets an additional trailing `128` on the binary
-        // note: if we really needed to have `0`, we could modify the encoding u256 uses to treat 0 as a different value
+        // Unequal encodings: Some value gets an additional trailing byte
         assert_ne!(buffer1, buffer2);
         let decoded2 = Test::decode(&mut &buffer2[..]).unwrap();
-        // but decodes "correctly"
         assert_eq!(decoded2, data2);
-    }
-
-    #[test]
-    fn test_u256_to_compact() {
-        // Create a U256 value to test
-        let original_value = U256::from(123456789_u64);
-
-        // Create a buffer to write the compact representation into
-        let mut buf = BytesMut::with_capacity(32);
-
-        // Call the to_compact method
-        let bytes_written = original_value.to_compact(&mut buf);
-
-        // Ensure that the number of bytes written is 32 (for U256)
-        assert_eq!(bytes_written, 32);
-
-        // Check that the buffer now contains the correct big-endian representation
-        let expected_bytes = {
-            let mut temp = [0_u8; 32];
-            original_value.to_big_endian(&mut temp);
-            temp
-        };
-        assert_eq!(&buf[..], &expected_bytes[..]);
-    }
-
-    #[test]
-    fn test_u256_compact_round_trip() {
-        // Create a U256 value and convert it to compact bytes
-        let original_value = U256::from(123456789_u64);
-        let mut buf = BytesMut::with_capacity(32);
-        original_value.to_compact(&mut buf);
-
-        // Call from_compact to convert the bytes back to U256
-        let (decoded_value, _) = U256::from_compact(&buf[..], buf.len());
-
-        // Check that the decoded value matches the original value
-        assert_eq!(decoded_value, original_value);
-    }
-
-    #[test]
-    fn test_base64_compact_round_trip() {
-        // Create a Base64 value and convert it to compact bytes
-        let original_value = Base64::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        let mut buf = BytesMut::with_capacity(original_value.0.len());
-        original_value.to_compact(&mut buf);
-
-        // Call from_compact to convert the bytes back to Base64
-        let (decoded_value, _) = Base64::from_compact(&buf[..], buf.len());
-
-        // Check that the decoded value matches the original value
-        assert_eq!(decoded_value, original_value);
-    }
-
-    #[test]
-    fn test_h256_rlp_round_trip() {
-        // setup
-        let data = H256::random();
-
-        // action
-        let mut buffer = vec![];
-        Encodable::encode(&data, &mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
-
-        // Assert
-        assert_eq!(data, decoded);
-    }
-
-    #[test]
-    fn test_h256_compact_round_trip() {
-        // Create a H256 value and convert it to compact bytes
-        let original_value = H256::random();
-        let mut buf = BytesMut::with_capacity(32);
-        original_value.to_compact(&mut buf);
-
-        // Call from_compact to convert the bytes back to H256
-        let (decoded_value, _) = H256::from_compact(&buf[..], buf.len());
-
-        // Check that the decoded value matches the original value
-        assert_eq!(decoded_value, original_value);
     }
 
     #[test]
@@ -1120,15 +1060,12 @@ mod tests {
             value: U256,
         }
 
-        // Test with 1e18
         let one_e18 = U256::from(1_000_000_000_000_000_000_u64);
         let test_struct = TestStruct { value: one_e18 };
 
-        // Serialize to JSON
         let serialized = serde_json::to_string(&test_struct).unwrap();
         assert_eq!(serialized, r#"{"value":"1000000000000000000"}"#);
 
-        // Deserialize back
         let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, test_struct);
     }
@@ -1145,21 +1082,17 @@ mod tests {
 
         #[test]
         fn test_round_trip_serialize_deserialize() {
-            let original_ts = UnixTimestamp::from_secs(1609459200); // 2021-01-01 00:00:00 UTC
+            let original_ts = UnixTimestamp::from_secs(1609459200);
             let test_struct = TestStruct {
                 timestamp: original_ts,
             };
 
-            // Serialize to JSON
             let serialized = serde_json::to_string(&test_struct).unwrap();
 
-            // Assert JSON contains expected RFC3339 string
             assert!(serialized.contains("2021-01-01T00:00:00+00:00"));
 
-            // Deserialize back
             let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
 
-            // Assert parsed equals original
             assert_eq!(deserialized.timestamp, original_ts);
         }
 
@@ -1180,5 +1113,28 @@ mod tests {
 
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "to parse base58 string")]
+    fn h256_from_base58_panics_on_invalid_input() {
+        let _ = H256::from_base58("!!!invalid-base58!!!");
+    }
+
+    #[test]
+    fn h256_from_base58_result_returns_err_on_invalid() {
+        assert!(H256::from_base58_result("!!!invalid!!!").is_err());
+    }
+
+    #[test]
+    fn h256_from_base58_result_returns_err_on_wrong_length() {
+        use base58::ToBase58 as _;
+
+        let encoded = [0_u8; 31].to_base58();
+        let err = H256::from_base58_result(&encoded).unwrap_err();
+        assert!(
+            err.to_string().contains("31 bytes, expected 32"),
+            "expected length error, got: {err}"
+        );
     }
 }
