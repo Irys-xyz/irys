@@ -428,7 +428,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("exceeds maximum"),
+            !err_msg.contains("Invalid signature length"),
             "should not fail on length check at boundary, got: {err_msg}"
         );
     }

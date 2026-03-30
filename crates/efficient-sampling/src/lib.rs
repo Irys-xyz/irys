@@ -55,7 +55,7 @@ impl Ranges {
         partition_hash: &H256,
     ) -> Result<usize> {
         // non consecutive vdf_steps is handled at mining level
-        if step != self.last_step_num + 1 {
+        if step.checked_sub(1) != Some(self.last_step_num) {
             return Err(eyre::eyre!(
                 "Non consecutive vdf steps are not supported, last step num {}, current step num {}",
                 self.last_step_num,

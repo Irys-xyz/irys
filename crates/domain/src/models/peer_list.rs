@@ -1414,6 +1414,7 @@ mod tests {
             let peer_list =
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
+            // BogusData penalty is 5, ACTIVE_THRESHOLD is 20: 24 - 5 = 19 < 20 (inactive)
             peer.reputation_score = PeerScore::new(24);
 
             peer_list.add_or_update_peer(peer.clone(), true);

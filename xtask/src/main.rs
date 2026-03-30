@@ -193,6 +193,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             monitor,
             heap_profile,
         } => {
+            if coverage && heap_profile {
+                return Err(eyre::eyre!(
+                    "--coverage and --heap-profile cannot be used together"
+                ));
+            }
             println!("cargo test");
             let _ = cmd!(
                 sh,

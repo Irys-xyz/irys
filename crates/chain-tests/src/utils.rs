@@ -2929,21 +2929,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunk_offset: LedgerChunkOffset,
         timeout_secs: usize,
     ) -> eyre::Result<PackedChunk> {
-        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
-        for _ in 0..timeout_secs {
-            if let Some(chunk) = self.get_chunk(ledger, chunk_offset).await {
-                return Ok(chunk);
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        self.get_chunk(ledger, chunk_offset).await.ok_or_else(|| {
-            eyre::eyre!(
-                "Chunk not found over HTTP after {}s: {} ledger chunk_offset: {}",
-                timeout_secs,
-                ledger,
-                chunk_offset,
-            )
-        })
+        self.wait_for_chunk_in_storage(ledger, chunk_offset, timeout_secs)
+            .await
     }
 
     pub async fn verify_migrated_chunk_32b(

@@ -694,6 +694,17 @@ mod tests {
         assert_eq!(url.as_str(), expected);
     }
 
+    #[test]
+    fn peer_base_url_rejects_scoped_ipv6() {
+        let addr = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::LOCALHOST,
+            8080,
+            0,
+            1,
+        ));
+        assert!(peer_base_url(addr).is_err());
+    }
+
     #[rstest]
     #[case("http://127.0.0.1:8080/v1", &["tx", "abc"], "http://127.0.0.1:8080/v1/tx/abc")]
     #[case("http://127.0.0.1:8080/v1", &["block", "latest"], "http://127.0.0.1:8080/v1/block/latest")]

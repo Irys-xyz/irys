@@ -87,9 +87,9 @@ impl StorageSubmodulesConfig {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
         let base_path = instance_dir.join("storage_modules");
-        fs::create_dir_all(base_path.clone()).expect("to create storage_modules directory"); // clone: needed below in multiple branches
+        fs::create_dir_all(&base_path).expect("to create storage_modules directory");
 
-        fs::read_dir(base_path.clone()) // clone: needed below in symlink creation
+        fs::read_dir(&base_path)
             .expect("to read storage_modules dir")
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))

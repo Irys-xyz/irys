@@ -662,6 +662,7 @@ fn ln_fp18(x: U256) -> Result<U256> {
     if x.is_zero() {
         return Err(eyre!("ln(0) is undefined"));
     }
+    ensure!(x >= TOKEN_SCALE, "ln_fp18 only supports x >= 1.0");
 
     const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
 
@@ -2648,16 +2649,12 @@ mod tests {
         }
 
         #[test]
-        fn test_ln_sub_unit_returns_zero() {
-            // ln(x) for 0 < x < 1 is negative, but ln_fp18 uses u32 for k
-            // which saturates at 0 — so sub-unit inputs return 0 instead of
-            // a negative value. This test documents the current behavior.
+        fn test_ln_sub_unit_fails() {
             let half_scale = TOKEN_SCALE / U256::from(2);
-            let result = ln_fp18(half_scale).unwrap();
-            assert_eq!(
-                result,
-                U256::zero(),
-                "sub-unit ln_fp18 saturates k at 0, returning 0"
+            let result = ln_fp18(half_scale);
+            assert!(
+                result.is_err(),
+                "ln_fp18 should reject x < 1 until signed output is supported"
             );
         }
     }
