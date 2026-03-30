@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(v.major, pkg.major);
         assert_eq!(v.minor, pkg.minor);
         assert_eq!(v.patch, pkg.patch);
-        assert!(v.pre.is_empty());
+        assert_eq!(v.pre, pkg.pre);
     }
 
     #[test]
