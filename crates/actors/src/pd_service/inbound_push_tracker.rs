@@ -6,12 +6,12 @@ use std::time::Duration;
 
 const INBOUND_PUSH_TRACKER_TTL: Duration = Duration::from_secs(300);
 
-pub struct InboundPushTracker {
+pub(super) struct InboundPushTracker {
     cache: Cache<(u32, u64), Arc<RwLock<HashSet<IrysPeerId>>>>,
 }
 
 impl InboundPushTracker {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             cache: Cache::builder()
                 .max_capacity(100_000)
@@ -20,7 +20,7 @@ impl InboundPushTracker {
         }
     }
 
-    pub fn record_inbound(&self, ledger: u32, offset: u64, peer_id: IrysPeerId) {
+    pub(super) fn record_inbound(&self, ledger: u32, offset: u64, peer_id: IrysPeerId) {
         let entry = self
             .cache
             .get_with((ledger, offset), || Arc::new(RwLock::new(HashSet::new())));
@@ -30,7 +30,7 @@ impl InboundPushTracker {
             .insert(peer_id);
     }
 
-    pub fn get_known_sources(&self, ledger: u32, offset: u64) -> HashSet<IrysPeerId> {
+    pub(super) fn get_known_sources(&self, ledger: u32, offset: u64) -> HashSet<IrysPeerId> {
         self.cache
             .get(&(ledger, offset))
             .map(|entry| {

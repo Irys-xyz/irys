@@ -11,7 +11,7 @@ use std::collections::HashSet;
 /// When fewer candidates than k are available the entire candidate list is
 /// returned. Returned order is unspecified.
 #[must_use]
-pub fn select_push_targets(
+pub(crate) fn select_push_targets(
     k: u32,
     candidates: &[(IrysPeerId, PeerAddress, f64)],
 ) -> Vec<(IrysPeerId, PeerAddress)> {
