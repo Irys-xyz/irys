@@ -1,5 +1,6 @@
 use semver::Version;
 use std::sync::OnceLock;
+use tracing::error;
 
 /// Vendor identifier embedded in build metadata so peers know this is the Irys implementation.
 const VENDOR: &str = "irys-rs";
@@ -32,19 +33,19 @@ fn build_version_ref() -> &'static Version {
 /// earlier call to [`build_version`] (e.g. via handshake `Default` impls) would permanently
 /// freeze the version without git metadata.
 ///
+/// - `pkg_version`: the caller's `env!("CARGO_PKG_VERSION")` — use the binary crate's version
 /// - `git_sha`: short commit hash (e.g. `"a1b2c3d"`)
 /// - `has_tag`: whether the commit has an exact tag match
 ///
 /// Untagged commits produce `3.0.0+irys-rs.a1b2c3d`, tagged commits produce `3.0.0+irys-rs`.
 /// No-op if already initialized.
-pub fn init_build_version(git_sha: &str, has_tag: bool) {
+pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool) {
     debug_assert!(
         has_tag || !git_sha.is_empty(),
         "untagged build must have a non-empty git_sha for version metadata"
     );
-    let _ = BUILD_VERSION.set({
-        let mut version =
-            Version::parse(env!("CARGO_PKG_VERSION")).expect("valid CARGO_PKG_VERSION semver");
+    let version = {
+        let mut version = Version::parse(pkg_version).expect("valid pkg_version semver");
         let meta = if !has_tag && !git_sha.is_empty() {
             format!("{VENDOR}.{git_sha}")
         } else {
@@ -52,7 +53,17 @@ pub fn init_build_version(git_sha: &str, has_tag: bool) {
         };
         version.build = semver::BuildMetadata::new(&meta).expect("valid build metadata");
         version
-    });
+    };
+    if let Err(existing) = BUILD_VERSION.set(version) {
+        debug_assert!(
+            false,
+            "init_build_version called after BUILD_VERSION already set to {existing}"
+        );
+        error!(
+            existing = %existing,
+            "init_build_version called too late — BUILD_VERSION already initialized, git metadata dropped"
+        );
+    }
 }
 
 #[cfg(test)]
