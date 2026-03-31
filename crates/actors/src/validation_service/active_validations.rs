@@ -122,6 +122,10 @@ pub(super) struct RunningVdfTask {
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub sealed_block: Arc<SealedBlock>,
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
+    /// Clone of the task retained so the select handler can requeue if the
+    /// handle is unexpectedly cancelled (e.g. runtime teardown). `None` only
+    /// in unit tests that construct `RunningVdfTask` directly.
+    pub requeue_task: Option<BlockValidationTask>,
 }
 
 /// Strategy for spawning VDF validation tasks.
@@ -278,15 +282,15 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
 
         self.pending.push(task, priority);
 
-        // Signal the running task to cancel if the new pending task outranks it.
-        // This must happen before start_next(): if preemption fires, start_next()
-        // sees current is still Some (the cancelled task hasn't resolved yet) and
-        // is a no-op — the select loop will pick up the Cancelled result and
-        // promote the higher-priority pending task.
+        // Preemption must fire before start_next(). If preemption fires,
+        // start_next() is a no-op (current is still Some). The cancelled
+        // task will resolve in the next select iteration, and the handler
+        // will resubmit it — after which start_next() promotes the higher-
+        // priority pending task.
         self.check_preemption();
 
-        // After push + check_preemption, either current was already running or
-        // pending is non-empty, so start_next always returns true.
+        // Invariant: after push + preemption check, either the existing task
+        // is still running or a new one was just started.
         let active = self.start_next();
         debug_assert!(
             active,
@@ -329,6 +333,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
         let cancel_signal = Arc::clone(&cancel_u8);
         let sealed_block = Arc::clone(&task.sealed_block);
+        let requeue_task = task.clone();
 
         let handle = self.spawn_strategy.spawn_vdf_task(
             &self.runtime_handle,
@@ -344,6 +349,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             cancel_signal,
             sealed_block,
             handle,
+            requeue_task: Some(requeue_task),
         });
         true
     }
@@ -524,6 +530,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
 
         let new_priority = self.calculate_priority(sealed_block.header());
 
+        // Re-borrow mutably now that calculate_priority's &self borrow is released.
         let Some(current) = &mut self.vdf_scheduler.current else {
             return;
         };
@@ -980,6 +987,7 @@ mod tests {
             cancel_signal: Arc::clone(&cancel),
             sealed_block: sealed,
             handle: tokio::spawn(std::future::pending()),
+            requeue_task: None,
         };
         (task, cancel)
     }
@@ -1449,6 +1457,7 @@ mod tests {
             cancel_signal: cancel,
             sealed_block: ext_sealed,
             handle: tokio::spawn(std::future::pending()),
+            requeue_task: None,
         });
 
         // Create a fork from height 2 that becomes the new canonical chain
@@ -1650,6 +1659,7 @@ mod tests {
                 .expect("sealing block"),
             ),
             handle: tokio::spawn(std::future::pending()),
+            requeue_task: None,
         });
 
         // Reevaluate without any tree changes
