@@ -15,11 +15,7 @@ static BUILD_VERSION: OnceLock<Version> = OnceLock::new();
 /// Returns the build version. Always includes `+irys-rs` vendor tag in build metadata.
 /// If [`init_build_version`] was called (by the binary), untagged commits also get the
 /// git SHA appended: `3.0.0+irys-rs.abc1234`. Otherwise falls back to `3.0.0+irys-rs`.
-pub fn build_version() -> Version {
-    build_version_ref().clone()
-}
-
-fn build_version_ref() -> &'static Version {
+pub fn build_version() -> &'static Version {
     BUILD_VERSION.get_or_init(|| {
         let mut v =
             Version::parse(env!("CARGO_PKG_VERSION")).expect("valid CARGO_PKG_VERSION semver");
@@ -103,7 +99,7 @@ mod tests {
     fn build_version_is_valid_semver_string() {
         let v = build_version();
         let reparsed = Version::parse(&v.to_string()).expect("build_version should roundtrip");
-        assert_eq!(v, reparsed);
+        assert_eq!(*v, reparsed);
     }
 
     #[test]

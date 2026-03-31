@@ -141,7 +141,7 @@ pub type HandshakeRequest = HandshakeRequestV1;
 impl Default for HandshakeRequestV1 {
     fn default() -> Self {
         Self {
-            version: crate::build_version(),
+            version: crate::build_version().clone(),
             mining_address: IrysAddress::ZERO,
             protocol_version: ProtocolVersion::V1,
             timestamp: SystemTime::now()
@@ -159,7 +159,7 @@ impl Default for HandshakeRequestV1 {
 impl Default for HandshakeRequestV2 {
     fn default() -> Self {
         Self {
-            version: crate::build_version(),
+            version: crate::build_version().clone(),
             mining_address: IrysAddress::ZERO,
             peer_id: IrysPeerId::ZERO,
             protocol_version: ProtocolVersion::current(),
@@ -345,7 +345,7 @@ pub struct HandshakeResponseV1 {
 impl Default for HandshakeResponseV1 {
     fn default() -> Self {
         Self {
-            version: crate::build_version(),
+            version: crate::build_version().clone(),
             protocol_version: ProtocolVersion::V1,
             peers: Vec::new(),
             timestamp: SystemTime::now()
@@ -388,7 +388,7 @@ pub struct HandshakeResponseV2 {
 impl Default for HandshakeResponseV2 {
     fn default() -> Self {
         Self {
-            version: crate::build_version(),
+            version: crate::build_version().clone(),
             protocol_version: ProtocolVersion::current(),
             peers: Vec::new(),
             timestamp: SystemTime::now()
