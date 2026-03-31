@@ -82,7 +82,7 @@ async fn main() -> eyre::Result<()> {
     info!(
         node_version = %version,
         "starting irys node v{}, mode: {:?}",
-        irys_types::build_version(),
+        &version,
         &config.node_mode
     );
     let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
