@@ -1,12 +1,12 @@
 use actix_http::Request;
+use actix_web::App;
 use actix_web::http::StatusCode;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
-use actix_web::App;
 use actix_web::{
+    Error,
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
-    Error,
 };
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_core::primitives::FixedBytes;
@@ -15,16 +15,16 @@ use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
 use alloy_primitives::Address;
 use alloy_signer_local::LocalSigner;
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
+    MempoolServiceFacadeImpl,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes;
@@ -38,51 +38,51 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
-    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
+    BlockState, BlockTreeEntry, ChainState, ChunkType, CommitmentSnapshotStatus, EmaSnapshot,
+    EpochSnapshot, get_canonical_chain,
 };
 use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_reth::IrysBuiltPayload;
+use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
+use irys_types::SendTraced as _;
 use irys_types::range_specifier::PdDataRead;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::SendTraced as _;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
-    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
-    SystemLedger, H256, U256,
-};
-use irys_types::{
-    storage_pricing::{
-        phantoms::{CostPerChunk, Irys},
-        Amount,
-    },
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    storage_pricing::{
+        Amount,
+        phantoms::{CostPerChunk, Irys},
+    },
+};
+use irys_types::{
+    BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
+    NetworkConfigWithDefaults as _, SealedBlock, SyncMode, SystemLedger, U256,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
 };
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
-use reth_db::{cursor::*, Database as _};
+use reth_db::{Database as _, cursor::*};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -95,11 +95,44 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
+fn compute_step_checkpoints(
+    config: &irys_types::VdfConfig,
+    current_step: u64,
+    previous_step_output: H256,
+    reset_seed: H256,
+) -> eyre::Result<(H256List, H256)> {
+    eyre::ensure!(current_step > 0, "current_step must be greater than 0");
+
+    let previous_step_number = current_step - 1;
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(config, previous_step_number));
+    let mut seed = previous_step_output;
+
+    if previous_step_number > 0
+        && previous_step_number.is_multiple_of(config.reset_frequency as u64)
+    {
+        seed = apply_reset_seed(seed, reset_seed);
+    }
+
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed,
+        config.num_checkpoints_in_vdf_step,
+        config.num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+
+    Ok((H256List(checkpoints), seed))
+}
+
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
+    reset_seed: H256,
 ) -> SolutionContext {
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
@@ -133,25 +166,16 @@ pub async fn capacity_chunk_solution(
             }
         };
 
-        // Calculate last step checkpoints for current_step - 1
-        let mut hasher = Sha256::new();
-        let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.vdf,
-            current_step.saturating_sub(1),
-        ));
-        let mut seed = steps[0];
-
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            config.vdf.num_checkpoints_in_vdf_step,
-            config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
-        );
+        let (checkpoints, computed_step_output) =
+            compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed)
+                .expect("valid current step when computing checkpoints");
+        if computed_step_output != steps[1] {
+            // The VDF thread may have crossed a reset boundary; if our recomputation does not
+            // land on the advertised step output, skip this candidate instead of building an
+            // invalid synthetic solution for the block producer.
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        }
 
         // Determine recall range for this step
         let recall_range_idx = block_validation::get_recall_range(
@@ -196,7 +220,7 @@ pub async fn capacity_chunk_solution(
                     mining_address: miner_addr,
                     chunk: entropy_chunk,
                     vdf_step: current_step,
-                    checkpoints: H256List(checkpoints),
+                    checkpoints,
                     seed: Seed(steps[1]),
                     solution_hash,
                     ..Default::default()
@@ -252,29 +276,9 @@ pub async fn capacity_chunk_solution(
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: current_step,
-        checkpoints: H256List(
-            // recompute checkpoints for fallback
-            {
-                let mut h = Sha256::new();
-                let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.vdf,
-                    current_step.saturating_sub(1),
-                ));
-                let mut sd = steps[0];
-                let mut cps: Vec<H256> =
-                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-                vdf_sha(
-                    &mut h,
-                    &mut s,
-                    &mut sd,
-                    config.vdf.num_checkpoints_in_vdf_step,
-                    config.vdf.num_iterations_per_checkpoint(),
-                    &mut cps,
-                );
-                H256List(cps)
-            }
+        checkpoints: compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed)
+            .expect("valid current step when recomputing fallback checkpoints")
             .0,
-        ),
         seed: Seed(steps[1]),
         solution_hash,
         ..Default::default()
@@ -4211,6 +4215,15 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = {
+        let read = node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .cloned()
+            .ok_or_else(|| eyre!("Parent block header not found in block tree"))?
+    };
+    let reset_seed = prev_block.vdf_limiter_info.next_seed;
+
     let was_vdf_enabled = node_ctx
         .is_vdf_mining_enabled
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -4240,20 +4253,14 @@ pub async fn solution_context_with_poa_chunk(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
-        // Compute checkpoints for (step-1)
-        let mut hasher = Sha256::new();
-        let mut salt =
-            irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
-        let mut seed = steps[0];
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            node_ctx.config.vdf.num_checkpoints_in_vdf_step,
-            node_ctx.config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
+        let (checkpoints, computed_step_output) =
+            compute_step_checkpoints(&node_ctx.config.vdf, step, steps[0], reset_seed)?;
+        eyre::ensure!(
+            computed_step_output == steps[1],
+            "recomputed VDF output mismatch for step {}: expected {}, got {}",
+            step,
+            steps[1],
+            computed_step_output
         );
 
         // For deterministic linkage without recall-range dependency, use offset 0
@@ -4275,7 +4282,7 @@ pub async fn solution_context_with_poa_chunk(
             data_path: None,
             chunk: poa_chunk,
             vdf_step: step,
-            checkpoints: H256List(checkpoints),
+            checkpoints,
             seed: Seed(steps[1]),
             solution_hash,
         })
@@ -4312,12 +4319,46 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,
+        prev_block.vdf_limiter_info.next_seed,
     )
     .await;
     if !was_vdf_enabled {
         node_ctx.stop_vdf();
     }
     Ok(poa_solution)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_step_checkpoints;
+    use irys_types::{H256, VdfConfig};
+
+    #[test]
+    fn compute_step_checkpoints_applies_reset_seed_at_boundary() {
+        let config = VdfConfig {
+            reset_frequency: 3,
+            parallel_verification_thread_limit: 1,
+            num_checkpoints_in_vdf_step: 4,
+            max_allowed_vdf_fork_steps: 16,
+            sha_1s_difficulty: 40,
+        };
+        let previous_step_output = H256::from_low_u64_be(11);
+        let reset_seed = H256::from_low_u64_be(29);
+
+        let (with_reset, computed_output) =
+            compute_step_checkpoints(&config, 4, previous_step_output, reset_seed)
+                .expect("checkpoints should be computed");
+        let (without_reset, without_reset_output) =
+            compute_step_checkpoints(&config, 4, previous_step_output, H256::zero())
+                .expect("checkpoints should be computed");
+
+        assert_eq!(with_reset.0.last(), Some(&computed_output));
+        assert_eq!(without_reset.0.last(), Some(&without_reset_output));
+        assert_ne!(
+            computed_output, without_reset_output,
+            "reset-boundary computation must change the VDF output"
+        );
+    }
 }
 
 /// Outcome of block validation for testing.
