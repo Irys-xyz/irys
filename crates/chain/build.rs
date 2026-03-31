@@ -10,12 +10,12 @@ fn main() {
     println!("cargo:rerun-if-changed={head_path}");
 
     // If HEAD is a symbolic ref, also track the branch ref itself
-    if let Ok(head_content) = std::fs::read_to_string(&head_path) {
-        if let Some(ref_path) = head_content.trim().strip_prefix("ref: ") {
-            // For worktrees, the branch ref lives in the common git dir
-            let base = git_output(&["rev-parse", "--git-common-dir"]).unwrap_or(git_dir);
-            println!("cargo:rerun-if-changed={base}/{ref_path}");
-        }
+    if let Ok(head_content) = std::fs::read_to_string(&head_path)
+        && let Some(ref_path) = head_content.trim().strip_prefix("ref: ")
+    {
+        // For worktrees, the branch ref lives in the common git dir
+        let base = git_output(&["rev-parse", "--git-common-dir"]).unwrap_or(git_dir);
+        println!("cargo:rerun-if-changed={base}/{ref_path}");
     }
 
     // Track packed-refs so that adding/removing tags triggers a rebuild.
