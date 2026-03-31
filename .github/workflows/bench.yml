@@ -9,7 +9,7 @@ concurrency:
 
 on:
   pull_request:
-    types: [closed]
+    types: [opened, closed]
   pull_request_review:
     types: [submitted]
   push:
@@ -41,6 +41,10 @@ jobs:
 
           # Fork PRs must not run on self-hosted runners that have write access
           # to gh-pages and shared caches — require same-repo origin.
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "opened" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            SHOULD_RUN=true
+          fi
+
           if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
             SHOULD_RUN=true
           fi

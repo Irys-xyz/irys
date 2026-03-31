@@ -57,10 +57,9 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
 
     // Temporarily unset RUSTC_WRAPPER to prevent sccache from wrapping nvcc.
-    // Cargo propagates CARGO_BUILD_RUSTC_WRAPPER as RUSTC_WRAPPER into
-    // build script environments. cc-rs then picks up RUSTC_WRAPPER and
-    // prepends it to compiler invocations, including nvcc, which sccache
-    // cannot handle. Unsetting here is the only reliable way to prevent it.
+    // Cargo translates CARGO_BUILD_RUSTC_WRAPPER → RUSTC_WRAPPER when spawning
+    // build-script subprocesses. cc-rs reads RUSTC_WRAPPER and prepends it to
+    // all compiler invocations, including nvcc, which sccache cannot handle.
 
     let _guard = RestoreEnv {
         key: "RUSTC_WRAPPER",
