@@ -17,6 +17,8 @@ static BUILD_VERSION: OnceLock<Version> = OnceLock::new();
 /// git SHA appended: `3.0.0+irys-rs.abc1234`. Otherwise falls back to `3.0.0+irys-rs`.
 pub fn build_version() -> &'static Version {
     BUILD_VERSION.get_or_init(|| {
+        // Fallback: uses this crate's version (irys-types), not the binary's.
+        // In production, init_build_version() runs first with the real version.
         let mut v =
             Version::parse(env!("CARGO_PKG_VERSION")).expect("valid CARGO_PKG_VERSION semver");
         v.build = semver::BuildMetadata::new(VENDOR).expect("valid build metadata");
@@ -40,7 +42,8 @@ pub fn build_version() -> &'static Version {
 /// - Untagged, dirty: `3.0.0+irys-rs.a1b2c3d.dirty`
 /// - Tagged, dirty:   `3.0.0+irys-rs.dirty`
 ///
-/// No-op if already initialized.
+/// Panics in debug builds if already initialized; in release, logs an error
+/// and keeps the existing value.
 pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) {
     debug_assert!(
         has_tag || !git_sha.is_empty(),
@@ -150,92 +153,56 @@ mod tests {
 
     // -- Golden-string fixture tests for serialization / deserialization --
 
-    #[test]
-    fn golden_tagged_release_serializes_to_json() {
-        let mut v = Version::parse("3.0.0").unwrap();
-        v.build = semver::BuildMetadata::new(VENDOR).unwrap();
+    #[rstest::rstest]
+    #[case("3.0.0", "irys-rs", r#""3.0.0+irys-rs""#)]
+    #[case("3.0.0", "irys-rs.a1b2c3d", r#""3.0.0+irys-rs.a1b2c3d""#)]
+    #[case("3.0.0", "irys-rs.a1b2c3d.dirty", r#""3.0.0+irys-rs.a1b2c3d.dirty""#)]
+    #[case("3.0.0", "irys-rs.dirty", r#""3.0.0+irys-rs.dirty""#)]
+    fn golden_serialization(#[case] ver: &str, #[case] meta: &str, #[case] expected: &str) {
+        let mut v = Version::parse(ver).unwrap();
+        v.build = semver::BuildMetadata::new(meta).unwrap();
         let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#""3.0.0+irys-rs""#);
+        assert_eq!(json, expected);
     }
 
-    #[test]
-    fn golden_untagged_build_serializes_to_json() {
-        let mut v = Version::parse("3.0.0").unwrap();
-        v.build = semver::BuildMetadata::new(&format!("{VENDOR}.a1b2c3d")).unwrap();
-        let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#""3.0.0+irys-rs.a1b2c3d""#);
-    }
-
-    #[test]
-    fn golden_tagged_release_roundtrips_json() {
-        let json = r#""3.0.0+irys-rs""#;
+    #[rstest::rstest]
+    #[case(r#""3.0.0+irys-rs""#, 3, 0, 0, "irys-rs")]
+    #[case(r#""3.0.0+irys-rs.a1b2c3d""#, 3, 0, 0, "irys-rs.a1b2c3d")]
+    #[case(r#""3.0.0+irys-rs.a1b2c3d.dirty""#, 3, 0, 0, "irys-rs.a1b2c3d.dirty")]
+    fn golden_roundtrip(
+        #[case] json: &str,
+        #[case] major: u64,
+        #[case] minor: u64,
+        #[case] patch: u64,
+        #[case] build: &str,
+    ) {
         let v: Version = serde_json::from_str(json).unwrap();
-        assert_eq!(v.major, 3);
-        assert_eq!(v.minor, 0);
-        assert_eq!(v.patch, 0);
-        assert_eq!(v.build.as_str(), "irys-rs");
-        assert_eq!(serde_json::to_string(&v).unwrap(), json);
-    }
-
-    #[test]
-    fn golden_untagged_build_roundtrips_json() {
-        let json = r#""3.0.0+irys-rs.a1b2c3d""#;
-        let v: Version = serde_json::from_str(json).unwrap();
-        assert_eq!(v.major, 3);
-        assert_eq!(v.minor, 0);
-        assert_eq!(v.patch, 0);
-        assert_eq!(v.build.as_str(), "irys-rs.a1b2c3d");
+        assert_eq!(v.major, major);
+        assert_eq!(v.minor, minor);
+        assert_eq!(v.patch, patch);
+        assert_eq!(v.build.as_str(), build);
         assert_eq!(serde_json::to_string(&v).unwrap(), json);
     }
 
     #[test]
     fn golden_plain_version_without_metadata_deserializes() {
         // Peers running older versions may send plain "3.0.0" without vendor metadata.
-        let json = r#""3.0.0""#;
-        let v: Version = serde_json::from_str(json).unwrap();
-        assert_eq!(v.major, 3);
-        assert_eq!(v.minor, 0);
-        assert_eq!(v.patch, 0);
+        let v: Version = serde_json::from_str(r#""3.0.0""#).unwrap();
+        assert_eq!((v.major, v.minor, v.patch), (3, 0, 0));
         assert!(v.build.is_empty());
     }
 
     #[test]
     fn golden_foreign_vendor_deserializes() {
         // A hypothetical alternative implementation — we should accept it, not reject.
-        let json = r#""3.0.0+irys-go.deadbeef""#;
-        let v: Version = serde_json::from_str(json).unwrap();
+        let v: Version = serde_json::from_str(r#""3.0.0+irys-go.deadbeef""#).unwrap();
         assert_eq!(v.major, 3);
         assert_eq!(v.build.as_str(), "irys-go.deadbeef");
     }
 
     #[test]
-    fn golden_untagged_dirty_serializes_to_json() {
-        let mut v = Version::parse("3.0.0").unwrap();
-        v.build = semver::BuildMetadata::new(&format!("{VENDOR}.a1b2c3d.dirty")).unwrap();
-        let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#""3.0.0+irys-rs.a1b2c3d.dirty""#);
-    }
-
-    #[test]
-    fn golden_tagged_dirty_serializes_to_json() {
-        let mut v = Version::parse("3.0.0").unwrap();
-        v.build = semver::BuildMetadata::new(&format!("{VENDOR}.dirty")).unwrap();
-        let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#""3.0.0+irys-rs.dirty""#);
-    }
-
-    #[test]
-    fn golden_dirty_roundtrips_json() {
-        let json = r#""3.0.0+irys-rs.a1b2c3d.dirty""#;
-        let v: Version = serde_json::from_str(json).unwrap();
-        assert_eq!(v.build.as_str(), "irys-rs.a1b2c3d.dirty");
-        assert_eq!(serde_json::to_string(&v).unwrap(), json);
-    }
-
-    #[test]
     fn golden_build_metadata_ignored_for_precedence() {
         // SemVer 2.0.0: build metadata MUST be ignored when determining version precedence.
-        // The semver crate's `cmp_precedence` method implements this correctly.
         let a: Version = serde_json::from_str(r#""3.0.0+irys-rs.abc""#).unwrap();
         let b: Version = serde_json::from_str(r#""3.0.0+irys-rs.def""#).unwrap();
         let c: Version = serde_json::from_str(r#""3.0.0""#).unwrap();

@@ -261,8 +261,12 @@ where
     size += version.major.to_compact(buf);
     size += version.minor.to_compact(buf);
     size += version.patch.to_compact(buf);
-    // size += version.pre.to_string().to_compact(buf);
-    // size += version.build.to_string().to_compact(buf);
+    // Intentionally excludes pre-release and build metadata from signing.
+    // Build metadata is observability-only (see design/docs/build-versioning.md);
+    // including it would break signature verification between nodes running
+    // different builds of the same version. Pre-release is excluded for the
+    // same reason — protocol compatibility is determined by protocol_version,
+    // not the semver pre-release tag.
     size
 }
 

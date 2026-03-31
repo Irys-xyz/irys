@@ -23,9 +23,9 @@ fn main() {
     let packed_refs = format!("{common_dir}/packed-refs");
     println!("cargo:rerun-if-changed={packed_refs}");
     // Track individual loose tag files — directory-level rerun-if-changed
-    // doesn't reliably detect new files on all filesystems.
+    // doesn't reliably detect new files on all filesystems. Enumerate existing
+    // entries explicitly; new tags arriving via fetch typically land in packed-refs.
     let tags_dir = format!("{common_dir}/refs/tags");
-    // Track the directory itself so new/removed loose tags trigger a rebuild.
     println!("cargo:rerun-if-changed={tags_dir}");
     if let Ok(entries) = std::fs::read_dir(&tags_dir) {
         for entry in entries.flatten() {
@@ -47,7 +47,10 @@ fn main() {
         .args(["diff-index", "--quiet", "HEAD", "--"])
         .status()
         .map(|s| !s.success())
-        .unwrap_or(false);
+        .unwrap_or_else(|e| {
+            println!("cargo:warning=git diff-index failed ({e}), assuming dirty");
+            true
+        });
 
     println!("cargo:rustc-env=GIT_SHA={sha}");
     println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
