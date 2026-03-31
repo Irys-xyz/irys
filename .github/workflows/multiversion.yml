@@ -61,4 +61,5 @@ jobs:
 
       - name: sccache stats
         if: always()
+        continue-on-error: true
         run: sccache --show-stats
