@@ -11,6 +11,7 @@ use irys_types::{
     HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
     PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
     ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent,
+    build_version,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -146,7 +147,7 @@ impl PeerNetworkServiceState {
             address: self.peer_address,
             chain_id: self.chain_id,
             protocol_version: ProtocolVersion::V1,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some(build_user_agent("irys", &build_version().to_string())),
             ..HandshakeRequest::default()
         };
         self.config
@@ -163,7 +164,7 @@ impl PeerNetworkServiceState {
             chain_id: self.chain_id,
             peer_id,
             protocol_version: ProtocolVersion::V2,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some(build_user_agent("irys", &build_version().to_string())),
             consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };

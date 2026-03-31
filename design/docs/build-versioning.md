@@ -31,9 +31,11 @@ Node versions follow [SemVer 2.0.0](https://semver.org/), using build metadata t
 
 Build metadata is ignored for SemVer precedence — `3.0.0+irys-rs.abc` and `3.0.0+irys-rs.def` are equal when compared for compatibility.
 
+Note: "tagged" means any exact tag on HEAD (`git describe --exact-match --tags`), not only tags matching a release naming convention.
+
 ### Workspace version
 
-All crates share a single version defined once in the workspace root. Individual crate manifests inherit it. Version bumps are a one-line change.
+Each crate in the workspace defines its own version independently (e.g. `irys-chain = "3.0.0"`, `irys-types = "0.1.0"`). The node's reported version comes from the binary crate's `Cargo.toml` — `init_build_version` in `main()` receives it via `env!("CARGO_PKG_VERSION")` at the call site.
 
 ### Build-time capture
 
@@ -47,7 +49,9 @@ A global, initialise-once cell holds the version. Binary crates populate it with
 
 The version is **strictly informational** — it is carried in handshake messages for observability only. It **must not** be used for gossip decisions, peer acceptance/rejection, or compatibility checks. Peer compatibility is determined solely by the protocol version.
 
-Only `major.minor.patch` is included in handshake signature preimages — build metadata is excluded. This is intentional: the version is observability data, not a security or consensus input.
+**V1 handshakes** sign only `major.minor.patch` — pre-release and build metadata are excluded. This cannot be changed because V1 is already live on mainnet; altering the preimage would break signature verification with existing peers. Build metadata in V1 is therefore unauthenticated and could be modified in transit.
+
+**V2 handshakes** sign the full semver string (including pre-release and build metadata). This makes the version an authenticated part of the handshake — a peer cannot misrepresent its build without invalidating the signature. V2 is not yet live on mainnet, so this stronger invariant can be established from the start.
 
 ### Wire format
 

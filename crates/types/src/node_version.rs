@@ -1,6 +1,5 @@
 use semver::Version;
 use std::sync::OnceLock;
-use tracing::error;
 
 /// Vendor identifier embedded in build metadata so peers know this is the Irys implementation.
 const VENDOR: &str = "irys-rs";
@@ -42,42 +41,42 @@ pub fn build_version() -> &'static Version {
 /// - Untagged, dirty: `3.0.0+irys-rs.a1b2c3d.dirty`
 /// - Tagged, dirty:   `3.0.0+irys-rs.dirty`
 ///
-/// Panics in debug builds if already initialized; in release, logs an error
-/// and keeps the existing value.
+/// If already initialized, prints an error to stderr and keeps the existing value.
 pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) {
     debug_assert!(
         has_tag || !git_sha.is_empty(),
         "untagged build must have a non-empty git_sha for version metadata"
     );
-    let version = {
-        let mut version = Version::parse(pkg_version).expect("valid pkg_version semver");
-        let mut meta = if !has_tag && !git_sha.is_empty() {
-            format!("{VENDOR}.{git_sha}")
-        } else {
-            VENDOR.to_string()
-        };
-        if is_dirty {
-            meta.push_str(".dirty");
-        }
-        version.build = semver::BuildMetadata::new(&meta).expect("valid build metadata");
-        version
-    };
+    let version = make_build_version(pkg_version, git_sha, has_tag, is_dirty);
     if let Err(existing) = BUILD_VERSION.set(version) {
-        debug_assert!(
-            false,
-            "init_build_version called after BUILD_VERSION already set to {existing}"
-        );
-        error!(
-            existing = %existing,
-            "init_build_version called too late — BUILD_VERSION already initialized, git metadata dropped"
+        eprintln!(
+            "init_build_version called too late — BUILD_VERSION already initialized to {existing}, git metadata dropped"
         );
     }
+}
+
+/// Builds a [`Version`] with vendor and git metadata in the build metadata field.
+/// This is the pure logic used by [`init_build_version`]; extracted for testability.
+fn make_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) -> Version {
+    let mut version = Version::parse(pkg_version).expect("valid pkg_version semver");
+    let mut meta = if !has_tag && !git_sha.is_empty() {
+        format!("{VENDOR}.{git_sha}")
+    } else {
+        VENDOR.to_string()
+    };
+    if is_dirty {
+        meta.push_str(".dirty");
+    }
+    version.build = semver::BuildMetadata::new(&meta).expect("valid build metadata");
+    version
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // NOTE: These tests share a process-wide OnceLock, so they all observe
+    // the same fallback value (whichever test runs first initializes it).
     #[test]
     fn build_version_matches_cargo_pkg_version() {
         let v = build_version();
@@ -107,48 +106,26 @@ mod tests {
 
     #[test]
     fn version_untagged_clean() {
-        // Verify the construction logic used by init_build_version for untagged, clean commits.
-        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-        let sha = "abc1234";
-        let meta = format!("{VENDOR}.{sha}");
-        v.build = semver::BuildMetadata::new(&meta).unwrap();
-        assert_eq!(
-            v.to_string(),
-            format!("{}+{}.{}", env!("CARGO_PKG_VERSION"), VENDOR, sha)
-        );
+        let v = make_build_version("3.0.0", "abc1234", false, false);
+        assert_eq!(v.to_string(), "3.0.0+irys-rs.abc1234");
     }
 
     #[test]
     fn version_tagged_clean() {
-        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-        v.build = semver::BuildMetadata::new(VENDOR).unwrap();
-        assert_eq!(
-            v.to_string(),
-            format!("{}+{}", env!("CARGO_PKG_VERSION"), VENDOR)
-        );
+        let v = make_build_version("3.0.0", "", true, false);
+        assert_eq!(v.to_string(), "3.0.0+irys-rs");
     }
 
     #[test]
     fn version_untagged_dirty() {
-        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-        let sha = "abc1234";
-        let meta = format!("{VENDOR}.{sha}.dirty");
-        v.build = semver::BuildMetadata::new(&meta).unwrap();
-        assert_eq!(
-            v.to_string(),
-            format!("{}+{}.{}.dirty", env!("CARGO_PKG_VERSION"), VENDOR, sha)
-        );
+        let v = make_build_version("3.0.0", "abc1234", false, true);
+        assert_eq!(v.to_string(), "3.0.0+irys-rs.abc1234.dirty");
     }
 
     #[test]
     fn version_tagged_dirty() {
-        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-        let meta = format!("{VENDOR}.dirty");
-        v.build = semver::BuildMetadata::new(&meta).unwrap();
-        assert_eq!(
-            v.to_string(),
-            format!("{}+{}.dirty", env!("CARGO_PKG_VERSION"), VENDOR)
-        );
+        let v = make_build_version("3.0.0", "", true, true);
+        assert_eq!(v.to_string(), "3.0.0+irys-rs.dirty");
     }
 
     // -- Golden-string fixture tests for serialization / deserialization --
