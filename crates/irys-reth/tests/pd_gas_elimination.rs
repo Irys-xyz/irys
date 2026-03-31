@@ -26,6 +26,7 @@ use alloy_evm::{Evm as _, EvmFactory as _};
 
 const TEST_CALLER: Address = Address::repeat_byte(0x42);
 const PROXY_ADDR: Address = Address::repeat_byte(0x77);
+const SUM_VERIFIER_ADDR: Address = Address::repeat_byte(0x66);
 const TEST_FEE_PER_CHUNK: u128 = 1_000_000_000_000_000_000; // 1 IRYS
 const CHUNK_SIZE: u64 = 256_000;
 const NUM_CHUNKS_IN_PARTITION: u64 = 200;
@@ -86,7 +87,27 @@ fn chunk_data_index(num_chunks: u64) -> irys_types::chunk_provider::ChunkDataInd
     index
 }
 
-fn test_factory(num_chunks: u64) -> IrysEvmFactory {
+fn chunk_data_index_from_bytes(
+    data: &[u8],
+    chunk_size: u64,
+) -> irys_types::chunk_provider::ChunkDataIndex {
+    let index = Arc::new(DashMap::new());
+    let chunk_size = chunk_size as usize;
+
+    for (offset, chunk) in data.chunks(chunk_size).enumerate() {
+        let mut padded = vec![0_u8; chunk_size];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        index.insert((0_u32, offset as u64), Arc::new(bytes::Bytes::from(padded)));
+    }
+
+    index
+}
+
+fn factory_with_chunk_index(
+    chunk_size: u64,
+    num_chunks_in_partition: u64,
+    chunk_index: irys_types::chunk_provider::ChunkDataIndex,
+) -> IrysEvmFactory {
     use irys_types::ConsensusConfig;
     use irys_types::chunk_provider::ChunkConfig;
 
@@ -94,13 +115,21 @@ fn test_factory(num_chunks: u64) -> IrysEvmFactory {
     let hardfork_config = Arc::new(consensus.hardforks);
 
     let chunk_config = ChunkConfig {
-        num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
-        chunk_size: CHUNK_SIZE,
+        num_chunks_in_partition,
+        chunk_size,
         entropy_packing_iterations: 0,
         chain_id: 1,
     };
 
-    IrysEvmFactory::new(chunk_config, hardfork_config, chunk_data_index(num_chunks))
+    IrysEvmFactory::new(chunk_config, hardfork_config, chunk_index)
+}
+
+fn test_factory(num_chunks: u64) -> IrysEvmFactory {
+    factory_with_chunk_index(
+        CHUNK_SIZE,
+        NUM_CHUNKS_IN_PARTITION,
+        chunk_data_index(num_chunks),
+    )
 }
 
 fn test_db_with_proxy() -> CacheDB<EmptyDB> {
@@ -136,6 +165,12 @@ fn test_db_with_proxy() -> CacheDB<EmptyDB> {
         },
     );
 
+    db
+}
+
+fn test_db_with_contract(runtime: &[u8], addr: Address) -> CacheDB<EmptyDB> {
+    let mut db = test_db_with_proxy();
+    deploy_contract(&mut db, addr, runtime);
     db
 }
 
@@ -198,6 +233,25 @@ fn pd_proxy_tx(num_chunks: u64) -> TxEnv {
     }
 }
 
+fn contract_call_tx(kind: TxKind, calldata: Bytes, access_list: AccessList) -> TxEnv {
+    TxEnv {
+        caller: TEST_CALLER,
+        kind,
+        nonce: 0,
+        gas_limit: 30_000_000,
+        value: U256::ZERO,
+        data: calldata,
+        gas_price: 0,
+        chain_id: Some(1),
+        gas_priority_fee: None,
+        access_list,
+        blob_hashes: Vec::new(),
+        max_fee_per_blob_gas: 0,
+        tx_type: 1,
+        authorization_list: Default::default(),
+    }
+}
+
 /// Execute a PD read of `num_chunks` chunks through the proxy contract.
 /// Returns `(is_success, gas_used, output_len)`.
 fn run_pd_read(num_chunks: u64) -> (bool, u64, usize) {
@@ -214,6 +268,96 @@ fn run_pd_read(num_chunks: u64) -> (bool, u64, usize) {
 fn expected_memory_cost(num_words: usize) -> u64 {
     let w = num_words as u64;
     3 * w + w * w / 512
+}
+
+fn sum_verifier_runtime() -> Bytes {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/contracts/out/IrysPDSumVerifier.sol/PdSumVerifier.json"
+    ))
+    .expect("valid PdSumVerifier artifact JSON");
+    let bytecode = artifact["deployedBytecode"]["object"]
+        .as_str()
+        .expect("artifact contains deployed bytecode")
+        .strip_prefix("0x")
+        .expect("deployed bytecode is hex prefixed");
+
+    Bytes::from(alloy_primitives::hex::decode(bytecode).expect("valid bytecode hex"))
+}
+
+/// Compiled Solidity contract path for a 5 MiB PD read succeeds.
+///
+/// This covers the path that previously failed in the chain test:
+/// Solidity first `RETURNDATACOPY`s the PD returndata, then reshapes it into a
+/// `bytes memory` value for indexing. The raw proxy tests do not exercise that
+/// decode path.
+#[test]
+fn pd_5mib_sum_verifier_contract_succeeds() {
+    const CHUNK_SIZE_5MIB: u64 = 262_144;
+    const NUM_CHUNKS_IN_PARTITION_5MIB: u64 = 40;
+    const FIVE_MIB: usize = 5 * 1024 * 1024;
+    const MB: usize = 1_048_576;
+
+    let mut data = vec![0_u8; FIVE_MIB];
+    data[0] = 8;
+    data[MB] = 8;
+    data[2 * MB] = 9;
+    data[3 * MB] = 8;
+    data[4 * MB] = 9;
+
+    let chunk_index = chunk_data_index_from_bytes(&data, CHUNK_SIZE_5MIB);
+    let factory =
+        factory_with_chunk_index(CHUNK_SIZE_5MIB, NUM_CHUNKS_IN_PARTITION_5MIB, chunk_index);
+    let runtime = sum_verifier_runtime();
+    let mut evm = factory.create_evm(
+        test_db_with_contract(runtime.as_ref(), SUM_VERIFIER_ADDR),
+        evm_env(),
+    );
+
+    let access_list = AccessList(vec![AccessListItem {
+        address: PD_PRECOMPILE_ADDRESS,
+        storage_keys: vec![
+            B256::from(
+                PdDataRead {
+                    partition_index: 0,
+                    start: 0,
+                    len: data.len() as u32,
+                    byte_off: 0,
+                }
+                .encode(),
+            ),
+            B256::from(
+                encode_pd_fee(
+                    PdAccessListArgsTypeId::PdPriorityFee as u8,
+                    U256::from(TEST_FEE_PER_CHUNK),
+                )
+                .expect("fee encoding"),
+            ),
+            B256::from(
+                encode_pd_fee(
+                    PdAccessListArgsTypeId::PdBaseFeeCap as u8,
+                    U256::from(TEST_FEE_PER_CHUNK),
+                )
+                .expect("fee encoding"),
+            ),
+        ],
+    }]);
+
+    let tx = contract_call_tx(
+        TxKind::Call(SUM_VERIFIER_ADDR),
+        Bytes::from_static(&[0xE1, 0x8D, 0xCB, 0x62]),
+        access_list,
+    );
+    let result = evm.transact_raw(tx).expect("sum verifier tx executes");
+
+    assert!(
+        result.result.is_success(),
+        "compiled Solidity 5 MiB verifier should succeed"
+    );
+    assert!(
+        result.result.gas_used() < 2_000_000,
+        "compiled Solidity verifier should stay well below the 30M cap, got {}",
+        result.result.gas_used()
+    );
 }
 
 /// 5 MB PD read through a contract succeeds within gas limit.

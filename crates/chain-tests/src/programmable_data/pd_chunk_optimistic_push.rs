@@ -6,31 +6,48 @@
 //! - Observer (Node C): not staked, not pledged, validator-only push target
 //!
 //! Three scenarios:
-//! 1. Happy path: push delivers chunk before block validation
+//! 1. Happy path: push delivers 5 MB PD data, smart contract verifies byte-level
+//!    correctness on the EVM side, all 3 nodes validate and follow the same tip
 //! 2. Cache-hit shortcut: duplicate push exits early without re-verification
 //! 3. Pending fetch reconciliation: push wins over in-flight P2P fetch
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
+use alloy_core::primitives::U256;
 use alloy_eips::Encodable2718 as _;
-use alloy_network::TxSignerSync as _;
-use alloy_primitives::{Address, U256};
-use alloy_signer_local::LocalSigner;
+use alloy_genesis::GenesisAccount;
+use alloy_network::{EthereumWallet, TxSignerSync as _};
+use alloy_primitives::Address;
+use alloy_provider::{Provider as _, ProviderBuilder};
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use alloy_sol_macro::sol;
+use alloy_sol_types::SolCall as _;
 use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_types::chunk_provider::ChunkStorageProvider as _;
 use irys_types::gossip::PdChunkPush;
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::PdDataRead;
 use irys_types::ChunkFormat;
-use irys_types::PeerAddress;
 use irys_types::{
     Base64, DataLedger, LedgerChunkOffset, NodeConfig, PeerFilterMode, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{IrysAddress, PeerAddress};
+use k256::ecdsa::SigningKey;
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
+
+sol!(
+    #[sol(rpc)]
+    PdSumVerifier,
+    "../../fixtures/contracts/out/IrysPDSumVerifier.sol/PdSumVerifier.json"
+);
+
+const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
+const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 /// Context returned by [`setup_pd_push_test`] containing all 3 nodes and metadata.
 #[expect(dead_code, reason = "fields available for future test assertions")]
@@ -229,6 +246,305 @@ pub(crate) async fn setup_pd_push_test(fanout: u32) -> eyre::Result<PdPushTestCo
     })
 }
 
+/// Context for the 5 MB happy path test: wraps base context + deployed contract address.
+pub(crate) struct PdPush5MbContext {
+    pub ctx: PdPushTestContext,
+    pub contract_address: Address,
+}
+
+/// Start 3 nodes with production-size chunks (256 KB), upload 5 MB of crafted data,
+/// deploy the `PdSumVerifier` contract, and return the context for the happy path test.
+///
+/// Data is crafted so bytes at 0, 1 MB, 2 MB, 3 MB, 4 MB sum to 42.
+pub(crate) async fn setup_pd_push_test_5mb(fanout: u32) -> eyre::Result<PdPush5MbContext> {
+    let chunk_size: u64 = 262_144; // 256 KB (production)
+    let num_chunks_in_partition: u64 = 40;
+    let data_size: usize = 5 * 1024 * 1024; // 5 MB
+    let num_chunks_uploaded: u64 = (data_size as u64).div_ceil(chunk_size);
+    let seconds_to_wait = 120;
+
+    // --- Configure Genesis (Node A) with 256 KB chunks ---
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().block_migration_depth = 2;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_chunks_in_partition = num_chunks_in_partition;
+    config.consensus.get_mut().entropy_packing_iterations = 100;
+    config.p2p_gossip.pd_optimistic_push_fanout = fanout;
+
+    let data_signer = config.new_random_signer();
+    let peer_signer = config.new_random_signer();
+    let observer_signer = config.new_random_signer();
+    let pd_signer = config.new_random_signer();
+    let pd_signer_2 = config.new_random_signer();
+
+    // Fund the dev wallet for contract deployment.
+    let dev_address = IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice());
+    config.consensus.extend_genesis_accounts(vec![(
+        dev_address,
+        GenesisAccount {
+            balance: U256::from(4_200_000_000_000_000_000_u128),
+            ..Default::default()
+        },
+    )]);
+    config.fund_genesis_accounts(vec![
+        &data_signer,
+        &peer_signer,
+        &observer_signer,
+        &pd_signer,
+        &pd_signer_2,
+    ]);
+
+    let genesis = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // --- Craft 5 MB data: bytes at 1 MB intervals sum to 42 ---
+    let mut data_bytes = vec![0_u8; data_size];
+    const MB: usize = 1_048_576;
+    data_bytes[0] = 8;
+    data_bytes[MB] = 8;
+    data_bytes[2 * MB] = 9;
+    data_bytes[3 * MB] = 8;
+    data_bytes[4 * MB] = 9;
+    // 8 + 8 + 9 + 8 + 9 = 42
+
+    // Record Publish ledger total_chunks BEFORE posting — this is the data_start_offset.
+    let offset_before = {
+        let block_index = genesis.node_ctx.block_index_guard.read();
+        block_index
+            .get_latest_item()
+            .and_then(|item| {
+                item.ledgers
+                    .iter()
+                    .find(|l| l.ledger == DataLedger::Publish)
+                    .map(|l| l.total_chunks)
+            })
+            .unwrap_or(0)
+    };
+
+    // Post the data transaction via the mempool channel.
+    let tx = genesis
+        .post_publish_data_tx(&data_signer, data_bytes.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+    // Upload chunks via HTTP so they are in the cache for migration.
+    let client = reqwest::Client::new();
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        genesis.node_ctx.config.node_config.http.bind_port
+    );
+    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+        let min = chunk_node.min_byte_range;
+        let max = chunk_node.max_byte_range;
+        let chunk = UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+            bytes: Base64(data_bytes[min..max].to_vec()),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            ),
+        };
+        let resp = client
+            .post(format!("{}/v1/chunk", &http_url))
+            .json(&chunk)
+            .send()
+            .await?;
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "Failed to upload chunk {} for data tx",
+            tx_chunk_offset
+        );
+    }
+
+    // Mine blocks until the tx header appears in the block index (past migration depth).
+    genesis
+        .wait_for_migrated_txs(vec![tx.header.clone()], seconds_to_wait)
+        .await?;
+
+    // Wait for first chunk to be available in storage module.
+    genesis
+        .wait_for_chunk_in_storage(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(offset_before),
+            seconds_to_wait,
+        )
+        .await?;
+
+    let data_start_offset = offset_before;
+    info!(
+        "5 MB data uploaded and migrated on Genesis: {} chunks, data_start_offset={}",
+        num_chunks_uploaded, data_start_offset
+    );
+
+    // --- Deploy PdSumVerifier contract on Genesis ---
+    let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
+    let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
+    let wallet = EthereumWallet::from(signer);
+    let alloy_provider = ProviderBuilder::new().wallet(wallet).connect_http(
+        format!(
+            "http://127.0.0.1:{}/v1/execution-rpc",
+            genesis.node_ctx.config.node_config.http.bind_port
+        )
+        .parse()?,
+    );
+
+    let deploy_builder = PdSumVerifier::deploy_builder(alloy_provider.clone()).gas(29_506_173);
+    let mut deploy_fut = Box::pin(deploy_builder.deploy());
+    let contract_address = genesis
+        .future_or_mine_on_timeout(&mut deploy_fut, Duration::from_millis(500))
+        .await??;
+    info!("PdSumVerifier deployed at {:?}", contract_address);
+
+    // --- Start Block Producer (Node B) with partition assignments ---
+    let block_producer = genesis.testing_peer_with_assignments(&peer_signer).await?;
+    info!("Block Producer started with partition assignments");
+
+    // Record Genesis block index height for Observer sync.
+    let genesis_index_height = genesis.get_block_index_height();
+    info!("Genesis block index height: {}", genesis_index_height);
+
+    // --- Start Observer (Node C) — validator-only, no staking/pledging ---
+    let observer_config = genesis.testing_peer_with_signer(&observer_signer);
+    let observer = IrysNodeTest::new(observer_config)
+        .start_with_name("OBSERVER")
+        .await;
+
+    // Wait for Observer's block index to catch up to Genesis.
+    observer
+        .wait_until_block_index_height(genesis_index_height, seconds_to_wait)
+        .await?;
+    info!(
+        "Observer block index synced to height {}",
+        genesis_index_height
+    );
+
+    // Compute partition_index and local_offset from data_start_offset.
+    let partition_index = data_start_offset / num_chunks_in_partition;
+    let local_offset = (data_start_offset % num_chunks_in_partition) as u32;
+
+    Ok(PdPush5MbContext {
+        ctx: PdPushTestContext {
+            genesis,
+            block_producer,
+            observer,
+            data_start_offset,
+            partition_index,
+            local_offset,
+            num_chunks_in_partition,
+            chunk_size,
+            num_chunks_uploaded,
+            data_bytes,
+            data_signer,
+            peer_signer,
+            observer_signer,
+            pd_signer,
+            pd_signer_2,
+        },
+        contract_address,
+    })
+}
+
+/// Poll a node's execution RPC for a transaction receipt, returning its status.
+async fn wait_for_tx_receipt_on_node(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    tx_hash: alloy_primitives::FixedBytes<32>,
+    node_name: &str,
+) -> eyre::Result<bool> {
+    let rpc_url: reqwest::Url = format!(
+        "http://127.0.0.1:{}/v1/execution-rpc",
+        node.node_ctx.config.node_config.http.bind_port
+    )
+    .parse()
+    .expect("valid URL");
+    let provider = ProviderBuilder::new().connect_http(rpc_url);
+    for attempt in 1..=30 {
+        match provider.get_transaction_receipt(tx_hash).await {
+            Ok(Some(r)) => {
+                info!(
+                    "{}: PD tx receipt on attempt {}: status={:?}, gas_used={:?}",
+                    node_name,
+                    attempt,
+                    r.status(),
+                    r.gas_used
+                );
+                return Ok(r.status());
+            }
+            Ok(None) if attempt < 30 => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Ok(None) => {
+                eyre::bail!("{}: tx receipt not found after {} attempts", node_name, 30);
+            }
+            Err(e) if attempt < 30 => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                info!(
+                    "{}: receipt query failed on attempt {} (retrying): {:?}",
+                    node_name, attempt, e
+                );
+            }
+            Err(e) => {
+                eyre::bail!("{}: tx receipt query failed: {:?}", node_name, e);
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// Build a signed PD transaction calling a contract, with a configurable gas limit.
+///
+/// Same as `inject_pd_contract_call` in utils.rs, but allows overriding the gas limit
+/// (needed for large PD reads like 5 MB that require more gas for memory operations).
+async fn inject_pd_contract_call_with_gas(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    signer: &IrysSigner,
+    contract_address: Address,
+    abi_calldata: alloy_primitives::Bytes,
+    data_reads: Vec<PdDataRead>,
+    priority_fee_per_chunk: u64,
+    gas_limit: u64,
+    nonce: u64,
+) -> eyre::Result<alloy_primitives::FixedBytes<32>> {
+    let local_signer = LocalSigner::from(signer.signer.clone());
+    let chain_id = node.node_ctx.config.consensus.chain_id;
+
+    let access_list = build_pd_access_list_with_fees(
+        &data_reads,
+        U256::from(priority_fee_per_chunk),
+        U256::from(1_000_000_000_000_000_u64),
+    )?;
+
+    let mut tx = TxEip1559 {
+        access_list,
+        chain_id,
+        gas_limit,
+        input: abi_calldata,
+        max_fee_per_gas: 20_000_000_000,
+        max_priority_fee_per_gas: 1_000_000_000,
+        nonce,
+        to: alloy_primitives::TxKind::Call(contract_address),
+        value: U256::ZERO,
+    };
+    let signature = local_signer
+        .sign_transaction_sync(&mut tx)
+        .expect("PD tx must be signable");
+
+    let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+        .encoded_2718()
+        .into();
+    let tx_hash = node
+        .node_ctx
+        .reth_node_adapter
+        .rpc
+        .inject_tx(tx_envelope)
+        .await?;
+
+    Ok(tx_hash)
+}
+
 /// Build a signed PD transaction referencing real chunk offsets and inject it.
 ///
 /// Unlike `create_and_inject_pd_transaction_with_priority_fee` (which uses `U200::MAX`
@@ -287,87 +603,112 @@ pub(crate) async fn build_and_inject_real_pd_tx(
     Ok(tx_hash)
 }
 
-/// Genesis pushes PD chunks to Observer via optimistic push. Observer verifies
-/// (block index + merkle + leaf hash) and caches. Block validates with cache hits.
+/// Block Producer (no local PD data) receives a PD contract call, fetches 5 MB of
+/// chunks from Genesis via P2P, then naturally pushes them to Observer. Block Producer
+/// mines the block. The smart contract (`PdSumVerifier`) reads the full 5 MB via
+/// `readData()` and verifies that bytes at 1 MB intervals sum to 42.
 ///
-/// Key assertion: chunks appear in Observer's ChunkDataIndex BEFORE any block
-/// is gossiped, proving they arrived via push (not P2P fetch during validation).
+/// This exercises the full production flow:
+///   Block Producer pulls chunks from Genesis → pushes to Observer → mines block
+///   → all 3 nodes validate the PD transaction and follow the same tip
+///
+/// Key assertions:
+/// 1. Chunks appear in Observer's ChunkDataIndex via push (before any block gossip)
+/// 2. Smart contract verification passes (tx receipt status=true on all nodes)
+/// 3. ALL 3 nodes validate the block and follow the same canonical tip
 #[test_log::test(tokio::test)]
 async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
-    let ctx = setup_pd_push_test(4).await?;
+    let mb_ctx = setup_pd_push_test_5mb(4).await?;
+    let contract_address = mb_ctx.contract_address;
+    let ctx = mb_ctx.ctx;
 
     let publish_ledger = DataLedger::Publish as u32;
+    let num_chunks = ctx.num_chunks_uploaded;
 
-    // Pre-test invariant: Observer should NOT have chunks at the target offset.
-    for i in 0..2_u64 {
-        let offset = ctx.data_start_offset + i;
-        assert!(
-            ctx.observer
-                .node_ctx
-                .chunk_data_index
-                .get(&(publish_ledger, offset))
-                .is_none(),
-            "Observer should NOT have chunk at ({}, {}) before push",
-            publish_ledger,
-            offset,
-        );
+    // Pre-test invariant: Observer and Block Producer should NOT have chunks.
+    for node_ctx in [&ctx.observer.node_ctx, &ctx.block_producer.node_ctx] {
+        for &offset in &[
+            ctx.data_start_offset,
+            ctx.data_start_offset + num_chunks - 1,
+        ] {
+            assert!(
+                node_ctx
+                    .chunk_data_index
+                    .get(&(publish_ledger, offset))
+                    .is_none(),
+                "Node should NOT have chunk at ({}, {}) before PD tx",
+                publish_ledger,
+                offset,
+            );
+        }
     }
 
-    // Inject a PD tx on Genesis referencing 2 real chunks.
-    // This triggers: handle_provision_chunks → cache hit (local storage) → schedule_outbound_push
-    let tx_hash = build_and_inject_real_pd_tx(
-        &ctx.genesis,
+    // --- Inject PD contract call on Block Producer ---
+    // Block Producer does NOT have PD chunks locally. Its PdService will:
+    //   1. P2P fetch all 20 chunks from Genesis
+    //   2. After each fetch, schedule_outbound_push → push to Observer
+    //   3. Mark the PD tx as ready in ready_pd_txs
+    let abi_calldata: alloy_primitives::Bytes = PdSumVerifier::verifySumAt1MbOffsetsCall {}
+        .abi_encode()
+        .into();
+
+    let data_len = ctx.data_bytes.len() as u32;
+    let tx_hash = inject_pd_contract_call_with_gas(
+        &ctx.block_producer,
         &ctx.pd_signer,
-        ctx.partition_index,
-        ctx.local_offset,
-        2, // chunk_count
-        0, // nonce
+        contract_address,
+        abi_calldata,
+        vec![PdDataRead {
+            partition_index: ctx.partition_index,
+            start: ctx.local_offset,
+            len: data_len,
+            byte_off: 0,
+        }],
+        10_000_000_000_000_000_u64,
+        30_000_000, // 30M gas — readData() loads 5 MB into EVM memory
+        0,
     )
     .await?;
-    info!("PD tx injected on Genesis: {:?}", tx_hash);
+    info!("PD contract call injected on Block Producer: {:?}", tx_hash);
 
-    // Wait for Genesis to provision and push. The push is fire-and-forget,
-    // so we wait for the chunk to appear in Observer's cache.
+    // Wait for Observer to receive chunks via optimistic push from Block Producer.
+    // Block Producer fetches from Genesis, then pushes to Observer automatically.
+    // This happens BEFORE any block is mined — proving chunks arrived via push.
     ctx.observer
-        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset, 30)
+        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset, 120)
         .await?;
     ctx.observer
-        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + 1, 30)
+        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + num_chunks - 1, 120)
         .await?;
-    info!("Chunks arrived in Observer cache via optimistic push (before block gossip)");
+    info!(
+        "Chunks arrived in Observer cache via push from Block Producer ({} chunks, before block gossip)",
+        num_chunks
+    );
 
-    // Verify byte-level correctness of pushed chunks.
+    // Verify byte-level correctness of first pushed chunk on Observer.
     let chunk_size = ctx.chunk_size as usize;
-    for i in 0..2_u64 {
-        let global_offset = ctx.data_start_offset + i;
-        let fetched_bytes = ctx
+    {
+        let fetched = ctx
             .observer
             .node_ctx
             .chunk_data_index
-            .get(&(publish_ledger, global_offset))
-            .map(|r| Arc::clone(&*r));
-        assert!(
-            fetched_bytes.is_some(),
-            "Chunk at ({}, {}) should be in Observer's ChunkDataIndex after push",
-            publish_ledger,
-            global_offset,
-        );
+            .get(&(publish_ledger, ctx.data_start_offset))
+            .map(|r| Arc::clone(&*r))
+            .expect("First chunk should be in Observer's ChunkDataIndex after push");
 
-        let fetched = fetched_bytes.unwrap();
-        let chunk_byte_start = i as usize * chunk_size;
-        let chunk_byte_end = chunk_byte_start + chunk_size;
-        let expected = &ctx.data_bytes[chunk_byte_start..chunk_byte_end];
+        let expected = &ctx.data_bytes[..chunk_size];
         assert_eq!(
             fetched.as_ref(),
             expected,
-            "Pushed chunk at offset {} bytes should match uploaded data",
-            global_offset,
+            "First pushed chunk bytes should match uploaded data",
         );
     }
 
-    // Wait for Genesis to mark the PD tx as ready, then mine.
-    ctx.genesis.wait_for_ready_pd_tx(&tx_hash, 30).await?;
-    let (block, eth_payload, _) = ctx.genesis.mine_block_without_gossip().await?;
+    // Wait for Block Producer to finish provisioning all chunks, then mine.
+    ctx.block_producer
+        .wait_for_ready_pd_tx(&tx_hash, 120)
+        .await?;
+    let (block, eth_payload, _) = ctx.block_producer.mine_block_without_gossip().await?;
 
     // Verify PD tx is in the block.
     let pd_tx_included = eth_payload
@@ -378,30 +719,64 @@ async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
         .any(|tx| tx.hash() == &tx_hash);
     assert!(
         pd_tx_included,
-        "PD tx {:?} should be included in Genesis's mined block",
+        "PD tx {:?} should be included in Block Producer's mined block",
         tx_hash,
     );
 
     let block_height = block.height;
-    info!("Genesis mined block at height {} with PD tx", block_height);
+    info!(
+        "Block Producer mined block at height {} with PD tx",
+        block_height
+    );
 
-    // Gossip the block to Observer.
-    ctx.genesis.gossip_block_to_peers(&block)?;
-    ctx.genesis.gossip_eth_block_to_peers(eth_payload.block())?;
+    // --- Verify PD tx receipt on Block Producer (smart contract sum check passed) ---
+    let bp_status =
+        wait_for_tx_receipt_on_node(&ctx.block_producer, tx_hash, "BlockProducer").await?;
+    assert!(
+        bp_status,
+        "PD tx should have succeeded on Block Producer (contract verifySumAt1MbOffsets passed)",
+    );
 
-    // Wait for Observer to validate and accept the block.
-    // Chunks are already cached from push — this should be a fast cache hit.
-    ctx.observer.wait_until_height(block_height, 30).await?;
+    // --- Gossip block from Block Producer to all peers ---
+    ctx.block_producer.gossip_block_to_peers(&block)?;
+    ctx.block_producer
+        .gossip_eth_block_to_peers(eth_payload.block())?;
 
+    // --- ALL-NODE SYNC: wait for all 3 nodes to validate and follow the same tip ---
+    ctx.genesis.wait_until_height(block_height, 60).await?;
+    let genesis_height = ctx.genesis.get_canonical_chain_height().await;
+    assert_eq!(
+        genesis_height, block_height,
+        "Genesis canonical tip should match Block Producer after validation",
+    );
+
+    let bp_height = ctx.block_producer.get_canonical_chain_height().await;
+    assert_eq!(
+        bp_height, block_height,
+        "Block Producer canonical tip should be at the mined block height",
+    );
+
+    ctx.observer.wait_until_height(block_height, 60).await?;
     let observer_height = ctx.observer.get_canonical_chain_height().await;
     assert_eq!(
         observer_height, block_height,
-        "Observer canonical tip should match Genesis after validation",
+        "Observer canonical tip should match Block Producer after validation",
     );
 
     info!(
-        "Observer validated PD block at height {} — push delivered chunks before block arrived",
-        block_height,
+        "All 3 nodes at height {}: Genesis={}, BlockProducer={}, Observer={}",
+        block_height, genesis_height, bp_height, observer_height,
+    );
+
+    // --- Verify PD tx receipt on ALL nodes (status=true proves EVM execution succeeded) ---
+    let genesis_status = wait_for_tx_receipt_on_node(&ctx.genesis, tx_hash, "Genesis").await?;
+    assert!(genesis_status, "PD tx should have succeeded on Genesis");
+
+    let observer_status = wait_for_tx_receipt_on_node(&ctx.observer, tx_hash, "Observer").await?;
+    assert!(observer_status, "PD tx should have succeeded on Observer",);
+
+    info!(
+        "PD tx receipt verified on all 3 nodes — contract verifySumAt1MbOffsets passed everywhere",
     );
 
     ctx.observer.stop().await;
