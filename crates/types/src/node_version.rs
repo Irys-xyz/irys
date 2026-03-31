@@ -6,18 +6,18 @@ const VENDOR: &str = "irys-rs";
 
 /// Global build version, initialized once.
 ///
-/// Binary crates should call [`init_build_version`] early in `main()` to set the full version
-/// including git metadata. Library crates access it via [`build_version`], which falls back to
+/// Binary crates should call [`init_version`] early in `main()` to set the full version
+/// including git metadata. Library crates access it via [`get_version`], which falls back to
 /// the plain workspace version if no initializer ran.
 static BUILD_VERSION: OnceLock<Version> = OnceLock::new();
 
 /// Returns the build version. Always includes `+irys-rs` vendor tag in build metadata.
-/// If [`init_build_version`] was called (by the binary), untagged commits also get the
+/// If [`init_version`] was called (by the binary), untagged commits also get the
 /// git SHA appended: `3.0.0+irys-rs.abc1234`. Otherwise falls back to `3.0.0+irys-rs`.
-pub fn build_version() -> &'static Version {
+pub fn get_version() -> &'static Version {
     BUILD_VERSION.get_or_init(|| {
         // Fallback: uses this crate's version (irys-types), not the binary's.
-        // In production, init_build_version() runs first with the real version.
+        // In production, init_version() runs first with the real version.
         let mut v =
             Version::parse(env!("CARGO_PKG_VERSION")).expect("valid CARGO_PKG_VERSION semver");
         v.build = semver::BuildMetadata::new(VENDOR).expect("valid build metadata");
@@ -27,7 +27,7 @@ pub fn build_version() -> &'static Version {
 
 /// Initializes the global build version with git metadata.
 /// **Must be the first call in `main()`** — the backing `OnceLock` is set-once, so any
-/// earlier call to [`build_version`] (e.g. via handshake `Default` impls) would permanently
+/// earlier call to [`get_version`] (e.g. via handshake `Default` impls) would permanently
 /// freeze the version without git metadata.
 ///
 /// - `pkg_version`: the caller's `env!("CARGO_PKG_VERSION")` — use the binary crate's version
@@ -41,24 +41,25 @@ pub fn build_version() -> &'static Version {
 /// - Untagged, dirty: `3.0.0+irys-rs.a1b2c3d.dirty`
 /// - Tagged, dirty:   `3.0.0+irys-rs.dirty`
 ///
-/// If already initialized, prints an error to stderr and keeps the existing value.
-pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) {
-    debug_assert!(
+/// Panics if already initialized (indicates a code ordering bug).
+pub fn init_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) {
+    assert!(
         has_tag || !git_sha.is_empty(),
         "untagged build must have a non-empty git_sha for version metadata"
     );
-    let version = make_build_version(pkg_version, git_sha, has_tag, is_dirty);
+    let version = make_version(pkg_version, git_sha, has_tag, is_dirty);
     if let Err(existing) = BUILD_VERSION.set(version) {
-        eprintln!(
-            "init_build_version called too late — BUILD_VERSION already initialized to {existing}, git metadata dropped"
+        panic!(
+            "init_version called too late — BUILD_VERSION already initialized to {existing}, git metadata dropped"
         );
     }
 }
 
 /// Builds a [`Version`] with vendor and git metadata in the build metadata field.
-/// This is the pure logic used by [`init_build_version`]; extracted for testability.
-fn make_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) -> Version {
+/// This is the pure logic used by [`init_version`]; extracted for testability.
+fn make_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) -> Version {
     let mut version = Version::parse(pkg_version).expect("valid pkg_version semver");
+    // Tagged builds use vendor-only metadata; the tag *is* the identifier, so SHA is redundant.
     let mut meta = if !has_tag && !git_sha.is_empty() {
         format!("{VENDOR}.{git_sha}")
     } else {
@@ -78,8 +79,8 @@ mod tests {
     // NOTE: These tests share a process-wide OnceLock, so they all observe
     // the same fallback value (whichever test runs first initializes it).
     #[test]
-    fn build_version_matches_cargo_pkg_version() {
-        let v = build_version();
+    fn get_version_matches_cargo_pkg_version() {
+        let v = get_version();
         let pkg = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
         assert_eq!(v.major, pkg.major);
         assert_eq!(v.minor, pkg.minor);
@@ -88,43 +89,44 @@ mod tests {
     }
 
     #[test]
-    fn build_version_includes_vendor() {
-        let v = build_version();
-        assert!(
-            v.build.as_str().starts_with("irys"),
-            "build metadata should start with vendor: {}",
+    fn get_version_includes_vendor() {
+        let v = get_version();
+        assert_eq!(
+            v.build.as_str(),
+            "irys-rs",
+            "build metadata should be the vendor tag: {}",
             v.build
         );
     }
 
     #[test]
-    fn build_version_is_valid_semver_string() {
-        let v = build_version();
-        let reparsed = Version::parse(&v.to_string()).expect("build_version should roundtrip");
+    fn get_version_is_valid_semver_string() {
+        let v = get_version();
+        let reparsed = Version::parse(&v.to_string()).expect("get_version should roundtrip");
         assert_eq!(*v, reparsed);
     }
 
     #[test]
     fn version_untagged_clean() {
-        let v = make_build_version("3.0.0", "abc1234", false, false);
+        let v = make_version("3.0.0", "abc1234", false, false);
         assert_eq!(v.to_string(), "3.0.0+irys-rs.abc1234");
     }
 
     #[test]
     fn version_tagged_clean() {
-        let v = make_build_version("3.0.0", "", true, false);
+        let v = make_version("3.0.0", "", true, false);
         assert_eq!(v.to_string(), "3.0.0+irys-rs");
     }
 
     #[test]
     fn version_untagged_dirty() {
-        let v = make_build_version("3.0.0", "abc1234", false, true);
+        let v = make_version("3.0.0", "abc1234", false, true);
         assert_eq!(v.to_string(), "3.0.0+irys-rs.abc1234.dirty");
     }
 
     #[test]
     fn version_tagged_dirty() {
-        let v = make_build_version("3.0.0", "", true, true);
+        let v = make_version("3.0.0", "", true, true);
         assert_eq!(v.to_string(), "3.0.0+irys-rs.dirty");
     }
 

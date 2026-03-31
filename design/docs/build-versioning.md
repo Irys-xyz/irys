@@ -35,7 +35,7 @@ Note: "tagged" means any exact tag on HEAD (`git describe --exact-match --tags`)
 
 ### Workspace version
 
-Each crate in the workspace defines its own version independently (e.g. `irys-chain = "3.0.0"`, `irys-types = "0.1.0"`). The node's reported version comes from the binary crate's `Cargo.toml` — `init_build_version` in `main()` receives it via `env!("CARGO_PKG_VERSION")` at the call site.
+Each crate in the workspace defines its own version independently (e.g. `irys-chain = "3.0.0"`, `irys-types = "0.1.0"`). The node's reported version comes from the binary crate's `Cargo.toml` — `init_version` in `main()` receives it via `env!("CARGO_PKG_VERSION")` at the call site.
 
 ### Build-time capture
 

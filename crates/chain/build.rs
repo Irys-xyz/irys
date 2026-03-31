@@ -1,6 +1,9 @@
 use std::process::Command;
 
 fn main() {
+    // In worktrees, HEAD lives in the worktree's own git dir, but refs/tags and
+    // packed-refs live in the common (main repo) git dir. Track both.
+
     // If we're not in a git repo at all, fail the build — we require git metadata.
     let git_dir = git_output(&["rev-parse", "--absolute-git-dir"])
         .expect("not inside a git repository — irys-chain requires git metadata to build");
@@ -41,8 +44,8 @@ fn main() {
     // Pin to 7-character short SHA for deterministic output regardless of repo size.
     let sha = git_output(&["rev-parse", "--short=7", "HEAD"])
         .expect("git rev-parse --short=7 HEAD failed — cannot determine commit SHA");
-    // Any tag on HEAD triggers the "tagged" path. Non-release tags (e.g. local/CI)
-    // will suppress the SHA — if finer control is needed, filter to a pattern here.
+    // TODO: filter to release tag patterns (e.g. `v*`) so CI/local tags don't
+    // suppress the SHA. Currently any tag on HEAD triggers the "tagged" path.
     let has_tag = git_output(&["describe", "--exact-match", "--tags", "HEAD"]).is_some();
     // Detect uncommitted changes (staged or unstaged, excluding untracked files).
     // Note: no rerun-if-changed for working-tree state — cargo can't practically

@@ -1100,7 +1100,7 @@ where
             .unwrap_or_default();
 
         let response = wire_types::HandshakeResponseV1 {
-            version: irys_types::build_version().clone(),
+            version: irys_types::get_version().clone(),
             protocol_version: version_request.protocol_version,
             peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
@@ -1222,7 +1222,7 @@ where
             .unwrap_or_default();
 
         let response = wire_types::HandshakeResponseV2 {
-            version: irys_types::build_version().clone(),
+            version: irys_types::get_version().clone(),
             protocol_version: version_request.protocol_version,
             peers: peers.into_iter().map(Into::into).collect(),
             timestamp: SystemTime::now()
