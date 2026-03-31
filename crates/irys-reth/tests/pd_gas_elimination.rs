@@ -24,19 +24,11 @@ use std::sync::Arc;
 
 use alloy_evm::{Evm as _, EvmFactory as _};
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const TEST_CALLER: Address = Address::repeat_byte(0x42);
 const PROXY_ADDR: Address = Address::repeat_byte(0x77);
 const TEST_FEE_PER_CHUNK: u128 = 1_000_000_000_000_000_000; // 1 IRYS
 const CHUNK_SIZE: u64 = 256_000;
 const NUM_CHUNKS_IN_PARTITION: u64 = 200;
-
-// ---------------------------------------------------------------------------
-// Proxy contract bytecode
-// ---------------------------------------------------------------------------
 
 /// Minimal runtime bytecode that:
 /// 1. Copies calldata to memory
@@ -84,10 +76,6 @@ const PD_PROXY_RUNTIME: &[u8] = &[
     0x60, 0x00, // PUSH1 0                        PC=40
     0xFD, // REVERT                                PC=42
 ];
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
 
 fn chunk_data_index(num_chunks: u64) -> irys_types::chunk_provider::ChunkDataIndex {
     let index = Arc::new(DashMap::new());
@@ -228,10 +216,6 @@ fn expected_memory_cost(num_words: usize) -> u64 {
     3 * w + w * w / 512
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 /// 5 MB PD read through a contract succeeds within gas limit.
 ///
 /// Without gas elimination, memory expansion alone costs ~50.5M gas (exceeds
@@ -315,10 +299,6 @@ fn pd_gas_scales_linearly_with_size() {
         "Gas ratio 5MB/1MB = {ratio:.1}× — should be ~5× (linear), not ~25× (quadratic)"
     );
 }
-
-// ===========================================================================
-// Task 3: Comparative — non-PD RETURNDATACOPY still charges memory gas
-// ===========================================================================
 
 const RETURNER_ADDR: Address = Address::repeat_byte(0x88);
 const NON_PD_CALLER_ADDR: Address = Address::repeat_byte(0x99);
@@ -482,10 +462,6 @@ fn pd_vs_non_pd_512kb_gas_comparison() {
     );
 }
 
-// ===========================================================================
-// Task 4: Memory high-water mark preserved after PD copy
-// ===========================================================================
-
 /// Build a PD proxy variant that optionally does an MSTORE 1 word past
 /// the RETURNDATACOPY region to test incremental memory expansion.
 ///
@@ -600,10 +576,6 @@ fn pd_copy_preserves_memory_high_water_mark() {
     );
 }
 
-// ===========================================================================
-// Task 5: Transaction boundary isolation
-// ===========================================================================
-
 /// PD return marker does not leak across transactions.
 ///
 /// TX1 does a PD read (exempt from memory gas). TX2 does a non-PD read
@@ -664,10 +636,6 @@ fn pd_marker_does_not_leak_across_transactions() {
         "TX1 PD ({gas_pd}) should be cheaper than TX2 non-PD ({gas_non_pd})"
     );
 }
-
-// ===========================================================================
-// Task 6: Frame-scope and edge case tests
-// ===========================================================================
 
 const WRAPPER_ADDR: Address = Address::repeat_byte(0xCC);
 
@@ -826,10 +794,6 @@ fn two_pd_reads_separate_txs_both_exempt() {
         res2.result.gas_used()
     );
 }
-
-// ===========================================================================
-// Task 6c: Two PD STATICCALLs in one transaction both get exemption
-// ===========================================================================
 
 const DUAL_PROXY_ADDR: Address = Address::repeat_byte(0xDD);
 

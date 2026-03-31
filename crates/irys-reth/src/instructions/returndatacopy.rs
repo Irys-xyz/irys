@@ -277,10 +277,6 @@ mod tests {
         3 * num_words(len) as u64
     }
 
-    // -----------------------------------------------------------------------
-    // Subtask 1b: PD return data skips memory expansion gas
-    // -----------------------------------------------------------------------
-
     #[test]
     fn pd_return_data_skips_memory_expansion_gas() {
         let _scope = PdReturnMarkerScope::new();
@@ -324,10 +320,6 @@ mod tests {
         let mem = interp.memory.slice(0..32);
         assert!(mem.iter().all(|&b| b == 0xAB), "Data should be copied");
     }
-
-    // -----------------------------------------------------------------------
-    // Subtask 1c: Non-PD return data charges full gas
-    // -----------------------------------------------------------------------
 
     #[test]
     fn non_pd_return_data_charges_memory_expansion() {
@@ -382,10 +374,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Subtask 1d: Zero-length short-circuits
-    // -----------------------------------------------------------------------
-
     #[test]
     fn zero_length_returns_early_no_gas() {
         let _scope = PdReturnMarkerScope::new();
@@ -412,10 +400,6 @@ mod tests {
         );
         assert_eq!(interp.gas.memory().words_num, 0, "No memory expansion");
     }
-
-    // -----------------------------------------------------------------------
-    // Subtask 1e: PD marker cleared between transactions
-    // -----------------------------------------------------------------------
 
     #[test]
     fn marker_cleared_by_scope_charges_expansion() {
@@ -451,10 +435,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Subtask 1f: Non-zero source offset
-    // -----------------------------------------------------------------------
-
     #[test]
     fn pd_non_zero_source_offset_still_exempt() {
         let _scope = PdReturnMarkerScope::new();
@@ -487,10 +467,6 @@ mod tests {
         let mem = interp.memory.slice(0..32);
         assert!(mem.iter().all(|&b| b == 0xBE));
     }
-
-    // -----------------------------------------------------------------------
-    // Subtask 1g: Multiple RETURNDATACOPY ops against same PD buffer
-    // -----------------------------------------------------------------------
 
     #[test]
     fn multiple_returndatacopy_both_exempt() {
@@ -545,10 +521,6 @@ mod tests {
         assert!(words_after_second > words_after_first);
     }
 
-    // -----------------------------------------------------------------------
-    // Subtask 1h: High-water mark bookkeeping is exact
-    // -----------------------------------------------------------------------
-
     #[test]
     fn pd_highwater_mark_expansion_cost_is_correct() {
         let _scope = PdReturnMarkerScope::new();
@@ -579,10 +551,6 @@ mod tests {
         );
         assert_eq!(interp.gas.memory().words_num, words);
     }
-
-    // -----------------------------------------------------------------------
-    // Subtask 6b: Failed PD call clears prior exemption
-    // -----------------------------------------------------------------------
 
     /// Simulates the sequence: successful PD call → failed PD call → RETURNDATACOPY.
     ///
@@ -631,10 +599,6 @@ mod tests {
             "After failed PD call, gas ({gas_spent}) should include copy ({expected_copy}) + expansion ({expected_expansion})"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Regression: sparse PD destination charges expansion gas
-    // -----------------------------------------------------------------------
 
     /// Copying a small PD return buffer to a large sparse memory offset must
     /// charge expansion gas. Without this guard a malicious contract could
