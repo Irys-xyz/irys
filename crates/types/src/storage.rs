@@ -7,8 +7,8 @@ use std::{
 use crate::{ConsensusConfig, RelativeChunkOffset};
 use derive_more::{Add, Div, From, Into, Mul, Sub};
 pub use nodit::{
-    interval::{ie, ii},
     DiscreteFinite, InclusiveInterval, Interval,
+    interval::{ie, ii},
 };
 use reth_codecs::Compact;
 use reth_db::table::{Decode, Encode};

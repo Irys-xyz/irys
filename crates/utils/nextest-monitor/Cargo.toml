@@ -1,7 +1,7 @@
 [package]
 name = "nextest-monitor"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 description = "A wrapper tool to monitor CPU and memory usage of cargo-nextest test binaries, with pass/fail tracking"
 license = "MIT"
 

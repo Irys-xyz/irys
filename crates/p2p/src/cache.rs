@@ -5,7 +5,7 @@
 )]
 use crate::types::GossipResult;
 use core::time::Duration;
-use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, IrysPeerId, IrysTransactionId, H256};
+use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, H256, IrysPeerId, IrysTransactionId};
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;

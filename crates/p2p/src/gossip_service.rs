@@ -11,11 +11,11 @@ use crate::block_status_provider::BlockStatusProvider;
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
+    SyncChainServiceMessage,
     cache::GossipCache,
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
@@ -25,8 +25,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::Traced;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -35,9 +35,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{
-    channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+    Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, error::SendError,
 };
-use tracing::{debug, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, info, instrument, warn};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -330,18 +330,18 @@ impl P2PService {
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
-                if peer_entry.protocol_version == ProtocolVersion::V2 {
-                    if let Some((route, ref body)) = preserialized {
-                        self.client.send_preserialized_detached(
-                            (&peer_miner_address, &peer_entry),
-                            route,
-                            body.clone(),
-                            peer_list,
-                            Arc::clone(&self.cache),
-                            key,
-                        );
-                        continue;
-                    }
+                if peer_entry.protocol_version == ProtocolVersion::V2
+                    && let Some((route, ref body)) = preserialized
+                {
+                    self.client.send_preserialized_detached(
+                        (&peer_miner_address, &peer_entry),
+                        route,
+                        body.clone(),
+                        peer_list,
+                        Arc::clone(&self.cache),
+                        key,
+                    );
+                    continue;
                 }
                 // V1 peers or preserialization failure: fall back to existing path
                 self.client.send_data_and_update_the_score_detached(

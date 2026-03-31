@@ -1,25 +1,24 @@
 use super::send_block_and_read_state;
 use crate::utils::{
-    assert_validation_error, gossip_data_tx_to_node, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    BlockValidationOutcome, IrysNodeTest, assert_validation_error, gossip_data_tx_to_node,
+    solution_context,
 };
 use irys_actors::{
-    async_trait,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
 use irys_domain::{BlockTreeReadGuard, ChainState};
-use irys_types::storage_pricing::{
-    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
-};
 use irys_types::IngressProofsList;
+use irys_types::storage_pricing::{
+    Amount, calculate_perm_fee_from_config, calculate_term_fee_from_config,
+};
 use irys_types::{
-    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
-    UnixTimestamp, U256,
+    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256,
+    UnixTimestamp,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;

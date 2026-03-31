@@ -18,25 +18,24 @@ mod unstake_edge_cases;
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
-    BlockValidationOutcome, IrysNodeTest,
+    BlockValidationOutcome, IrysNodeTest, assert_validation_error, gossip_commitment_to_node,
+    read_block_from_state, solution_context,
 };
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
-    async_trait,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_tree_service::BlockTreeServiceMessage,
     block_validation::PreValidationError,
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger,
-    H256,
+    BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256,
+    H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock,
+    SystemTransactionLedger,
 };
 use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
@@ -826,10 +825,10 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
 async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
     use irys_types::{
-        ingress::{generate_ingress_proof, CachedIngressProof},
         IngressProofsList, U256,
+        ingress::{CachedIngressProof, generate_ingress_proof},
     };
-    use reth_db::{transaction::DbTxMut as _, Database as _};
+    use reth_db::{Database as _, transaction::DbTxMut as _};
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,

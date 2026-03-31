@@ -4,9 +4,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::node::{eth_payload_attributes, NodeHelperType, RethNode};
+use crate::node::{NodeHelperType, RethNode, eth_payload_attributes};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, BlockNumber, B256};
+use alloy_primitives::{Address, B256, BlockNumber};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
 use irys_reth::{IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 use reth::transaction_pool::EthPooledTransaction;
@@ -68,13 +68,12 @@ impl IrysRethNodeAdapter {
                 .inner
                 .provider
                 .block_by_number_or_tag(BlockNumberOrTag::Latest)?
+                && latest_block.header.number == block_number
             {
-                if latest_block.header.number == block_number {
-                    // make sure the block hash we submitted via FCU engine api is the new latest
-                    // block using an RPC call
-                    assert_eq!(latest_block.hash_slow(), block_hash);
-                    break;
-                }
+                // make sure the block hash we submitted via FCU engine api is the new latest
+                // block using an RPC call
+                assert_eq!(latest_block.hash_slow(), block_hash);
+                break;
             }
         }
         Ok(())

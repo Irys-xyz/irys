@@ -10,7 +10,7 @@ use crate::{ConsensusConfig, UnixTimestamp};
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use core::{fmt::Debug, marker::PhantomData};
-use eyre::{ensure, eyre, Result};
+use eyre::{Result, ensure, eyre};
 use reth_codecs::Compact;
 pub use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -2195,7 +2195,7 @@ mod tests {
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
-                                                        // First calculate term fee (needed for perm fee calculation)
+            // First calculate term fee (needed for perm fee calculation)
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,

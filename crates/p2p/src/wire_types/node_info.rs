@@ -1,4 +1,4 @@
-use irys_types::{IrysAddress, H256, U256};
+use irys_types::{H256, IrysAddress, U256};
 use serde::{Deserialize, Serialize};
 
 /// V1 wire type for [`irys_types::version::NodeInfo`].

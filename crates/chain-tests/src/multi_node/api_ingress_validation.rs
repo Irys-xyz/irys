@@ -457,8 +457,8 @@ async fn heavy_test_api_accepts_higher_fees() -> eyre::Result<()> {
 /// those with perm_fee or insufficient term_fee are rejected.
 #[test_log::test(tokio::test)]
 async fn heavy_cascade_mempool_ingress_boundary_for_term_ledgers() -> eyre::Result<()> {
-    use irys_types::hardfork_config::Cascade;
     use irys_types::UnixTimestamp;
+    use irys_types::hardfork_config::Cascade;
 
     let num_blocks_in_epoch = 4_u64;
 
@@ -586,9 +586,9 @@ async fn heavy_cascade_mempool_ingress_boundary_for_term_ledgers() -> eyre::Resu
 /// the post-Cascade rate ($0.028/GB/year).
 #[test_log::test(tokio::test)]
 async fn heavy_cascade_mempool_rejects_publish_tx_with_pre_cascade_pricing() -> eyre::Result<()> {
+    use irys_types::UnixTimestamp;
     use irys_types::hardfork_config::Cascade;
     use irys_types::storage_pricing::calculate_term_fee_from_config;
-    use irys_types::UnixTimestamp;
     use rust_decimal_macros::dec;
 
     let num_blocks_in_epoch = 4_u64;

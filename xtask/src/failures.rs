@@ -28,12 +28,11 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 
         // Check for Cargo.toml with [workspace] section
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                if content.contains("[workspace]") {
-                    return Some(current);
-                }
-            }
+        if cargo_toml.exists()
+            && let Ok(content) = fs::read_to_string(&cargo_toml)
+            && content.contains("[workspace]")
+        {
+            return Some(current);
         }
 
         // Move up one directory
@@ -221,7 +220,9 @@ pub fn generate_nextest_config(
     } else if !config_content.contains("wrapper-scripts") {
         // Need to modify existing experimental line - this is tricky
         // For now, just add it and hope TOML merges correctly or warn the user
-        eprintln!("Warning: existing config has 'experimental' key - you may need to add 'wrapper-scripts' manually");
+        eprintln!(
+            "Warning: existing config has 'experimental' key - you may need to add 'wrapper-scripts' manually"
+        );
     }
 
     // Add wrapper script definition — use a distinct name to avoid collisions
@@ -282,7 +283,7 @@ pub fn build_failure_filter(failed_tests: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nextest_monitor::types::{append_stats, TestStats};
+    use nextest_monitor::types::{TestStats, append_stats};
     use tempfile::TempDir;
 
     fn make_stats(name: &str, passed: bool) -> TestStats {

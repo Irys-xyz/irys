@@ -1,15 +1,15 @@
-use crate::utils::{solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, solution_context};
 use eyre::Result;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
-use irys_actors::block_validation::{prevalidate_block, PreValidationError};
+use irys_actors::block_validation::{PreValidationError, prevalidate_block};
 use irys_actors::test_helpers::build_test_service_senders;
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot, HardforkConfigExt as _};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemLedger,
-    UnixTimestampMs, H256, U256,
+    H256, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemLedger, U256,
+    UnixTimestampMs,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,9 +124,9 @@ fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
 #[tokio::test]
 async fn test_future_block_rejection() -> Result<()> {
     use irys_actors::{
-        async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
+        BlockProdStrategy, BlockProducerInner, async_trait, reth_ethereum_primitives,
     };
-    use irys_types::{block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats};
+    use irys_types::{AdjustmentStats, block_production::SolutionContext, storage_pricing::Amount};
     use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
 
     struct EvilBlockProdStrategy {

@@ -1,25 +1,24 @@
-use alloy_core::primitives::{ruint::aliases::U256, TxKind};
-use alloy_eips::eip2718::Encodable2718 as _;
+use alloy_core::primitives::{TxKind, ruint::aliases::U256};
 use alloy_eips::HashOrNumber;
+use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    mempool_service::TxIngressError, reth_ethereum_primitives,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta, mempool_service::TxIngressError,
+    reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_domain::ChainState;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
-    shadow_tx_topics, ShadowTransaction, TransactionPacket,
+    ShadowTransaction, TransactionPacket, shadow_tx_topics,
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::SystemLedger;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    UnixTimestampMs, H256,
+    DataTransactionHeader, H256, IrysBlockHeader, NodeConfig, UnixTimestampMs, irys::IrysSigner,
+    storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::BlockNumberOrTag;
@@ -33,8 +32,8 @@ use reth::{
 use tracing::info;
 
 use crate::utils::{
-    new_stake_tx, read_block_from_state, solution_context, wait_for_block_event, AddTxError,
-    BlockValidationOutcome, IrysNodeTest,
+    AddTxError, BlockValidationOutcome, IrysNodeTest, new_stake_tx, read_block_from_state,
+    solution_context, wait_for_block_event,
 };
 
 // EVM test constants

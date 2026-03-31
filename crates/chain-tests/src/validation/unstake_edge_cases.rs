@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
 use crate::validation::send_block_and_read_state;
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_types::SendTraced as _;
 use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};

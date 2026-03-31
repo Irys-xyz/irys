@@ -1,4 +1,4 @@
-use irys_types::{partition::PartitionAssignment, H256};
+use irys_types::{H256, partition::PartitionAssignment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

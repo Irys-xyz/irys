@@ -1,9 +1,9 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
+    CommitmentTransaction, NodeConfig, UnixTimestamp,
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig, UnixTimestamp,
 };
 use tracing::info;
 

@@ -1,10 +1,10 @@
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, CommitmentTransaction,
-    DataTransactionHeader, IrysTransactionResponse, NodeInfo, H256,
+    DataTransactionHeader, H256, IrysTransactionResponse, NodeInfo,
 };
 pub use reqwest::{Client, StatusCode, Url};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -14,10 +14,10 @@ pub use ext::ApiClientExt;
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn peer_base_url(peer: SocketAddr) -> Result<Url> {
-    if let std::net::SocketAddr::V6(v6) = &peer {
-        if v6.scope_id() != 0 {
-            eyre::bail!("scoped IPv6 addresses are not supported in peer URLs: {peer}");
-        }
+    if let std::net::SocketAddr::V6(v6) = &peer
+        && v6.scope_id() != 0
+    {
+        eyre::bail!("scoped IPv6 addresses are not supported in peer URLs: {peer}");
     }
     let mut url = Url::parse("http://placeholder/v1")
         .map_err(|e| eyre::eyre!("failed to parse base URL: {e}"))?;

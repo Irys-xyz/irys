@@ -47,12 +47,11 @@ async fn assert_shadow_tx_in_block(
     let evm_block = node.wait_for_evm_block(block.evm_block_hash, 30).await?;
     for tx in evm_block.body.transactions {
         let mut input = tx.input().as_ref();
-        if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-            if let Some(packet) = shadow.as_v1() {
-                if matcher(packet) {
-                    return Ok(());
-                }
-            }
+        if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+            && let Some(packet) = shadow.as_v1()
+            && matcher(packet)
+        {
+            return Ok(());
         }
     }
     panic!(
@@ -101,10 +100,12 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
     let data_block = node.mine_block().await?;
 
     let tx_ids = data_block.get_data_ledger_tx_ids();
-    assert!(tx_ids
-        .get(&DataLedger::Submit)
-        .map(|t| !t.is_empty())
-        .unwrap_or(false));
+    assert!(
+        tx_ids
+            .get(&DataLedger::Submit)
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+    );
 
     // Epoch 1: Reward address takes effect
     node.mine_until_next_epoch().await?;

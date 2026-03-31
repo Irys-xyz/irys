@@ -14,17 +14,17 @@
 use std::sync::OnceLock;
 
 use irys_types::{
+    IrysPeerId, U256,
     block::{BlockIndexQuery, DataLedger},
     version::{NodeInfo, PeerAddress, ProtocolVersion},
-    IrysPeerId, U256,
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use semver::Version;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::wire_types::{
-    self as wire, test_helpers::*, GossipResponse, HandshakeRequirementReason, RejectionReason,
+    self as wire, GossipResponse, HandshakeRequirementReason, RejectionReason, test_helpers::*,
 };
 
 // =============================================================================

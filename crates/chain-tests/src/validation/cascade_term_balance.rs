@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    hardfork_config::Cascade, BoundedFee, DataLedger, NodeConfig, UnixTimestamp, U256,
+    BoundedFee, DataLedger, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
 
 /// Start a node, fund two wallets, post data transactions to both the 30-day

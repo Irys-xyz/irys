@@ -1,7 +1,7 @@
 use crate::IrysAddress;
 use crate::{
-    hash_sha256, partition::PartitionHash, string_u64, Base64, LedgerChunkOffset,
-    PartitionChunkOffset, H256,
+    Base64, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256, partition::PartitionHash,
+    string_u64,
 };
 use arbitrary::Arbitrary;
 use core::fmt;

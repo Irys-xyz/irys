@@ -1,4 +1,4 @@
-use irys_types::{BlockHash, ChunkPathHash, IrysAddress, IrysPeerId, H256};
+use irys_types::{BlockHash, ChunkPathHash, H256, IrysAddress, IrysPeerId};
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};

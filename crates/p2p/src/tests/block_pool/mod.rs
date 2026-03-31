@@ -1,15 +1,15 @@
+use crate::BlockStatusProvider;
 use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, wait_until_listening,
-    BlockDiscoveryStub, FakeGossipServer, MempoolStub,
+    BlockDiscoveryStub, FakeGossipServer, MempoolStub, data_handler_stub,
+    data_handler_with_stubbed_pool, wait_for_block, wait_until_listening,
 };
 use crate::types::GossipResponse;
-use crate::BlockStatusProvider;
-use futures::{future, FutureExt as _};
+use futures::{FutureExt as _, future};
 use irys_actors::mempool_guard::MempoolReadGuard;
-use irys_actors::mempool_service::{create_state, AtomicMempoolState};
+use irys_actors::mempool_service::{AtomicMempoolState, create_state};
 use irys_actors::services::ServiceSenders;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};

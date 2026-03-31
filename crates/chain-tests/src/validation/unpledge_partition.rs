@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, gossip_commitment_to_node, solution_context, IrysNodeTest,
+    IrysNodeTest, assert_validation_error, gossip_commitment_to_node, solution_context,
 };
 use crate::validation::{send_block_and_read_state, send_block_to_block_tree};
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};

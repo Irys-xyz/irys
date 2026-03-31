@@ -2,10 +2,10 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
-    irys::IrysSigner,
     CommitmentTransaction, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
     CommitmentTypeV2, ConsensusConfig, IrysTransactionId, NodeConfig, UnixTimestamp,
+    hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
+    irys::IrysSigner,
 };
 use rstest::rstest;
 use tracing::info;
@@ -707,7 +707,7 @@ mod epoch_block_filtering {
 #[cfg(test)]
 mod borealis_hardfork {
     use super::*;
-    use irys_types::{hardfork_config::Borealis, IrysAddress};
+    use irys_types::{IrysAddress, hardfork_config::Borealis};
 
     fn create_borealis_config(borealis: Option<Borealis>, aurora: Option<Aurora>) -> NodeConfig {
         let mut config = NodeConfig::testing();

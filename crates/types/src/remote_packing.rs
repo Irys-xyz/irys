@@ -3,7 +3,7 @@ use std::num::NonZeroU8;
 use crate::IrysAddress;
 use serde::{Deserialize, Serialize};
 
-use crate::{PartitionChunkRange, H256};
+use crate::{H256, PartitionChunkRange};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

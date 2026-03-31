@@ -3,11 +3,11 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
-use xshell::{cmd, Cmd, Shell};
+use xshell::{Cmd, Shell, cmd};
 
 use xtask::failures::{
-    self, generate_nextest_config, get_failures_file_path, get_stats_file_path, FailuresFile,
-    RunResults,
+    self, FailuresFile, RunResults, generate_nextest_config, get_failures_file_path,
+    get_stats_file_path,
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
@@ -893,7 +893,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         .run()
                 } else {
                     // Fallback for other platforms - try basic tee without script
-                    eprintln!("Warning: script command may not be available on this platform, progress bars may not display correctly");
+                    eprintln!(
+                        "Warning: script command may not be available on this platform, progress bars may not display correctly"
+                    );
                     let tee_command = format!(
                         "cargo {} 2>&1 | tee -a '{}'",
                         command_args.join(" "),

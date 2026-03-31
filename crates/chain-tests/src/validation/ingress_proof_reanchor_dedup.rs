@@ -1,5 +1,5 @@
 use crate::{
-    utils::{build_sealed_block, IrysNodeTest},
+    utils::{IrysNodeTest, build_sealed_block},
     validation::send_block_to_block_tree,
 };
 use irys_types::{DataLedger, NodeConfig};

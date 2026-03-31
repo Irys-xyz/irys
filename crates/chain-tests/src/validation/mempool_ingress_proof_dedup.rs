@@ -1,10 +1,10 @@
 use crate::utils::IrysNodeTest;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
-    DataTransactionHeader, DataTransactionHeaderV1, IrysTransactionCommon as _, NodeConfig, H256,
+    DataTransactionHeader, DataTransactionHeaderV1, H256, IrysTransactionCommon as _, NodeConfig,
     U256,
 };
-use reth_db::{transaction::DbTxMut as _, Database as _};
+use reth_db::{Database as _, transaction::DbTxMut as _};
 use tracing::info;
 
 /// Pre-populates the DB with two data roots:

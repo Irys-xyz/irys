@@ -1,4 +1,4 @@
-use irys_types::{IrysSignature, H256};
+use irys_types::{H256, IrysSignature};
 use serde::{Deserialize, Serialize};
 
 use super::impl_json_version_tagged_serde;

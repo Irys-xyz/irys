@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::utils::{solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, solution_context};
 use irys_actors::{
+    BlockProdStrategy as _, ProductionStrategy,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_validation::PreValidationError,
-    BlockProdStrategy as _, ProductionStrategy,
 };
-use irys_types::{DataLedger, DataTransactionLedger, H256List, NodeConfig, SealedBlock, H256};
+use irys_types::{DataLedger, DataTransactionLedger, H256, H256List, NodeConfig, SealedBlock};
 
 /// Verify that blocks containing OneYear/ThirtyDay ledgers are rejected
 /// when the Cascade hardfork is not active on the receiving node.
@@ -25,11 +25,13 @@ async fn heavy_cascade_block_rejects_invalid_term_ledger_metadata() -> eyre::Res
     });
 
     // Ensure no Cascade hardfork
-    assert!(genesis_config
-        .consensus_config()
-        .hardforks
-        .cascade
-        .is_none());
+    assert!(
+        genesis_config
+            .consensus_config()
+            .hardforks
+            .cascade
+            .is_none()
+    );
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);

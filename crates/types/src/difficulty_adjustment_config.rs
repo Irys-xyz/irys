@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{ConsensusConfig, DifficultyAdjustmentConfig, UnixTimestampMs, U256};
+use crate::{ConsensusConfig, DifficultyAdjustmentConfig, U256, UnixTimestampMs};
 use rust_decimal_macros::dec;
 
 pub fn calculate_initial_difficulty(
@@ -167,8 +167,8 @@ mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
     use crate::{
-        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, u256_from_le_bytes,
-        H256, U256,
+        H256, U256, adjust_difficulty, calculate_difficulty, calculate_initial_difficulty,
+        u256_from_le_bytes,
     };
     use openssl::sha;
     use rstest::{fixture, rstest};

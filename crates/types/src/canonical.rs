@@ -1,4 +1,4 @@
-use serde::{de, ser, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de, ser};
 use serde_json::{Map, Number, Value};
 use std::fmt::{self, Display};
 
@@ -764,9 +764,11 @@ mod tests {
         assert!(v.get("numChunksInPartition").is_some());
         assert!(v.get("difficultyAdjustment").is_some());
         assert!(v["difficultyAdjustment"].get("blockTime").is_some());
-        assert!(v["difficultyAdjustment"]
-            .get("difficultyAdjustmentInterval")
-            .is_some());
+        assert!(
+            v["difficultyAdjustment"]
+                .get("difficultyAdjustmentInterval")
+                .is_some()
+        );
         assert!(v.get("mempool").is_some());
         assert!(v["mempool"].get("maxDataTxsPerBlock").is_some());
         assert!(v["mempool"].get("txAnchorExpiryDepth").is_some());

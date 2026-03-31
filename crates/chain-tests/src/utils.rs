@@ -1,25 +1,25 @@
 use actix_http::Request;
+use actix_web::App;
 use actix_web::http::StatusCode;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
-use actix_web::App;
 use actix_web::{
+    Error,
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
-    Error,
 };
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
-use eyre::{eyre, OptionExt as _};
+use eyre::{OptionExt as _, eyre};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
+    MempoolServiceFacadeImpl,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, ReorgEvent},
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes;
@@ -33,8 +33,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
-    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
+    BlockState, BlockTreeEntry, ChainState, ChunkType, CommitmentSnapshotStatus, EmaSnapshot,
+    EpochSnapshot, get_canonical_chain,
 };
 use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
@@ -43,21 +43,21 @@ use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
-use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::TempDirBuilder;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::SendTraced as _;
-use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
-    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
-    SystemLedger, H256, U256,
-};
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+};
+use irys_types::{
+    BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
+    NetworkConfigWithDefaults as _, SealedBlock, SyncMode, SystemLedger, U256,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -71,7 +71,7 @@ use reth::{
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
-use reth_db::{cursor::*, Database as _};
+use reth_db::{Database as _, cursor::*};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -984,7 +984,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     #[must_use]
     pub async fn start_public_api(
         &self,
-    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> + use<> {
         let api_state = self.node_ctx.get_api_state();
 
         actix_web::test::init_service(
@@ -998,7 +998,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn start_mock_gossip_server(
         &self,
-    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> + use<> {
         let gossip_server = self.node_ctx.get_gossip_server();
 
         actix_web::test::init_service(
@@ -1439,20 +1439,19 @@ impl IrysNodeTest<IrysNodeCtx> {
             let mut to_remove: HashSet<H256> = HashSet::new();
 
             for (idx, maybe_header) in headers.iter().enumerate() {
-                if let Some(tx_header) = maybe_header {
-                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
-                        if tx_proofs.len() >= num_proofs {
-                            for ingress_proof in tx_proofs.iter() {
-                                assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                                tracing::info!(
-                                    "proof {} signer: {}",
-                                    ingress_proof.proof.id(),
-                                    ingress_proof.address
-                                );
-                            }
-                            to_remove.insert(to_check[idx]);
-                        }
+                if let Some(tx_header) = maybe_header
+                    && let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root)
+                    && tx_proofs.len() >= num_proofs
+                {
+                    for ingress_proof in tx_proofs.iter() {
+                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                        tracing::info!(
+                            "proof {} signer: {}",
+                            ingress_proof.proof.id(),
+                            ingress_proof.address
+                        );
                     }
+                    to_remove.insert(to_check[idx]);
                 }
             }
 
@@ -1767,16 +1766,16 @@ impl IrysNodeTest<IrysNodeCtx> {
                 get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
             for entry in canonical_chain.0.iter().rev() {
                 let block_hash = entry.block_hash();
-                if let Ok(block) = self.get_block_by_hash(&block_hash) {
-                    if block.data_ledgers[ledger].tx_ids.0.contains(&txid) {
-                        tracing::info!(
-                            "found block containing tx {} on {} after {} attempt(s)",
-                            txid,
-                            self.name.clone().unwrap_or_else(|| "genesis".to_string()),
-                            attempt
-                        );
-                        return Ok(block);
-                    }
+                if let Ok(block) = self.get_block_by_hash(&block_hash)
+                    && block.data_ledgers[ledger].tx_ids.0.contains(&txid)
+                {
+                    tracing::info!(
+                        "found block containing tx {} on {} after {} attempt(s)",
+                        txid,
+                        self.name.clone().unwrap_or_else(|| "genesis".to_string()),
+                        attempt
+                    );
+                    return Ok(block);
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -2638,53 +2637,51 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 tx_header.data_root,
                                 tx_chunk_offset,
                             )
-                        }) {
-                            if let Some(bytes) = cached_chunk.chunk {
-                                let unpacked = irys_types::UnpackedChunk {
-                                    data_root: tx_header.data_root,
-                                    data_size: tx_header.data_size,
-                                    data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
-                                    bytes,
-                                    tx_offset: tx_chunk_offset,
-                                };
-                                let verify_data_root = unpacked.data_root;
-                                let verify_tx_offset = unpacked.tx_offset;
+                        }) && let Some(bytes) = cached_chunk.chunk
+                        {
+                            let unpacked = irys_types::UnpackedChunk {
+                                data_root: tx_header.data_root,
+                                data_size: tx_header.data_size,
+                                data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
+                                bytes,
+                                tx_offset: tx_chunk_offset,
+                            };
+                            let verify_data_root = unpacked.data_root;
+                            let verify_tx_offset = unpacked.tx_offset;
 
-                                let (ctx, crx) = tokio::sync::oneshot::channel();
-                                peer.node_ctx
-                                    .service_senders
-                                    .chunk_ingress
-                                    .send_traced(irys_actors::ChunkIngressMessage::IngestChunk(
-                                        unpacked,
-                                        Some(ctx),
-                                    ))
-                                    .expect("failed to send chunk to chunk_ingress");
-                                crx.await
-                                    .expect("chunk_ingress oneshot dropped")
-                                    .expect("chunk ingress failed");
+                            let (ctx, crx) = tokio::sync::oneshot::channel();
+                            peer.node_ctx
+                                .service_senders
+                                .chunk_ingress
+                                .send_traced(irys_actors::ChunkIngressMessage::IngestChunk(
+                                    unpacked,
+                                    Some(ctx),
+                                ))
+                                .expect("failed to send chunk to chunk_ingress");
+                            crx.await
+                                .expect("chunk_ingress oneshot dropped")
+                                .expect("chunk ingress failed");
 
-                                // Verify the chunk is present on the peer DB (small retry loop)
-                                {
-                                    let mut attempts = 0_usize;
-                                    loop {
-                                        let got = peer
-                                            .node_ctx
-                                            .db
-                                            .view_eyre(|tx| {
-                                                irys_database::cached_chunk_by_chunk_offset(
-                                                    tx,
-                                                    verify_data_root,
-                                                    verify_tx_offset,
-                                                )
-                                            })
-                                            .unwrap_or(None);
-                                        if got.is_some() || attempts >= 5 {
-                                            break;
-                                        }
-                                        attempts += 1;
-                                        tokio::time::sleep(std::time::Duration::from_millis(50))
-                                            .await;
+                            // Verify the chunk is present on the peer DB (small retry loop)
+                            {
+                                let mut attempts = 0_usize;
+                                loop {
+                                    let got = peer
+                                        .node_ctx
+                                        .db
+                                        .view_eyre(|tx| {
+                                            irys_database::cached_chunk_by_chunk_offset(
+                                                tx,
+                                                verify_data_root,
+                                                verify_tx_offset,
+                                            )
+                                        })
+                                        .unwrap_or(None);
+                                    if got.is_some() || attempts >= 5 {
+                                        break;
                                     }
+                                    attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
                             }
                         }
@@ -2894,10 +2891,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         if let Ok(resp) = response {
             // Only attempt to parse JSON if we got a successful HTTP status
-            if resp.status().is_success() {
-                if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
-                    return Some(packed_chunk);
-                }
+            if resp.status().is_success()
+                && let Ok(packed_chunk) = resp.json::<PackedChunk>().await
+            {
+                return Some(packed_chunk);
             }
         }
         None
@@ -3088,12 +3085,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             let api_uri = self.node_ctx.config.node_config.local_api_url();
             let url = format!("{}/v1/peer-list", api_uri);
 
-            if let Ok(resp) = client.get(&url).send().await {
-                if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
-                    if list.contains(target) {
-                        return Ok(());
-                    }
-                }
+            if let Ok(resp) = client.get(&url).send().await
+                && let Ok(list) = resp.json::<Vec<PeerAddress>>().await
+                && list.contains(target)
+            {
+                return Ok(());
             }
         }
         eyre::bail!(
@@ -3687,12 +3683,11 @@ pub async fn solution_context_with_poa_chunk(
                 ));
             }
             let s = vdf_steps_guard.read().global_step;
-            if s >= 1 {
-                if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
-                    if steps.len() >= 2 {
-                        break (s, steps);
-                    }
-                }
+            if s >= 1
+                && let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s))
+                && steps.len() >= 2
+            {
+                break (s, steps);
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };

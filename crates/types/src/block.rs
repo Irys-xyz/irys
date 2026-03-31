@@ -3,32 +3,33 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
-use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
+use crate::storage_pricing::{Amount, phantoms::IrysPrice, phantoms::Usd};
 use crate::versioning::{
-    compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
-    VersioningError,
+    Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
+    split_discriminant,
 };
-use crate::{decode_rlp_version, encode_rlp_version, IrysTransactionCommon as _};
 use crate::{
-    generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
+    Arbitrary, Base64, Compact, Config, DataRootLeaf, H256, H256List, IngressProofsList,
+    IrysSignature, Proof, U256, generate_data_root, generate_leaves_from_data_roots,
+    option_u64_stringify,
     partition::PartitionHash,
     resolve_proofs,
     serialization::{optional_string_u64, string_u64},
     time::UnixTimestampMs,
     transaction::DataTransactionHeader,
-    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
-    IrysSignature, Proof, H256, U256,
+    u64_stringify,
 };
 use crate::{CommitmentTransaction, IrysAddress, SystemLedger};
+use crate::{IrysTransactionCommon as _, decode_rlp_version, encode_rlp_version};
 
 use alloy_primitives::map::foldhash::HashSet;
-use alloy_primitives::{keccak256, TxHash, B256};
+use alloy_primitives::{B256, TxHash, keccak256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
-use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
+use reth_db::table::{Decode, Encode};
 use reth_primitives_traits::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -1420,12 +1421,12 @@ impl SealedBlock {
 )]
 mod tests {
     use crate::ingress::{IngressProof, IngressProofV1};
-    use crate::{validate_path, Config, NodeConfig};
+    use crate::{Config, NodeConfig, validate_path};
 
     use super::*;
-    use alloy_primitives::{keccak256, Signature};
+    use alloy_primitives::{Signature, keccak256};
     use alloy_rlp::Decodable;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
+    use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
     use rstest::rstest;
     use serde_json;
     use zerocopy::IntoBytes as _;
@@ -1652,9 +1653,9 @@ mod tests {
         let is_ema = header.is_ema_recalculation_block(interval);
 
         assert_eq!(
-        is_ema, expected_is_ema,
-        "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
-    );
+            is_ema, expected_is_ema,
+            "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
+        );
     }
 
     #[test]

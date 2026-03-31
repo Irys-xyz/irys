@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, U256};
+use irys_types::{DataLedger, NodeConfig, U256, irys::IrysSigner};
 use tracing::info;
 
 /// Tests that publish ledger slots expire when publish_ledger_epoch_length is configured.
@@ -132,14 +132,14 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
         .await?;
     for tx in &evm_block.body.transactions {
         let mut input = tx.input().as_ref();
-        if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-            if let Some(packet) = shadow.as_v1() {
-                // TermFeeReward should never appear for Publish ledger expiry
-                assert!(
-                    !matches!(packet, TransactionPacket::TermFeeReward(_)),
-                    "Unexpected TermFeeReward shadow tx in perm expiry epoch block"
-                );
-            }
+        if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+            && let Some(packet) = shadow.as_v1()
+        {
+            // TermFeeReward should never appear for Publish ledger expiry
+            assert!(
+                !matches!(packet, TransactionPacket::TermFeeReward(_)),
+                "Unexpected TermFeeReward shadow tx in perm expiry epoch block"
+            );
         }
     }
     info!(
@@ -394,14 +394,14 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     let mut found_term_fee_reward = false;
     for tx in &evm_block.body.transactions {
         let mut input = tx.input().as_ref();
-        if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-            if let Some(TransactionPacket::TermFeeReward(_)) = shadow.as_v1() {
-                found_term_fee_reward = true;
-                info!(
-                    "Found TermFeeReward shadow tx in epoch block at height {}",
-                    target_height
-                );
-            }
+        if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+            && let Some(TransactionPacket::TermFeeReward(_)) = shadow.as_v1()
+        {
+            found_term_fee_reward = true;
+            info!(
+                "Found TermFeeReward shadow tx in epoch block at height {}",
+                target_height
+            );
         }
     }
     assert!(
@@ -737,14 +737,14 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
             .await?;
         for tx in &evm_block.body.transactions {
             let mut input = tx.input().as_ref();
-            if let Ok(shadow) = ShadowTransaction::decode(&mut input) {
-                if let Some(TransactionPacket::TermFeeReward(_)) = shadow.as_v1() {
-                    panic!(
-                        "Unexpected TermFeeReward shadow tx at epoch height {} — \
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+                && let Some(TransactionPacket::TermFeeReward(_)) = shadow.as_v1()
+            {
+                panic!(
+                    "Unexpected TermFeeReward shadow tx at epoch height {} — \
                          last-slot protection should prevent any fee distribution",
-                        epoch_height
-                    );
-                }
+                    epoch_height
+                );
             }
         }
         info!(
@@ -1148,7 +1148,9 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
             assert!(
                 assignment.ledger_id == Some(DataLedger::Publish as u32),
                 "Perm partition {:?} at slot {} should still be assigned to Publish but has ledger_id={:?}",
-                partition_hash, slot_index, assignment.ledger_id
+                partition_hash,
+                slot_index,
+                assignment.ledger_id
             );
         }
     }

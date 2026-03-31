@@ -1,7 +1,7 @@
 pub use crate::versions::ProtocolVersion;
 use crate::{
-    decode_address, encode_address, serialization::string_u64, Arbitrary, IrysPeerId,
-    IrysSignature, RethPeerInfo, H256,
+    Arbitrary, H256, IrysPeerId, IrysSignature, RethPeerInfo, decode_address, encode_address,
+    serialization::string_u64,
 };
 use crate::{IrysAddress, U256};
 use alloy_primitives::keccak256;
@@ -591,7 +591,7 @@ fn encode_reth_peer_info_rlp_length(info: &RethPeerInfo) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, HandshakeRequest, HandshakeRequestV2, IrysSignature, NodeConfig, H256};
+    use crate::{Config, H256, HandshakeRequest, HandshakeRequestV2, IrysSignature, NodeConfig};
     use crate::{IrysAddress, U256};
     use serde_json;
 
@@ -980,8 +980,8 @@ mod tests {
     #[test]
     #[ignore]
     fn generate_raw_handshake_json() {
-        use crate::irys::IrysSigner;
         use crate::ConsensusConfig;
+        use crate::irys::IrysSigner;
 
         let mut config = ConsensusConfig::testing();
 

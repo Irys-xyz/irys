@@ -1,4 +1,4 @@
-use irys_types::{IrysAddress, IrysPeerId, IrysSignature, ProtocolVersion, H256};
+use irys_types::{H256, IrysAddress, IrysPeerId, IrysSignature, ProtocolVersion};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;

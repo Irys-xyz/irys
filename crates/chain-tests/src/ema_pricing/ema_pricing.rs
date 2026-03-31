@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::utils::IrysNodeTest;
-use irys_domain::{get_canonical_chain, BlockTreeReadGuard};
-use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
+use irys_domain::{BlockTreeReadGuard, get_canonical_chain};
+use irys_types::{H256, IrysBlockHeader, NodeConfig, OracleConfig, storage_pricing::Amount};
 use rust_decimal_macros::dec;
 
 /// When no oracles are configured, block production should still succeed by

@@ -1,4 +1,4 @@
-use irys_types::{BoundedFee, IrysAddress, IrysSignature, H256};
+use irys_types::{BoundedFee, H256, IrysAddress, IrysSignature};
 use serde::{Deserialize, Serialize};
 
 use super::{impl_json_version_tagged_serde, impl_versioned_tx_from};

@@ -1,6 +1,6 @@
 use irys_types::{
-    CommitmentTransaction, Compact as _, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    VersionDiscriminant as _, H256,
+    CommitmentTransaction, Compact as _, ConsensusConfig, DataTransactionHeader, H256,
+    IrysBlockHeader, VersionDiscriminant as _,
 };
 use rstest::rstest;
 

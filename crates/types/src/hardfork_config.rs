@@ -1,12 +1,12 @@
 //! Configurable hardfork parameters.
 
 use crate::{
+    UnixTimestamp, VersionDiscriminant,
     serialization::unix_timestamp_string_serde,
     storage_pricing::{
-        phantoms::{CostPerGb, Usd},
         Amount,
+        phantoms::{CostPerGb, Usd},
     },
-    UnixTimestamp, VersionDiscriminant,
 };
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -140,20 +140,20 @@ impl IrysHardforkConfig {
 
     /// Get the number of ingress proofs required at a specific timestamp (in seconds).
     pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd {
-            if timestamp >= fork.activation_timestamp {
-                return fork.number_of_ingress_proofs_total;
-            }
+        if let Some(ref fork) = self.next_name_tbd
+            && timestamp >= fork.activation_timestamp
+        {
+            return fork.number_of_ingress_proofs_total;
         }
         self.frontier.number_of_ingress_proofs_total
     }
 
     /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
     pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd {
-            if timestamp >= fork.activation_timestamp {
-                return fork.number_of_ingress_proofs_from_assignees;
-            }
+        if let Some(ref fork) = self.next_name_tbd
+            && timestamp >= fork.activation_timestamp
+        {
+            return fork.number_of_ingress_proofs_from_assignees;
         }
         self.frontier.number_of_ingress_proofs_from_assignees
     }

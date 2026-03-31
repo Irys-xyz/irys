@@ -11,19 +11,19 @@ use crate::{
 };
 use actix_web::dev::HttpServiceFactory;
 use actix_web::{
+    App, HttpResponse, HttpServer,
     dev::Server,
     http::header::ContentType,
     web::{self, Data},
-    App, HttpResponse, HttpServer,
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
-use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
+use irys_domain::{PeerList, ScoreDecreaseReason, get_node_info};
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    parse_user_agent, BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction,
-    DataTransactionHeader, GossipRequest, GossipRequestV2, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, NodeInfo, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
+    BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
+    GossipRequest, GossipRequestV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
+    NodeInfo, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk, parse_user_agent,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -32,7 +32,7 @@ use semver::Version;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, warn};
 use tracing_actix_web::TracingLogger;
 
 /// Default deduplication window in milliseconds for data requests

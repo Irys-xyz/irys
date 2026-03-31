@@ -1,6 +1,6 @@
 //! api client tests
 
-use crate::utils::{coverage_adjusted_timeout, IrysNodeTest};
+use crate::utils::{IrysNodeTest, coverage_adjusted_timeout};
 use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient, TransactionStatus};
 use irys_chain::IrysNodeCtx;
