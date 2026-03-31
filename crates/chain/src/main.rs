@@ -25,6 +25,9 @@ async fn main() -> eyre::Result<()> {
         env!("GIT_HAS_TAG")
             .parse()
             .expect("GIT_HAS_TAG must be 'true' or 'false'"),
+        env!("GIT_DIRTY")
+            .parse()
+            .expect("GIT_DIRTY must be 'true' or 'false'"),
     );
 
     // Load .env file if present (silently ignore if not found)

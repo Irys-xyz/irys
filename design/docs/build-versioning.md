@@ -23,9 +23,11 @@ Node versions follow [SemVer 2.0.0](https://semver.org/), using build metadata t
 | Scenario | Format | Example |
 |---|---|---|
 | Tagged release | `MAJOR.MINOR.PATCH+VENDOR` | `3.0.0+irys-rs` |
+| Tagged, dirty | `MAJOR.MINOR.PATCH+VENDOR.dirty` | `3.0.0+irys-rs.dirty` |
 | Development build | `MAJOR.MINOR.PATCH+VENDOR.GIT_SHA` | `3.0.0+irys-rs.a1b2c3d` |
+| Development, dirty | `MAJOR.MINOR.PATCH+VENDOR.GIT_SHA.dirty` | `3.0.0+irys-rs.a1b2c3d.dirty` |
 
-**VENDOR** identifies the implementation (`irys-rs` for this codebase). Alternative implementations would use their own identifier (e.g. `irys-go`). **GIT_SHA** is the short commit hash, appended only for builds not on an exact release tag.
+**VENDOR** identifies the implementation (`irys-rs` for this codebase). Alternative implementations would use their own identifier (e.g. `irys-go`). **GIT_SHA** is the 7-character short commit hash, appended only for builds not on an exact release tag. **dirty** is appended when the working tree contains uncommitted changes (staged or unstaged, excluding untracked files) at build time.
 
 Build metadata is ignored for SemVer precedence — `3.0.0+irys-rs.abc` and `3.0.0+irys-rs.def` are equal when compared for compatibility.
 
@@ -35,7 +37,7 @@ All crates share a single version defined once in the workspace root. Individual
 
 ### Build-time capture
 
-The main binary's build script captures the git SHA and tag status at compile time. The build **fails** if git is unavailable — release artifacts must always carry provenance. Cargo `rerun-if-changed` directives ensure the version updates when commits or tags change.
+The main binary's build script captures the git SHA (pinned to 7 characters via `--short=7`), tag status, and working-tree cleanliness at compile time. Dirty detection uses `git diff-index --quiet HEAD --`, which covers staged and unstaged changes but intentionally ignores untracked files. The build **fails** if git is unavailable — release artifacts must always carry provenance. Cargo `rerun-if-changed` directives ensure the version updates when commits or tags change.
 
 ### Runtime model
 
@@ -56,5 +58,6 @@ The version is serialized as a plain SemVer string (e.g. `"3.0.0+irys-rs.a1b2c3d
 - Operators can identify exact builds in logs and peer handshakes.
 - The vendor tag prepares for a multi-implementation ecosystem.
 - Development builds are distinguishable from releases at a glance.
+- Dirty builds are clearly marked, aiding debugging and discouraging release artifacts built from uncommitted changes.
 - Builds require a git repository — source tarballs without `.git` will not compile. This is an intentional trade-off favouring provenance over convenience.
 - The initialise-once model has an ordering constraint: the binary must populate the version before any code reads it. This is documented at both the API and call-site level.

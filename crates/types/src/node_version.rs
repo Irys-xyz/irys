@@ -34,23 +34,32 @@ fn build_version_ref() -> &'static Version {
 /// freeze the version without git metadata.
 ///
 /// - `pkg_version`: the caller's `env!("CARGO_PKG_VERSION")` — use the binary crate's version
-/// - `git_sha`: short commit hash (e.g. `"a1b2c3d"`)
+/// - `git_sha`: 7-character short commit hash (e.g. `"a1b2c3d"`)
 /// - `has_tag`: whether the commit has an exact tag match
+/// - `is_dirty`: whether the working tree had uncommitted changes at build time
 ///
-/// Untagged commits produce `3.0.0+irys-rs.a1b2c3d`, tagged commits produce `3.0.0+irys-rs`.
+/// Examples:
+/// - Tagged, clean:   `3.0.0+irys-rs`
+/// - Untagged, clean: `3.0.0+irys-rs.a1b2c3d`
+/// - Untagged, dirty: `3.0.0+irys-rs.a1b2c3d.dirty`
+/// - Tagged, dirty:   `3.0.0+irys-rs.dirty`
+///
 /// No-op if already initialized.
-pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool) {
+pub fn init_build_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: bool) {
     debug_assert!(
         has_tag || !git_sha.is_empty(),
         "untagged build must have a non-empty git_sha for version metadata"
     );
     let version = {
         let mut version = Version::parse(pkg_version).expect("valid pkg_version semver");
-        let meta = if !has_tag && !git_sha.is_empty() {
+        let mut meta = if !has_tag && !git_sha.is_empty() {
             format!("{VENDOR}.{git_sha}")
         } else {
             VENDOR.to_string()
         };
+        if is_dirty {
+            meta.push_str(".dirty");
+        }
         version.build = semver::BuildMetadata::new(&meta).expect("valid build metadata");
         version
     };
@@ -98,11 +107,11 @@ mod tests {
     }
 
     #[test]
-    fn version_untagged_includes_vendor_and_sha() {
-        // Verify the construction logic used by init_build_version for untagged commits.
+    fn version_untagged_clean() {
+        // Verify the construction logic used by init_build_version for untagged, clean commits.
         let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
         let sha = "abc1234";
-        let meta = format!("{}.{}", VENDOR, sha);
+        let meta = format!("{VENDOR}.{sha}");
         v.build = semver::BuildMetadata::new(&meta).unwrap();
         assert_eq!(
             v.to_string(),
@@ -111,12 +120,35 @@ mod tests {
     }
 
     #[test]
-    fn version_tagged_includes_vendor_only() {
+    fn version_tagged_clean() {
         let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
         v.build = semver::BuildMetadata::new(VENDOR).unwrap();
         assert_eq!(
             v.to_string(),
             format!("{}+{}", env!("CARGO_PKG_VERSION"), VENDOR)
+        );
+    }
+
+    #[test]
+    fn version_untagged_dirty() {
+        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let sha = "abc1234";
+        let meta = format!("{VENDOR}.{sha}.dirty");
+        v.build = semver::BuildMetadata::new(&meta).unwrap();
+        assert_eq!(
+            v.to_string(),
+            format!("{}+{}.{}.dirty", env!("CARGO_PKG_VERSION"), VENDOR, sha)
+        );
+    }
+
+    #[test]
+    fn version_tagged_dirty() {
+        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let meta = format!("{VENDOR}.dirty");
+        v.build = semver::BuildMetadata::new(&meta).unwrap();
+        assert_eq!(
+            v.to_string(),
+            format!("{}+{}.dirty", env!("CARGO_PKG_VERSION"), VENDOR)
         );
     }
 
@@ -178,6 +210,30 @@ mod tests {
         let v: Version = serde_json::from_str(json).unwrap();
         assert_eq!(v.major, 3);
         assert_eq!(v.build.as_str(), "irys-go.deadbeef");
+    }
+
+    #[test]
+    fn golden_untagged_dirty_serializes_to_json() {
+        let mut v = Version::parse("3.0.0").unwrap();
+        v.build = semver::BuildMetadata::new(&format!("{VENDOR}.a1b2c3d.dirty")).unwrap();
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#""3.0.0+irys-rs.a1b2c3d.dirty""#);
+    }
+
+    #[test]
+    fn golden_tagged_dirty_serializes_to_json() {
+        let mut v = Version::parse("3.0.0").unwrap();
+        v.build = semver::BuildMetadata::new(&format!("{VENDOR}.dirty")).unwrap();
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#""3.0.0+irys-rs.dirty""#);
+    }
+
+    #[test]
+    fn golden_dirty_roundtrips_json() {
+        let json = r#""3.0.0+irys-rs.a1b2c3d.dirty""#;
+        let v: Version = serde_json::from_str(json).unwrap();
+        assert_eq!(v.build.as_str(), "irys-rs.a1b2c3d.dirty");
+        assert_eq!(serde_json::to_string(&v).unwrap(), json);
     }
 
     #[test]

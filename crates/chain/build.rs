@@ -26,6 +26,8 @@ fn main() {
         // Track individual loose tag files — directory-level rerun-if-changed
         // doesn't reliably detect new files on all filesystems.
         let tags_dir = format!("{base}/refs/tags");
+        // Track the directory itself so new/removed loose tags trigger a rebuild.
+        println!("cargo:rerun-if-changed={tags_dir}");
         if let Ok(entries) = std::fs::read_dir(&tags_dir) {
             for entry in entries.flatten() {
                 println!("cargo:rerun-if-changed={}", entry.path().display());
@@ -33,13 +35,21 @@ fn main() {
         }
     }
 
-    let sha = git_output(&["rev-parse", "--short", "HEAD"])
-        .expect("git rev-parse --short HEAD failed — cannot determine commit SHA");
+    // Pin to 7-character short SHA for deterministic output regardless of repo size.
+    let sha = git_output(&["rev-parse", "--short=7", "HEAD"])
+        .expect("git rev-parse --short=7 HEAD failed — cannot determine commit SHA");
     // describe --exact-match exits non-zero when HEAD has no tag, which is normal
     let has_tag = git_output(&["describe", "--exact-match", "--tags", "HEAD"]).is_some();
+    // Detect uncommitted changes (staged or unstaged, excluding untracked files).
+    let is_dirty = Command::new("git")
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
 
     println!("cargo:rustc-env=GIT_SHA={sha}");
     println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
+    println!("cargo:rustc-env=GIT_DIRTY={is_dirty}");
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

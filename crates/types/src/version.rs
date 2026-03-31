@@ -1102,6 +1102,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn v1_build_metadata_does_not_affect_signature_hash() {
+        let a = HandshakeRequest {
+            version: Version::parse("3.0.0+irys-rs").unwrap(),
+            ..Default::default()
+        };
+        let b = HandshakeRequest {
+            version: Version::parse("3.0.0+irys-rs.abc1234").unwrap(),
+            timestamp: a.timestamp,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            a.signature_hash(),
+            b.signature_hash(),
+            "build metadata must not affect V1 signature hash"
+        );
+    }
+
+    #[test]
+    fn v2_build_metadata_does_not_affect_signature_hash() {
+        let a = HandshakeRequestV2 {
+            version: Version::parse("3.0.0+irys-rs").unwrap(),
+            ..Default::default()
+        };
+        let b = HandshakeRequestV2 {
+            version: Version::parse("3.0.0+irys-rs.abc1234").unwrap(),
+            timestamp: a.timestamp,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            a.signature_hash(),
+            b.signature_hash(),
+            "build metadata must not affect V2 signature hash"
+        );
+    }
+
     #[rstest::rstest]
     #[case::zero(0)]
     #[case::three(3)]
