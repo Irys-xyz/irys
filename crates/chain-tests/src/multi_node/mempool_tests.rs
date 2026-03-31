@@ -494,7 +494,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
 #[tokio::test]
 /// Test mempool persists to disk during shutdown
 ///
-/// FIXME: This test will not be effective until mempool tree/index separation work is complete
+/// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1297 : This test will not be effective until mempool tree/index separation work is complete
 ///
 /// post stake, post pledge, restart node
 /// confirm pledge is present in mempool
@@ -599,7 +599,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
-    // TODO: change anchor
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1317 : change anchor
     genesis_config
         .consensus
         .get_mut()
@@ -965,7 +965,7 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// send A's tx to B & prepare it for promotion
 /// mine a block on B, assert A's tx is included correctly
 /// send B's block back to A, assert mempool state ingress proofs etc are correct
-// TODO: once longer forks are stable & if it's worthwhile:
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1269 : once longer forks are stable & if it's worthwhile:
 /// mine 4 blocks on C
 /// send  C's blocks to A
 /// assert all txs return to mempool
@@ -1819,7 +1819,7 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let signed_tx1: Bytes = tx_env1.encoded_2718().into();
 
     // Transaction 2: Send to recipient2 (will be in peer2's fork)
-    // TODO: remove manual nonce calculations (tricky when dealing with forks...)
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1363 : remove manual nonce calculations (tricky when dealing with forks...)
     let evm_tx_req2 = TransactionRequest {
         to: Some(TxKind::Call(recipient2.alloy_address())),
         max_fee_per_gas: Some(20e9 as u128),

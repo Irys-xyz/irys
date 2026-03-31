@@ -307,7 +307,7 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
     ) -> eyre::Result<()> {
-        // TODO: Opportunity to do custom timeout tracking/handling here
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1353 : Opportunity to do custom timeout tracking/handling here
         debug!("chunk timed out: {} peer:{}", chunk_offset, peer_addr);
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;

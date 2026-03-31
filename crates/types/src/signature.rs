@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 /// Wrapper newtype around [`Signature`], with enforced boolean parity
 pub struct IrysSignature(Signature);
 
-// TODO: eventually implement ERC-2098 to save a byte
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1281 : eventually implement ERC-2098 to save a byte
 
 /// As base58 is rather expensive, we want to make sure that input is well formed as soon as possible
 /// this constant is computed using the below `compute_max_str_len` function (to_base58() is not a const fn)
@@ -115,7 +115,7 @@ impl Compact for IrysSignature {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         // the normal to/from compact impl does some whacky bitflag encoding
-        // TODO: adapt it to work here
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1304 : adapt it to work here
         // be careful of how the bitflags are scoped..
         // self.reth_signature.to_compact(buf)
         buf.put_slice(&self.0.r().as_le_bytes());

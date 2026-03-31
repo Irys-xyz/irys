@@ -1590,7 +1590,7 @@ pub trait BlockProdStrategy {
                 &prev_block_header.evm_block_hash, &prev_block_header.height
             )
         });
-        // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1323 : fix genesis hash computation when using init-state (persist modified chainspec?)
         // for now we just skip the check for the genesis block
         if prev_block_header.height > 0 {
             let computed_parent_evm_hash = parent.header.hash_slow();

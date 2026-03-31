@@ -42,7 +42,7 @@ impl ChunkProvider {
         data_root: DataRoot,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
-        // TODO: read from the cache
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1321 : read from the cache
 
         debug!(
             "getting ledger: {:?}, data_root: {}, offset: {}",
@@ -61,7 +61,7 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
-        // TODO: this also needs to be checked for data_size constraints
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1264 : this also needs to be checked for data_size constraints
         // So you can't get a chunk that overlaps the next txs chunks / start_offset
 
         for sm in sms {
@@ -103,7 +103,7 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
-        // TODO: see if we should check the DataRootInfo.data_size here too
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1315 : see if we should check the DataRootInfo.data_size here too
 
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {

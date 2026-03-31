@@ -9,11 +9,11 @@ use reth_db::DatabaseError;
 use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-// TODO: move all of these into types
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1345 : move all of these into types
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// partition hashes
-/// TODO: use a custom Compact as the default for `Vec<T>` sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+/// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1337 : use a custom Compact as the default for `Vec<T>` sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct PartitionHashes(pub Vec<PartitionHash>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
@@ -123,7 +123,7 @@ impl From<UnpackedChunk> for CachedChunk {
     }
 }
 
-// TODO: figure out if/how to use lifetimes to reduce the data cloning
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1361 : figure out if/how to use lifetimes to reduce the data cloning
 // (the write to DB copies the bytes anyway so it should just need a ref)
 impl From<&UnpackedChunk> for CachedChunk {
     fn from(value: &UnpackedChunk) -> Self {

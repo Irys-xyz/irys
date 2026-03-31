@@ -70,7 +70,7 @@ pub fn run_vdf<B: BlockProvider>(
     let mut hash: H256 = current_vdf_hash;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
     let mut global_step_number = global_step_number;
-    // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1374 : The reset seed is the same as the seed... which I suspect is incorrect!
     info!(
         "VDF thread started at global_step_number: {}",
         global_step_number

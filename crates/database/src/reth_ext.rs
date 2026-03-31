@@ -17,7 +17,7 @@ impl IrysRethDatabaseEnvMetricsExt for DatabaseEnv {
     }
 }
 
-// TODO: better name
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1373 : better name
 pub trait IrysRethDatabaseEnvMetricsExt2 {
     fn new_with_tables<T: TableSet + TableInfo>(tables: &[T]) -> Self;
     fn generate_operation_handles_with_tables<T: TableSet + TableInfo>(

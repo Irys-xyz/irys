@@ -27,7 +27,7 @@ async fn external_api() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
 
-    // FIXME: Test to be updated with future endpoint work
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1335 : Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;
     //assert_eq!(_response.status(), 200);
     //assert_eq!(_response.content_type(), ContentType::json());

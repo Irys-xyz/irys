@@ -456,7 +456,7 @@ impl ConsensusConfig {
     }
 
     // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
-    // TODO: get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1285 : get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 

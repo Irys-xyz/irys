@@ -368,7 +368,7 @@ impl DataTransactionHeaderV1 {
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct DataTransaction {
     pub header: DataTransactionHeader,
-    // TODO: make this compatible with stream/iterator data sources
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1356 : make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
     #[serde(skip)]
     pub chunks: Vec<Node>,
@@ -382,7 +382,7 @@ impl DataTransaction {
     }
 
     pub fn data_chunks(&self) -> eyre::Result<Vec<UnpackedChunk>> {
-        // TODO: find a better version
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1347 : find a better version
         let data = match &self.data {
             Some(d) => d,
             None => eyre::bail!("missing required tx data"),
@@ -473,7 +473,7 @@ pub trait IrysTransactionCommon {
 impl DataTransactionHeader {
     pub fn user_fee(&self) -> BoundedFee {
         // Return term_fee as the user fee for prioritization
-        // todo: use TermFeeCharges to get the fee that will go to the miner
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1359 : use TermFeeCharges to get the fee that will go to the miner
         self.term_fee
     }
 
@@ -650,7 +650,7 @@ impl TryInto<CommitmentTransaction> for IrysTransaction {
 }
 
 // route to IrysTransactionCommon impl
-// TODO: a better way to do this?
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1346 : a better way to do this?
 impl IrysTransactionCommon for IrysTransaction {
     fn is_signature_valid(&self) -> bool {
         match self {

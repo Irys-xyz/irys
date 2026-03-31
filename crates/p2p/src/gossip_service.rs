@@ -296,7 +296,7 @@ impl P2PService {
 
         // Get all peers sorted by score, so we broadcast to the best ones first, but try to
         // reach to all peers eventually.
-        // TODO: we need to make an algorithm that doesn't try to reach all peers every time,
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1351 : we need to make an algorithm that doesn't try to reach all peers every time,
         //  but rather a random subset of them. We should take n top peers, and add some
         //  randomly selected peers from the rest of the list.
         let mut peers = peer_list.all_peers_sorted_by_score();

@@ -483,7 +483,7 @@ pub async fn select_best_txs(
                         tx.signer = ?tx.signer,
                         "Invalid Publish tx: missing perm_fee"
                     );
-                    // todo: add to list of invalid txs because all publish txs must have perm fee present
+                    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1339 : add to list of invalid txs because all publish txs must have perm fee present
                     continue;
                 };
                 if perm_fee < expected_perm_fee.amount {
@@ -724,7 +724,7 @@ async fn get_publish_txs_and_proofs(
 
         // Note: get_data_tx_in_parallel_inner() read from both the mempool and
         //       db as publishing can happen to a tx that is no longer in the mempool
-        // TODO: improve this
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1298 : improve this
         let publish_txids_for_lookup = publish_txids.clone();
         let mut tx_headers = get_data_tx_in_parallel_inner(
             publish_txids,

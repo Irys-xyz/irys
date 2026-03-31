@@ -197,7 +197,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
         &mut entropy,
     )?;
 
-    // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1365 : check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
     xor_vec_u8_arrays_in_place(data, &entropy);
     Ok(())
 }

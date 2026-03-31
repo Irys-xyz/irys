@@ -108,7 +108,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     debug!("{:#?}", entropy_intervals);
 
     // Storage module should be fully synced (no entropy)
-    // TODO: Fix this.. there will always be one left when the max_chunk_offset of the block and the partition align
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1358 : Fix this.. there will always be one left when the max_chunk_offset of the block and the partition align
     assert!(entropy_intervals.is_empty());
 }
 

@@ -629,7 +629,7 @@ pub async fn prevalidate_block(
         return Err(PreValidationError::BlockSignatureInvalid);
     }
 
-    // TODO: add validation for the term ledger 'expires' field,
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1307 : add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
 
@@ -1738,7 +1738,7 @@ pub fn is_seed_data_valid(
     let vdf_info = &block_header.vdf_limiter_info;
     let expected_seed_data = vdf_info.calculate_seeds(reset_frequency, previous_block_header);
 
-    // TODO: difficulty validation adjustment is likely needs to be done here too,
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1271 : difficulty validation adjustment is likely needs to be done here too,
     //  but difficulty is not yet implemented
     let are_seeds_valid =
         expected_seed_data.0 == vdf_info.next_seed && expected_seed_data.1 == vdf_info.seed;
@@ -2263,11 +2263,11 @@ pub async fn data_txs_are_valid(
                         });
                     }
                     DataLedger::OneYear => {
-                        // TODO: Validate OneYear term ledger data tx
+                        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1266 : Validate OneYear term ledger data tx
                         // For now, accept any historical state
                     }
                     DataLedger::ThirtyDay => {
-                        // TODO: Validate ThirtyDay term ledger data tx
+                        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1292 : Validate ThirtyDay term ledger data tx
                         // For now, accept any historical state
                     }
                 }
@@ -2612,7 +2612,7 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // TODO: validate that block.treasury is correctly updated
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1324 : validate that block.treasury is correctly updated
 
     debug!("Data transaction validation successful");
     Ok(())

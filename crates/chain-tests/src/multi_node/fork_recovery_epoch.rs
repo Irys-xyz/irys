@@ -183,7 +183,7 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
         "Peer1 and Peer2 should be on different forks!"
     );
 
-    // TODO: Verify pledge1 is in the genesis epoch state
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1316 : Verify pledge1 is in the genesis epoch state
     // Verify that packing is started on peer1 for whatever partition_hash was assigned to pledge1
     // Verify that a Miner is started on peer1 for whatever partition_hash was assigned to pledge1
 
@@ -295,7 +295,7 @@ async fn heavy4_fork_recovery_epoch_test() -> eyre::Result<()> {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // TODO:
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1320
         // Verify that packing is started on peer2 for whatever partition_hash was assigned to pledge2
         // Verify that a Miner is started on peer2 for whatever partition_hash was assigned to pledge2
         // Verify that packing is stopped on peer1 for whatever partition_hash was assigned to pledge1

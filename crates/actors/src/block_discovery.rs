@@ -441,7 +441,7 @@ impl BlockDiscoveryServiceInner {
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
-        // TODO: we can remove cloning (here and in the loop)
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1357 : we can remove cloning (here and in the loop)
         // by extracting out just the metadata we need (height, hash, data ledger tx ids)
         let mut parent_block = previous_block_header.clone();
 
@@ -624,7 +624,7 @@ impl BlockDiscoveryServiceInner {
             };
 
             let ema_snapshot = parent_block.ema_snapshot.clone();
-            // FIXME: Does this need to be for the current block if it's an epoch block?
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1366 : Does this need to be for the current block if it's an epoch block?
             let epoch_snapshot = parent_block.epoch_snapshot.clone();
 
             (ema_snapshot, epoch_snapshot)

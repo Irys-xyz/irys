@@ -27,7 +27,7 @@ use reth_db::{
     table::{Decode, Encode},
 };
 
-// TODO: we can probably just do an std::mem::transmute as the underlying memory layout & contents is identical
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1360 : we can probably just do an std::mem::transmute as the underlying memory layout & contents is identical
 impl From<AlloyAddress> for IrysAddress {
     #[inline]
     fn from(value: AlloyAddress) -> Self {
@@ -104,7 +104,7 @@ const MAX_HEX_ADDRESS_STRING_LENGTH: usize = 2 /* 0x */ + 20 * 2 /* 20 bytes, he
 // }
 
 impl IrysAddress {
-    // TODO: better error types
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1287 : better error types
     pub fn from_base58(str: &str) -> Result<Self, String> {
         // reject strings if they are larger than `MAX_BS58_ADDRESS_STRING_LENGTH`
         if str.len() > MAX_BS58_ADDRESS_STRING_LENGTH {
@@ -141,7 +141,7 @@ mod tests {
     #[case("not_an_address", false)]
     #[case("0x", false)]
     #[case("0xinvalid", false)]
-    // TODO: a test for `MAX_BS58_ADDRESS_STRING_LENGTH`
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1302 : a test for `MAX_BS58_ADDRESS_STRING_LENGTH`
     fn test_parse_address(#[case] input: &str, #[case] should_succeed: bool) {
         let result = IrysAddress::from_str(input);
         assert_eq!(result.is_ok(), should_succeed);

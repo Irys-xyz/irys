@@ -381,7 +381,7 @@ impl BinaryResolver {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // TODO: once ring releases 0.17.15+ (current: 0.17.14), we should no
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1367 : once ring releases 0.17.15+ (current: 0.17.14), we should no
         // longer need this workaround. See https://github.com/rust-lang/cargo/issues/16134
         //
         // Strip env vars that ring's build.rs registers via

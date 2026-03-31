@@ -267,7 +267,7 @@ pub struct PromotionStatus {
     pub promotion_height: Option<u64>,
 }
 
-// TODO: REMOVE ME ONCE WE HAVE A GATEWAY
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1350 : REMOVE ME ONCE WE HAVE A GATEWAY
 /// Returns whether or not a transaction has been promoted
 /// by checking if the ingress_proofs field of the tx's header is `Some`,
 ///  which only occurs when it's been promoted.

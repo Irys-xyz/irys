@@ -50,7 +50,7 @@ pub struct ApiState {
     pub peer_list: PeerList,
     pub db: DatabaseProvider,
     pub config: Config,
-    // TODO: slim this down to what we actually use - beware the types!
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1270 : slim this down to what we actually use - beware the types!
     pub reth_provider: RethNodeProvider,
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
@@ -105,7 +105,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
         .route("/genesis", web::get().to(index::genesis_route))
-        // TODO: need to fix serialization here
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1336 : need to fix serialization here
         .route("/network/config", web::get().to(config::get_config))
         .route("/peer-list", web::get().to(peer_list::peer_list_route))
         .route(

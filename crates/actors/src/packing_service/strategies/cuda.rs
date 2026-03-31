@@ -102,7 +102,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         eyre::Result::Ok(out)
                     })
                     .await
-                    .unwrap() // TODO: error handling
+                    .unwrap() // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1328 : error handling
                     .unwrap();
 
                 // Write packed chunks

@@ -120,7 +120,7 @@ impl ExecutionPayloadCache {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
                 payloads_currently_requested_from_the_network: LruCache::new(NonZeroUsize::new(PAYLOAD_REQUESTS_CACHE_CAPACITY).expect("payloads currently requested from the network capacity is not a non-zero usize")),
             })),
-            // TODO: fix this to use a real RPC client
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1311 : fix this to use a real RPC client
             reth_payload_provider,
             payload_senders: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(PAYLOAD_RECEIVERS_CAPACITY).expect("payload senders capacity is not a non-zero usize")))),
             peer_list

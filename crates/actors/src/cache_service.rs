@@ -276,7 +276,7 @@ impl InnerCacheTask {
         // We'll do deletions in a write tx per batch to keep lock times short
         let mut pending_roots: Vec<DataRoot> = Vec::new();
 
-        // TODO: try to deprioritise data_roots that almost have all their chunks, as we want as many full data_roots as possible so we can provide proofs
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1355 : try to deprioritise data_roots that almost have all their chunks, as we want as many full data_roots as possible so we can provide proofs
         while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
             if evictions_performed >= MAX_EVICTIONS_PER_RUN {
                 warn!(
@@ -463,7 +463,7 @@ impl InnerCacheTask {
         let local_addr = signer.address();
         let tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
-        // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1309 : we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
         // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();
@@ -901,7 +901,7 @@ mod tests {
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
-    // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
+    // This test prevents a regression of GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1290 : mempool-only data roots (with empty block_set field)
     // are pruned once prune_height > 0 and they should not be pruned!
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {

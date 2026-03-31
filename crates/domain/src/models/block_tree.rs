@@ -432,7 +432,7 @@ impl BlockTree {
             )
         })?;
 
-        // TODO: if we restart when we have a very large amount of blocks,
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1293 : if we restart when we have a very large amount of blocks,
         // then actually we would be storing almost all of the block index in memory -
         // this is because pruning is only called at the very end
 
@@ -1084,8 +1084,8 @@ impl BlockTree {
 
     /// Get the earliest unvalidated block from the longest/canonical chain
     /// Relies on the `longest_chain_cache`
-    /// TODO: rename to "...in_canonical_chain"
-    /// TODO: replace with lookup from canonical chain not_on_chain_count & lookup
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1294 : rename to "...in_canonical_chain"
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1278 : replace with lookup from canonical chain not_on_chain_count & lookup
     #[must_use]
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
@@ -1120,7 +1120,7 @@ impl BlockTree {
         }
     }
 
-    // TODO: replace with reading canonical chain, minusing head block by not on chain count
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1279 : replace with reading canonical chain, minusing head block by not on chain count
     pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
         // Get the block with max cumulative difficulty
         let (_entry, blocks, _time) = self.get_earliest_not_onchain_in_longest_chain()?;
@@ -1393,7 +1393,7 @@ pub fn build_current_commitment_snapshot_from_index(
 
                 // Apply them to the commitment snapshot
                 let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
-                // TODO: we should be asserting the status here... should it always be `Accepted`??
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1333 : we should be asserting the status here... should it always be `Accepted`??
             }
         }
     }

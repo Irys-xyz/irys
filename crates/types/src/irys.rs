@@ -52,7 +52,7 @@ impl IrysSigner {
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize, store_data)?;
 
-        // TODO: These should be calculated from some pricing params passed in
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1267 : These should be calculated from some pricing params passed in
         // as a parameter
         transaction.header.perm_fee = Some(BoundedFee::from(1_u64));
         transaction.header.term_fee = BoundedFee::from(1_u64);
@@ -201,7 +201,7 @@ impl IrysSigner {
         chunk_size: usize,
         store_data: bool,
     ) -> Result<DataTransaction> {
-        // TODO: fix the `data` field so we can use "streaming" data sources
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1300 : fix the `data` field so we can use "streaming" data sources
         let (data, chunks) = if store_data {
             let data: eyre::Result<Vec<Vec<u8>>> = data.collect();
             let data = data?;

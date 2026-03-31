@@ -86,7 +86,7 @@ impl ChunkIngressServiceInner {
         // Validate the anchor
         self.validate_ingress_proof_anchor(&ingress_proof)?;
 
-        // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1329 : we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
             .irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
@@ -144,7 +144,7 @@ impl ChunkIngressServiceInner {
                 IngressProofError::Other("unable to get canonical chain from block tree".to_owned())
             })?;
 
-        // TODO: add an ingress proof invalid LRU, like we have for txs
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1286 : add an ingress proof invalid LRU, like we have for txs
         let anchor_height = match crate::anchor_validation::get_anchor_height(
             block_tree_read_guard,
             irys_db,

@@ -777,7 +777,7 @@ pub struct VdfNodeConfig {
 impl Default for VdfNodeConfig {
     fn default() -> Self {
         Self {
-            // TODO: default to something like numcpus - 4
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1288 : default to something like numcpus - 4
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
             throttle: false,
@@ -875,7 +875,7 @@ impl Default for MempoolNodeConfig {
 impl NodeConfig {
     pub fn consensus_config(&self) -> ConsensusConfig {
         // load the consensus config
-        // todo: lazy load the consensus config, caching the result for subsequent calls
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1274 : lazy load the consensus config, caching the result for subsequent calls
 
         match &self.consensus {
             ConsensusOptions::Path(path_buf) => std::fs::read_to_string(path_buf)
@@ -987,7 +987,7 @@ impl NodeConfig {
             trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
-                execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
+                execution: crate::RethPeerInfo::default(), // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1284 : figure out how to pre-compute peer IDs
             }*/],
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],

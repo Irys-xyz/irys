@@ -34,7 +34,7 @@ pub fn decode_rlp_version(buf: &mut &[u8]) -> alloy_rlp::Result<(u8, Vec<u8>)> {
     };
 
     header.encode(&mut tmp);
-    // TODO: figure out how to remove this copy - we can't overwrite the now-defunct external header as the slice isn't &mut &mut [u8] (unless we're cheeky and use unsafe)
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1299 : figure out how to remove this copy - we can't overwrite the now-defunct external header as the slice isn't &mut &mut [u8] (unless we're cheeky and use unsafe)
     // maybe some type that lets us create a modified "view" over the original data?
 
     // copy remaining bytes (expected internal payload) to after the reconstructed internal header)

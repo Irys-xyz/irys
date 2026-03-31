@@ -518,7 +518,7 @@ impl IrysNode {
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await;
                 let timestamp_secs = block.timestamp_secs().as_secs();
-                // TODO: we should enforce this
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1344 : we should enforce this
                 // assert_eq!(
                 //     timestamp_secs,
                 //     (self.config.consensus.genesis.timestamp_millis / 1000) as u64
@@ -964,7 +964,7 @@ impl IrysNode {
                         &latest_hash
                     );
                 };
-                // TODO: add code to proactively grab the latest head block from peers
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1327 : add code to proactively grab the latest head block from peers
                 // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
                 stake_and_pledge(
                     &config,
@@ -1502,7 +1502,7 @@ impl IrysNode {
             })??;
 
         // overwrite config as we now have reth peering information
-        // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1362 : Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
         let mut node_config = config.node_config.clone();
         node_config.reth.network.peer_id = reth_peering.peer_id;
         node_config.reth.network.bind_ip = Some(reth_peering.peering_tcp_addr.ip().to_string());

@@ -626,7 +626,7 @@ impl DataTransactionLedger {
             .iter()
             .map(|h| DataRootLeaf {
                 data_root: h.data_root,
-                tx_size: h.data_size as usize, // TODO: check this
+                tx_size: h.data_size as usize, // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1331 : check this
             })
             .collect::<Vec<DataRootLeaf>>();
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();

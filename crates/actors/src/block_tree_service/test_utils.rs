@@ -290,7 +290,7 @@ pub fn create_and_apply_fork(
     let reorg_event = ReorgEvent {
         // todo: write data here
         old_fork: Arc::new(vec![]),
-        // todo: write data here
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1272 : write data here
         new_fork: Arc::new(new_fork_blocks),
         fork_parent,
         new_tip,

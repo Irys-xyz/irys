@@ -232,7 +232,7 @@ impl PartitionMiningServiceInner {
         }
 
         for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
-            // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1348 : check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset =
                 PartitionChunkOffset::from(start_chunk_offset + index as u32);
 

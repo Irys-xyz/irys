@@ -142,7 +142,7 @@ super::impl_mirror_enum_from!(
         convert: V1;
     }
 );
-// TODO: remove/streamline
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1268 : remove/streamline
 impl From<std::sync::Arc<irys_types::IrysBlockHeader>> for IrysBlockHeader {
     fn from(arc: std::sync::Arc<irys_types::IrysBlockHeader>) -> Self {
         std::sync::Arc::unwrap_or_clone(arc).into()
