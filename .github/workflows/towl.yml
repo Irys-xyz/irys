@@ -1,0 +1,34 @@
+name: towl
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  towl:
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Install towl
+        run: cargo install towl
+
+      - name: Run towl
+        env:
+          TOWL_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOWL_LLM_API_KEY: ${{ secrets.TOWL_LLM_API_KEY }}
+        run: towl scan --non-interactive --github --ai .
+
+      - name: Commit TODO replacements
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: replace TODOs with GitHub issue links"
+          git push
