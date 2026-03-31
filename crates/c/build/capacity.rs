@@ -94,7 +94,7 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     // CARGO_BUILD_RUSTC_WRAPPER → RUSTC_WRAPPER in build script environments,
     // so unsetting here is the only reliable way to prevent it.
     // SAFETY: build scripts are single-threaded; no other threads observe this env var.
-    let saved_rustc_wrapper = env::var("RUSTC_WRAPPER").ok();
+    let saved_rustc_wrapper = env::var_os("RUSTC_WRAPPER");
     unsafe { env::remove_var("RUSTC_WRAPPER") };
     cc.compile("capacity_cuda");
     if let Some(val) = saved_rustc_wrapper {
