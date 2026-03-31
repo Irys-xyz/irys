@@ -30,10 +30,12 @@ use reth_evm::{
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
+use revm::bytecode::opcode::RETURNDATACOPY;
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
 use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
 use revm::handler::EthFrame;
 use revm::inspector::NoOpInspector;
+use revm::interpreter::Instruction;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
@@ -43,6 +45,8 @@ use tracing::trace;
 use irys_types::storage_pricing::TOKEN_SCALE;
 
 use super::*;
+use crate::instructions::pd_return_marker::PdReturnMarkerScope;
+use crate::instructions::returndatacopy::irys_returndatacopy;
 use crate::precompiles::pd::context::PdContext;
 use crate::precompiles::pd::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
@@ -412,6 +416,13 @@ impl EvmFactory for IrysEvmFactory {
         if is_sprite_active {
             let pd_context = evm.pd_context().clone();
             register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+            // Replace RETURNDATACOPY with PD-aware handler that skips memory expansion
+            // gas when return data came from the PD precompile.
+            evm.inner.instruction.insert_instruction(
+                RETURNDATACOPY,
+                Instruction::new(irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>, 3),
+            );
         }
 
         evm
@@ -456,6 +467,13 @@ impl EvmFactory for IrysEvmFactory {
         if is_sprite_active {
             let pd_context = evm.pd_context().clone();
             register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+            // Replace RETURNDATACOPY with PD-aware handler that skips memory expansion
+            // gas when return data came from the PD precompile.
+            evm.inner.instruction.insert_instruction(
+                RETURNDATACOPY,
+                Instruction::new(irys_returndatacopy::<EthInterpreter, EthEvmContext<DB>>, 3),
+            );
         }
 
         evm
@@ -615,6 +633,10 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
+        // Clear PD return marker at transaction boundary. The scope guard ensures
+        // the marker is cleared on entry and on every exit path (normal or early return).
+        let _pd_return_marker_scope = PdReturnMarkerScope::new();
+
         // Reject blob-carrying transactions (EIP-4844) at execution time.
         // We keep Cancun active but explicitly disable blobs/sidecars.
         if !tx.blob_hashes.is_empty()
@@ -649,141 +671,140 @@ where
                 "Updated PdContext with transaction access_list for this EVM instance"
             );
 
-            // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
-            // Layout: [magic][version:u16][borsh header][rest]
-            if let Some((pd_header, consumed)) =
-                crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
-            {
-                // Compute PD fees based on header values. Always derive PD chunk count from access list.
-                let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
-                let chunks = U256::from(chunks_u64);
-                // Read the actual PD base fee from EVM state.
-                let actual_per_chunk = self.read_pd_base_fee_per_chunk();
-                // Reject if actual base fee exceeds user's max (EIP-1559 semantics).
-                if actual_per_chunk > pd_header.max_base_fee_per_chunk {
-                    tracing::debug!(
-                        actual_per_chunk = %actual_per_chunk,
-                        max_base_fee_per_chunk = %pd_header.max_base_fee_per_chunk,
-                        "PD transaction rejected: actual base fee exceeds user's max"
-                    );
+            // Parse PD fee metadata from the access list (canonical parser).
+            let chunk_config = self.context.chunk_config();
+            match crate::pd_tx::parse_pd_transaction(&tx.access_list, &chunk_config) {
+                crate::pd_tx::PdParseResult::InvalidPd(err) => {
+                    tracing::debug!(?err, "Invalid PD transaction rejected at EVM layer");
                     return Err(EVMError::Transaction(
-                        InvalidTransaction::GasPriceLessThanBasefee,
+                        format!("invalid PD transaction: {err}").into(),
                     ));
                 }
-                let base_per_chunk = actual_per_chunk;
-                let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
-
-                let base_total = chunks.saturating_mul(base_per_chunk);
-                let prio_total = chunks.saturating_mul(prio_per_chunk);
-
-                // Validate minimum PD transaction cost
-                if let Some(min_cost_usd) = self.min_pd_transaction_cost_usd {
-                    let irys_usd_price = self.read_irys_usd_price()?;
-
-                    // Calculate minimum cost in IRYS tokens:
-                    // min_cost_irys = (min_cost_usd * TOKEN_SCALE) / irys_usd_price
-                    // Both min_cost_usd and irys_usd_price are in TOKEN_SCALE (1e18) scale
-                    let scale = U256::from_be_bytes(TOKEN_SCALE.to_be_bytes());
-                    let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
-
-                    // Calculate actual total fees
-                    let actual_total_fees = base_total.saturating_add(prio_total);
-
-                    if actual_total_fees < min_cost_irys {
+                crate::pd_tx::PdParseResult::ValidPd(pd_meta) => {
+                    let chunks = U256::from(pd_meta.total_chunks);
+                    // Read the actual PD base fee from EVM state.
+                    let actual_per_chunk = self.read_pd_base_fee_per_chunk();
+                    // Reject if actual base fee exceeds user's max (EIP-1559 semantics).
+                    if actual_per_chunk > pd_meta.base_fee_cap_per_chunk {
                         tracing::debug!(
-                            min_cost_usd = %min_cost_usd,
-                            irys_usd_price = %irys_usd_price,
-                            min_cost_irys = %min_cost_irys,
-                            actual_total_fees = %actual_total_fees,
-                            chunks = %chunks,
-                            "PD transaction rejected: fees below minimum cost"
+                            actual_per_chunk = %actual_per_chunk,
+                            base_fee_cap_per_chunk = %pd_meta.base_fee_cap_per_chunk,
+                            "PD transaction rejected: actual base fee exceeds user's max"
                         );
-                        // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
-                        // transaction should be skipped during block building (not a fatal error).
-                        // This causes the payload builder to skip this tx and continue.
-                        // Note: We're repurposing this error type since there's no specific
-                        // "PD fee too low" variant in revm.
                         return Err(EVMError::Transaction(
                             InvalidTransaction::GasPriceLessThanBasefee,
                         ));
                     }
-                }
+                    let base_per_chunk = actual_per_chunk;
+                    let prio_per_chunk = pd_meta.priority_fee_per_chunk;
 
-                // Fee payer is the transaction caller; priority recipient is block beneficiary.
-                let fee_payer = tx.caller;
-                let beneficiary = self.block().beneficiary;
-                // Pre-Sprite: burn to Address::ZERO, Post-Sprite: send to treasury
-                let treasury = if self.is_sprite_active {
-                    *TREASURY_ACCOUNT
-                } else {
-                    Address::ZERO
-                };
+                    let base_total = chunks.saturating_mul(base_per_chunk);
+                    let prio_total = chunks.saturating_mul(prio_per_chunk);
 
-                // Pre-validate fee_payer has sufficient balance for total PD fees
-                let total_pd_fees = base_total.saturating_add(prio_total);
-                let fee_payer_account = self
-                    .inner
-                    .ctx
-                    .journaled_state
-                    .inner
-                    .load_account(&mut self.inner.ctx.journaled_state.database, fee_payer)?;
-                let fee_payer_balance = fee_payer_account.data.info.balance;
+                    // Validate minimum PD transaction cost
+                    if let Some(min_cost_usd) = self.min_pd_transaction_cost_usd {
+                        let irys_usd_price = self.read_irys_usd_price()?;
 
-                if fee_payer_balance < total_pd_fees {
-                    tracing::debug!(
-                        fee_payer = %fee_payer,
-                        required = %total_pd_fees,
-                        available = %fee_payer_balance,
-                        "PD transaction rejected: insufficient balance for PD fees"
-                    );
-                    return Err(EVMError::Transaction(
-                        InvalidTransaction::LackOfFundForMaxFee {
-                            fee: Box::new(total_pd_fees),
-                            balance: Box::new(fee_payer_balance),
-                        },
-                    ));
-                }
+                        // Calculate minimum cost in IRYS tokens:
+                        // min_cost_irys = (min_cost_usd * TOKEN_SCALE) / irys_usd_price
+                        // Both min_cost_usd and irys_usd_price are in TOKEN_SCALE (1e18) scale
+                        let scale = U256::from_be_bytes(TOKEN_SCALE.to_be_bytes());
+                        let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
 
-                // Strip the PD header from calldata before executing the tx logic.
-                let stripped: Bytes = tx.data.slice(consumed..);
-                let mut tx = tx;
-                tx.data = stripped;
+                        // Calculate actual total fees
+                        let actual_total_fees = base_total.saturating_add(prio_total);
 
-                let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
-                {
-                    // Deduct fees from payer. Balance was pre-validated above, so OutOfFunds
-                    // should not occur. OverflowPayment is theoretically possible but extremely
-                    // unlikely (would require recipient balance near U256::MAX).
-                    if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
-                        &mut self.inner.ctx.journaled_state.database,
-                        fee_payer,
-                        treasury,
-                        base_total,
-                    )? {
-                        return Err(EVMError::Custom(format!(
-                            "PD base fee transfer failed unexpectedly: {err:?}"
-                        )));
+                        if actual_total_fees < min_cost_irys {
+                            tracing::debug!(
+                                min_cost_usd = %min_cost_usd,
+                                irys_usd_price = %irys_usd_price,
+                                min_cost_irys = %min_cost_irys,
+                                actual_total_fees = %actual_total_fees,
+                                chunks = %chunks,
+                                "PD transaction rejected: fees below minimum cost"
+                            );
+                            // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
+                            // transaction should be skipped during block building (not a fatal error).
+                            // This causes the payload builder to skip this tx and continue.
+                            // Note: We're repurposing this error type since there's no specific
+                            // "PD fee too low" variant in revm.
+                            return Err(EVMError::Transaction(
+                                InvalidTransaction::GasPriceLessThanBasefee,
+                            ));
+                        }
                     }
-                    if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
-                        &mut self.inner.ctx.journaled_state.database,
-                        fee_payer,
-                        beneficiary,
-                        prio_total,
-                    )? {
-                        return Err(EVMError::Custom(format!(
-                            "PD priority fee transfer failed unexpectedly: {err:?}"
-                        )));
+
+                    // Fee payer is the transaction caller; priority recipient is block beneficiary.
+                    let fee_payer = tx.caller;
+                    let beneficiary = self.block().beneficiary;
+                    // Pre-Sprite: burn to Address::ZERO, Post-Sprite: send to treasury
+                    let treasury = if self.is_sprite_active {
+                        *TREASURY_ACCOUNT
+                    } else {
+                        Address::ZERO
+                    };
+
+                    // Pre-validate fee_payer has sufficient balance for total PD fees
+                    let total_pd_fees = base_total.saturating_add(prio_total);
+                    let fee_payer_account =
+                        self.inner.ctx.journaled_state.inner.load_account(
+                            &mut self.inner.ctx.journaled_state.database,
+                            fee_payer,
+                        )?;
+                    let fee_payer_balance = fee_payer_account.data.info.balance;
+
+                    if fee_payer_balance < total_pd_fees {
+                        tracing::debug!(
+                            fee_payer = %fee_payer,
+                            required = %total_pd_fees,
+                            available = %fee_payer_balance,
+                            "PD transaction rejected: insufficient balance for PD fees"
+                        );
+                        return Err(EVMError::Transaction(
+                            InvalidTransaction::LackOfFundForMaxFee {
+                                fee: Box::new(total_pd_fees),
+                                balance: Box::new(fee_payer_balance),
+                            },
+                        ));
                     }
+
+                    let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+                    {
+                        // Deduct fees from payer. Balance was pre-validated above, so OutOfFunds
+                        // should not occur. OverflowPayment is theoretically possible but extremely
+                        // unlikely (would require recipient balance near U256::MAX).
+                        if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
+                            &mut self.inner.ctx.journaled_state.database,
+                            fee_payer,
+                            treasury,
+                            base_total,
+                        )? {
+                            return Err(EVMError::Custom(format!(
+                                "PD base fee transfer failed unexpectedly: {err:?}"
+                            )));
+                        }
+                        if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
+                            &mut self.inner.ctx.journaled_state.database,
+                            fee_payer,
+                            beneficiary,
+                            prio_total,
+                        )? {
+                            return Err(EVMError::Custom(format!(
+                                "PD priority fee transfer failed unexpectedly: {err:?}"
+                            )));
+                        }
+                    }
+                    self.inner.ctx.journaled_state.checkpoint_commit();
+
+                    let res = if self.inspect {
+                        self.inner.inspect_tx(tx)
+                    } else {
+                        self.inner.transact(tx)
+                    }?;
+
+                    return Ok(res);
                 }
-                self.inner.ctx.journaled_state.checkpoint_commit();
-
-                let res = if self.inspect {
-                    self.inner.inspect_tx(tx)
-                } else {
-                    self.inner.transact(tx)
-                }?;
-
-                return Ok(res);
+                crate::pd_tx::PdParseResult::NotPd => {}
             }
         }
 
@@ -1759,7 +1780,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{PdHeaderV1, prepend_pd_header_v1_to_calldata};
+    use crate::pd_tx::build_pd_access_list_with_fees;
     use crate::shadow_tx::{
         IrysUsdPriceUpdate, PdBaseFeeUpdate, ShadowTransaction, TransactionPacket,
     };
@@ -1768,15 +1789,13 @@ mod tests {
         sign_tx,
     };
     use alloy_consensus::TxEip1559;
-    use alloy_eips::eip2930::AccessListItem as AlItem;
     use alloy_primitives::{Address, B256, U256};
     use alloy_primitives::{Bytes, FixedBytes};
     use reth::rpc::api::eth::EthApiServer as _;
     use reth_evm::EvmEnv;
     use reth_provider::ReceiptProvider as _;
 
-    use alloy_primitives::aliases::U200;
-    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
+    use irys_types::range_specifier::PdDataRead;
     use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
@@ -1806,22 +1825,26 @@ mod tests {
         }
     }
 
-    /// Helper to build PD access list with N chunks
-    fn build_pd_access_list(num_chunks: usize) -> alloy_eips::eip2930::AccessList {
-        let keys: Vec<_> = (0..num_chunks)
-            .map(|i| {
-                let spec = ChunkRangeSpecifier {
-                    partition_index: U200::ZERO,
-                    offset: i as u32,
-                    chunk_count: 1,
-                };
-                B256::from(spec.encode())
+    /// Helper to build PD access list with N chunks and fee parameters.
+    ///
+    /// Each read requests exactly 1 chunk (32 bytes = testing config chunk_size).
+    /// `num_chunks` reads are created at consecutive partition offsets 0..N.
+    fn build_pd_access_list_with_test_fees(
+        num_chunks: usize,
+        priority_fee: U256,
+        base_fee_cap: U256,
+    ) -> alloy_eips::eip2930::AccessList {
+        // chunk_size=32 in ConsensusConfig::testing()
+        let reads: Vec<PdDataRead> = (0..num_chunks)
+            .map(|i| PdDataRead {
+                partition_index: 0,
+                start: i as u32,
+                len: 32,
+                byte_off: 0,
             })
             .collect();
-        alloy_eips::eip2930::AccessList(vec![AlItem {
-            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
-            storage_keys: keys,
-        }])
+        build_pd_access_list_with_fees(&reads, priority_fee, base_fee_cap)
+            .expect("test fee encoding should not fail")
     }
 
     /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
@@ -1961,25 +1984,10 @@ mod tests {
         let sink_initial = get_balance(&node.inner, treasury);
         let payer_initial_nonce = get_nonce(&node.inner, payer);
 
-        // Build and submit a PD-header transaction: 3 chunks
+        // Build and submit a PD transaction: 3 chunks with fees in access list
         let pd_priority_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens per chunk
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: pd_priority_fee,
-            max_base_fee_per_chunk: pd_base_fee,
-        };
-        let user_calldata = Bytes::from(vec![0xAA, 0xBB]);
-        let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
-
-        // PD access list: 3 storage keys at PD precompile address
-        use crate::test_utils::chunk_spec_with_params;
-
-        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
-        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
-        let key3 = B256::from(chunk_spec_with_params([0; 25], 2, 1).encode());
-        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
-            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![key1, key2, key3],
-        }]);
+        let access_list = build_pd_access_list_with_test_fees(3, pd_priority_fee, pd_base_fee);
+        let input = Bytes::from(vec![0xAA, 0xBB]);
 
         // Compose EIP-1559 tx with zero priority gas fee so only PD fees affect balances
         let value = U256::from(transfer_value);
@@ -2141,12 +2149,9 @@ mod tests {
             balance_before, nonce_before
         );
 
-        // Build single PD transaction with 2 chunks
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: pd_priority_fee,
-            max_base_fee_per_chunk: pd_base_fee,
-        };
-        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
+        // Build single PD transaction with 2 chunks (fees in access list)
+        let access_list = build_pd_access_list_with_test_fees(2, pd_priority_fee, pd_base_fee);
+        let input = Bytes::from(vec![0xAA]);
 
         let tx_request = alloy_rpc_types::TransactionRequest {
             from: Some(payer),
@@ -2154,7 +2159,7 @@ mod tests {
             value: Some(U256::from(100_u64)),
             input: alloy_rpc_types::TransactionInput::new(input),
             nonce: Some(nonce_before),
-            access_list: Some(build_pd_access_list(2)),
+            access_list: Some(access_list),
             ..tx_request_base()
         };
 
@@ -2269,17 +2274,11 @@ mod tests {
             payer_initial_nonce
         );
 
-        // Build PD transaction header (3 chunks with fees)
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: pd_priority_fee,
-            max_base_fee_per_chunk: pd_base_fee,
-        };
+        // Build PD access list (3 chunks with fees)
+        let access_list = build_pd_access_list_with_test_fees(3, pd_priority_fee, pd_base_fee);
 
         // Reverting initcode: PUSH1 0 PUSH1 0 REVERT (0x60006000fd)
-        let reverting_initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]);
-        let input = prepend_pd_header_v1_to_calldata(&header, &reverting_initcode);
-
-        let access_list = build_pd_access_list(3);
+        let input = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]);
 
         // CREATE transaction with reverting init code (will fail)
         let nonce = payer_initial_nonce;
@@ -2444,23 +2443,12 @@ mod tests {
         let user_max_base_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens (< 0.01)
         let pd_priority_fee = U256::from(5_000_000_000_000_000_u64);
 
-        // Build PD transaction header
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: pd_priority_fee,
-            max_base_fee_per_chunk: user_max_base_fee, // TOO LOW!
-        };
-
-        // Create and submit PD transaction (1 chunk)
-        use crate::test_utils::chunk_spec_with_params;
-
+        // Create and submit PD transaction (1 chunk) with base fee cap TOO LOW
         let payer = ctx.normal_signer.address();
         let payer_nonce = get_nonce(&node.inner, payer);
-        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
-        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
-        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
-            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![key1],
-        }]);
+        let access_list =
+            build_pd_access_list_with_test_fees(1, pd_priority_fee, user_max_base_fee);
+        let input = Bytes::from(vec![0xAA]);
         let tx_raw = TxEip1559 {
             access_list,
             input,
@@ -2608,22 +2596,10 @@ mod tests {
         // Priority fee per chunk (small relative to base fee)
         let pd_priority_fee = U256::from(1_000_000_000_000_000_u64); // 0.001 tokens per chunk
 
-        // Build PD transaction header - user is willing to pay the high fees
-        let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: pd_priority_fee,
-            max_base_fee_per_chunk: excessive_base_fee_per_chunk, // User accepts the high fee
-        };
-
-        // Create PD transaction with 2 chunks (total cost = 2 * excessive_fee + 2 * prio)
-        use crate::test_utils::chunk_spec_with_params;
-
-        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xBB]));
-        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
-        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
-        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
-            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
-            storage_keys: vec![key1, key2],
-        }]);
+        // Create PD transaction with 2 chunks - user accepts the high fee
+        let access_list =
+            build_pd_access_list_with_test_fees(2, pd_priority_fee, excessive_base_fee_per_chunk);
+        let input = Bytes::from(vec![0xBB]);
         let tx_raw = TxEip1559 {
             access_list,
             input,

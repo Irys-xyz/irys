@@ -50,6 +50,7 @@ use crate::{
 
 pub mod engine;
 pub mod evm;
+mod instructions;
 pub mod mempool;
 pub mod payload;
 pub mod payload_builder_builder;
@@ -146,8 +147,11 @@ impl IrysEthereumNode {
             >,
     {
         // Create pool builder with PD chunk sender
-        let pool_builder =
-            IrysPoolBuilder::new(self.hardfork_config.clone(), self.pd_chunk_sender.clone());
+        let pool_builder = IrysPoolBuilder::new(
+            self.hardfork_config.clone(),
+            self.pd_chunk_sender.clone(),
+            self.chunk_config,
+        );
 
         ComponentsBuilder::default()
             .node_types::<Node>()
@@ -161,6 +165,7 @@ impl IrysEthereumNode {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
                 ready_pd_txs: self.ready_pd_txs.clone(),
+                chunk_config: self.chunk_config,
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -2532,7 +2537,6 @@ pub mod test_utils {
 
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
-    use alloy_primitives::aliases::U200;
     use reth::{
         api::PayloadAttributesBuilder,
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -3424,16 +3428,18 @@ pub mod test_utils {
         ))
     }
 
-    /// Helper to create a ChunkRangeSpecifier with custom parameters for testing
-    pub fn chunk_spec_with_params(
-        partition_index: [u8; 25],
-        offset: u32,
-        chunk_count: u16,
-    ) -> irys_types::range_specifier::ChunkRangeSpecifier {
-        irys_types::range_specifier::ChunkRangeSpecifier {
-            partition_index: U200::from_le_bytes(partition_index),
-            offset,
-            chunk_count,
+    /// Helper to create a `PdDataRead` with custom parameters for testing.
+    pub fn data_read_with_params(
+        partition_index: u64,
+        start: u32,
+        len: u32,
+        byte_off: u32,
+    ) -> irys_types::range_specifier::PdDataRead {
+        irys_types::range_specifier::PdDataRead {
+            partition_index,
+            start,
+            len,
+            byte_off,
         }
     }
 }

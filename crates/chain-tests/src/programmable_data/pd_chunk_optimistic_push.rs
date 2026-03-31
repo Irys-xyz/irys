@@ -16,13 +16,13 @@ use std::sync::Arc;
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{aliases::U200, Address, U256};
+use alloy_primitives::{Address, U256};
 use alloy_signer_local::LocalSigner;
-use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_types::chunk_provider::ChunkStorageProvider as _;
 use irys_types::gossip::PdChunkPush;
 use irys_types::irys::IrysSigner;
-use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::PdDataRead;
 use irys_types::ChunkFormat;
 use irys_types::PeerAddress;
 use irys_types::{
@@ -245,24 +245,25 @@ pub(crate) async fn build_and_inject_real_pd_tx(
     let local_signer = LocalSigner::from(signer.signer.clone());
     let chain_id = node.node_ctx.config.consensus.chain_id;
 
-    let specs = vec![ChunkRangeSpecifier {
-        partition_index: U200::from(partition_index),
-        offset,
-        chunk_count,
+    let chunk_size = u32::try_from(node.node_ctx.config.consensus.chunk_size)
+        .expect("test chunk_size must fit in u32");
+    let reads = vec![PdDataRead {
+        partition_index,
+        start: offset,
+        len: u32::from(chunk_count) * chunk_size,
+        byte_off: 0,
     }];
-    let access_list = build_pd_access_list(specs.into_iter());
-
-    let header = PdHeaderV1 {
-        max_priority_fee_per_chunk: U256::from(10_000_000_000_000_000_u64),
-        max_base_fee_per_chunk: U256::from(1_000_000_000_000_000_u64),
-    };
-    let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+    let access_list = build_pd_access_list_with_fees(
+        &reads,
+        U256::from(10_000_000_000_000_000_u64), // 0.01 IRYS priority fee
+        U256::from(1_000_000_000_000_000_u64),  // 0.001 IRYS base fee cap
+    )?;
 
     let mut tx = TxEip1559 {
         access_list,
         chain_id,
         gas_limit: 1_000_000,
-        input: calldata,
+        input: alloy_primitives::Bytes::new(),
         max_fee_per_gas: 20_000_000_000,
         max_priority_fee_per_gas: 1_000_000_000,
         nonce,

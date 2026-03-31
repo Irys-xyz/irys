@@ -100,7 +100,8 @@ pub fn compute_base_fee_per_chunk(
         sprite,
         config.consensus.chunk_size,
     )?;
-    let total_pd_chunks = count_pd_chunks_in_block(parent_evm_block);
+    let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&config.consensus);
+    let total_pd_chunks = count_pd_chunks_in_block(parent_evm_block, &chunk_config);
     let pd_base_fee = calculate_pd_base_fee_for_new_block(
         parent_ema_snapshot,
         current_ema_price,
@@ -269,20 +270,19 @@ pub fn extract_pd_base_fee_from_block(
 ///
 /// This function iterates through all transactions in the block, detects PD transactions
 /// by their header, and sums up the chunk counts from their access lists.
-pub fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
+pub fn count_pd_chunks_in_block(
+    evm_block: &reth_ethereum_primitives::Block,
+    chunk_config: &irys_types::chunk_provider::ChunkConfig,
+) -> u64 {
     use alloy_consensus::Transaction as _;
-    use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
+    use irys_reth::pd_tx::{PdParseResult, parse_pd_transaction};
 
     let mut total_pd_chunks: u64 = 0;
     for tx in evm_block.body.transactions.iter() {
-        // Try to detect PD header in transaction input
-        let input = tx.input();
-        if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-            // This is a PD transaction, sum chunks from access list if present
-            if let Some(access_list) = tx.access_list() {
-                let chunks = sum_pd_chunks_in_access_list(access_list);
-                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-            }
+        if let Some(access_list) = tx.access_list()
+            && let PdParseResult::ValidPd(meta) = parse_pd_transaction(access_list, chunk_config)
+        {
+            total_pd_chunks = total_pd_chunks.saturating_add(meta.total_chunks);
         }
     }
 
@@ -296,18 +296,18 @@ pub fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> 
 /// Returns a vector of priority fees as typed Amount values.
 pub fn extract_priority_fees_from_block(
     evm_block: &reth_ethereum_primitives::Block,
+    chunk_config: &irys_types::chunk_provider::ChunkConfig,
 ) -> Vec<Amount<(CostPerChunk, Irys)>> {
     use alloy_consensus::Transaction as _;
-    use irys_reth::pd_tx::detect_and_decode_pd_header;
+    use irys_reth::pd_tx::{PdParseResult, parse_pd_transaction};
 
     let mut priority_fees = Vec::new();
     for tx in evm_block.body.transactions.iter() {
-        // Try to detect PD header in transaction input
-        let input = tx.input();
-        if let Ok(Some((header, _))) = detect_and_decode_pd_header(input) {
-            // Convert alloy U256 to irys U256 and create typed Amount
+        if let Some(access_list) = tx.access_list()
+            && let PdParseResult::ValidPd(meta) = parse_pd_transaction(access_list, chunk_config)
+        {
             let priority_fee_irys =
-                Amount::<(CostPerChunk, Irys)>::new(header.max_priority_fee_per_chunk.into());
+                Amount::<(CostPerChunk, Irys)>::new(meta.priority_fee_per_chunk.into());
             priority_fees.push(priority_fee_irys);
         }
     }

@@ -11,7 +11,6 @@
 //! - Headerless access list → precompile reverts
 //! - Multi-node block validation (peer pre-loads chunks for validation)
 
-use alloy_core::primitives::aliases::U200;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_primitives::{Address, U256};
@@ -25,9 +24,7 @@ use std::time::Duration;
 use tracing::info;
 
 use irys_types::precompile::IrysPrecompileOffsets;
-use irys_types::range_specifier::{
-    ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArgSerde as _, U18, U34,
-};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
 
@@ -255,7 +252,7 @@ fn decompose_ledger_offset(global_offset: u64, num_chunks_in_partition: u64) -> 
 /// - `offset_4`: 4 padding chunks → test data at local_offset=4
 /// - `offset_3`: 3 padding chunks → test data at local_offset=3
 ///
-/// This exercises different `offset` values in `ChunkRangeSpecifier`.
+/// This exercises different `start` values in `PdDataRead`.
 #[rstest]
 #[case::offset_4(4)] // test data at partition 0, offset 4
 #[case::offset_3(3)] // test data at partition 0, offset 3
@@ -310,16 +307,11 @@ async fn heavy_test_pd_single_chunk_read(#[case] padding_chunks: u64) -> eyre::R
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(partition_index),
-                offset: local_offset,
-                chunk_count: 1,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(data_bytes.len()),
+            vec![PdDataRead {
+                partition_index,
+                start: local_offset,
+                len: data_bytes.len() as u32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0, // nonce
@@ -412,16 +404,11 @@ async fn heavy_test_pd_multi_tx_single_block() -> eyre::Result<()> {
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(partition_index),
-                offset: local_offset,
-                chunk_count: 3,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(data_bytes.len()),
+            vec![PdDataRead {
+                partition_index,
+                start: local_offset,
+                len: data_bytes.len() as u32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0,
@@ -722,22 +709,18 @@ async fn heavy_test_pd_missing_chunks_not_included() -> eyre::Result<()> {
             .abi_encode()
             .into();
 
-    // Reference a non-existent chunk (partition 0, offset 9999)
+    // Reference a non-existent chunk at a valid partition offset.
+    // start=9 is within num_chunks_in_partition(10) but no data was uploaded there.
     let tx_hash = node
         .inject_pd_contract_call(
             &data_account,
             contract_address,
             abi_calldata,
-            vec![ChunkRangeSpecifier {
-                partition_index: U200::from(0_u64),
-                offset: 9999,
-                chunk_count: 1,
-            }],
-            vec![ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::from(0),
-                length: U34::from(32_usize),
+            vec![PdDataRead {
+                partition_index: 0,
+                start: 9,
+                len: 32,
+                byte_off: 0,
             }],
             10_000_000_000_000_000_u64,
             0,
@@ -815,50 +798,31 @@ async fn heavy_test_pd_headerless_access_list_reverts() -> eyre::Result<()> {
 
     let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
 
-    // Call readPdChunkIntoStorage with PD access list but NO PD header.
-    // Set explicit gas to bypass eth_call simulation (which would revert and
-    // prevent submission — we want the tx to be mined so we can check its receipt).
+    // Call readPdChunkIntoStorage with PD access list but NO fee keys.
+    // The mempool now rejects PD access lists missing fee parameters as InvalidPd,
+    // so the transaction should fail at submission time, not at execution time.
     let mut invocation_builder = contract.readPdChunkIntoStorage().gas(1_000_000);
     invocation_builder = invocation_builder.access_list(
         vec![alloy_eips::eip2930::AccessListItem {
             address: precompile_address,
-            storage_keys: vec![
-                ChunkRangeSpecifier {
-                    partition_index: U200::from(partition_index),
-                    offset: local_offset,
-                    chunk_count: 1,
+            storage_keys: vec![alloy_primitives::B256::from(
+                PdDataRead {
+                    partition_index,
+                    start: local_offset,
+                    len: data_bytes.len() as u32,
+                    byte_off: 0,
                 }
-                .encode()
-                .into(),
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::from(0),
-                    length: U34::from(data_bytes.len()),
-                }
-                .encode()
-                .into(),
-            ],
+                .encode(),
+            )],
         }]
         .into(),
     );
 
-    let invocation_call = invocation_builder.send().await?;
-    let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
-    let receipt = node
-        .future_or_mine_on_timeout(&mut invocation_receipt_fut, Duration::from_millis(500))
-        .await??;
-
+    // The tx should be rejected at mempool admission (InvalidPd: missing fee keys).
+    let send_result = invocation_builder.send().await;
     assert!(
-        !receipt.status(),
-        "Headerless tx with PD access list should revert — PD header required for chunk access"
-    );
-
-    // Also verify no data was stored
-    let stored_bytes = contract.getStorage().call().await?;
-    assert!(
-        stored_bytes.is_empty(),
-        "No data should be stored when PD header is missing"
+        send_result.is_err(),
+        "PD access list without fee keys should be rejected by mempool"
     );
 
     node.stop().await;

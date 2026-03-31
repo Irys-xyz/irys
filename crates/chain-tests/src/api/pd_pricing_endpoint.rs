@@ -34,8 +34,13 @@ struct BlockMetadata {
 /// - Block 4: 0% (no PD txs)
 /// - Block 5: 100% (5 txs × 20 chunks each, priority fees [1,2,5,8,10] × 1e9)
 /// - Block 6: 25% (5 txs × 5 chunks each, all priority fee 1e9)
-async fn setup_pd_fee_history_test_chain(
-) -> eyre::Result<(IrysNodeTest<IrysNodeCtx>, String, Vec<BlockMetadata>, u64)> {
+async fn setup_pd_fee_history_test_chain() -> eyre::Result<(
+    IrysNodeTest<IrysNodeCtx>,
+    String,
+    Vec<BlockMetadata>,
+    u64,
+    u64,
+)> {
     use alloy_consensus::Transaction as _;
     use irys_actors::pd_pricing::base_fee::PD_BASE_FEE_INDEX;
     use irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
@@ -43,6 +48,9 @@ async fn setup_pd_fee_history_test_chain(
     // Configure node with predictable PD parameters
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
+    // All 255 chunks must fit in a single partition so the genesis node's storage
+    // modules can store them (default num_chunks_in_partition=10 would span 26 partitions).
+    config.consensus.get_mut().num_chunks_in_partition = 256;
     let sprite = config
         .consensus
         .get_mut()
@@ -50,8 +58,7 @@ async fn setup_pd_fee_history_test_chain(
         .sprite
         .as_mut()
         .expect("Sprite hardfork must be configured for testing");
-    sprite.max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
-                                          // Set min_pd_transaction_cost to 0 to avoid rejections in this test
+    sprite.max_pd_chunks_per_block = 100;
     sprite.min_pd_transaction_cost = Amount::new(U256::from(0));
 
     // Create and fund a test account for PD transactions
@@ -65,8 +72,19 @@ async fn setup_pd_fee_history_test_chain(
         node.node_ctx.config.node_config.http.bind_port
     );
 
-    // Define block specifications
-    // Block utilizations: 0%, 50%, 80%, 0%, 100%, 25%
+    // === Phase 1: Upload all data needed for Phase 2 ===
+    // Block specs: 0 + 50 + 80 + 0 + 100 + 25 = 255 total chunks
+    // At chunk_size=32, that's 255 * 32 = 8160 bytes
+    let total_chunks: u64 = 255;
+    let chunk_size = config.consensus.get_mut().chunk_size as usize;
+    let data = vec![0xAB_u8; total_chunks as usize * chunk_size];
+    let data_start_offset = node.upload_data_for_pd(&pd_signer, &data, 60).await?;
+
+    // Record the tip height after Phase 1 completes (before Phase 2 blocks).
+    // Must use block_tree (not block_index, which is 6 blocks behind tip).
+    let phase2_start_height = node.get_canonical_chain_height().await;
+
+    // === Phase 2: Mine 6 blocks with varying PD utilization ===
     let block_specs = [
         // Block 1: 0% utilization - no PD txs
         BlockSpec {
@@ -120,37 +138,44 @@ async fn setup_pd_fee_history_test_chain(
 
     let mut block_metadata = Vec::new();
     let mut nonce = 0_u64;
-    let mut offset_base = 0_u32;
+    let mut cursor = data_start_offset;
+
+    // Large base fee cap — we don't want base fee rejection in this test
+    const LARGE_BASE_FEE_CAP: u64 = 1_000_000_000_000_000;
 
     for (block_idx, spec) in block_specs.iter().enumerate() {
-        // Inject PD transactions if this block has any
         if !spec.priority_fees.is_empty() {
             let num_txs = spec.priority_fees.len();
-            let chunks_per_tx = (spec.chunks / num_txs as u64) as u16;
+            let chunks_per_tx = spec.chunks / num_txs as u64;
 
+            let mut tx_hashes = Vec::new();
             for priority_fee in &spec.priority_fees {
-                node.create_and_inject_pd_transaction_with_priority_fee(
-                    &pd_signer,
-                    chunks_per_tx,
-                    *priority_fee,
-                    nonce,
-                    offset_base,
-                )
-                .await?;
+                let tx_hash = node
+                    .inject_pd_tx_at_real_offsets(
+                        &pd_signer,
+                        cursor,
+                        chunks_per_tx,
+                        *priority_fee,
+                        LARGE_BASE_FEE_CAP,
+                        nonce,
+                    )
+                    .await?;
+                tx_hashes.push(tx_hash);
                 nonce += 1;
-                offset_base += chunks_per_tx as u32;
+                cursor += chunks_per_tx;
+            }
+
+            // Wait for PdService to provision all chunks and mark txs ready
+            for tx_hash in &tx_hashes {
+                node.wait_for_ready_pd_tx(tx_hash, 30).await?;
             }
         }
 
         // Mine the block
         let (irys_block, eth_payload, _block_txs) = node.mine_block_without_gossip().await?;
-
-        // Wait for the block to be validated and tip updated
         node.wait_until_height(irys_block.height, 10).await?;
 
         // Extract the PD base fee from the block
-        // On the first Sprite block, TreasuryDeposit is at index 1 and PdBaseFeeUpdate is at index 2.
-        // For subsequent blocks, PdBaseFeeUpdate is at index 1.
         let sealed_block = eth_payload.block();
         let tx_at_index_1 = sealed_block
             .body()
@@ -165,12 +190,8 @@ async fn setup_pd_fee_history_test_chain(
             .as_v1()
             .ok_or_else(|| eyre::eyre!("Expected V1 shadow tx"))?
         {
-            TransactionPacket::PdBaseFeeUpdate(update) => {
-                // Normal case: PdBaseFeeUpdate is at index 1
-                U256::from(update.per_chunk)
-            }
+            TransactionPacket::PdBaseFeeUpdate(update) => U256::from(update.per_chunk),
             TransactionPacket::TreasuryDeposit(_) => {
-                // First Sprite block: TreasuryDeposit at index 1, check index 2 for PdBaseFeeUpdate
                 let tx_at_index_2 = sealed_block
                     .body()
                     .transactions
@@ -229,7 +250,13 @@ async fn setup_pd_fee_history_test_chain(
         .as_ref()
         .expect("Sprite hardfork must be configured")
         .max_pd_chunks_per_block;
-    Ok((node, address, block_metadata, max_pd_chunks))
+    Ok((
+        node,
+        address,
+        block_metadata,
+        max_pd_chunks,
+        phase2_start_height,
+    ))
 }
 
 /// Test that the fee history API returns valid data with correct structure.
@@ -242,7 +269,8 @@ async fn setup_pd_fee_history_test_chain(
 /// - Arrays follow eth_feeHistory ordering (oldest-to-newest)
 #[test_log::test(tokio::test)]
 async fn heavy_pd_fee_history_base_fee_progression() -> eyre::Result<()> {
-    let (node, address, block_metadata, max_pd_chunks) = setup_pd_fee_history_test_chain().await?;
+    let (node, address, block_metadata, max_pd_chunks, phase2_start_height) =
+        setup_pd_fee_history_test_chain().await?;
 
     // Request fee history for all 6 blocks
     let response = pd_fee_history_request(&address, 6).await;
@@ -272,10 +300,10 @@ async fn heavy_pd_fee_history_base_fee_progression() -> eyre::Result<()> {
     );
     assert_eq!(fee_history.reward.len(), 6, "reward should have N elements");
 
-    // Verify oldest_block is 1 (excludes genesis)
     assert_eq!(
-        fee_history.oldest_block, 1,
-        "oldest_block should be 1 (excludes genesis)"
+        fee_history.oldest_block,
+        phase2_start_height + 1,
+        "oldest_block should be phase2_start_height + 1 (first Phase 2 block)"
     );
 
     // Response is oldest-first. block_metadata[i] corresponds to response[i].
@@ -335,17 +363,18 @@ fn compute_percentile(sorted_fees: &[u64], percentile: u8) -> u64 {
 /// - Percentile values match expected computation
 #[test_log::test(tokio::test)]
 async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
-    let (node, address, block_metadata, _max_pd_chunks) = setup_pd_fee_history_test_chain().await?;
+    let (node, address, block_metadata, _max_pd_chunks, phase2_start_height) =
+        setup_pd_fee_history_test_chain().await?;
 
     let response = pd_fee_history_request(&address, 6).await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     let fee_history: PdFeeHistoryResponse = response.json().await?;
 
-    // Verify oldest_block is 1 (excludes genesis)
     assert_eq!(
-        fee_history.oldest_block, 1,
-        "oldest_block should be 1 (excludes genesis)"
+        fee_history.oldest_block,
+        phase2_start_height + 1,
+        "oldest_block should be phase2_start_height + 1 (first Phase 2 block)"
     );
 
     // Verify percentiles for each block. block_metadata[i] corresponds to response[i].
@@ -419,16 +448,24 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
     sprite.base_fee_floor = Amount::new(U256::from(10_u64.pow(8)));
     sprite.max_pd_chunks_per_block = 100;
 
-    // Store min_cost before we borrow config for node creation
     let min_cost_usd = min_cost.amount;
 
-    // Start node and mine initial block to establish pricing
+    // Start node
     let node = IrysNodeTest::new_genesis(config).start().await;
     let address = format!(
         "http://127.0.0.1:{}",
         node.node_ctx.config.node_config.http.bind_port
     );
+
+    // === Phase 1: Upload 2 chunks of real data ===
+    let chunk_size = 32_usize;
+    let data = vec![0xCD_u8; 2 * chunk_size]; // 2 chunks × 32 bytes
+    let data_start_offset = node.upload_data_for_pd(&low_fee_signer, &data, 60).await?;
+
+    // Mine one more block to establish pricing (same as original test)
     node.mine_block().await?;
+
+    // === Phase 2: Test fee threshold behavior ===
 
     // 1. Query API and verify min_pd_transaction_cost is returned
     let response = pd_fee_history_request(&address, 1).await;
@@ -450,24 +487,26 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
         "min_pd_transaction_cost_irys should be non-zero"
     );
 
-    // 2. Submit LOW-FEE transaction (below minimum)
-    // Use fees well below min_cost_irys
+    // 2. Submit LOW-FEE transaction (below minimum) at first real offset
     let low_priority_fee = 100_u64; // 100 wei per chunk
     let low_base_fee = 100_u64; // 100 wei per chunk
                                 // Total for 1 chunk = 200 wei, far below min_cost_irys
 
     let low_fee_tx_hash = node
-        .create_and_inject_pd_transaction_with_custom_fees(
+        .inject_pd_tx_at_real_offsets(
             &low_fee_signer,
-            1,                // 1 chunk
-            low_priority_fee, // priority fee per chunk
-            low_base_fee,     // base fee per chunk
-            0,                // nonce
-            0,                // offset_base
+            data_start_offset, // 1 chunk at first real offset
+            1,
+            low_priority_fee,
+            low_base_fee,
+            0, // nonce
         )
         .await?;
 
-    // Mine block - low-fee tx should NOT be included
+    // Wait for PdService to provision the chunk
+    node.wait_for_ready_pd_tx(&low_fee_tx_hash, 30).await?;
+
+    // Mine block - low-fee tx should NOT be included (rejected by block producer)
     let (_, eth_payload, _) = node.mine_block_without_gossip().await?;
     let low_fee_included = eth_payload
         .block()
@@ -481,33 +520,30 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
         "Low-fee PD tx (fees below min_pd_transaction_cost) should be REJECTED"
     );
 
-    // 3. Submit ADEQUATE-FEE transaction (at or above minimum)
-    // Use the base fee from the API response (predicted next block fee at index [1])
-    // Only adjust priority fee to meet the minimum threshold
+    // 3. Submit ADEQUATE-FEE transaction at second real offset
     let base_fee_from_api: u64 = fee_history.base_fee_per_chunk_irys[1]
         .amount
         .try_into()
+        .map(|v: u64| v.max(1))
         .expect("base_fee should fit in u64");
 
-    // The EVM calculates min_cost_irys using on-chain price which may differ from API's EMA.
-    // At $1/IRYS price: min_cost_irys = min_cost.amount (they're equal in internal representation)
-    // For 1 chunk: total_fee = base_fee + priority_fee >= min_cost_irys
-    // So: priority_fee >= min_cost_irys - base_fee
     let evm_min_cost_irys: u64 = min_cost_usd.try_into().expect("min_cost fits in u64");
     let required_priority_fee = evm_min_cost_irys.saturating_sub(base_fee_from_api);
-    // Add buffer to ensure we exceed the threshold (same magnitude as min_cost)
     let priority_fee = required_priority_fee.saturating_add(evm_min_cost_irys);
 
     let adequate_tx_hash = node
-        .create_and_inject_pd_transaction_with_custom_fees(
+        .inject_pd_tx_at_real_offsets(
             &adequate_fee_signer,
-            1,                 // 1 chunk
-            priority_fee,      // priority fee per chunk (adjusted to meet minimum)
-            base_fee_from_api, // base fee from API
-            0,                 // nonce (fresh signer, starts at 0)
-            100,               // offset_base (different from first tx)
+            data_start_offset + 1, // 1 chunk at second real offset
+            1,
+            priority_fee,
+            base_fee_from_api,
+            0, // nonce (fresh signer, starts at 0)
         )
         .await?;
+
+    // Wait for PdService to provision the chunk
+    node.wait_for_ready_pd_tx(&adequate_tx_hash, 30).await?;
 
     // Mine block - adequate-fee tx should be included
     let (_, eth_payload, _) = node.mine_block_without_gossip().await?;
