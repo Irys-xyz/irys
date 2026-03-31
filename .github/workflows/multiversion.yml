@@ -11,12 +11,12 @@ concurrency:
   group: multiversion-${{ github.ref }}
   cancel-in-progress: true
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  CARGO_BUILD_RUSTC_WRAPPER: sccache
-  SCCACHE_DIR: /shared/sccache
-  SCCACHE_CACHE_SIZE: 40G
+  CARGO_INCREMENTAL: 0
 
 jobs:
   multiversion-tests:
@@ -45,16 +45,8 @@ jobs:
             echo "old_ref=origin/${{ github.event.repository.default_branch || 'master' }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install rust (respect toolchain file)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: rustfmt,clippy,cargo,llvm-tools-preview
-          cache: false
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
 
       - name: Run multiversion tests
         run: cargo xtask multiversion-test --profile dev --old-ref ${{ steps.refs.outputs.old_ref }} --new-ref HEAD --clean

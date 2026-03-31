@@ -10,11 +10,20 @@ runs:
         components: rustfmt,clippy,cargo,llvm-tools-preview
         cache: false
 
-
     - uses: Swatinem/rust-cache@v2
       with:
         prefix-key: "v0"
         cache-on-failure: true
+        # Persistent self-hosted runners already have tools installed;
+        # caching ~/.cargo/bin would just preserve stale binaries.
         cache-bin: "false"
         cache-all-crates: true
         cache-workspace-crates: "true"
+
+    - name: Configure sccache
+      shell: bash
+      run: |
+        echo "CARGO_BUILD_RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=/shared/sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=40G" >> "$GITHUB_ENV"
+        sccache --zero-stats 2>/dev/null || true

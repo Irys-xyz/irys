@@ -35,9 +35,8 @@ env:
   RUST_BACKTRACE: short
   # keep build artifacts contained to this repo's workspace on the self-hosted runner
   CARGO_TARGET_DIR: ${{ github.workspace }}/.target
-  CARGO_BUILD_RUSTC_WRAPPER: sccache
-  SCCACHE_DIR: /shared/sccache
-  SCCACHE_CACHE_SIZE: 40G
+  # Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+  # are set by the setup-repo composite action via GITHUB_ENV.
 
 jobs:
   flaky-tests:

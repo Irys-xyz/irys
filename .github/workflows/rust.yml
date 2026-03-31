@@ -13,14 +13,13 @@ on:
   push:
   workflow_dispatch:
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
   CARGO_INCREMENTAL: 0
-  CARGO_BUILD_RUSTC_WRAPPER: sccache
-  SCCACHE_DIR: /shared/sccache
-  SCCACHE_CACHE_SIZE: 40G
 
 
 jobs:
