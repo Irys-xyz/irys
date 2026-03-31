@@ -12,6 +12,8 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -137,3 +139,8 @@ jobs:
       - name: Fail if coverage tests failed
         if: ${{ always() && steps.coverage_tests.outcome == 'failure' }}
         run: exit 1
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats

@@ -26,6 +26,8 @@ concurrency:
   group: flaky-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   ITERATIONS: ${{ github.event.inputs.iterations || '3' }}
   TOLERABLE_FAILURES: ${{ github.event.inputs.tolerable_failures || '5' }}
@@ -168,3 +170,7 @@ jobs:
             cat flaky-test-results/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats

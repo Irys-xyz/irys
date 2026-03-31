@@ -13,6 +13,8 @@ on:
   push:
   workflow_dispatch:
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -43,6 +45,13 @@ jobs:
         run: |
           # default to running
           SHOULD_RUN=true
+
+          # Fork PRs must not run on self-hosted runners — require same-repo origin.
+          # (push events only fire for same-repo; merge_group is already gated.)
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+            echo "Fork PR detected, skipping CI on self-hosted runners"
+            SHOULD_RUN=false
+          fi
 
           # this string disables CI if a commit/branch description includes it
           DISABLE_CI_STRING="#disable-ci"
@@ -161,6 +170,11 @@ jobs:
       - name: cargo test
         run: RUST_LOG=info cargo xtask test
 
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
   cargo-check:
     name: cargo check
     runs-on: [self-hosted, misc-runner]
@@ -180,6 +194,11 @@ jobs:
 
       - name: cargo check
         run: RUSTFLAGS="-D warnings" cargo xtask full-check
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
 
   cargo-fmt:
     name: cargo fmt
@@ -215,6 +234,11 @@ jobs:
       - name: cargo clippy
         run: cargo xtask clippy -- --all-features -- -Dwarnings
 
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
   cargo-doc:
     name: cargo doc
     runs-on: [self-hosted, misc-runner]
@@ -235,6 +259,11 @@ jobs:
       - name: cargo test docs
         run: RUST_LOG=info cargo test --doc
 
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
   cargo-unused-deps:
     name: cargo unused-deps
     runs-on: [self-hosted, misc-runner]
@@ -251,6 +280,11 @@ jobs:
 
       - name: cargo unused deps
         run: cargo xtask unused-deps
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
 
   typos:
     runs-on: [self-hosted, misc-runner]
