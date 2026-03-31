@@ -278,10 +278,15 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
 
         self.pending.push(task, priority);
 
-        // Check if we should preempt current task
+        // Signal the running task to cancel if the new pending task outranks it.
+        // This must happen before start_next(): if preemption fires, start_next()
+        // sees current is still Some (the cancelled task hasn't resolved yet) and
+        // is a no-op — the select loop will pick up the Cancelled result and
+        // promote the higher-priority pending task.
         self.check_preemption();
 
-        // If nothing running, start immediately
+        // After push + check_preemption, either current was already running or
+        // pending is non-empty, so start_next always returns true.
         let active = self.start_next();
         debug_assert!(
             active,
@@ -505,29 +510,38 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
 
     /// Reevaluate and potentially preempt current VDF task
     fn reevaluate_current_vdf(&mut self) {
-        let Some(current) = &self.vdf_scheduler.current else {
+        // Clone the sealed block Arc (cheap refcount bump) so the immutable
+        // borrow of `current` is released before we call calculate_priority
+        // (which borrows &self) and take &mut current to update the priority.
+        let Some((sealed_block, hash)) = self
+            .vdf_scheduler
+            .current
+            .as_ref()
+            .map(|c| (Arc::clone(&c.sealed_block), c.hash))
+        else {
             return;
         };
 
-        // Calculate new priority (block is already a reference)
-        let new_priority = self.calculate_priority(current.sealed_block.header());
+        let new_priority = self.calculate_priority(sealed_block.header());
+
+        let Some(current) = &mut self.vdf_scheduler.current else {
+            return;
+        };
 
         if new_priority == current.priority {
-            return; // No change
+            return;
         }
 
         debug!(
-            block.hash = %current.hash,
+            block.hash = %hash,
             block.priority.old = ?current.priority,
             block.priority.new = ?new_priority,
             "Current VDF task priority changed after reorg"
         );
 
-        // Update priority. Preemption is checked by the caller
-        // (reevaluate_priorities) after pending priorities are also refreshed.
-        if let Some(current_mut) = &mut self.vdf_scheduler.current {
-            current_mut.priority = new_priority;
-        }
+        // Preemption is checked by the caller (reevaluate_priorities) after
+        // pending priorities are also refreshed.
+        current.priority = new_priority;
     }
 
     /// Reevaluate pending VDF task priorities

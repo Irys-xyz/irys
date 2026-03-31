@@ -684,6 +684,13 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        // Cap on parent-chain rebuilds per solution. This is distinct from
+        // MAX_RETRY_ATTEMPTS (5) in fully_produce_new_block_without_gossip,
+        // which retries transient errors (e.g. stale parent during tx selection).
+        // Here we handle the case where the canonical tip keeps advancing while
+        // we're building: each rebuild reuses the same mining solution on the
+        // new parent. 20 is a generous upper bound — in practice even a few
+        // consecutive tip changes are rare.
         const MAX_REBUILD_ATTEMPTS: usize = 20;
         let mut rebuild_attempts = 0;
 

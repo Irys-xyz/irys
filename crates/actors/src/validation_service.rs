@@ -265,7 +265,9 @@ impl ValidationService {
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                // Re-queue with recalculated priority
+                                // Re-queue with recalculated priority; start_next()
+                                // below will immediately promote the highest-priority
+                                // pending task into the running slot.
                                 let priority = coordinator.calculate_priority(task.sealed_block.header());
                                 coordinator.vdf_scheduler.pending.push(task, priority);
                             }
