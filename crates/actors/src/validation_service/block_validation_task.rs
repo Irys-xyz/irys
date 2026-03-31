@@ -113,18 +113,20 @@ impl BlockValidationTask {
         block_tree_guard: BlockTreeReadGuard,
     ) -> Self {
         // SAFETY: We allocate a real ArcInner<MaybeUninit<ValidationServiceInner>>
-        // (with valid refcounts), cast it to Arc<ValidationServiceInner>, and leak
-        // one reference so the inner data is never dropped or freed.
+        // (with valid refcounts), cast it to Arc<ValidationServiceInner>, and keep
+        // one strong reference in ManuallyDrop so the inner data is never dropped
+        // or freed.
         //
         // Layout is identical because MaybeUninit<T> has the same size/alignment as T.
-        // The leaked clone keeps the strong count ≥ 1, so drop_in_place is never called
-        // on the uninitialized data.
+        // Dropping the returned Arc only decrements the strong count back to 1, so
+        // drop_in_place is never called on the uninitialized data.
         let fake_inner: Arc<ValidationServiceInner> = unsafe {
             let uninit = Arc::new(std::mem::MaybeUninit::<ValidationServiceInner>::uninit());
             let raw = Arc::into_raw(uninit) as *const ValidationServiceInner;
             let arc = Arc::from_raw(raw);
-            std::mem::forget(arc.clone()); // leak one ref → data is never freed
-            arc
+            let leaked_arc = std::mem::ManuallyDrop::new(arc);
+
+            Arc::clone(&leaked_arc)
         };
 
         Self {
