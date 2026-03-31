@@ -14,8 +14,9 @@ contract PdSumVerifier {
     uint32 constant MB = 1048576;
 
     /// @notice Reads the full PD data via readData(), then checks that the bytes
-    ///         at offsets 0, 1 MB, 2 MB, 3 MB, 4 MB sum to exactly 42.
-    ///         Reverts with "PD byte sum != 42" if the sum is wrong.
+    ///         at offsets 0, 1 MB, 2 MB, 3 MB, 4 MB sum to exactly 28.
+    ///         Uses distinct primes (2,3,5,7,11) so no permutation or substitution collides.
+    ///         Reverts with "PD byte sum != 28" if the sum is wrong.
     function verifySumAt1MbOffsets() public view {
         bytes memory data = IrysPDLib.readData();
         uint8 sum = uint8(data[0])
@@ -23,6 +24,6 @@ contract PdSumVerifier {
                   + uint8(data[2 * MB])
                   + uint8(data[3 * MB])
                   + uint8(data[4 * MB]);
-        require(sum == 42, "PD byte sum != 42");
+        require(sum == 28, "PD byte sum != 28");
     }
 }

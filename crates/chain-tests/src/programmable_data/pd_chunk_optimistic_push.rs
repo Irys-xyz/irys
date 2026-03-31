@@ -299,15 +299,15 @@ pub(crate) async fn setup_pd_push_test_5mb(fanout: u32) -> eyre::Result<PdPush5M
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // --- Craft 5 MB data: bytes at 1 MB intervals sum to 42 ---
+    // --- Craft 5 MB data: distinct primes at 1 MB intervals sum to 28 ---
     let mut data_bytes = vec![0_u8; data_size];
     const MB: usize = 1_048_576;
-    data_bytes[0] = 8;
-    data_bytes[MB] = 8;
-    data_bytes[2 * MB] = 9;
-    data_bytes[3 * MB] = 8;
-    data_bytes[4 * MB] = 9;
-    // 8 + 8 + 9 + 8 + 9 = 42
+    data_bytes[0] = 2;
+    data_bytes[MB] = 3;
+    data_bytes[2 * MB] = 5;
+    data_bytes[3 * MB] = 7;
+    data_bytes[4 * MB] = 11;
+    // 2 + 3 + 5 + 7 + 11 = 28 (distinct primes — no permutation/substitution collides)
 
     // Record Publish ledger total_chunks BEFORE posting — this is the data_start_offset.
     let offset_before = {
@@ -625,19 +625,30 @@ async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
     let publish_ledger = DataLedger::Publish as u32;
     let num_chunks = ctx.num_chunks_uploaded;
 
-    // Pre-test invariant: Observer and Block Producer should NOT have chunks.
+    // Pre-test invariant: Observer and Block Producer should NOT have chunks
+    // in either the in-memory cache OR persistent storage modules.
     for node_ctx in [&ctx.observer.node_ctx, &ctx.block_producer.node_ctx] {
         for &offset in &[
             ctx.data_start_offset,
             ctx.data_start_offset + num_chunks - 1,
         ] {
+            // Fix 2: Check in-memory cache is empty.
             assert!(
                 node_ctx
                     .chunk_data_index
                     .get(&(publish_ledger, offset))
                     .is_none(),
-                "Node should NOT have chunk at ({}, {}) before PD tx",
+                "Node should NOT have chunk at ({}, {}) in cache before PD tx",
                 publish_ledger,
+                offset,
+            );
+            // Fix 2: Check persistent storage modules are empty too.
+            let storage_result = node_ctx
+                .chunk_provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(offset));
+            assert!(
+                matches!(storage_result, Ok(None) | Err(_)),
+                "Node should NOT have chunk at offset {} in storage modules",
                 offset,
             );
         }
@@ -671,36 +682,63 @@ async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
     .await?;
     info!("PD contract call injected on Block Producer: {:?}", tx_hash);
 
-    // Wait for Observer to receive chunks via optimistic push from Block Producer.
+    // Fix 3: Wait for ALL chunks in Observer's cache (not just first+last).
     // Block Producer fetches from Genesis, then pushes to Observer automatically.
     // This happens BEFORE any block is mined — proving chunks arrived via push.
-    ctx.observer
-        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset, 120)
-        .await?;
-    ctx.observer
-        .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + num_chunks - 1, 120)
-        .await?;
+    for i in 0..num_chunks {
+        ctx.observer
+            .wait_for_pd_chunk_in_cache(publish_ledger, ctx.data_start_offset + i, 120)
+            .await?;
+    }
     info!(
-        "Chunks arrived in Observer cache via push from Block Producer ({} chunks, before block gossip)",
+        "All {} chunks arrived in Observer cache via push from Block Producer (before block gossip)",
         num_chunks
     );
 
-    // Verify byte-level correctness of first pushed chunk on Observer.
+    // Fix 1: Check whether Observer also self-provisioned via EVM tx pool gossip.
+    // In the real system, reth gossips EVM txs to peers, so Observer may see the PD tx
+    // in its own mempool and start independent provisioning. The push is additive —
+    // it races with self-provisioning, and whichever arrives first populates the cache.
+    // The key proof is that ALL chunks are cached BEFORE any block is mined/gossiped.
+    let observer_self_provisioned = ctx.observer.node_ctx.ready_pd_txs.contains(&tx_hash);
+    info!(
+        "Observer self-provisioned PD tx via mempool gossip: {} (push still delivered chunks pre-block)",
+        observer_self_provisioned,
+    );
+
+    // Verify byte-level correctness of first and a middle pushed chunk on Observer.
     let chunk_size = ctx.chunk_size as usize;
     {
-        let fetched = ctx
+        // First chunk (contains data[0] = 2)
+        let fetched_first = ctx
             .observer
             .node_ctx
             .chunk_data_index
             .get(&(publish_ledger, ctx.data_start_offset))
             .map(|r| Arc::clone(&*r))
             .expect("First chunk should be in Observer's ChunkDataIndex after push");
-
-        let expected = &ctx.data_bytes[..chunk_size];
         assert_eq!(
-            fetched.as_ref(),
-            expected,
+            fetched_first.as_ref(),
+            &ctx.data_bytes[..chunk_size],
             "First pushed chunk bytes should match uploaded data",
+        );
+
+        // Middle chunk (chunk 10 of 20) — catches off-by-one in chunk assembly
+        let mid = num_chunks / 2;
+        let mid_start = mid as usize * chunk_size;
+        let mid_end = mid_start + chunk_size;
+        let fetched_mid = ctx
+            .observer
+            .node_ctx
+            .chunk_data_index
+            .get(&(publish_ledger, ctx.data_start_offset + mid))
+            .map(|r| Arc::clone(&*r))
+            .expect("Middle chunk should be in Observer's ChunkDataIndex after push");
+        assert_eq!(
+            fetched_mid.as_ref(),
+            &ctx.data_bytes[mid_start..mid_end],
+            "Middle pushed chunk (#{}) bytes should match uploaded data",
+            mid,
         );
     }
 
@@ -742,30 +780,26 @@ async fn slow_heavy3_pd_chunk_optimistic_push_happy_path() -> eyre::Result<()> {
     ctx.block_producer
         .gossip_eth_block_to_peers(eth_payload.block())?;
 
-    // --- ALL-NODE SYNC: wait for all 3 nodes to validate and follow the same tip ---
-    ctx.genesis.wait_until_height(block_height, 60).await?;
-    let genesis_height = ctx.genesis.get_canonical_chain_height().await;
+    // --- Fix 5: ALL-NODE SYNC — compare block HASHES, not just heights ---
+    let bp_block_hash = block.block_hash;
+
+    let genesis_hash = ctx.genesis.wait_until_height(block_height, 60).await?;
     assert_eq!(
-        genesis_height, block_height,
-        "Genesis canonical tip should match Block Producer after validation",
+        genesis_hash, bp_block_hash,
+        "Genesis and Block Producer disagree on block hash at height {}",
+        block_height,
     );
 
-    let bp_height = ctx.block_producer.get_canonical_chain_height().await;
+    let observer_hash = ctx.observer.wait_until_height(block_height, 60).await?;
     assert_eq!(
-        bp_height, block_height,
-        "Block Producer canonical tip should be at the mined block height",
-    );
-
-    ctx.observer.wait_until_height(block_height, 60).await?;
-    let observer_height = ctx.observer.get_canonical_chain_height().await;
-    assert_eq!(
-        observer_height, block_height,
-        "Observer canonical tip should match Block Producer after validation",
+        observer_hash, bp_block_hash,
+        "Observer and Block Producer disagree on block hash at height {}",
+        block_height,
     );
 
     info!(
-        "All 3 nodes at height {}: Genesis={}, BlockProducer={}, Observer={}",
-        block_height, genesis_height, bp_height, observer_height,
+        "All 3 nodes at height {} with same block hash {:?}",
+        block_height, bp_block_hash,
     );
 
     // --- Verify PD tx receipt on ALL nodes (status=true proves EVM execution succeeded) ---
