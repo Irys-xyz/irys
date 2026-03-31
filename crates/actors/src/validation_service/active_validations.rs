@@ -124,9 +124,72 @@ pub(super) struct RunningVdfTask {
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
 }
 
+/// Strategy for spawning VDF validation tasks.
+///
+/// Production code spawns real `PreemptibleVdfTask::execute()` futures.
+/// Tests can supply a no-op strategy that pends forever, allowing queue and
+/// scheduling logic to be exercised with stub tasks.
+pub(super) trait VdfSpawnStrategy {
+    fn spawn_vdf_task(
+        &self,
+        runtime_handle: &tokio::runtime::Handle,
+        task: BlockValidationTask,
+        cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        hash: BlockHash,
+        priority: BlockPriorityMeta,
+    ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>;
+}
+
+/// Spawns real VDF validation tasks via `PreemptibleVdfTask::execute()`.
+pub(super) struct ProductionVdfSpawn;
+
+impl VdfSpawnStrategy for ProductionVdfSpawn {
+    fn spawn_vdf_task(
+        &self,
+        runtime_handle: &tokio::runtime::Handle,
+        task: BlockValidationTask,
+        cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        hash: BlockHash,
+        priority: BlockPriorityMeta,
+    ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
+        runtime_handle.spawn(
+            async move {
+                let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
+                (hash, result, task)
+            }
+            .instrument(tracing::info_span!(
+                "vdf_validation",
+                block.hash = %hash,
+                block.priority = ?priority
+            )),
+        )
+    }
+}
+
+/// Spawns a perpetually-pending no-op future instead of real VDF work.
+///
+/// This is safe to use with `BlockValidationTask::test_stub` tasks whose
+/// `service_inner` field is uninitialized.
+#[cfg(test)]
+pub(super) struct TestVdfSpawn;
+
+#[cfg(test)]
+impl VdfSpawnStrategy for TestVdfSpawn {
+    fn spawn_vdf_task(
+        &self,
+        runtime_handle: &tokio::runtime::Handle,
+        _task: BlockValidationTask,
+        _cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        _hash: BlockHash,
+        _priority: BlockPriorityMeta,
+    ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
+        runtime_handle.spawn(std::future::pending())
+    }
+}
+
 /// VDF scheduler with preemption. At most one VDF task runs at a time.
 /// The running task's handle is awaited directly in the main select loop.
-pub(super) struct VdfScheduler {
+pub(super) struct VdfScheduler<S: VdfSpawnStrategy = ProductionVdfSpawn> {
     /// Currently running VDF task (at most one).
     pub current: Option<RunningVdfTask>,
 
@@ -136,42 +199,36 @@ pub(super) struct VdfScheduler {
     /// Runtime handle used to spawn VDF tasks.
     runtime_handle: tokio::runtime::Handle,
 
-    /// When true, `start_next()` spawns a perpetually-pending no-op future
-    /// instead of calling `PreemptibleVdfTask::execute()`. This allows tests
-    /// to exercise queue/scheduling logic with `BlockValidationTask::test_stub`
-    /// tasks whose `service_inner` field is uninitialized.
-    #[cfg(test)]
-    test_no_spawn: bool,
+    /// Strategy for spawning VDF tasks.
+    spawn_strategy: S,
 }
 
-impl VdfScheduler {
+impl VdfScheduler<ProductionVdfSpawn> {
     pub(super) fn new(runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
             runtime_handle,
-            #[cfg(test)]
-            test_no_spawn: false,
+            spawn_strategy: ProductionVdfSpawn,
         }
     }
+}
 
-    /// Create a scheduler that never spawns real VDF tasks.
-    ///
-    /// `start_next()` will still move tasks from pending → current and set up
-    /// the `RunningVdfTask` metadata, but the spawned future pends forever
-    /// instead of calling `PreemptibleVdfTask::execute()`. This is safe to use
-    /// with `BlockValidationTask::test_stub` tasks whose `service_inner` is
-    /// uninitialized.
-    #[cfg(test)]
+#[cfg(test)]
+impl VdfScheduler<TestVdfSpawn> {
+    /// Create a scheduler using [`TestVdfSpawn`] — safe with
+    /// [`BlockValidationTask::test_stub`] tasks.
     pub(super) fn new_test_mode(runtime_handle: tokio::runtime::Handle) -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
             runtime_handle,
-            test_no_spawn: true,
+            spawn_strategy: TestVdfSpawn,
         }
     }
+}
 
+impl<S: VdfSpawnStrategy> VdfScheduler<S> {
     /// Await the current VDF task's completion and take it from `current`.
     /// Returns `pending` if no task is running, which naturally disables this
     /// branch in `tokio::select!`.
@@ -268,22 +325,13 @@ impl VdfScheduler {
         let cancel_signal = Arc::clone(&cancel_u8);
         let sealed_block = Arc::clone(&task.sealed_block);
 
-        #[cfg(test)]
-        let handle = { self.runtime_handle.spawn(std::future::pending()) };
-        #[cfg(not(test))]
-        let handle = {
-            self.runtime_handle.spawn(
-                async move {
-                    let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
-                    (hash, result, task)
-                }
-                .instrument(tracing::info_span!(
-                    "vdf_validation",
-                    block.hash = %hash,
-                    block.priority = ?priority
-                )),
-            )
-        };
+        let handle = self.spawn_strategy.spawn_vdf_task(
+            &self.runtime_handle,
+            task,
+            cancel_u8,
+            hash,
+            priority,
+        );
 
         self.current = Some(RunningVdfTask {
             hash,
@@ -297,9 +345,9 @@ impl VdfScheduler {
 }
 
 /// Main validation coordinator
-pub(super) struct ValidationCoordinator {
+pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn> {
     /// VDF validation scheduler
-    pub vdf_scheduler: VdfScheduler,
+    pub vdf_scheduler: VdfScheduler<S>,
 
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
@@ -318,6 +366,21 @@ impl ValidationCoordinator {
     ) -> Self {
         Self {
             vdf_scheduler: VdfScheduler::new(runtime_handle),
+            concurrent_tasks: JoinSet::new(),
+            concurrent_task_blocks: HashMap::new(),
+            block_tree_guard,
+        }
+    }
+}
+
+impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
+    #[cfg(test)]
+    pub(super) fn new_with_strategy(
+        block_tree_guard: BlockTreeReadGuard,
+        vdf_scheduler: VdfScheduler<S>,
+    ) -> Self {
+        Self {
+            vdf_scheduler,
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
             block_tree_guard,
@@ -1467,9 +1530,9 @@ mod tests {
     #[tokio::test]
     async fn test_reevaluate_priorities_with_no_current_task() {
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
+        let vdf_scheduler = VdfScheduler::new_test_mode(tokio::runtime::Handle::current());
         let mut coordinator =
-            ValidationCoordinator::new(block_tree_guard.clone(), tokio::runtime::Handle::current());
-        coordinator.vdf_scheduler.test_no_spawn = true;
+            ValidationCoordinator::new_with_strategy(block_tree_guard.clone(), vdf_scheduler);
 
         // --- Empty-queue branch: nothing pending, nothing running ---
         assert!(coordinator.vdf_scheduler.current.is_none());
