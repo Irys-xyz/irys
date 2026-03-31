@@ -29,4 +29,6 @@ runs:
         echo "SCCACHE_DIR=/shared/sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=40G" >> "$GITHUB_ENV"
         # Intentionally not suppressing errors: fail early if sccache is missing.
+        # GITHUB_ENV exports above take effect in subsequent steps, not this one,
+        # so SCCACHE_DIR must be set inline here.
         SCCACHE_DIR=/shared/sccache sccache --zero-stats

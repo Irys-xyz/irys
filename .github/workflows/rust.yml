@@ -47,6 +47,7 @@ jobs:
           SHOULD_RUN=true
 
           # Fork PRs must not run on self-hosted runners — require same-repo origin.
+          # (push events only fire for same-repo; merge_group is already gated.)
           if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
             echo "Fork PR detected, skipping CI on self-hosted runners"
             SHOULD_RUN=false
