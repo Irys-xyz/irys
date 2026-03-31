@@ -2,9 +2,14 @@ use std::process::Command;
 
 fn main() {
     // If we're not in a git repo at all, fail the build — we require git metadata.
-    let git_dir = git_output(&["rev-parse", "--git-dir"])
+    let git_dir = git_output(&["rev-parse", "--absolute-git-dir"])
         .expect("not inside a git repository — irys-chain requires git metadata to build");
-    let common_dir = git_output(&["rev-parse", "--git-common-dir"]).unwrap_or(git_dir.clone());
+    // --git-common-dir may return a relative path; canonicalize to ensure
+    // rerun-if-changed directives use absolute paths.
+    let common_dir = git_output(&["rev-parse", "--git-common-dir"])
+        .and_then(|p| std::fs::canonicalize(&p).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(git_dir.clone());
 
     // Track HEAD so cargo rebuilds when the checked-out commit changes
     let head_path = format!("{git_dir}/HEAD");

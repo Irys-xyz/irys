@@ -78,7 +78,13 @@ async fn main() -> eyre::Result<()> {
     }
 
     // start the node
-    info!("starting the node, mode: {:?}", &config.node_mode);
+    let version = irys_types::build_version();
+    info!(
+        node_version = %version,
+        "starting irys node v{}, mode: {:?}",
+        irys_types::build_version(),
+        &config.node_mode
+    );
     let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
         .start()
