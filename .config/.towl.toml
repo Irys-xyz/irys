@@ -1,0 +1,45 @@
+[parsing]
+file_extensions = [
+    "yaml",
+    "sh",
+    "toml",
+    "json",
+    "yml",
+    "bash",
+    "rs",
+]
+exclude_patterns = [
+    "target/*",
+    ".git/*",
+]
+include_context_lines = 10
+comment_prefixes = [
+    "//",
+    '^\s*#',
+    '/\*',
+    '^\s*\*',
+]
+todo_patterns = [
+    '(?i)\bTODO:\s*(.*)',
+    '(?i)\bFIXME:\s*(.*)',
+    '(?i)\bHACK:\s*(.*)',
+    '(?i)\bBUG:\s*(.*)',
+]
+function_patterns = [
+    '^\s*(pub\s+)?fn\s+(\w+)',
+    '^\s*def\s+(\w+)',
+    '^\s*(async\s+)?function\s+(\w+)',
+    '^\s*(?:public|private|protected)\s+(?:static\s+)?\w+\s+(\w+)\s*\(',
+    '^\s*func\s+(\w+)',
+]
+
+[github]
+rate_limit_delay_ms = 1000
+
+[llm]
+provider = "claude"
+model = "claude-opus-4-6"
+max_concurrent_analyses = 5
+max_analyse_count = 200
+max_tokens = 4096
+max_retries = 3
