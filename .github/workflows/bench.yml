@@ -39,7 +39,9 @@ jobs:
         run: |
           SHOULD_RUN=false
 
-          if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" ]]; then
+          # Fork PRs must not run on self-hosted runners that have write access
+          # to gh-pages and shared caches — require same-repo origin.
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
             SHOULD_RUN=true
           fi
 
@@ -89,16 +91,7 @@ jobs:
     name: cargo bench
     runs-on: [self-hosted, misc-runner]
     needs: gate
-    if: >-
-      ${{
-        needs.gate.outputs.should-run == 'true' && (
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'push' ||
-          (github.event_name == 'pull_request_review'
-            && github.event.review.state == 'approved'
-            && github.event.pull_request.head.repo.full_name == github.repository)
-        )
-      }}
+    if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
     permissions:
       contents: write

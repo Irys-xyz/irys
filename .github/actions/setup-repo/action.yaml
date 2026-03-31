@@ -23,7 +23,10 @@ runs:
     - name: Configure sccache
       shell: bash
       run: |
+        # Use CARGO_BUILD_RUSTC_WRAPPER (cargo config-layer equivalent of RUSTC_WRAPPER)
+        # so the setting is scoped to cargo rather than polluting the general environment.
         echo "CARGO_BUILD_RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_DIR=/shared/sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=40G" >> "$GITHUB_ENV"
-        sccache --zero-stats 2>/dev/null || true
+        # Intentionally not suppressing errors: fail early if sccache is missing.
+        SCCACHE_DIR=/shared/sccache sccache --zero-stats
