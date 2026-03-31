@@ -1750,10 +1750,11 @@ mod oracle_choice_tests {
             UnixTimestamp::from_secs(oracle_ts_secs),
         );
 
-        if expect_parent {
-            assert_eq!(chosen, parent_price);
+        let expected = if expect_parent {
+            parent_price
         } else {
-            assert_eq!(chosen, oracle_price);
-        }
+            oracle_price
+        };
+        assert_eq!(chosen, expected);
     }
 }

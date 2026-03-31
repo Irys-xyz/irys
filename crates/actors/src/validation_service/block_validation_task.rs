@@ -346,7 +346,7 @@ impl BlockValidationTask {
                 });
             }
         };
-        tracing::info!("Using parent epoch snapshot for PoA validation");
+        tracing::debug!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
         let block_hash_for_error_log = self.sealed_block.header().block_hash;

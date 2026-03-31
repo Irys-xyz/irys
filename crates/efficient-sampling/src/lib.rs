@@ -135,7 +135,13 @@ impl Ranges {
         next_steps.0.iter().enumerate().try_for_each(|(i, seed)| {
             let offset =
                 u64::try_from(i).map_err(|_| eyre::eyre!("enumerate index {i} exceeds u64"))?;
-            self.next_recall_range(step + 1 + offset, seed, partition_hash)?;
+            let reconstructed_step = step
+                .checked_add(1)
+                .and_then(|s| s.checked_add(offset))
+                .ok_or_else(|| {
+                    eyre::eyre!("reconstructed step overflow: base {step}, offset {offset}")
+                })?;
+            self.next_recall_range(reconstructed_step, seed, partition_hash)?;
             Ok(())
         })
     }

@@ -265,15 +265,8 @@ impl ValidationService {
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                // Re-queue with recalculated priority; start_next()
-                                // below will immediately promote the highest-priority
-                                // pending task into the running slot.
-                                // Safe to push directly (bypassing submit's duplicate check):
-                                // this block was just removed from `current` in poll_vdf(),
-                                // and no concurrent path can re-insert it because this
-                                // entire select arm runs synchronously.
-                                let priority = coordinator.calculate_priority(task.sealed_block.header());
-                                coordinator.vdf_scheduler.pending.push(task, priority);
+                                // re-submit the task
+                                coordinator.submit_task(task);
                             }
                         }
                         Err(join_error) => if join_error.is_panic() {

@@ -950,6 +950,7 @@ mod tests {
         #[case::height_equals_max(5, true, true)]
         #[case::height_exceeds_max(3, true, false)]
         #[case::unmigrated_height(10, false, false)]
+        /// Verifies `tx_header_by_txid_canonical` respects both height bounds and migration status.
         fn canonical_lookup(
             #[case] max_height: u64,
             #[case] insert_migration: bool,
