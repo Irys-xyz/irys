@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
-    CommitmentTransaction, Config, H256, H256List, IrysAddress, IrysBlockHeader, SystemLedger,
-    SystemTransactionLedger, U256, UnixTimestamp, UnixTimestampMs, calculate_initial_difficulty,
-    chainspec::irys_chain_spec, irys::IrysSigner,
+    CommitmentTransaction, CommitmentTypeV2, Config, H256, H256List, IrysAddress, IrysBlockHeader,
+    SystemLedger, SystemTransactionLedger, U256, UnixTimestamp, UnixTimestampMs,
+    calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -223,6 +223,109 @@ pub async fn build_signed_genesis_block(
     info!("GENESIS BLOCK CREATED (multi-miner)");
     info!("Hash: {}", genesis_block.block_hash);
     info!("Miners: {}", miners.len());
+    info!("Total pledges: {}", total_pledges);
+    info!(
+        "consensus.expected_genesis_hash = \"{}\"",
+        genesis_block.block_hash
+    );
+    info!("=====================================");
+
+    Ok(GenesisOutput {
+        block: genesis_block,
+        commitments,
+        reth_chain_spec,
+    })
+}
+
+/// Build a signed genesis block from pre-existing commitment transactions.
+///
+/// Unlike [`build_signed_genesis_block`] which generates commitments from mining
+/// keys, this function packages already-signed commitments into a genesis block.
+/// The caller provides a signing key for the block header signature.
+///
+/// # Errors
+///
+/// Returns an error if difficulty calculation fails, VDF execution fails,
+/// or block signing fails.
+pub fn build_genesis_block_from_commitments(
+    config: &Config,
+    commitments: Vec<CommitmentTransaction>,
+    block_signing_key: &SigningKey,
+) -> eyre::Result<GenesisOutput> {
+    // 1. Determine timestamp (prefer configured value, else now())
+    let configured_ts = config.consensus.genesis.timestamp_millis;
+    let timestamp_millis = if configured_ts != 0 {
+        configured_ts
+    } else {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_millis()
+    };
+    let timestamp_secs = Duration::from_millis(
+        timestamp_millis
+            .try_into()
+            .wrap_err("timestamp_millis overflow")?,
+    )
+    .as_secs();
+
+    // 2. Build reth chain spec
+    let reth_chain_spec = irys_chain_spec(
+        config.consensus.chain_id,
+        &config.consensus.reth,
+        &config.consensus.hardforks,
+        timestamp_secs,
+    )?;
+
+    // 3. Build unsigned genesis block
+    let number_of_ingress_proofs_total =
+        config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
+    let mut genesis_block = build_unsigned_irys_genesis_block(
+        &config.consensus.genesis,
+        reth_chain_spec.genesis_hash(),
+        number_of_ingress_proofs_total,
+    )?;
+
+    // 4. Set timestamp fields
+    if config.consensus.genesis.last_epoch_hash != H256::zero() {
+        genesis_block.last_epoch_hash = config.consensus.genesis.last_epoch_hash;
+    }
+    genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+    genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+
+    // 5. Register all commitment txids in the commitment ledger and sum values
+    let ledger = get_or_create_commitment_ledger(&mut genesis_block);
+    let mut initial_treasury = U256::zero();
+    for commitment in &commitments {
+        ledger.tx_ids.push(commitment.id());
+        initial_treasury = initial_treasury.saturating_add(commitment.value());
+    }
+
+    // 6. Count pledges for difficulty
+    let total_pledges = commitments
+        .iter()
+        .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }))
+        .count() as u64;
+
+    // 7. Calculate difficulty from pledge count
+    let difficulty = calculate_initial_difficulty(&config.consensus, total_pledges as f64)
+        .wrap_err("failed to calculate initial difficulty")?;
+    genesis_block.diff = difficulty;
+    genesis_block.treasury = initial_treasury;
+
+    // 8. Run VDF for genesis
+    run_vdf_for_genesis_block(&mut genesis_block, &config.vdf);
+
+    // 9. Sign with provided key
+    let block_signer = signer_from_key(block_signing_key, config);
+    block_signer
+        .sign_block_header(&mut genesis_block)
+        .wrap_err("failed to sign genesis block header")?;
+
+    info!("=====================================");
+    info!("GENESIS BLOCK CREATED (from commitments)");
+    info!("Hash: {}", genesis_block.block_hash);
+    info!("Total commitments: {}", commitments.len());
     info!("Total pledges: {}", total_pledges);
     info!(
         "consensus.expected_genesis_hash = \"{}\"",

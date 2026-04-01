@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use irys_chain::genesis_builder::{
-    GenesisMinerEntry, GenesisMinerManifest, GenesisMinerManifestEntry, build_signed_genesis_block,
+    GenesisMinerEntry, GenesisMinerManifest, GenesisMinerManifestEntry,
+    build_genesis_block_from_commitments, build_signed_genesis_block,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::EpochSnapshot;
@@ -176,12 +177,7 @@ async fn partition_assignments_are_deterministic() {
         output.commitments.clone(),
         &config,
     );
-    let snap_2 = EpochSnapshot::new(
-        &submodules,
-        output.block,
-        output.commitments,
-        &config,
-    );
+    let snap_2 = EpochSnapshot::new(&submodules, output.block, output.commitments, &config);
 
     // Extract partition assignments from both snapshots.
     // After genesis init, some pledged capacity partitions are moved to data partitions
@@ -226,4 +222,29 @@ async fn partition_assignments_are_deterministic() {
         total_assigned, total_pledges,
         "every pledge should have a partition assignment (capacity + data)"
     );
+}
+
+#[tokio::test]
+async fn build_genesis_from_existing_commitments_matches_generated() {
+    let config = test_config();
+    let miners = test_miners();
+
+    // First, generate commitments the normal way
+    let generated = build_signed_genesis_block(&config, &miners).await.unwrap();
+
+    // Now use those commitments to build a genesis block from existing commitments.
+    // Use the first miner's key as the block signer (same as build_signed_genesis_block).
+    let from_existing = build_genesis_block_from_commitments(
+        &config,
+        generated.commitments.clone(),
+        &miners[0].signing_key,
+    )
+    .unwrap();
+
+    // Both should produce the same block hash (same commitments, same config, same signer)
+    assert_eq!(
+        generated.block.block_hash, from_existing.block.block_hash,
+        "genesis from existing commitments should match generated genesis"
+    );
+    assert_eq!(generated.commitments.len(), from_existing.commitments.len());
 }

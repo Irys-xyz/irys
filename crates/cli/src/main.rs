@@ -36,12 +36,23 @@ pub enum Commands {
     },
     #[command(
         name = "build-genesis",
-        about = "Build a signed genesis block with multi-miner commitments and write to disk"
+        about = "Build a signed genesis block from miner keys or existing commitments"
     )]
     BuildGenesis {
-        /// Path to genesis_miners.toml containing miner keys and pledge counts
+        /// Path to genesis_miners.toml containing miner keys and pledge counts.
+        /// Mutually exclusive with --commitments.
+        #[arg(long, conflicts_with = "commitments")]
+        miners: Option<PathBuf>,
+
+        /// Path to a JSON file of pre-signed CommitmentTransaction objects.
+        /// Requires --signing-key. Mutually exclusive with --miners.
+        #[arg(long, conflicts_with = "miners")]
+        commitments: Option<PathBuf>,
+
+        /// Hex-encoded secp256k1 private key for signing the genesis block header.
+        /// Required when using --commitments. With --miners, the first miner signs.
         #[arg(long)]
-        miners: PathBuf,
+        signing_key: Option<String>,
 
         /// Output directory for genesis block and commitments JSON files.
         /// Defaults to current directory.
@@ -241,8 +252,16 @@ async fn main() -> eyre::Result<()> {
             info!("Rollback complete. New tip is at height {}", target_height);
             Ok(())
         }
-        Commands::BuildGenesis { miners, output } => {
-            use irys_chain::genesis_builder::{GenesisMinerManifest, build_signed_genesis_block};
+        Commands::BuildGenesis {
+            miners,
+            commitments,
+            signing_key,
+            output,
+        } => {
+            use irys_chain::genesis_builder::{
+                GenesisMinerManifest, build_genesis_block_from_commitments,
+                build_signed_genesis_block,
+            };
             use irys_chain::genesis_utilities::{
                 save_genesis_block_to_disk, save_genesis_commitments_to_disk,
             };
@@ -250,16 +269,46 @@ async fn main() -> eyre::Result<()> {
             let node_config: NodeConfig = load_config()?;
             let config = Config::new_with_random_peer_id(node_config);
 
-            let manifest = GenesisMinerManifest::load(&miners)?;
-            let miner_entries = manifest.into_entries()?;
+            let genesis_output = if let Some(miners_path) = miners {
+                let manifest = GenesisMinerManifest::load(&miners_path)?;
+                let miner_entries = manifest.into_entries()?;
 
-            info!(
-                "Building genesis block with {} miner(s), {} total pledges",
-                miner_entries.len(),
-                miner_entries.iter().map(|m| m.pledge_count).sum::<u64>()
-            );
+                info!(
+                    "Building genesis block with {} miner(s), {} total pledges",
+                    miner_entries.len(),
+                    miner_entries.iter().map(|m| m.pledge_count).sum::<u64>()
+                );
 
-            let genesis_output = build_signed_genesis_block(&config, &miner_entries).await?;
+                build_signed_genesis_block(&config, &miner_entries).await?
+            } else if let Some(commitments_path) = commitments {
+                let signing_key_hex = signing_key.ok_or_else(|| {
+                    eyre::eyre!("--signing-key is required when using --commitments")
+                })?;
+                let key_bytes = hex::decode(signing_key_hex.trim_start_matches("0x"))
+                    .map_err(|e| eyre::eyre!("Invalid hex for --signing-key: {e}"))?;
+                let block_signer = k256::ecdsa::SigningKey::from_slice(&key_bytes)
+                    .map_err(|e| eyre::eyre!("Invalid signing key: {e}"))?;
+
+                let file = std::fs::File::open(&commitments_path).map_err(|e| {
+                    eyre::eyre!(
+                        "Failed to read commitments file {:?}: {e}",
+                        commitments_path
+                    )
+                })?;
+                let reader = std::io::BufReader::new(file);
+                let loaded_commitments: Vec<irys_types::CommitmentTransaction> =
+                    serde_json::from_reader(reader)
+                        .map_err(|e| eyre::eyre!("Failed to parse commitments JSON: {e}"))?;
+
+                info!(
+                    "Building genesis from {} existing commitments",
+                    loaded_commitments.len()
+                );
+
+                build_genesis_block_from_commitments(&config, loaded_commitments, &block_signer)?
+            } else {
+                bail!("Either --miners or --commitments must be provided");
+            };
 
             save_genesis_block_to_disk(Arc::new(genesis_output.block.clone()), &output)
                 .map_err(|e| eyre::eyre!("Failed to write genesis block: {}", e))?;
