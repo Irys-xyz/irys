@@ -5189,6 +5189,7 @@ dependencies = [
  "reth-provider",
  "reth-tasks",
  "rstest",
+ "serde_json",
  "tempfile",
  "test-log",
  "tokio",
