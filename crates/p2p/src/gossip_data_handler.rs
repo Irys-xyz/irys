@@ -1011,6 +1011,16 @@ where
             .await?;
         let allowed_miner_addresses = HashSet::from_iter(allowed_miner_addresses.into_iter());
 
+        self.mempool
+            .update_stake_and_pledge_whitelist(allowed_miner_addresses.clone())
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {}",
+                    e
+                )))
+            })?;
+
         let promoted_peers = self
             .peer_list
             .promote_peers_to_staked(&allowed_miner_addresses);
@@ -1021,15 +1031,7 @@ where
             );
         }
 
-        self.mempool
-            .update_stake_and_pledge_whitelist(allowed_miner_addresses)
-            .await
-            .map_err(|e| {
-                GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "get_stake_and_pledge_whitelist() errored: {}",
-                    e
-                )))
-            })
+        Ok(())
     }
 
     fn send_gossip_data(
