@@ -78,6 +78,15 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         genesis_dir: PathBuf,
     },
+    #[command(
+        name = "dump-commitments",
+        about = "Export all commitment transactions from the database to JSON"
+    )]
+    DumpCommitments {
+        /// Output file path. Defaults to .irys_genesis_commitments.json
+        #[arg(long, default_value = ".irys_genesis_commitments.json")]
+        output: PathBuf,
+    },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
         /// Node URLs to connect to
@@ -474,6 +483,27 @@ async fn main() -> eyre::Result<()> {
             println!("  Capacity partitions: {capacity_count}");
             println!("  Data partitions:     {data_count}");
 
+            Ok(())
+        }
+        Commands::DumpCommitments { output } => {
+            use irys_database::reth_db::Database as _;
+            use irys_database::tables::IrysCommitments;
+            use irys_database::walk_all;
+
+            let db_env = cli_init_irys_db(DatabaseEnvKind::RO)?;
+            let read_tx = db_env.tx()?;
+
+            let entries = walk_all::<IrysCommitments, _>(&read_tx)?;
+            let commitments: Vec<_> = entries.into_iter().map(|(_txid, c)| c.0).collect();
+
+            info!("Found {} commitments in database", commitments.len());
+
+            let json = serde_json::to_string_pretty(&commitments)
+                .map_err(|e| eyre::eyre!("Failed to serialize commitments: {e}"))?;
+            std::fs::write(&output, json)
+                .map_err(|e| eyre::eyre!("Failed to write {}: {e}", output.display()))?;
+
+            info!("Commitments written to {}", output.display());
             Ok(())
         }
         Commands::Tui {
@@ -876,6 +906,30 @@ mod tests {
                 assert_eq!(genesis_dir, PathBuf::from("."));
             }
             other => panic!("expected InspectGenesis, got {:?}", other),
+        }
+    }
+
+    #[rstest]
+    #[case(&["irys-cli", "dump-commitments", "--output", "/tmp/out.json"])]
+    fn test_dump_commitments_parsing(#[case] args: &[&str]) {
+        let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
+        match cli.command {
+            Commands::DumpCommitments { output } => {
+                assert_eq!(output, PathBuf::from("/tmp/out.json"));
+            }
+            other => panic!("expected DumpCommitments, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dump_commitments_default_output() {
+        let args = &["irys-cli", "dump-commitments"];
+        let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
+        match cli.command {
+            Commands::DumpCommitments { output } => {
+                assert_eq!(output, PathBuf::from(".irys_genesis_commitments.json"));
+            }
+            other => panic!("expected DumpCommitments, got {:?}", other),
         }
     }
 
