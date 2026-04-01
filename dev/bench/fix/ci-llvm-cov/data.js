@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775033683017,
+  "lastUpdate": 1775035705943,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1830,6 +1830,86 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "1b2dc3d2ed6e3f47d348e178a5c02a46e804f57f",
+          "message": "fix(ci): force install cargo-llvm-cov to avoid cached version conflict",
+          "timestamp": "2026-04-01T08:40:06Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1379/commits/1b2dc3d2ed6e3f47d348e178a5c02a46e804f57f"
+        },
+        "date": 1775035705037,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074919,
+            "range": "± 0.001594",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.65225,
+            "range": "± 2.284579",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.96955,
+            "range": "± 0.987935",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117587,
+            "range": "± 0.0002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.697869,
+            "range": "± 0.78366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1525.347403,
+            "range": "± 0.835452",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.462073,
+            "range": "± 0.021195",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.845578,
+            "range": "± 1.022016",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.187713,
+            "range": "± 2.230852",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
             "range": "± 0",
             "unit": "ms/iter"
           }
