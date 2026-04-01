@@ -498,10 +498,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 )
                 .remove_and_run();
 
-                if let Err(e) = &lcov_result {
-                    eprintln!("Warning: LCOV coverage report generation failed: {e}");
-                }
-
                 if html_result.is_ok() {
                     println!("  HTML report: target/llvm-cov/html/index.html");
                     if std::env::var("CI").is_err() {
@@ -1031,23 +1027,100 @@ fn write_status_summary(run_dir: &std::path::Path) {
 
 /// Detect and log functions with mismatched coverage data.
 ///
-/// Compares function names in the merged profdata against those in the
-/// `cargo llvm-cov report --json` export. Functions present in the profdata
-/// but absent from the JSON are candidates for hash mismatches (the binary's
-/// coverage mapping hash differs from the profdata hash). Results are filtered
-/// to workspace crates to avoid noise from std/deps.
+/// When llvm-cov encounters a function whose profdata hash doesn't match the
+/// binary's coverage mapping hash, it silently drops that function's counters.
+/// This identifies those functions by cross-referencing: functions that were
+/// executed (non-zero `Function count` in profdata) but show zero coverage in
+/// the JSON export are the hash mismatches. Results are filtered to workspace
+/// crates to avoid noise from std/deps.
 fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()> {
-    // Locate the merged profdata file
+    // Run `cargo llvm-cov report --json` via std::process::Command so we can
+    // capture stderr, where llvm-cov emits "warning: N functions have
+    // mismatched data". xshell's Cmd::read() only captures stdout.
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["llvm-cov", "report", "--json"]);
+    cmd.args(scope_args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    for k in RING_ENV_VARS {
+        cmd.env_remove(k);
+    }
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("cargo llvm-cov report --json failed: {stderr}"));
+    }
+    let json_str = String::from_utf8(output.stdout)?;
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+    // Parse the mismatch count from stderr
+    let mismatch_count: usize = stderr_str
+        .lines()
+        .find_map(|l| {
+            // e.g. "warning: 135 functions have mismatched data"
+            let n = l.strip_prefix("warning: ")
+                .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
+            n.parse().ok()
+        })
+        .unwrap_or(0);
+
+    if mismatch_count == 0 {
+        println!("  No coverage data mismatches detected.");
+        return Ok(());
+    }
+
+    println!("  llvm-cov reports {mismatch_count} functions with mismatched coverage data.");
+    println!("  Identifying affected workspace functions...");
+
+    // Collect workspace crate names (hyphens → underscores) for filtering
+    let metadata = MetadataCommand::new().exec()?;
+    let crate_names: Vec<String> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|p| p.name.replace('-', "_"))
+        .collect();
+
+    // From the JSON export: workspace functions with zero execution count.
+    // Hash-mismatched functions appear in the export (from the binary's coverage
+    // mapping) but their profdata counters aren't applied, leaving count == 0.
+    let json: serde_json::Value = serde_json::from_str(&json_str)?;
+    let zero_coverage: HashSet<&str> = json
+        .pointer("/data/0/functions")
+        .and_then(|v| v.as_array())
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|f| {
+                    let name = f.get("name")?.as_str()?;
+                    let count = f.get("count")?.as_u64()?;
+                    if count == 0 && crate_names.iter().any(|c| name.contains(c.as_str())) {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // From profdata: workspace functions that were actually executed.
     let profdata_dir = PathBuf::from("target/llvm-cov-target");
     let profdata_path = fs::read_dir(&profdata_dir).ok().and_then(|entries| {
+        // read_dir order is filesystem-dependent; pick the newest .profdata
+        // so stale files from interrupted runs don't shadow the fresh merge.
         entries
             .filter_map(std::result::Result::ok)
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+            .max_by_key(|e| {
+                e.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
             .map(|e| e.path())
     });
 
     let Some(profdata_path) = profdata_path else {
-        eprintln!("  Skipping mismatch analysis: no profdata file found");
+        println!("    (skipping function identification: no profdata file found)");
         return Ok(());
     };
 
@@ -1060,66 +1133,45 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
         .ok_or_else(|| eyre::eyre!("could not determine host triple from rustc -vV"))?;
     let llvm_profdata = format!("{sysroot}/lib/rustlib/{host_triple}/bin/llvm-profdata");
 
-    // Collect workspace crate names (hyphens → underscores) for filtering
-    let metadata = MetadataCommand::new().exec()?;
-    let crate_names: Vec<String> = metadata
-        .workspace_packages()
-        .iter()
-        .map(|p| p.name.replace('-', "_"))
-        .collect();
-
-    // Extract function names from profdata.
-    // `llvm-profdata show --all-functions` prints each function as:
-    //   function_name:
-    //     Hash: 0x...
+    // Parse profdata for executed workspace functions.
+    // llvm-profdata show --all-functions output (tested LLVM 18/19):
+    //   <function_name>:        (2-space indent)
+    //     Hash: 0x...           (4-space indent)
     //     Counters: N
+    //     Function count: M     ← M > 0 means the function was called
+    // Format not guaranteed stable; if parsing fails we get an empty set (safe).
     let profdata_str = profdata_path.display().to_string();
     let profdata_output = cmd!(sh, "{llvm_profdata} show --all-functions {profdata_str}").read()?;
 
-    let profdata_funcs: HashSet<&str> = profdata_output
-        .lines()
-        .filter_map(|line| {
-            // Function name lines: exactly 2-space indent, ending with ':'
-            if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
-                let name = line.trim().trim_end_matches(':');
-                // Keep only workspace functions
-                if crate_names.iter().any(|c| name.contains(c.as_str())) {
-                    return Some(name);
+    let mut current_func: Option<&str> = None;
+    let mut executed: HashSet<&str> = HashSet::new();
+    for line in profdata_output.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+            let name = line.trim().trim_end_matches(':');
+            current_func = if crate_names.iter().any(|c| name.contains(c.as_str())) {
+                Some(name)
+            } else {
+                None
+            };
+        } else if let Some(func) = current_func
+            && let Some(count_str) = line.trim().strip_prefix("Function count: ") {
+                if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
+                    executed.insert(func);
                 }
+                current_func = None;
             }
-            None
-        })
-        .collect();
+    }
 
-    // Extract function names from the JSON coverage export
-    let scope_args_json = scope_args.to_vec();
-    let json_output =
-        cmd!(sh, "cargo llvm-cov report --json {scope_args_json...}").remove_and_read()?;
-
-    let json: serde_json::Value = serde_json::from_str(&json_output)?;
-    let json_funcs: HashSet<&str> = json
-        .pointer("/data/0/functions")
-        .and_then(|v| v.as_array())
-        .map(|funcs| {
-            funcs
-                .iter()
-                .filter_map(|f| {
-                    let n = f.get("name")?;
-                    n.as_str()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Functions in profdata but not in export = likely hash mismatches
-    let mut mismatched: Vec<&str> = profdata_funcs.difference(&json_funcs).copied().collect();
+    // Intersection: executed in profdata ∩ zero coverage in export = hash mismatch.
+    // Both sources use mangled symbol names from the coverage mapping.
+    let mut mismatched: Vec<&str> = executed.intersection(&zero_coverage).copied().collect();
     mismatched.sort();
 
     if mismatched.is_empty() {
-        println!("  No workspace coverage data mismatches detected.");
+        println!("    No workspace functions affected (mismatches are in dependencies).");
     } else {
         println!(
-            "  Workspace functions with mismatched coverage data ({}):",
+            "  Affected workspace functions ({} of {mismatch_count}):",
             mismatched.len()
         );
         let log_path = PathBuf::from("target/llvm-cov/mismatched-functions.txt");
@@ -1144,28 +1196,30 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     Ok(())
 }
 
-/// Removes problematic env vars set by xtask being a cargo subcommand.
-/// Ring's build.rs emits rerun conditions for these env vars, many of which are
-/// absent under a regular `cargo check`, causing unnecessary rebuilds.
+/// Env vars that Ring's build.rs emits rerun conditions for, many of which are
+/// absent under a regular `cargo check`, causing unnecessary rebuilds when
+/// alternating between `cargo check` and xtask commands.
 // TODO: once ring releases 0.17.15+, we should no longer need this
+const RING_ENV_VARS: &[&str] = &[
+    "CARGO_MANIFEST_DIR",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_MANIFEST_LINKS",
+    "RING_PREGENERATE_ASM",
+    // "OUT_DIR",
+    "CARGO_CFG_TARGET_ARCH",
+    "CARGO_CFG_TARGET_OS",
+    "CARGO_CFG_TARGET_ENV",
+    "CARGO_CFG_TARGET_ENDIAN",
+    // "DEBUG",
+];
+
 fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
     let mut c = cmd;
-    for k in [
-        "CARGO_MANIFEST_DIR",
-        "CARGO_PKG_NAME",
-        "CARGO_PKG_VERSION_MAJOR",
-        "CARGO_PKG_VERSION_MINOR",
-        "CARGO_PKG_VERSION_PATCH",
-        "CARGO_PKG_VERSION_PRE",
-        "CARGO_MANIFEST_LINKS",
-        "RING_PREGENERATE_ASM",
-        // "OUT_DIR",
-        "CARGO_CFG_TARGET_ARCH",
-        "CARGO_CFG_TARGET_OS",
-        "CARGO_CFG_TARGET_ENV",
-        "CARGO_CFG_TARGET_ENDIAN",
-        // "DEBUG",
-    ] {
+    for k in RING_ENV_VARS {
         c = c.env_remove(k);
     }
     c

@@ -25,11 +25,11 @@ set -euo pipefail
 WRAPPER="$HOME/.local/bin/sccache-wrap"
 
 if ! command -v sccache >/dev/null 2>&1; then
-  echo "setup-sccache: sccache not found on PATH, skipping" >&2
-  exit 0
+  echo "setup-sccache: error: sccache not found on PATH" >&2
+  exit 1
 fi
 
-if [ -x "$WRAPPER" ] && "$WRAPPER" --show-stats >/dev/null 2>&1; then
+if [ -x "$WRAPPER" ] && "$WRAPPER" --version >/dev/null 2>&1; then
   echo "setup-sccache: $WRAPPER already exists"
   exit 0
 fi
