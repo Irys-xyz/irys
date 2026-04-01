@@ -1053,12 +1053,26 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     let json_str = String::from_utf8(output.stdout)?;
     let stderr_str = String::from_utf8_lossy(&output.stderr);
 
+    // Debug: show what stderr contains so we can verify the warning format
+    if !stderr_str.is_empty() {
+        eprintln!(
+            "  [debug] cargo llvm-cov report --json stderr ({} bytes):",
+            stderr_str.len()
+        );
+        for line in stderr_str.lines().take(10) {
+            eprintln!("  [debug]   {line}");
+        }
+    } else {
+        eprintln!("  [debug] cargo llvm-cov report --json produced no stderr");
+    }
+
     // Parse the mismatch count from stderr
     let mismatch_count: usize = stderr_str
         .lines()
         .find_map(|l| {
             // e.g. "warning: 135 functions have mismatched data"
-            let n = l.strip_prefix("warning: ")
+            let n = l
+                .strip_prefix("warning: ")
                 .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
             n.parse().ok()
         })
@@ -1154,12 +1168,13 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
                 None
             };
         } else if let Some(func) = current_func
-            && let Some(count_str) = line.trim().strip_prefix("Function count: ") {
-                if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
-                    executed.insert(func);
-                }
-                current_func = None;
+            && let Some(count_str) = line.trim().strip_prefix("Function count: ")
+        {
+            if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
+                executed.insert(func);
             }
+            current_func = None;
+        }
     }
 
     // Intersection: executed in profdata ∩ zero coverage in export = hash mismatch.
