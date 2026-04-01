@@ -17,6 +17,19 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 #[tokio::main]
 #[tracing::instrument(level = "trace", skip_all)]
 async fn main() -> eyre::Result<()> {
+    // IMPORTANT: Must run before any code that calls `get_version()` (e.g. handshake defaults).
+    // The OnceLock is set-once, so late initialization panics.
+    irys_types::init_version(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA"),
+        env!("GIT_HAS_TAG")
+            .parse()
+            .expect("GIT_HAS_TAG must be 'true' or 'false'"),
+        env!("GIT_DIRTY")
+            .parse()
+            .expect("GIT_DIRTY must be 'true' or 'false'"),
+    );
+
     // Load .env file if present (silently ignore if not found)
     let _ = dotenvy::dotenv();
 
@@ -65,7 +78,11 @@ async fn main() -> eyre::Result<()> {
     }
 
     // start the node
-    info!("starting the node, mode: {:?}", &config.node_mode);
+    info!(
+        node_version = %irys_types::get_version(),
+        "starting irys node, mode: {:?}",
+        &config.node_mode
+    );
     let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
         .start()

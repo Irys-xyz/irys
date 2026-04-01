@@ -1035,6 +1035,7 @@ impl IrysNode {
 
                     info!(
                     target = "node-state",
+                    node_version = %irys_types::get_version(),
                     "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
                 );
 
