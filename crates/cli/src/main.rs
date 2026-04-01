@@ -9,6 +9,7 @@ use irys_types::{Config, DatabaseProvider, H256, NodeConfig};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{ProviderFactory, providers::StaticFileProvider};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 use std::{path::PathBuf, sync::Arc};
 use tracing::level_filters::LevelFilter;
@@ -67,6 +68,15 @@ pub enum Commands {
         /// Hex-encoded secp256k1 private key (with or without 0x prefix)
         #[arg(long)]
         key: String,
+    },
+    #[command(
+        name = "inspect-genesis",
+        about = "Load genesis files and display partition assignments"
+    )]
+    InspectGenesis {
+        /// Directory containing .irys_genesis.json and .irys_genesis_commitments.json
+        #[arg(long, default_value = ".")]
+        genesis_dir: PathBuf,
     },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
@@ -342,6 +352,127 @@ async fn main() -> eyre::Result<()> {
             println!("Mining key:   {}...", &key[..16]);
             println!("Irys address: {irys_address}");
             println!("EVM address:  {evm_address}");
+
+            Ok(())
+        }
+        Commands::InspectGenesis { genesis_dir } => {
+            use irys_chain::genesis_utilities::{
+                load_genesis_block_from_disk, load_genesis_commitments_from_disk,
+            };
+            use irys_config::StorageSubmodulesConfig;
+            use irys_domain::EpochSnapshot;
+            use irys_types::CommitmentTypeV2;
+
+            let node_config: NodeConfig = load_config()?;
+            let config = Config::new_with_random_peer_id(node_config);
+
+            let genesis_block = load_genesis_block_from_disk(&genesis_dir).map_err(|e| {
+                eyre::eyre!("Failed to load genesis block from {:?}: {e}", genesis_dir)
+            })?;
+
+            let commitments = load_genesis_commitments_from_disk(&genesis_dir).map_err(|e| {
+                eyre::eyre!(
+                    "Failed to load genesis commitments from {:?}: {e}",
+                    genesis_dir
+                )
+            })?;
+
+            let pledge_count = commitments
+                .iter()
+                .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }))
+                .count();
+            let stake_count = commitments
+                .iter()
+                .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Stake))
+                .count();
+
+            let submodules = StorageSubmodulesConfig {
+                is_using_hardcoded_paths: true,
+                submodule_paths: (0..pledge_count)
+                    .map(|i| PathBuf::from(format!("/tmp/inspect-sm-{i}")))
+                    .collect(),
+            };
+
+            let snapshot = EpochSnapshot::new(
+                &submodules,
+                (*genesis_block).clone(),
+                commitments.clone(),
+                &config,
+            );
+
+            // Print genesis block info
+            println!("Genesis Block");
+            println!("  Hash:        {}", snapshot.epoch_block.block_hash);
+            println!("  Timestamp:   {}", snapshot.epoch_block.timestamp);
+            println!("  Difficulty:  {}", snapshot.epoch_block.diff);
+            println!();
+            println!(
+                "Commitments: {} total ({} stakes, {} pledges)",
+                commitments.len(),
+                stake_count,
+                pledge_count
+            );
+            println!();
+
+            // Group assignments by miner address
+            // Tuple: (partition_hash, kind, ledger_id, slot_index)
+            let mut by_miner: BTreeMap<
+                irys_types::IrysAddress,
+                Vec<(H256, &str, Option<u32>, Option<usize>)>,
+            > = BTreeMap::new();
+
+            for (&hash, assignment) in &snapshot.partition_assignments.capacity_partitions {
+                by_miner
+                    .entry(assignment.miner_address)
+                    .or_default()
+                    .push((hash, "capacity", None, None));
+            }
+
+            for (&hash, assignment) in &snapshot.partition_assignments.data_partitions {
+                by_miner.entry(assignment.miner_address).or_default().push((
+                    hash,
+                    "data",
+                    assignment.ledger_id,
+                    assignment.slot_index,
+                ));
+            }
+
+            let mut total_partitions = 0;
+            let mut capacity_count = 0;
+            let mut data_count = 0;
+
+            println!("Partition Assignments:");
+            for (miner, partitions) in &mut by_miner {
+                println!("  Miner {miner}");
+                // Sort: data partitions first (by ledger_id, then slot_index), then capacity
+                partitions.sort_by(|a, b| {
+                    let order_a = if a.1 == "capacity" { 1 } else { 0 };
+                    let order_b = if b.1 == "capacity" { 1 } else { 0 };
+                    order_a
+                        .cmp(&order_b)
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| a.3.cmp(&b.3))
+                });
+                for (hash, kind, ledger_id, slot_index) in partitions.iter() {
+                    total_partitions += 1;
+                    if *kind == "capacity" {
+                        capacity_count += 1;
+                        println!("    [capacity] {hash}");
+                    } else {
+                        data_count += 1;
+                        let lid = ledger_id.unwrap_or(0);
+                        let sid = slot_index.unwrap_or(0);
+                        println!("    [data L{lid} S{sid}] {hash}   (ledger_id={lid}, slot={sid})");
+                    }
+                }
+                println!();
+            }
+
+            println!("Summary:");
+            println!("  Miners:              {}", by_miner.len());
+            println!("  Total partitions:    {total_partitions}");
+            println!("  Capacity partitions: {capacity_count}");
+            println!("  Data partitions:     {data_count}");
 
             Ok(())
         }
@@ -722,6 +853,30 @@ mod tests {
         // Irys address should be non-empty base58
         let irys_str = format!("{irys_address}");
         assert!(!irys_str.is_empty(), "Irys address should not be empty");
+    }
+
+    #[rstest]
+    #[case(&["irys-cli", "inspect-genesis", "--genesis-dir", "/tmp/genesis"])]
+    fn test_inspect_genesis_parsing(#[case] args: &[&str]) {
+        let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
+        match cli.command {
+            Commands::InspectGenesis { genesis_dir } => {
+                assert_eq!(genesis_dir, PathBuf::from("/tmp/genesis"));
+            }
+            other => panic!("expected InspectGenesis, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_inspect_genesis_default_dir() {
+        let args = &["irys-cli", "inspect-genesis"];
+        let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
+        match cli.command {
+            Commands::InspectGenesis { genesis_dir } => {
+                assert_eq!(genesis_dir, PathBuf::from("."));
+            }
+            other => panic!("expected InspectGenesis, got {:?}", other),
+        }
     }
 
     mod proptest_fuzz {
