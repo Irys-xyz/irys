@@ -5170,9 +5170,11 @@ dependencies = [
 name = "irys-cli"
 version = "0.1.0"
 dependencies = [
+ "alloy-signer",
  "clap",
  "color-eyre",
  "eyre",
+ "hex",
  "irys-chain",
  "irys-database",
  "irys-domain",
@@ -5180,6 +5182,7 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-tui",
  "irys-types",
+ "k256",
  "proptest",
  "reth-node-core",
  "reth-node-types",
