@@ -28,6 +28,9 @@ irys-tui.workspace = true
 reth-provider.workspace = true
 reth-node-types.workspace = true
 reth-tasks.workspace = true
+hex.workspace = true
+alloy-signer.workspace = true
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [dev-dependencies]
 proptest.workspace = true

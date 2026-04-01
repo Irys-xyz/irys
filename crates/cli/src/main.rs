@@ -48,6 +48,15 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         output: PathBuf,
     },
+    #[command(
+        name = "generate-miner-info",
+        about = "Derive Irys and EVM addresses from a mining key"
+    )]
+    GenerateMinerInfo {
+        /// Hex-encoded secp256k1 private key (with or without 0x prefix)
+        #[arg(long)]
+        key: String,
+    },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
         /// Node URLs to connect to
@@ -265,6 +274,25 @@ async fn main() -> eyre::Result<()> {
                 "  Add to peer configs: consensus.expected_genesis_hash = \"{}\"",
                 genesis_output.block.block_hash
             );
+
+            Ok(())
+        }
+        Commands::GenerateMinerInfo { key } => {
+            use alloy_signer::utils::secret_key_to_address;
+            use irys_types::IrysAddress;
+            use k256::ecdsa::SigningKey;
+
+            let key_bytes = hex::decode(key.trim_start_matches("0x"))
+                .map_err(|e| eyre::eyre!("Invalid hex: {e}"))?;
+            let signing_key = SigningKey::from_slice(&key_bytes)
+                .map_err(|e| eyre::eyre!("Invalid secp256k1 key: {e}"))?;
+
+            let evm_address = secret_key_to_address(&signing_key);
+            let irys_address = IrysAddress::from(evm_address);
+
+            println!("Mining key:   {}...", &key[..16]);
+            println!("Irys address: {irys_address}");
+            println!("EVM address:  {evm_address}");
 
             Ok(())
         }
@@ -600,6 +628,51 @@ mod tests {
         let result = timestamp_millis_to_secs(u128::from(u64::MAX) * 1000 + 999)
             .expect("max valid millis should convert");
         assert_eq!(result, u64::MAX);
+    }
+
+    #[rstest]
+    #[case(
+        &["irys-cli", "generate-miner-info", "--key", "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"],
+        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+    )]
+    fn test_generate_miner_info_parsing(#[case] args: &[&str], #[case] expected_key: &str) {
+        let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
+        match cli.command {
+            Commands::GenerateMinerInfo { key } => {
+                assert_eq!(key, expected_key);
+            }
+            other => panic!("expected GenerateMinerInfo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_generate_miner_info_address_derivation() {
+        use alloy_signer::utils::secret_key_to_address;
+        use irys_types::IrysAddress;
+        use k256::ecdsa::SigningKey;
+
+        let key_hex = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
+        let key_bytes = hex::decode(key_hex).unwrap();
+        let signing_key = SigningKey::from_slice(&key_bytes).unwrap();
+
+        let evm_address = secret_key_to_address(&signing_key);
+        let irys_address = IrysAddress::from(evm_address);
+
+        // EVM address should be a valid 0x-prefixed checksum address
+        let evm_str = format!("{evm_address}");
+        assert!(
+            evm_str.starts_with("0x"),
+            "EVM address should be 0x-prefixed"
+        );
+        assert_eq!(
+            evm_str.len(),
+            42,
+            "EVM address should be 42 chars (0x + 40 hex)"
+        );
+
+        // Irys address should be non-empty base58
+        let irys_str = format!("{irys_address}");
+        assert!(!irys_str.is_empty(), "Irys address should not be empty");
     }
 
     mod proptest_fuzz {
