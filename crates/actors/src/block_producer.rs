@@ -684,6 +684,14 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        // Cap on parent-chain rebuilds per solution. This is distinct from
+        // MAX_RETRY_ATTEMPTS (5) in fully_produce_new_block_without_gossip,
+        // which retries transient errors (e.g. stale parent during tx selection).
+        // Here we handle the case where the canonical tip keeps advancing while
+        // we're building: each rebuild reuses the same mining solution on the
+        // new parent. 20 is a generous upper bound — in practice even a few
+        // consecutive tip changes are rare.
+        const MAX_REBUILD_ATTEMPTS: usize = 20;
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -705,6 +713,17 @@ pub trait BlockProdStrategy {
                 }
 
                 ParentCheckResult::MustRebuild { new_parent } => {
+                    if rebuild_attempts >= MAX_REBUILD_ATTEMPTS {
+                        warn!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            rebuild.count = rebuild_attempts,
+                            rebuild.max_attempts = MAX_REBUILD_ATTEMPTS,
+                            "Max rebuild attempts reached, discarding solution"
+                        );
+                        return Ok(None);
+                    }
+
                     info!(
                         solution.hash = %solution.solution_hash,
                         solution.vdf_step = solution.vdf_step,
@@ -1349,7 +1368,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxsBundle> {
+    ) -> Result<MempoolTxsBundle, crate::tx_selector::TxSelectorError> {
         // Fetch mempool once
         let mut mempool_txs = self
             .fetch_best_mempool_txs(prev_block_header, block_timestamp)
@@ -1446,7 +1465,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxs> {
+    ) -> Result<MempoolTxs, crate::tx_selector::TxSelectorError> {
         let ctx = crate::tx_selector::TxSelectionContext {
             block_tree: &self.inner().block_tree_guard,
             db: &self.inner().db,
@@ -1731,10 +1750,11 @@ mod oracle_choice_tests {
             UnixTimestamp::from_secs(oracle_ts_secs),
         );
 
-        if expect_parent {
-            assert_eq!(chosen, parent_price);
+        let expected = if expect_parent {
+            parent_price
         } else {
-            assert_eq!(chosen, oracle_price);
-        }
+            oracle_price
+        };
+        assert_eq!(chosen, expected);
     }
 }

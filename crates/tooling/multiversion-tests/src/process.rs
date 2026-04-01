@@ -400,6 +400,10 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_and_kill() {
+        if !can_exec_in_tmp() {
+            eprintln!("skipping spawn_and_kill: tmp dir is noexec");
+            return;
+        }
         let (config, _dir) = stub_config("kill-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         assert!(proc.is_running());
@@ -410,6 +414,10 @@ mod tests {
 
     #[tokio::test]
     async fn pid_after_kill_returns_no_pid() {
+        if !can_exec_in_tmp() {
+            eprintln!("skipping pid_after_kill_returns_no_pid: tmp dir is noexec");
+            return;
+        }
         let (config, _dir) = stub_config("no-pid-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         proc.kill().await.unwrap();
@@ -418,6 +426,10 @@ mod tests {
 
     #[tokio::test]
     async fn respawn_replaces_child_process() {
+        if !can_exec_in_tmp() {
+            eprintln!("skipping respawn_replaces_child_process: tmp dir is noexec");
+            return;
+        }
         let (config, _dir) = stub_config("respawn-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         let first_pid = proc.pid().unwrap();
@@ -425,6 +437,28 @@ mod tests {
         let second_pid = proc.pid().unwrap();
         assert_ne!(first_pid, second_pid);
         proc.kill().await.unwrap();
+    }
+
+    /// Cached result of the exec-in-tmp probe.  The probe runs at most once
+    /// per process — subsequent checks just read the cached bool.
+    static CAN_EXEC_IN_TMP: LazyLock<bool> = LazyLock::new(|| {
+        let dir = TempDirBuilder::new().prefix("exec-probe-").build();
+        let script = dir.path().join("probe");
+        if std::fs::write(&script, "#!/bin/sh\ntrue\n").is_err() {
+            return false;
+        }
+        if std::fs::set_permissions(&script, PermissionsExt::from_mode(0o755)).is_err() {
+            return false;
+        }
+        std::process::Command::new(&script)
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+
+    /// Returns `true` when the temp directory used for test binaries allows
+    /// execution.  `/tmpfs` inside Docker is often mounted `noexec`.
+    fn can_exec_in_tmp() -> bool {
+        *CAN_EXEC_IN_TMP
     }
 
     /// Returns `true` when the current environment allows sending `SIGSTOP`
@@ -446,6 +480,10 @@ mod tests {
 
     #[tokio::test]
     async fn freeze_and_unfreeze() {
+        if !can_exec_in_tmp() {
+            eprintln!("skipping freeze_and_unfreeze: tmp dir is noexec");
+            return;
+        }
         if !can_sigstop() {
             eprintln!("skipping freeze_and_unfreeze: SIGSTOP not permitted in this environment");
             return;
@@ -460,6 +498,10 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_terminates_process() {
+        if !can_exec_in_tmp() {
+            eprintln!("skipping shutdown_terminates_process: tmp dir is noexec");
+            return;
+        }
         let (config, _dir) = stub_config("shutdown-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         let result = proc.shutdown(Duration::from_secs(5)).await;

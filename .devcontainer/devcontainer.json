@@ -8,7 +8,7 @@
 		"ghcr.io/devcontainers/features/docker-in-docker:2": {}
 	},
 	"mounts": [
-		"type=tmpfs,destination=/tmpfs,tmpfs-size=10000m"
+		"type=tmpfs,destination=/tmpfs,tmpfs-size=10000m,tmpfs-mode=1777"
 	],
 	// Use 'mounts' to make the cargo cache persistent in a Docker Volume.
 	// "mounts": [

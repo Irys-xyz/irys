@@ -30,6 +30,42 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, info, instrument, trace, warn};
 
+/// Errors from mempool transaction selection and bundling.
+#[derive(Debug, thiserror::Error)]
+pub enum TxSelectorError {
+    /// The selected parent block is no longer on the canonical chain, likely due to a reorg.
+    /// Retrying with the new canonical tip will resolve this.
+    #[error(
+        "parent block {parent_block_hash:?} is not on the canonical chain (tip: {canonical_tip:?})"
+    )]
+    StaleParent {
+        parent_block_hash: BlockHash,
+        canonical_tip: Option<BlockHash>,
+    },
+    /// Any other error during tx selection or bundle assembly.
+    #[error(transparent)]
+    Other(#[from] eyre::Error),
+}
+
+impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
+    fn from(e: TxSelectorError) -> Self {
+        match e {
+            // A reorg can move the canonical tip while we're selecting transactions,
+            // leaving our parent off the canonical chain. Retrying with the new tip
+            // resolves it.
+            TxSelectorError::StaleParent { .. } => Self::Retryable { source: e.into() },
+            // TODO: Some `Other` errors are actually stale-parent races — the parent
+            // passes the initial canonical-chain check but a concurrent reorg removes
+            // it before we query its snapshots/header (e.g. "Block not found",
+            // "snapshot not found", "block header not found"). These should be
+            // Retryable, not Irrecoverable. Needs a cleaner approach than downcasting
+            // the eyre chain — consider adding typed error variants for the specific
+            // lookup failures so they can be matched directly.
+            TxSelectorError::Other(source) => Self::Irrecoverable { source },
+        }
+    }
+}
+
 /// Borrowed dependencies for transaction selection.
 pub struct TxSelectionContext<'a> {
     pub block_tree: &'a BlockTreeReadGuard,
@@ -46,7 +82,7 @@ pub async fn select_best_txs(
     parent_block_hash: BlockHash,
     new_block_timestamp: UnixTimestamp,
     ctx: &TxSelectionContext<'_>,
-) -> eyre::Result<MempoolTxs> {
+) -> Result<MempoolTxs, TxSelectorError> {
     let mempool_state = ctx.mempool_state;
     let mut fees_spent_per_address: HashMap<IrysAddress, U256> = HashMap::new();
     let mut confirmed_commitments = HashSet::new();
@@ -80,11 +116,10 @@ pub async fn select_best_txs(
             .iter()
             .position(|entry| entry.block_hash() == parent_block_hash)
         else {
-            eyre::bail!(
-                "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
+            return Err(TxSelectorError::StaleParent {
                 parent_block_hash,
-                full_canonical.last().map(BlockTreeEntry::block_hash)
-            );
+                canonical_tip: full_canonical.last().map(BlockTreeEntry::block_hash),
+            });
         };
 
         // Truncate to only include entries up to and including the parent block
