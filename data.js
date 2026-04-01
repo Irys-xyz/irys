@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774906251667,
+  "lastUpdate": 1775032524903,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1663,6 +1663,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1585b76af4599ed8a6958dbd9dfa206c4ab58e02",
+          "message": "fix: devnet fixes (#1253)\n\n* fix: retryable stale parent tx selector error\n\n* feat: rework VDF validation polling logic\n\n* fix: debug assert\n\n* feat: add more tests\n\n* fix: tmpfs fixes\n\n* fix: add max rebuild attempts\n\n* feat: address feedback\n\n* chore: fix max rebuild operator\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: add test mode VdfScheduler\n\n* feat: add VdfScheduler VdfSpawnStrategy for testing\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: refine logic & comments\n\n* chore: add TODO comment",
+          "timestamp": "2026-04-01T09:15:45+01:00",
+          "tree_id": "36cf6422f486f848f1dd5d05c3ee7842adda9a09",
+          "url": "https://github.com/Irys-xyz/irys/commit/1585b76af4599ed8a6958dbd9dfa206c4ab58e02"
+        },
+        "date": 1775032522879,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074973,
+            "range": "± 0.001405",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 770.159372,
+            "range": "± 15.34426",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.992669,
+            "range": "± 4.295085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117581,
+            "range": "± 0.001058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1199.42339,
+            "range": "± 11.777086",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1532.238535,
+            "range": "± 21.715148",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.467051,
+            "range": "± 0.016335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.573121,
+            "range": "± 2.758251",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.247258,
+            "range": "± 1.822002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
