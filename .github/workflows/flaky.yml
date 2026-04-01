@@ -24,7 +24,7 @@ permissions:
 
 concurrency:
   group: flaky-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 # Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
 # are set by the setup-repo composite action via GITHUB_ENV.
