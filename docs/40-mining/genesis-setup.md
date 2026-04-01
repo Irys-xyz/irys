@@ -69,8 +69,8 @@ balance = "10000000000000000000000000"
 balance = "10000000000000000000000000"
 ```
 
-The balance must be >= stake value + (pledge_count * pledge_base_value),
-denominated in the chain's smallest token unit.
+Genesis pledges have no cost. The balance only needs to cover the stake
+commitment value, denominated in the chain's smallest token unit.
 
 ### 3. Build the Genesis Block
 
