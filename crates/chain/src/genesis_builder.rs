@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
-    calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
-    CommitmentTransaction, Config, H256List, IrysBlockHeader, SystemLedger,
-    SystemTransactionLedger, UnixTimestamp, UnixTimestampMs, H256, U256,
+    CommitmentTransaction, Config, H256, H256List, IrysAddress, IrysBlockHeader, SystemLedger,
+    SystemTransactionLedger, U256, UnixTimestamp, UnixTimestampMs, calculate_initial_difficulty,
+    chainspec::irys_chain_spec, irys::IrysSigner,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -76,11 +76,22 @@ impl GenesisMinerManifest {
     }
 
     /// Convert parsed entries into [`GenesisMinerEntry`] values.
+    ///
+    /// Validates that no miner has `pledge_count == 0` and that there are no
+    /// duplicate mining keys (by derived [`IrysAddress`]).  The returned entries
+    /// are sorted by `IrysAddress` so the manifest ordering is canonical and
+    /// does not affect the resulting block hash.
     pub fn into_entries(self) -> eyre::Result<Vec<GenesisMinerEntry>> {
-        self.miners
+        let mut entries: Vec<GenesisMinerEntry> = self
+            .miners
             .into_iter()
             .enumerate()
             .map(|(i, entry)| {
+                eyre::ensure!(
+                    entry.pledge_count > 0,
+                    "miner[{}] has pledge_count == 0; every miner must pledge at least one partition",
+                    i,
+                );
                 let key_bytes = hex::decode(entry.mining_key.trim_start_matches("0x"))
                     .map_err(|e| eyre::eyre!("Invalid hex for miner[{}] mining_key: {}", i, e))?;
                 let signing_key = SigningKey::from_slice(&key_bytes)
@@ -90,7 +101,23 @@ impl GenesisMinerManifest {
                     pledge_count: entry.pledge_count,
                 })
             })
-            .collect()
+            .collect::<eyre::Result<Vec<_>>>()?;
+
+        // Sort by derived IrysAddress for canonical ordering.
+        entries.sort_by_key(|e| signer_from_key_address(&e.signing_key));
+
+        // Detect duplicate keys by checking adjacent entries after sorting.
+        for w in entries.windows(2) {
+            let addr_a = signer_from_key_address(&w[0].signing_key);
+            let addr_b = signer_from_key_address(&w[1].signing_key);
+            eyre::ensure!(
+                addr_a != addr_b,
+                "duplicate mining key detected: address {} appears more than once",
+                addr_a,
+            );
+        }
+
+        Ok(entries)
     }
 }
 
@@ -294,4 +321,11 @@ fn signer_from_key(key: &SigningKey, config: &Config) -> IrysSigner {
         chain_id: config.consensus.chain_id,
         chunk_size: config.consensus.chunk_size,
     }
+}
+
+/// Derive the [`IrysAddress`] from a [`SigningKey`] without requiring a full
+/// [`Config`].
+fn signer_from_key_address(key: &SigningKey) -> IrysAddress {
+    use alloy_signer::utils::secret_key_to_address;
+    secret_key_to_address(key).into()
 }

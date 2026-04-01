@@ -5060,6 +5060,7 @@ version = "3.0.0"
 dependencies = [
  "actix-web",
  "alloy-contract",
+ "alloy-signer",
  "alloy-sol-types",
  "base58",
  "core_affinity",
