@@ -1009,11 +1009,20 @@ where
             .clone()
             .stake_and_pledge_whitelist(&self.peer_list)
             .await?;
+        let allowed_miner_addresses = HashSet::from_iter(allowed_miner_addresses.into_iter());
+
+        let promoted_peers = self
+            .peer_list
+            .promote_peers_to_staked(&allowed_miner_addresses);
+        if promoted_peers > 0 {
+            debug!(
+                "Promoted {} peer(s) to persistent cache from stake-and-pledge whitelist",
+                promoted_peers
+            );
+        }
 
         self.mempool
-            .update_stake_and_pledge_whitelist(HashSet::from_iter(
-                allowed_miner_addresses.into_iter(),
-            ))
+            .update_stake_and_pledge_whitelist(allowed_miner_addresses)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
