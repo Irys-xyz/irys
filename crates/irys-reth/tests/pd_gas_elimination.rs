@@ -298,11 +298,11 @@ fn pd_5mib_sum_verifier_contract_succeeds() {
     const MB: usize = 1_048_576;
 
     let mut data = vec![0_u8; FIVE_MIB];
-    data[0] = 8;
-    data[MB] = 8;
-    data[2 * MB] = 9;
-    data[3 * MB] = 8;
-    data[4 * MB] = 9;
+    data[0] = 2;
+    data[MB] = 3;
+    data[2 * MB] = 5;
+    data[3 * MB] = 7;
+    data[4 * MB] = 11;
 
     let chunk_index = chunk_data_index_from_bytes(&data, CHUNK_SIZE_5MIB);
     let factory =
