@@ -210,7 +210,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "rustup component add llvm-tools").run()?;
                 cmd!(
                     sh,
-                    "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                    "cargo install --locked --force --version {LLVM_COV_VERSION} cargo-llvm-cov"
                 )
                 .remove_and_run()?;
                 cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
