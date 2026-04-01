@@ -762,26 +762,51 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
-        self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
-            .await
-            .expect("stake tx to be in mempool");
-        self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
-            .await
-            .expect("pledge tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for stake commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            stake_tx.id(),
+            seconds_to_wait,
+            "stake_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("stake tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for pledge commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            pledge_tx.id(),
+            seconds_to_wait,
+            "pledge_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("pledge tx to be in mempool");
 
         // Get height before mining the commitment block
         let height_before_commitment = self.get_canonical_chain_height().await;
 
         // Mine a block to get the commitments included
+        info!(
+            peer = %peer_address,
+            target_height = height_before_commitment + 1,
+            "Peer assignment setup: mining commitment block and waiting for peer sync"
+        );
         self.mine_block()
             .await
             .expect("to mine block with commitments");
 
         // Wait for peer to sync the commitment block
-        peer_node
-            .wait_for_block_at_height(height_before_commitment + 1, seconds_to_wait)
-            .await
-            .expect("peer to sync commitment block");
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            height_before_commitment + 1,
+            seconds_to_wait,
+            "peer_sync_after_commitment_block".to_string(),
+        )
+        .await
+        .expect("peer to sync commitment block");
 
         // Get epoch configuration to calculate when next epoch round occurs
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
@@ -792,7 +817,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
 
         // Mine blocks until we reach the next epoch round
-        for _ in 0..blocks_until_next_epoch {
+        info!(
+            peer = %peer_address,
+            current_height_after_commitment,
+            blocks_until_next_epoch,
+            "Peer assignment setup: mining blocks until next epoch"
+        );
+        for step in 0..blocks_until_next_epoch {
             let height_before_mining = self.get_canonical_chain_height().await;
 
             self.mine_block()
@@ -800,25 +831,47 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .expect("to mine block towards next epoch");
 
             // Wait for peer to sync after each block to prevent race conditions
-            peer_node
-                .wait_for_block_at_height(height_before_mining + 1, seconds_to_wait)
-                .await
-                .expect("peer to sync to current height");
+            self.wait_for_peer_height_with_stage(
+                &peer_node,
+                height_before_mining + 1,
+                seconds_to_wait,
+                format!(
+                    "peer_sync_during_epoch_alignment step={}/{}",
+                    step + 1,
+                    blocks_until_next_epoch
+                ),
+            )
+            .await
+            .expect("peer to sync to current height");
         }
 
         let final_height = self.get_canonical_chain_height().await;
 
         // Wait for the peer to receive & process the epoch block
-        peer_node
-            .wait_for_block_at_height(final_height, seconds_to_wait)
-            .await
-            .expect("peer to sync to epoch height");
+        info!(
+            peer = %peer_address,
+            final_height,
+            "Peer assignment setup: waiting for final epoch height and packing"
+        );
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            final_height,
+            seconds_to_wait,
+            "peer_sync_to_final_epoch_height".to_string(),
+        )
+        .await
+        .expect("peer to sync to epoch height");
         self.wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .unwrap();
 
         // Wait for packing to complete on the peer (this indicates partition assignments are active)
-        peer_node.wait_for_packing(seconds_to_wait).await;
+        self.wait_for_peer_packing_with_stage(
+            &peer_node,
+            seconds_to_wait,
+            "peer_packing_for_partition_assignments".to_string(),
+        )
+        .await;
 
         // Verify that partition assignments were created
         let peer_assignments = peer_node.get_partition_assignments(peer_address);
@@ -830,6 +883,55 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
 
         Ok(peer_node)
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} {}",
+        phase,
+        self.diag_wait_state().await
+    ))]
+    async fn wait_for_mempool_tx_with_stage(
+        &self,
+        tx_id: IrysTransactionId,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        self.wait_for_mempool(tx_id, seconds_to_wait).await
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} target_height={} genesis={} peer={}",
+        phase,
+        target_height,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_height_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        target_height: u64,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        peer_node
+            .wait_for_block_at_height(target_height, seconds_to_wait)
+            .await
+            .map(|_| ())
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} genesis={} peer={}",
+        phase,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_packing_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        seconds_to_wait: usize,
+        phase: String,
+    ) {
+        peer_node.wait_for_packing(seconds_to_wait).await;
     }
 
     /// get block height in block index

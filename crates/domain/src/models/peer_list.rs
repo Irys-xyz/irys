@@ -972,10 +972,23 @@ impl PeerListDataInner {
                     peer: peer_clone,
                 });
             }
-        } else if matches!(reason, ScoreDecreaseReason::SlowResponse) {
+        } else if matches!(
+            reason,
+            ScoreDecreaseReason::SlowResponse | ScoreDecreaseReason::NetworkError(_)
+        ) {
             if let Some(peer_item) = self.unstaked_peer_purgatory.get_mut(peer_id) {
                 let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
-                peer_item.reputation_score.decrease_slow();
+                match reason {
+                    ScoreDecreaseReason::SlowResponse => {
+                        peer_item.reputation_score.decrease_slow();
+                    }
+                    ScoreDecreaseReason::NetworkError(message) => {
+                        peer_item.reputation_score.decrease_offline(&message);
+                    }
+                    ScoreDecreaseReason::BogusData(_) | ScoreDecreaseReason::Offline(_) => {
+                        unreachable!("filtered by the matches! guard above")
+                    }
+                }
                 let now_active = peer_item.reputation_score.is_active() && peer_item.is_online;
                 if was_active && !now_active {
                     warn!("Peer {:?} became inactive while in purgatory", peer_id);
@@ -1598,6 +1611,27 @@ mod tests {
                 .get_peer(&peer_id)
                 .expect("slow responses should not evict unstaked peers");
             assert_eq!(updated_peer.reputation_score.get(), 49);
+            assert!(peer_list.temporary_peers().contains(&peer_id));
+        }
+
+        #[test]
+        fn test_unstaked_peer_network_error_keeps_peer() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(peer, false);
+
+            peer_list.decrease_peer_score_by_peer_id(
+                &peer_id,
+                ScoreDecreaseReason::NetworkError("timeout".into()),
+            );
+
+            let updated_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("transient network errors should not evict unstaked peers");
+            assert_eq!(updated_peer.reputation_score.get(), 47);
             assert!(peer_list.temporary_peers().contains(&peer_id));
         }
 
