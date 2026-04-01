@@ -575,7 +575,7 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
-        use crate::genesis_builder::{build_signed_genesis_block, GenesisMinerEntry};
+        use crate::genesis_builder::{GenesisMinerEntry, build_signed_genesis_block};
 
         // Build a single-miner entry from the node's own config
         let storage_submodule_config =
