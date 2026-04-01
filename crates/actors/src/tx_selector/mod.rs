@@ -54,6 +54,13 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             // leaving our parent off the canonical chain. Retrying with the new tip
             // resolves it.
             TxSelectorError::StaleParent { .. } => Self::Retryable { source: e.into() },
+            // TODO: Some `Other` errors are actually stale-parent races — the parent
+            // passes the initial canonical-chain check but a concurrent reorg removes
+            // it before we query its snapshots/header (e.g. "Block not found",
+            // "snapshot not found", "block header not found"). These should be
+            // Retryable, not Irrecoverable. Needs a cleaner approach than downcasting
+            // the eyre chain — consider adding typed error variants for the specific
+            // lookup failures so they can be matched directly.
             TxSelectorError::Other(source) => Self::Irrecoverable { source },
         }
     }
