@@ -17,13 +17,14 @@ use actix_web::{
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
+use irys_types::chunk_provider::PdChunkMessage;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
     GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
-    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem,
-    PeerScore, ProtocolVersion, UnpackedChunk,
+    HandshakeResponseV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PdChunkPush,
+    PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -604,6 +605,76 @@ where
         }
 
         debug!("Gossip data handled");
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+    }
+
+    /// Handle an optimistically pushed PD chunk from a peer.
+    ///
+    /// Returns `Accepted` immediately — validation happens asynchronously in
+    /// `PdService`. Bad pushes won't trigger peer score penalties, but the
+    /// block-index + merkle verification in `PdService::handle_optimistic_push`
+    /// prevents invalid data from being cached.
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_pd_chunk_push(
+        server: Data<Self>,
+        json: web::Json<GossipRequestV2<PdChunkPush>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring PD chunk push",
+                node_id,
+            );
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+
+        let v2_request = json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
+
+        match Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            source_peer_id,
+            source_miner_address,
+        ) {
+            Ok(_) => {}
+            Err(error_response) => return error_response,
+        };
+        server.peer_list.set_is_online(&source_miner_address, true);
+
+        // Backpressure: reject if too many chunk operations in flight.
+        let _permit = match server.chunk_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+            }
+        };
+
+        let Some(ref sender) = server.data_handler.pd_chunk_sender else {
+            warn!("PD chunk push received but pd_chunk_sender is not configured");
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+        };
+
+        let push = v2_request.data;
+        if let Err(e) = sender.send(PdChunkMessage::OptimisticPush {
+            peer_id: source_peer_id,
+            push,
+        }) {
+            warn!("Failed to forward PD chunk push to PdService: {}", e);
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+        }
+
+        debug!("PD chunk push forwarded to PdService");
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
@@ -1515,6 +1586,11 @@ where
                     .route(
                         GossipRoutes::BlockIndex.as_str(),
                         web::get().to(Self::handle_block_index),
+                    )
+                    .service(
+                        web::scope(GossipRoutes::PdChunkPush.as_str())
+                            .app_data(web::JsonConfig::default().limit(768 * 1024))
+                            .route("", web::post().to(Self::handle_pd_chunk_push)),
                     ),
             )
             .route(

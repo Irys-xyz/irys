@@ -549,6 +549,16 @@ pub struct P2PGossipConfig {
     /// Maximum concurrent chunk handler tasks on the gossip receiver.
     /// Limits memory and CPU pressure from inbound chunk processing.
     pub max_concurrent_gossip_chunks: usize,
+    /// Number of peers to push each PD chunk to.
+    /// Peers are selected as k/2 top-scored + k/2 random,
+    /// excluding known sources and partition assignees.
+    /// Set to 0 to disable optimistic push entirely.
+    #[serde(default = "default_pd_optimistic_push_fanout")]
+    pub pd_optimistic_push_fanout: u32,
+}
+
+fn default_pd_optimistic_push_fanout() -> u32 {
+    4
 }
 
 impl Default for P2PGossipConfig {
@@ -558,6 +568,7 @@ impl Default for P2PGossipConfig {
             broadcast_batch_throttle_interval: 100,
             enable_scoring: true,
             max_concurrent_gossip_chunks: 50,
+            pd_optimistic_push_fanout: default_pd_optimistic_push_fanout(),
         }
     }
 }

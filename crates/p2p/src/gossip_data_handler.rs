@@ -22,7 +22,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
-use irys_types::chunk_provider::ChunkStorageProvider;
+use irys_types::chunk_provider::{ChunkStorageProvider, PdChunkSender};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, PeerNetworkError, H256};
 use irys_types::{
@@ -86,6 +86,9 @@ where
     pub consensus_config_hash: H256,
     pub runtime_handle: tokio::runtime::Handle,
     pub storage_provider: Option<Arc<dyn ChunkStorageProvider>>,
+    /// Sender for PD chunk messages (optimistic push from gossip peers).
+    /// `None` when PD is not active (e.g. test configurations).
+    pub pd_chunk_sender: Option<PdChunkSender>,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -111,6 +114,7 @@ where
             consensus_config_hash: self.consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
             storage_provider: self.storage_provider.clone(),
+            pd_chunk_sender: self.pd_chunk_sender.clone(),
         }
     }
 }
@@ -1005,18 +1009,29 @@ where
             .clone()
             .stake_and_pledge_whitelist(&self.peer_list)
             .await?;
+        let allowed_miner_addresses = HashSet::from_iter(allowed_miner_addresses.into_iter());
 
         self.mempool
-            .update_stake_and_pledge_whitelist(HashSet::from_iter(
-                allowed_miner_addresses.into_iter(),
-            ))
+            .update_stake_and_pledge_whitelist(allowed_miner_addresses.clone())
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
                     "get_stake_and_pledge_whitelist() errored: {}",
                     e
                 )))
-            })
+            })?;
+
+        let promoted_peers = self
+            .peer_list
+            .promote_peers_to_staked(&allowed_miner_addresses);
+        if promoted_peers > 0 {
+            debug!(
+                "Promoted {} peer(s) to persistent cache from stake-and-pledge whitelist",
+                promoted_peers
+            );
+        }
+
+        Ok(())
     }
 
     fn send_gossip_data(

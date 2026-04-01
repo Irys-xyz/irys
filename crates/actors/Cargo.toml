@@ -33,10 +33,12 @@ reth-transaction-pool.workspace = true
 reth-payload-primitives.workspace = true
 itertools.workspace = true
 lru.workspace = true
+moka = { workspace = true }
 nodit.workspace = true
 openssl.workspace = true
 opentelemetry.workspace = true
 priority-queue.workspace = true
+rand.workspace = true
 rayon.workspace = true
 reqwest.workspace = true
 reth-db.workspace = true

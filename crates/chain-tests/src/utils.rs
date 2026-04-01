@@ -75,7 +75,7 @@ use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
 };
 use irys_vdf::state::VdfStateReadonly;
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
@@ -95,11 +95,44 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
+fn compute_step_checkpoints(
+    config: &irys_types::VdfConfig,
+    current_step: u64,
+    previous_step_output: H256,
+    reset_seed: H256,
+) -> eyre::Result<(H256List, H256)> {
+    eyre::ensure!(current_step > 0, "current_step must be greater than 0");
+
+    let previous_step_number = current_step - 1;
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(config, previous_step_number));
+    let mut seed = previous_step_output;
+
+    if previous_step_number > 0
+        && previous_step_number.is_multiple_of(config.reset_frequency as u64)
+    {
+        seed = apply_reset_seed(seed, reset_seed);
+    }
+
+    let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed,
+        config.num_checkpoints_in_vdf_step,
+        config.num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+
+    Ok((H256List(checkpoints), seed))
+}
+
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
+    reset_seed: H256,
 ) -> SolutionContext {
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
@@ -133,25 +166,16 @@ pub async fn capacity_chunk_solution(
             }
         };
 
-        // Calculate last step checkpoints for current_step - 1
-        let mut hasher = Sha256::new();
-        let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.vdf,
-            current_step.saturating_sub(1),
-        ));
-        let mut seed = steps[0];
-
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            config.vdf.num_checkpoints_in_vdf_step,
-            config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
-        );
+        let (checkpoints, computed_step_output) =
+            compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed)
+                .expect("valid current step when computing checkpoints");
+        if computed_step_output != steps[1] {
+            // The VDF thread may have crossed a reset boundary; if our recomputation does not
+            // land on the advertised step output, skip this candidate instead of building an
+            // invalid synthetic solution for the block producer.
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        }
 
         // Determine recall range for this step
         let recall_range_idx = block_validation::get_recall_range(
@@ -196,7 +220,7 @@ pub async fn capacity_chunk_solution(
                     mining_address: miner_addr,
                     chunk: entropy_chunk,
                     vdf_step: current_step,
-                    checkpoints: H256List(checkpoints),
+                    checkpoints,
                     seed: Seed(steps[1]),
                     solution_hash,
                     ..Default::default()
@@ -252,29 +276,9 @@ pub async fn capacity_chunk_solution(
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: current_step,
-        checkpoints: H256List(
-            // recompute checkpoints for fallback
-            {
-                let mut h = Sha256::new();
-                let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.vdf,
-                    current_step.saturating_sub(1),
-                ));
-                let mut sd = steps[0];
-                let mut cps: Vec<H256> =
-                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-                vdf_sha(
-                    &mut h,
-                    &mut s,
-                    &mut sd,
-                    config.vdf.num_checkpoints_in_vdf_step,
-                    config.vdf.num_iterations_per_checkpoint(),
-                    &mut cps,
-                );
-                H256List(cps)
-            }
+        checkpoints: compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed)
+            .expect("valid current step when recomputing fallback checkpoints")
             .0,
-        ),
         seed: Seed(steps[1]),
         solution_hash,
         ..Default::default()
@@ -758,26 +762,51 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
-        self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
-            .await
-            .expect("stake tx to be in mempool");
-        self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
-            .await
-            .expect("pledge tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for stake commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            stake_tx.id(),
+            seconds_to_wait,
+            "stake_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("stake tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for pledge commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            pledge_tx.id(),
+            seconds_to_wait,
+            "pledge_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("pledge tx to be in mempool");
 
         // Get height before mining the commitment block
         let height_before_commitment = self.get_canonical_chain_height().await;
 
         // Mine a block to get the commitments included
+        info!(
+            peer = %peer_address,
+            target_height = height_before_commitment + 1,
+            "Peer assignment setup: mining commitment block and waiting for peer sync"
+        );
         self.mine_block()
             .await
             .expect("to mine block with commitments");
 
         // Wait for peer to sync the commitment block
-        peer_node
-            .wait_for_block_at_height(height_before_commitment + 1, seconds_to_wait)
-            .await
-            .expect("peer to sync commitment block");
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            height_before_commitment + 1,
+            seconds_to_wait,
+            "peer_sync_after_commitment_block".to_string(),
+        )
+        .await
+        .expect("peer to sync commitment block");
 
         // Get epoch configuration to calculate when next epoch round occurs
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
@@ -788,7 +817,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
 
         // Mine blocks until we reach the next epoch round
-        for _ in 0..blocks_until_next_epoch {
+        info!(
+            peer = %peer_address,
+            current_height_after_commitment,
+            blocks_until_next_epoch,
+            "Peer assignment setup: mining blocks until next epoch"
+        );
+        for step in 0..blocks_until_next_epoch {
             let height_before_mining = self.get_canonical_chain_height().await;
 
             self.mine_block()
@@ -796,25 +831,47 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .expect("to mine block towards next epoch");
 
             // Wait for peer to sync after each block to prevent race conditions
-            peer_node
-                .wait_for_block_at_height(height_before_mining + 1, seconds_to_wait)
-                .await
-                .expect("peer to sync to current height");
+            self.wait_for_peer_height_with_stage(
+                &peer_node,
+                height_before_mining + 1,
+                seconds_to_wait,
+                format!(
+                    "peer_sync_during_epoch_alignment step={}/{}",
+                    step + 1,
+                    blocks_until_next_epoch
+                ),
+            )
+            .await
+            .expect("peer to sync to current height");
         }
 
         let final_height = self.get_canonical_chain_height().await;
 
         // Wait for the peer to receive & process the epoch block
-        peer_node
-            .wait_for_block_at_height(final_height, seconds_to_wait)
-            .await
-            .expect("peer to sync to epoch height");
+        info!(
+            peer = %peer_address,
+            final_height,
+            "Peer assignment setup: waiting for final epoch height and packing"
+        );
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            final_height,
+            seconds_to_wait,
+            "peer_sync_to_final_epoch_height".to_string(),
+        )
+        .await
+        .expect("peer to sync to epoch height");
         self.wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .unwrap();
 
         // Wait for packing to complete on the peer (this indicates partition assignments are active)
-        peer_node.wait_for_packing(seconds_to_wait).await;
+        self.wait_for_peer_packing_with_stage(
+            &peer_node,
+            seconds_to_wait,
+            "peer_packing_for_partition_assignments".to_string(),
+        )
+        .await;
 
         // Verify that partition assignments were created
         let peer_assignments = peer_node.get_partition_assignments(peer_address);
@@ -826,6 +883,55 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
 
         Ok(peer_node)
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} {}",
+        phase,
+        self.diag_wait_state().await
+    ))]
+    async fn wait_for_mempool_tx_with_stage(
+        &self,
+        tx_id: IrysTransactionId,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        self.wait_for_mempool(tx_id, seconds_to_wait).await
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} target_height={} genesis={} peer={}",
+        phase,
+        target_height,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_height_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        target_height: u64,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        peer_node
+            .wait_for_block_at_height(target_height, seconds_to_wait)
+            .await
+            .map(|_| ())
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} genesis={} peer={}",
+        phase,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_packing_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        seconds_to_wait: usize,
+        phase: String,
+    ) {
+        peer_node.wait_for_packing(seconds_to_wait).await;
     }
 
     /// get block height in block index
@@ -4211,6 +4317,15 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = {
+        let read = node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .cloned()
+            .ok_or_else(|| eyre!("Parent block header not found in block tree"))?
+    };
+    let reset_seed = prev_block.vdf_limiter_info.next_seed;
+
     let was_vdf_enabled = node_ctx
         .is_vdf_mining_enabled
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -4240,20 +4355,14 @@ pub async fn solution_context_with_poa_chunk(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
-        // Compute checkpoints for (step-1)
-        let mut hasher = Sha256::new();
-        let mut salt =
-            irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
-        let mut seed = steps[0];
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            node_ctx.config.vdf.num_checkpoints_in_vdf_step,
-            node_ctx.config.vdf.num_iterations_per_checkpoint(),
-            &mut checkpoints,
+        let (checkpoints, computed_step_output) =
+            compute_step_checkpoints(&node_ctx.config.vdf, step, steps[0], reset_seed)?;
+        eyre::ensure!(
+            computed_step_output == steps[1],
+            "recomputed VDF output mismatch for step {}: expected {}, got {}",
+            step,
+            steps[1],
+            computed_step_output
         );
 
         // For deterministic linkage without recall-range dependency, use offset 0
@@ -4275,7 +4384,7 @@ pub async fn solution_context_with_poa_chunk(
             data_path: None,
             chunk: poa_chunk,
             vdf_step: step,
-            checkpoints: H256List(checkpoints),
+            checkpoints,
             seed: Seed(steps[1]),
             solution_hash,
         })
@@ -4312,12 +4421,46 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,
+        prev_block.vdf_limiter_info.next_seed,
     )
     .await;
     if !was_vdf_enabled {
         node_ctx.stop_vdf();
     }
     Ok(poa_solution)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_step_checkpoints;
+    use irys_types::{VdfConfig, H256};
+
+    #[test]
+    fn compute_step_checkpoints_applies_reset_seed_at_boundary() {
+        let config = VdfConfig {
+            reset_frequency: 3,
+            parallel_verification_thread_limit: 1,
+            num_checkpoints_in_vdf_step: 4,
+            max_allowed_vdf_fork_steps: 16,
+            sha_1s_difficulty: 40,
+        };
+        let previous_step_output = H256::from_low_u64_be(11);
+        let reset_seed = H256::from_low_u64_be(29);
+
+        let (with_reset, computed_output) =
+            compute_step_checkpoints(&config, 4, previous_step_output, reset_seed)
+                .expect("checkpoints should be computed");
+        let (without_reset, without_reset_output) =
+            compute_step_checkpoints(&config, 4, previous_step_output, H256::zero())
+                .expect("checkpoints should be computed");
+
+        assert_eq!(with_reset.0.last(), Some(&computed_output));
+        assert_eq!(without_reset.0.last(), Some(&without_reset_output));
+        assert_ne!(
+            computed_output, without_reset_output,
+            "reset-boundary computation must change the VDF output"
+        );
+    }
 }
 
 /// Outcome of block validation for testing.

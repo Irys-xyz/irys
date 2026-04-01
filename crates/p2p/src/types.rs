@@ -277,6 +277,7 @@ pub enum GossipRoutes {
     BlockIndex,
     Version,
     ProtocolVersion,
+    PdChunkPush,
 }
 
 impl GossipRoutes {
@@ -299,6 +300,7 @@ impl GossipRoutes {
             Self::BlockIndex => "/block-index",
             Self::Version => "/version",
             Self::ProtocolVersion => "/protocol_version",
+            Self::PdChunkPush => "/pd_chunk_push",
         }
     }
 }

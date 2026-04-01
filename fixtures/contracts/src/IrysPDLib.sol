@@ -6,11 +6,13 @@ import "./IIrysPD.sol";
 /// @title IrysPDLib — convenience helpers for calling the Irys PD precompile
 /// @dev Wraps low-level staticcall with ABI decoding and try-variants.
 library IrysPDLib {
+    error MalformedPdReturnData();
+
     // ── Index-0 convenience wrappers ───────────────────────────────────
 
     /// @notice Read the full byte range of specifier 0 (the most common case).
     function readData() internal view returns (bytes memory data) {
-        return IRYS_PD.readData(0);
+        return _callAndExtractBytes(abi.encodeCall(IIrysPD.readData, (0)));
     }
 
     /// @notice Read an arbitrary byte slice from specifier 0.
@@ -18,7 +20,9 @@ library IrysPDLib {
         uint32 offset,
         uint32 length
     ) internal view returns (bytes memory data) {
-        return IRYS_PD.readBytes(0, offset, length);
+        return _callAndExtractBytes(
+            abi.encodeCall(IIrysPD.readBytes, (0, offset, length))
+        );
     }
 
     // ── Try variants (return success bool instead of reverting) ────────
@@ -82,5 +86,32 @@ library IrysPDLib {
         bytes memory callData
     ) private view returns (bool success, bytes memory result) {
         (success, result) = IRYS_PD_ADDRESS.staticcall(callData);
+    }
+
+    /// @dev Call the PD precompile and reinterpret its ABI `bytes` return value in place.
+    /// This avoids the compiler-generated second large `MCOPY` that `abi.decode(data, (bytes))`
+    /// would perform when the returndata itself is already a large `bytes` payload.
+    function _callAndExtractBytes(
+        bytes memory payload
+    ) private view returns (bytes memory data) {
+        (bool success, bytes memory result) = IRYS_PD_ADDRESS.staticcall(payload);
+
+        if (!success) {
+            assembly {
+                revert(add(result, 32), mload(result))
+            }
+        }
+
+        if (!_isValidAbiBytes(result)) {
+            revert MalformedPdReturnData();
+        }
+
+        assembly {
+            // `result` is a bytes array containing the raw returndata:
+            // [returndata_len][abi_offset=0x20][bytes_len][bytes_data...]
+            // Re-point to the embedded `[bytes_len][bytes_data...]` region so
+            // callers see a standard `bytes memory` without copying the payload again.
+            data := add(result, 0x40)
+        }
     }
 }

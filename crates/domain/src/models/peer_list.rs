@@ -137,6 +137,13 @@ impl PeerList {
         inner.add_or_update_peer(peer, is_staked);
     }
 
+    /// Promote already-known peers to the persistent cache once an external source
+    /// confirms their mining addresses are stake-and-pledge eligible.
+    pub fn promote_peers_to_staked(&self, mining_addresses: &HashSet<IrysAddress>) -> usize {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        inner.promote_peers_to_staked(mining_addresses)
+    }
+
     /// Get a peer by their peer_id (V2)
     pub fn peer_by_id(&self, peer_id: &IrysPeerId) -> Option<PeerListItem> {
         let inner = self.read();
@@ -458,6 +465,34 @@ impl PeerList {
         peers.reverse();
 
         peers
+    }
+
+    /// Returns all online peers with their address and reputation score as f64.
+    /// Does not sort — caller is responsible for selection logic.
+    #[must_use]
+    pub fn all_peers_with_score(&self) -> Vec<(IrysPeerId, PeerAddress, f64)> {
+        let guard = self.read();
+        guard
+            .persistent_peers_cache
+            .iter()
+            .chain(guard.unstaked_peer_purgatory.iter())
+            .filter(|(_, item)| item.is_online)
+            .map(|(id, item)| (*id, item.address, item.reputation_score.get() as f64))
+            .collect()
+    }
+
+    /// Returns all online V2 peers with their address and reputation score.
+    /// Used for PD chunk push which requires V2 protocol support.
+    #[must_use]
+    pub fn v2_peers_with_score(&self) -> Vec<(IrysPeerId, PeerAddress, f64)> {
+        let guard = self.read();
+        guard
+            .persistent_peers_cache
+            .iter()
+            .chain(guard.unstaked_peer_purgatory.iter())
+            .filter(|(_, item)| item.is_online && item.protocol_version == ProtocolVersion::V2)
+            .map(|(id, item)| (*id, item.address, item.reputation_score.get() as f64))
+            .collect()
     }
 
     pub fn inactive_peers(&self) -> Vec<(IrysPeerId, PeerListItem)> {
@@ -785,6 +820,32 @@ impl PeerListDataInner {
         }
     }
 
+    /// Promote matching peers from unstaked purgatory into the persistent cache
+    /// using the live peer entries under a single write lock.
+    fn promote_peers_to_staked(&mut self, mining_addresses: &HashSet<IrysAddress>) -> usize {
+        let peer_ids_to_promote = self
+            .unstaked_peer_purgatory
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                mining_addresses
+                    .contains(&peer.mining_address)
+                    .then_some(*peer_id)
+            })
+            .collect::<Vec<_>>();
+
+        let mut promoted_count = 0;
+        for peer_id in peer_ids_to_promote {
+            let Some(peer) = self.unstaked_peer_purgatory.peek(&peer_id).cloned() else {
+                continue;
+            };
+
+            self.add_or_update_peer(peer, true);
+            promoted_count += 1;
+        }
+
+        promoted_count
+    }
+
     pub fn initiate_handshake(
         &self,
         api_address: SocketAddr,
@@ -919,6 +980,34 @@ impl PeerListDataInner {
                     mining_addr,
                     peer: peer_clone,
                 });
+            }
+        } else if matches!(
+            reason,
+            ScoreDecreaseReason::SlowResponse | ScoreDecreaseReason::NetworkError(_)
+        ) {
+            if let Some(peer_item) = self.unstaked_peer_purgatory.get_mut(peer_id) {
+                let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
+                match reason {
+                    ScoreDecreaseReason::SlowResponse => {
+                        peer_item.reputation_score.decrease_slow();
+                    }
+                    ScoreDecreaseReason::NetworkError(message) => {
+                        peer_item.reputation_score.decrease_offline(&message);
+                    }
+                    ScoreDecreaseReason::BogusData(_) | ScoreDecreaseReason::Offline(_) => {
+                        unreachable!("filtered by the matches! guard above")
+                    }
+                }
+                let now_active = peer_item.reputation_score.is_active() && peer_item.is_online;
+                if was_active && !now_active {
+                    warn!("Peer {:?} became inactive while in purgatory", peer_id);
+                    let peer_clone = peer_item.clone();
+                    let mining_addr = peer_item.mining_address;
+                    self.emit_peer_event(PeerEvent::BecameInactive {
+                        mining_addr,
+                        peer: peer_clone,
+                    });
+                }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
             // Get mining_addr from the peer
@@ -1493,7 +1582,7 @@ mod tests {
         }
 
         #[test]
-        fn test_unstaked_peer_operations() {
+        fn test_unstaked_peer_bogus_data_removes_peer() {
             let peer_list =
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
@@ -1512,8 +1601,88 @@ mod tests {
             let final_peer = peer_list.get_peer(&peer_id);
             assert!(
                 final_peer.is_none(),
-                "Unstaked peer should be removed after any decrease operation"
+                "Unstaked peer should be removed after bogus data"
             );
+        }
+
+        #[test]
+        fn test_unstaked_peer_slow_response_keeps_peer() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(peer, false);
+
+            peer_list.decrease_peer_score_by_peer_id(&peer_id, ScoreDecreaseReason::SlowResponse);
+
+            let updated_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("slow responses should not evict unstaked peers");
+            assert_eq!(updated_peer.reputation_score.get(), 49);
+            assert!(peer_list.temporary_peers().contains(&peer_id));
+        }
+
+        #[test]
+        fn test_unstaked_peer_network_error_keeps_peer() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(peer, false);
+
+            peer_list.decrease_peer_score_by_peer_id(
+                &peer_id,
+                ScoreDecreaseReason::NetworkError("timeout".into()),
+            );
+
+            let updated_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("transient network errors should not evict unstaked peers");
+            assert_eq!(updated_peer.reputation_score.get(), 47);
+            assert!(peer_list.temporary_peers().contains(&peer_id));
+        }
+
+        #[test]
+        fn test_promote_peers_to_staked_moves_purgatory_peer_to_persistent() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (mining_addr, peer_id, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(peer, false);
+            assert!(peer_list.persistable_peers().is_empty());
+            assert!(peer_list.temporary_peers().contains(&peer_id));
+
+            let promoted = peer_list.promote_peers_to_staked(&HashSet::from_iter([mining_addr]));
+
+            assert_eq!(promoted, 1);
+            assert!(peer_list.persistable_peers().contains_key(&peer_id));
+            assert!(!peer_list.temporary_peers().contains(&peer_id));
+        }
+
+        #[test]
+        fn test_promote_peers_to_staked_preserves_latest_purgatory_state() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (mining_addr, peer_id, mut peer) = create_test_peer(1);
+
+            peer.protocol_version = ProtocolVersion::V1;
+            peer_list.add_or_update_peer(peer.clone(), false);
+
+            peer.protocol_version = ProtocolVersion::V2;
+            peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+            peer_list.add_or_update_peer(peer, false);
+
+            let promoted = peer_list.promote_peers_to_staked(&HashSet::from_iter([mining_addr]));
+
+            assert_eq!(promoted, 1);
+            let promoted_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("peer should remain present after promotion");
+            assert_eq!(promoted_peer.protocol_version, ProtocolVersion::V2);
+            assert!(peer_list.persistable_peers().contains_key(&peer_id));
+            assert!(!peer_list.temporary_peers().contains(&peer_id));
         }
     }
 
