@@ -20,7 +20,7 @@ runs:
         cache-all-crates: true
         cache-workspace-crates: "true"
 
-    - name: Configure sccache
+    - name: Configure sccache env
       shell: bash
       run: |
         # Use CARGO_BUILD_RUSTC_WRAPPER (cargo config-layer equivalent of RUSTC_WRAPPER)
@@ -28,7 +28,7 @@ runs:
         echo "CARGO_BUILD_RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_DIR=/shared/sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=40G" >> "$GITHUB_ENV"
-        # Intentionally not suppressing errors: fail early if sccache is missing.
-        # GITHUB_ENV exports above take effect in subsequent steps, not this one,
-        # so SCCACHE_DIR must be set inline here.
-        SCCACHE_DIR=/shared/sccache sccache --zero-stats
+
+    - name: Reset sccache stats
+      shell: bash
+      run: sccache --zero-stats
