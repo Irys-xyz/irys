@@ -200,8 +200,8 @@ async fn partition_assignments_are_deterministic() {
     for ((hash_1, assign_1), (hash_2, assign_2)) in cap_1.iter().zip(cap_2.iter()) {
         assert_eq!(hash_1, hash_2, "capacity partition hashes must match");
         assert_eq!(
-            assign_1.miner_address, assign_2.miner_address,
-            "capacity miner assignments must match for partition {hash_1}"
+            assign_1, assign_2,
+            "capacity partition assignments must match for partition {hash_1}"
         );
     }
 
@@ -214,8 +214,8 @@ async fn partition_assignments_are_deterministic() {
     for ((hash_1, assign_1), (hash_2, assign_2)) in data_1.iter().zip(data_2.iter()) {
         assert_eq!(hash_1, hash_2, "data partition hashes must match");
         assert_eq!(
-            assign_1.miner_address, assign_2.miner_address,
-            "data miner assignments must match for partition {hash_1}"
+            assign_1, assign_2,
+            "data partition assignments must match for partition {hash_1}"
         );
     }
 
