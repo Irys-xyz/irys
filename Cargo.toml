@@ -83,7 +83,7 @@ derive_more = { version = "2", features = ["full"] }
 eyre = "0.6"
 sha2 = { version = "0.10", features = ["compress"] }
 rayon = "1.8.0"
-reqwest = "0.12.15"
+reqwest = { version = "0.12.15", features = ["json"] }
 color-eyre = "0.6"
 dashmap = "6.0"
 itertools = "0.13"
