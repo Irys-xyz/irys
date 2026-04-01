@@ -178,8 +178,8 @@ async fn partition_assignments_are_deterministic() {
     );
     let snap_2 = EpochSnapshot::new(
         &submodules,
-        output.block.clone(),
-        output.commitments.clone(),
+        output.block,
+        output.commitments,
         &config,
     );
 
