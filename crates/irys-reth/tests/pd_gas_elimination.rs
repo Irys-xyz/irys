@@ -313,34 +313,17 @@ fn pd_5mib_sum_verifier_contract_succeeds() {
         evm_env(),
     );
 
-    let access_list = AccessList(vec![AccessListItem {
-        address: PD_PRECOMPILE_ADDRESS,
-        storage_keys: vec![
-            B256::from(
-                PdDataRead {
-                    partition_index: 0,
-                    start: 0,
-                    len: data.len() as u32,
-                    byte_off: 0,
-                }
-                .encode(),
-            ),
-            B256::from(
-                encode_pd_fee(
-                    PdAccessListArgsTypeId::PdPriorityFee as u8,
-                    U256::from(TEST_FEE_PER_CHUNK),
-                )
-                .expect("fee encoding"),
-            ),
-            B256::from(
-                encode_pd_fee(
-                    PdAccessListArgsTypeId::PdBaseFeeCap as u8,
-                    U256::from(TEST_FEE_PER_CHUNK),
-                )
-                .expect("fee encoding"),
-            ),
-        ],
-    }]);
+    let access_list = irys_reth::pd_tx::build_pd_access_list_with_fees(
+        &[PdDataRead {
+            partition_index: 0,
+            start: 0,
+            len: data.len() as u32,
+            byte_off: 0,
+        }],
+        U256::from(TEST_FEE_PER_CHUNK),
+        U256::from(TEST_FEE_PER_CHUNK),
+    )
+    .expect("access list construction");
 
     let tx = contract_call_tx(
         TxKind::Call(SUM_VERIFIER_ADDR),
