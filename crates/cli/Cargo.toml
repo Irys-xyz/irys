@@ -23,6 +23,7 @@ irys-reth-node-bridge.workspace = true
 irys-reth.workspace = true
 irys-chain.workspace = true
 tokio.workspace = true
+irys-config.workspace = true
 irys-domain.workspace = true
 irys-tui.workspace = true
 reth-provider.workspace = true

@@ -5177,6 +5177,7 @@ dependencies = [
  "eyre",
  "hex",
  "irys-chain",
+ "irys-config",
  "irys-database",
  "irys-domain",
  "irys-reth",
