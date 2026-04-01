@@ -104,16 +104,21 @@ impl GenesisMinerManifest {
             .collect::<eyre::Result<Vec<_>>>()?;
 
         // Sort by derived IrysAddress for canonical ordering.
-        entries.sort_by_key(|e| signer_from_key_address(&e.signing_key));
+        // Use sort_by_cached_key to avoid redundant EC derivations (O(n log n) calls).
+        entries.sort_by_cached_key(|e| signer_from_key_address(&e.signing_key));
 
         // Detect duplicate keys by checking adjacent entries after sorting.
-        for w in entries.windows(2) {
-            let addr_a = signer_from_key_address(&w[0].signing_key);
-            let addr_b = signer_from_key_address(&w[1].signing_key);
+        // Compute addresses once rather than twice per window element.
+        let addrs: Vec<IrysAddress> = entries
+            .iter()
+            .map(|e| signer_from_key_address(&e.signing_key))
+            .collect();
+        for pair in addrs.windows(2) {
             eyre::ensure!(
-                addr_a != addr_b,
-                "duplicate mining key detected: address {} appears more than once",
-                addr_a,
+                pair[0] != pair[1],
+                "duplicate mining key detected: two miners resolve to the same \
+                 IrysAddress {}. Each miner must have a unique key.",
+                pair[0],
             );
         }
 
