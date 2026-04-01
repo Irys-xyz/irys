@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775032524903,
+  "lastUpdate": 1775033683017,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1746,6 +1746,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "distinct": true,
+          "id": "db091339380b6801010fa9467461c5c65fbf8a8e",
+          "message": "chore(CI): don't cancel in progress jobs on master",
+          "timestamp": "2026-04-01T08:39:54Z",
+          "tree_id": "6f73e41463929e41cb1fdab689f90d53389fa393",
+          "url": "https://github.com/Irys-xyz/irys/commit/db091339380b6801010fa9467461c5c65fbf8a8e"
+        },
+        "date": 1775033681020,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.081972,
+            "range": "± 0.001807",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 805.457408,
+            "range": "± 16.686099",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.145354,
+            "range": "± 4.882525",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.125182,
+            "range": "± 0.004324",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1267.231568,
+            "range": "± 54.819931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1571.628136,
+            "range": "± 16.531107",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.476986,
+            "range": "± 0.024794",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.518318,
+            "range": "± 3.620797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.345875,
+            "range": "± 1.407429",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0",
             "unit": "ms/iter"
           }
