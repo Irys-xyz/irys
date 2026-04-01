@@ -1,5 +1,6 @@
 use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -479,7 +480,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     );
                 }
 
-                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
+                let scope_args_lcov = scope_args.clone(); // clone: needed for lcov cmd! invocation
+                let scope_args_mismatch = scope_args.clone(); // clone: needed for mismatch analysis
                 let html_result = cmd!(
                     sh,
                     "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
@@ -517,6 +519,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 if let Err(e) = lcov_result {
                     eprintln!("Warning: LCOV report generation failed: {e}");
+                }
+
+                // Log which functions have mismatched coverage data
+                if let Err(e) = log_coverage_mismatches(sh, &scope_args_mismatch) {
+                    eprintln!("Warning: coverage mismatch analysis failed: {e}");
                 }
             }
 
@@ -1022,37 +1029,159 @@ fn write_status_summary(run_dir: &std::path::Path) {
     }
 }
 
+/// Detect and log functions with mismatched coverage data.
+///
+/// Compares function names in the merged profdata against those in the
+/// `cargo llvm-cov report --json` export. Functions present in the profdata
+/// but absent from the JSON are candidates for hash mismatches (the binary's
+/// coverage mapping hash differs from the profdata hash). Results are filtered
+/// to workspace crates to avoid noise from std/deps.
+fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()> {
+    // Locate the merged profdata file
+    let profdata_dir = PathBuf::from("target/llvm-cov-target");
+    let profdata_path = fs::read_dir(&profdata_dir).ok().and_then(|entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+            .map(|e| e.path())
+    });
+
+    let Some(profdata_path) = profdata_path else {
+        eprintln!("  Skipping mismatch analysis: no profdata file found");
+        return Ok(());
+    };
+
+    // Locate llvm-profdata via rustc sysroot
+    let sysroot = cmd!(sh, "rustc --print sysroot").read()?;
+    let rustc_info = cmd!(sh, "rustc -vV").read()?;
+    let host_triple = rustc_info
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .ok_or_else(|| eyre::eyre!("could not determine host triple from rustc -vV"))?;
+    let llvm_profdata = format!("{sysroot}/lib/rustlib/{host_triple}/bin/llvm-profdata");
+
+    // Collect workspace crate names (hyphens → underscores) for filtering
+    let metadata = MetadataCommand::new().exec()?;
+    let crate_names: Vec<String> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|p| p.name.replace('-', "_"))
+        .collect();
+
+    // Extract function names from profdata.
+    // `llvm-profdata show --all-functions` prints each function as:
+    //   function_name:
+    //     Hash: 0x...
+    //     Counters: N
+    let profdata_str = profdata_path.display().to_string();
+    let profdata_output = cmd!(sh, "{llvm_profdata} show --all-functions {profdata_str}").read()?;
+
+    let profdata_funcs: HashSet<&str> = profdata_output
+        .lines()
+        .filter_map(|line| {
+            // Function name lines: exactly 2-space indent, ending with ':'
+            if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+                let name = line.trim().trim_end_matches(':');
+                // Keep only workspace functions
+                if crate_names.iter().any(|c| name.contains(c.as_str())) {
+                    return Some(name);
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Extract function names from the JSON coverage export
+    let scope_args_json = scope_args.to_vec();
+    let json_output =
+        cmd!(sh, "cargo llvm-cov report --json {scope_args_json...}").remove_and_read()?;
+
+    let json: serde_json::Value = serde_json::from_str(&json_output)?;
+    let json_funcs: HashSet<&str> = json
+        .pointer("/data/0/functions")
+        .and_then(|v| v.as_array())
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|f| {
+                    let n = f.get("name")?;
+                    n.as_str()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Functions in profdata but not in export = likely hash mismatches
+    let mut mismatched: Vec<&str> = profdata_funcs.difference(&json_funcs).copied().collect();
+    mismatched.sort();
+
+    if mismatched.is_empty() {
+        println!("  No workspace coverage data mismatches detected.");
+    } else {
+        println!(
+            "  Workspace functions with mismatched coverage data ({}):",
+            mismatched.len()
+        );
+        let log_path = PathBuf::from("target/llvm-cov/mismatched-functions.txt");
+        let mut file = fs::File::create(&log_path)?;
+        for (i, func) in mismatched.iter().enumerate() {
+            writeln!(file, "{func}")?;
+            if i < 30 {
+                println!("    {func}");
+            }
+        }
+        if mismatched.len() > 30 {
+            println!(
+                "    ... and {} more (see {})",
+                mismatched.len() - 30,
+                log_path.display()
+            );
+        }
+        println!("  Full list: {}", log_path.display());
+        println!("  Tip: pipe through `rustfilt` to demangle function names");
+    }
+
+    Ok(())
+}
+
+/// Removes problematic env vars set by xtask being a cargo subcommand.
+/// Ring's build.rs emits rerun conditions for these env vars, many of which are
+/// absent under a regular `cargo check`, causing unnecessary rebuilds.
+// TODO: once ring releases 0.17.15+, we should no longer need this
+fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
+    let mut c = cmd;
+    for k in [
+        "CARGO_MANIFEST_DIR",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+        "CARGO_MANIFEST_LINKS",
+        "RING_PREGENERATE_ASM",
+        // "OUT_DIR",
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_OS",
+        "CARGO_CFG_TARGET_ENV",
+        "CARGO_CFG_TARGET_ENDIAN",
+        // "DEBUG",
+    ] {
+        c = c.env_remove(k);
+    }
+    c
+}
+
 pub trait CmdExt {
     fn remove_and_run(self) -> Result<(), xshell::Error>;
+    fn remove_and_read(self) -> Result<String, xshell::Error>;
 }
 
 impl CmdExt for Cmd<'_> {
-    /// removes a set of problematic env vars set by xtask being a cargo subcommand
-    /// this is for ring, as their build.rs emits rerun conditions for the following env vars
-    /// many of which are not present if you use a regular `cargo check`,
-    /// which causes a re-run if you alternate between `cargo check` and an xtask command
     fn remove_and_run(self) -> Result<(), xshell::Error> {
-        let mut c = self;
-        // TODO: once ring releases  0.17.15+, we should no longer need this
-        // these were taken from Ring's build.rs
-        for k in [
-            "CARGO_MANIFEST_DIR",
-            "CARGO_PKG_NAME",
-            "CARGO_PKG_VERSION_MAJOR",
-            "CARGO_PKG_VERSION_MINOR",
-            "CARGO_PKG_VERSION_PATCH",
-            "CARGO_PKG_VERSION_PRE",
-            "CARGO_MANIFEST_LINKS",
-            "RING_PREGENERATE_ASM",
-            // "OUT_DIR",
-            "CARGO_CFG_TARGET_ARCH",
-            "CARGO_CFG_TARGET_OS",
-            "CARGO_CFG_TARGET_ENV",
-            "CARGO_CFG_TARGET_ENDIAN",
-            // "DEBUG",
-        ] {
-            c = c.env_remove(k);
-        }
-        c.run()
+        remove_ring_env_vars(self).run()
+    }
+
+    fn remove_and_read(self) -> Result<String, xshell::Error> {
+        remove_ring_env_vars(self).read()
     }
 }
