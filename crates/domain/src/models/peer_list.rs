@@ -140,25 +140,8 @@ impl PeerList {
     /// Promote already-known peers to the persistent cache once an external source
     /// confirms their mining addresses are stake-and-pledge eligible.
     pub fn promote_peers_to_staked(&self, mining_addresses: &HashSet<IrysAddress>) -> usize {
-        let peers_to_promote = {
-            let inner = self.read();
-            inner
-                .unstaked_peer_purgatory
-                .iter()
-                .filter_map(|(_peer_id, peer)| {
-                    mining_addresses
-                        .contains(&peer.mining_address)
-                        .then_some(peer.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let promoted_count = peers_to_promote.len();
-        for peer in peers_to_promote {
-            self.add_or_update_peer(peer, true);
-        }
-
-        promoted_count
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        inner.promote_peers_to_staked(mining_addresses)
     }
 
     /// Get a peer by their peer_id (V2)
@@ -835,6 +818,32 @@ impl PeerListDataInner {
                 });
             }
         }
+    }
+
+    /// Promote matching peers from unstaked purgatory into the persistent cache
+    /// using the live peer entries under a single write lock.
+    fn promote_peers_to_staked(&mut self, mining_addresses: &HashSet<IrysAddress>) -> usize {
+        let peer_ids_to_promote = self
+            .unstaked_peer_purgatory
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                mining_addresses
+                    .contains(&peer.mining_address)
+                    .then_some(*peer_id)
+            })
+            .collect::<Vec<_>>();
+
+        let mut promoted_count = 0;
+        for peer_id in peer_ids_to_promote {
+            let Some(peer) = self.unstaked_peer_purgatory.peek(&peer_id).cloned() else {
+                continue;
+            };
+
+            self.add_or_update_peer(peer, true);
+            promoted_count += 1;
+        }
+
+        promoted_count
     }
 
     pub fn initiate_handshake(
@@ -1648,6 +1657,30 @@ mod tests {
             let promoted = peer_list.promote_peers_to_staked(&HashSet::from_iter([mining_addr]));
 
             assert_eq!(promoted, 1);
+            assert!(peer_list.persistable_peers().contains_key(&peer_id));
+            assert!(!peer_list.temporary_peers().contains(&peer_id));
+        }
+
+        #[test]
+        fn test_promote_peers_to_staked_preserves_latest_purgatory_state() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (mining_addr, peer_id, mut peer) = create_test_peer(1);
+
+            peer.protocol_version = ProtocolVersion::V1;
+            peer_list.add_or_update_peer(peer.clone(), false);
+
+            peer.protocol_version = ProtocolVersion::V2;
+            peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+            peer_list.add_or_update_peer(peer, false);
+
+            let promoted = peer_list.promote_peers_to_staked(&HashSet::from_iter([mining_addr]));
+
+            assert_eq!(promoted, 1);
+            let promoted_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("peer should remain present after promotion");
+            assert_eq!(promoted_peer.protocol_version, ProtocolVersion::V2);
             assert!(peer_list.persistable_peers().contains_key(&peer_id));
             assert!(!peer_list.temporary_peers().contains(&peer_id));
         }
