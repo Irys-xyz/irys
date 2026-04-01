@@ -69,8 +69,10 @@ balance = "10000000000000000000000000"
 balance = "10000000000000000000000000"
 ```
 
-Genesis pledges have no cost. The balance only needs to cover the stake
-commitment value, denominated in the chain's smallest token unit.
+Every miner with pledges must also have a stake -- the genesis builder creates
+one stake commitment per miner automatically. Genesis pledges have no cost, so
+the balance only needs to cover the stake commitment value, denominated in the
+chain's smallest token unit.
 
 ### 3. Build the Genesis Block
 
