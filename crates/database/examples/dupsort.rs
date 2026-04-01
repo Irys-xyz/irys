@@ -3,12 +3,13 @@ use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use irys_database::db::IrysDupCursorExt as _;
 use irys_database::db_cache::CachedChunk;
-use irys_database::{impl_compression_for_compact, open_or_create_db};
-use irys_types::Base64;
+use irys_database::{IrysDatabaseArgs as _, impl_compression_for_compact, open_or_create_db};
+use irys_types::{Base64, DbSyncMode};
 use paste::paste;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::cursor::DbDupCursorRO as _;
+use reth_db::mdbx::DatabaseArguments;
 use reth_db::table::TableInfo;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
@@ -76,15 +77,15 @@ impl Compact for CachedChunk2 {
 /// This is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value.
 /// Completely identical values (subkey + data) **are** deduplicated, but partially identical (same subkey + different data) are **NOT**, see chunk3.
 fn main() -> eyre::Result<()> {
-    let builder = tempfile::Builder::new()
-        .prefix("irys-test-")
-        .rand_bytes(8)
-        .tempdir();
-    let tmpdir = builder
-        .expect("Not able to create a temporary directory.")
-        .keep();
+    let tmpdir = irys_testing_utils::utils::TempDirBuilder::new()
+        .keep()
+        .build();
 
-    let db = open_or_create_db(tmpdir, DupSortTables::ALL, None)?;
+    let db = open_or_create_db(
+        tmpdir,
+        DupSortTables::ALL,
+        DatabaseArguments::irys_default(DbSyncMode::SafeNoSync)?,
+    )?;
     let write_tx = db.tx_mut()?;
     // write two chunks to the same key
     let chunk = CachedChunk2 {

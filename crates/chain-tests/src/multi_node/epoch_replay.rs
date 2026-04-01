@@ -5,7 +5,7 @@ use irys_domain::PackingParams;
 use irys_domain::{EpochSnapshot, PACKING_PARAMS_FILE_NAME};
 use irys_testing_utils::initialize_tracing;
 use irys_types::DataLedger;
-use irys_types::{irys::IrysSigner, IrysAddress, NodeConfig, H256};
+use irys_types::{H256, IrysAddress, NodeConfig, irys::IrysSigner};
 use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -36,11 +36,14 @@ macro_rules! assert_ok {
 /// - Partition assignments are correctly replayed
 /// - Peer catches up to the correct data ledger assignment state
 #[tokio::test]
-async fn heavy3_test_multi_node_epoch_replay() -> eyre::Result<()> {
+async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     // Configure minimal logging
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
-        std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_actors::data_sync_service=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off")
+        std::env::set_var(
+            "RUST_LOG",
+            "debug,irys_database=off,irys_actors::data_sync_service=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off",
+        )
     };
     initialize_tracing();
 
@@ -100,9 +103,11 @@ async fn heavy3_test_multi_node_epoch_replay() -> eyre::Result<()> {
         let expected_commitment_ids = [stake_tx1.id(), pledge1.id()];
         assert_eq!(block_1.commitment_tx_ids().len(), 2);
         assert_eq!(block_2.commitment_tx_ids().len(), 2);
-        assert!(expected_commitment_ids
-            .iter()
-            .all(|id| block_1.commitment_tx_ids().contains(id)));
+        assert!(
+            expected_commitment_ids
+                .iter()
+                .all(|id| block_1.commitment_tx_ids().contains(id))
+        );
 
         // Verify pledge assignments
         let epoch_snapshot = genesis_node
@@ -149,16 +154,20 @@ async fn heavy3_test_multi_node_epoch_replay() -> eyre::Result<()> {
                 .partition_hash,
             H256::from_base58("xJjza43xjkd7G6vhb4R14dHL1CB4EM5SytHSyUUJSdw")
         );
-        assert!(peer_sm_infos_before[0]
-            .partition_assignment
-            .unwrap()
-            .ledger_id
-            .is_none());
-        assert!(peer_sm_infos_before[0]
-            .partition_assignment
-            .unwrap()
-            .slot_index
-            .is_none());
+        assert!(
+            peer_sm_infos_before[0]
+                .partition_assignment
+                .unwrap()
+                .ledger_id
+                .is_none()
+        );
+        assert!(
+            peer_sm_infos_before[0]
+                .partition_assignment
+                .unwrap()
+                .slot_index
+                .is_none()
+        );
 
         peer1_node
     };

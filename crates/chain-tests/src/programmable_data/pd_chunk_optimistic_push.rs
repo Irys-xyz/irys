@@ -11,8 +11,8 @@
 //! 2. Cache-hit shortcut: duplicate push exits early without re-verification
 //! 3. Pending fetch reconciliation: push wins over in-flight P2P fetch
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
@@ -26,11 +26,11 @@ use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolCall as _;
 use irys_reth::pd_tx::build_pd_access_list_with_fees;
+use irys_types::ChunkFormat;
 use irys_types::chunk_provider::ChunkStorageProvider as _;
 use irys_types::gossip::PdChunkPush;
 use irys_types::irys::IrysSigner;
 use irys_types::range_specifier::PdDataRead;
-use irys_types::ChunkFormat;
 use irys_types::{
     Base64, DataLedger, LedgerChunkOffset, NodeConfig, PeerFilterMode, TxChunkOffset, UnpackedChunk,
 };

@@ -12,13 +12,13 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
-use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
+use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _, SystemLedger, Traced,
-    H256,
+    BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, H256,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _,
+    SystemLedger, Traced,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -27,7 +27,7 @@ use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
@@ -62,7 +62,9 @@ pub enum CriticalBlockPoolError {
     TransactionValidationFailed(BlockHash, TxIngressError),
     #[error("Trying to reprocess block {0:?} that is not in the pool")]
     TryingToReprocessBlockThatIsNotInPool(BlockHash),
-    #[error("Header/body mismatch in block {block_hash:?}: {ledger} ledger expects {expected} txs but found {found}. Missing tx IDs: {missing_ids:?}")]
+    #[error(
+        "Header/body mismatch in block {block_hash:?}: {ledger} ledger expects {expected} txs but found {found}. Missing tx IDs: {missing_ids:?}"
+    )]
     HeaderBodyMismatch {
         block_hash: BlockHash,
         ledger: String,
@@ -867,27 +869,23 @@ where
                     if let Err(err) = mempool
                         .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
                         .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
+                        && !matches!(err, TxIngressError::Skipped) {
                             warn!(
                                 "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
                                 commitment_tx.id(), current_block_hash, err
                             );
                         }
-                    }
                 }
                 for data_tx in block_transactions.all_data_txs() {
                     if let Err(err) = mempool
                         .handle_data_transaction_ingress_gossip(data_tx.clone())
                         .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
+                        && !matches!(err, TxIngressError::Skipped) {
                             warn!(
                                 "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
                                 data_tx.id, current_block_hash, err
                             );
                         }
-                    }
                 }
             });
         }

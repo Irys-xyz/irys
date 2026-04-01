@@ -1,25 +1,25 @@
+use crate::BlockStatusProvider;
 use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, BlockDiscoveryStub,
-    FakeGossipServer, MempoolStub,
+    BlockDiscoveryStub, FakeGossipServer, MempoolStub, data_handler_stub,
+    data_handler_with_stubbed_pool, wait_for_block, wait_until_listening,
 };
 use crate::types::GossipResponse;
-use crate::BlockStatusProvider;
-use futures::{future, FutureExt as _};
+use futures::{FutureExt as _, future};
 use irys_actors::mempool_guard::MempoolReadGuard;
-use irys_actors::mempool_service::{create_state, AtomicMempoolState};
+use irys_actors::mempool_service::{AtomicMempoolState, create_state};
 use irys_actors::services::ServiceSenders;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
-    SealedBlock,
+    BlockBody, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, MempoolConfig,
+    NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
+    RethPeerInfo, SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -29,12 +29,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
-fn create_test_config() -> Config {
-    let temp_dir = setup_tracing_and_temp_dir(None, false);
+fn create_test_config() -> (irys_testing_utils::tempfile::TempDir, Config) {
+    let temp_dir = TempDirBuilder::new().with_tracing().build();
     let mut node_config = NodeConfig::testing();
     node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
-    Config::new_with_random_peer_id(node_config)
+    (temp_dir, Config::new_with_random_peer_id(node_config))
 }
 
 fn create_test_block_body(block_hash: irys_types::BlockHash) -> BlockBody {
@@ -65,8 +65,11 @@ struct MockedServices {
 impl MockedServices {
     fn new(config: &Config) -> Self {
         let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
-                .expect("can't open temp dir"),
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("can't open temp dir"),
         ));
 
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
@@ -151,7 +154,7 @@ impl MockedServices {
 
 #[tokio::test]
 async fn should_process_block() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -213,7 +216,7 @@ async fn should_process_block() {
 
 #[tokio::test]
 async fn should_process_block_with_intermediate_block_in_api() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -221,8 +224,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let MockedServices {
         block_status_provider_mock,
@@ -386,7 +388,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
 #[tokio::test]
 async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -394,8 +396,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let MockedServices {
         block_status_provider_mock,
@@ -548,16 +549,23 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .await
         .expect("can't process block");
 
-    // Wait a little for processing - there's no specific event we're waiting for here
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Wait for block3's background processing to complete (parent fetch fails)
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while block_pool.is_block_processing(&block3.block_hash).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "block3 processing should have completed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     // Couldn't fetch block2, so block3 is not processed
     assert!(block_discovery_stub.get_blocks().is_empty());
     assert!(!block_pool.contains_block(&block2.block_hash).await);
     assert!(block_pool.contains_block(&block3.block_hash).await);
-    // Assert that both blocks are not marked as processing
     assert!(!block_pool.is_block_processing(&block2.block_hash).await);
-    assert!(!block_pool.is_block_processing(&block3.block_hash).await);
 
     info!("Adding block2 to the server and processing block4 to trigger reprocessing");
     // Add a previously missing block to the server
@@ -595,7 +603,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
 #[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -679,7 +687,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
 
 #[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,
@@ -701,8 +709,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     tokio::spawn(server_handle);
 
-    // Wait for the server to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until_listening(fake_peer_gossip_addr).await;
 
     let peer_list_guard = peer_list_data_guard.clone();
 
@@ -831,7 +838,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         }
     });
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let is_parent_in_the_tree =
         block_status_provider_mock.is_block_in_the_tree(&bogus_block.previous_block_hash);
     let is_parent_in_index = block_status_provider_mock.is_height_in_the_index(1);
@@ -857,7 +863,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
 #[tokio::test]
 async fn should_not_fast_track_block_already_in_index() {
-    let config = create_test_config();
+    let (_tmp_dir, config) = create_test_config();
 
     let MockedServices {
         block_status_provider_mock,

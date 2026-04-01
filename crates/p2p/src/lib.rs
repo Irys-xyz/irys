@@ -4,6 +4,8 @@ mod cache;
 mod chain_sync;
 mod gossip_client;
 mod gossip_data_handler;
+#[cfg(test)]
+mod gossip_fixture_tests;
 mod gossip_service;
 mod metrics;
 pub mod pd_chunk_fetcher;
@@ -13,6 +15,7 @@ mod server;
 #[cfg(test)]
 mod tests;
 mod types;
+pub(crate) mod wire_types;
 
 pub use block_pool::{BlockPool, BlockPoolError};
 pub use block_status_provider::{BlockStatus, BlockStatusProvider};
@@ -23,10 +26,10 @@ pub use chain_sync::{
 };
 pub use gossip_client::GossipClient;
 pub use gossip_data_handler::GossipDataHandler;
-pub use gossip_service::spawn_p2p_server_watcher_task;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
+pub use gossip_service::spawn_p2p_server_watcher_task;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-pub use peer_network_service::{spawn_peer_network_service, PeerListServiceError};
+pub use peer_network_service::{PeerListServiceError, spawn_peer_network_service};
 pub use server::GossipServer;
 pub use types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};

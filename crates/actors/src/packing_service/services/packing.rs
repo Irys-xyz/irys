@@ -460,7 +460,7 @@ mod tests {
     use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_packing::capacity_single::compute_entropy_chunk;
     use irys_storage::ie;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
@@ -476,7 +476,10 @@ mod tests {
         let to_pack = 10;
         let packing_end = num_chunks - to_pack;
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_packing_actor")
+            .with_tracing()
+            .build();
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -610,7 +613,10 @@ mod tests {
     async fn test_idle_detection_no_lost_notifications(
         #[case] start_idle: bool,
     ) -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_idle_detection"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_idle_detection")
+            .with_tracing()
+            .build();
         let config = create_test_config_with_chunks(&tmp_dir, 1, 10);
         let service = InternalPackingService::new(Arc::new(config.clone()));
 
@@ -638,7 +644,10 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn test_concurrent_job_enqueue_no_lost_jobs() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_concurrent_enqueue"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_concurrent_enqueue")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 4);
         let service = InternalPackingService::new(Arc::new(config.clone()));
         let handle = service.spawn_tokio_service(tokio::runtime::Handle::current());
@@ -690,7 +699,10 @@ mod tests {
     #[test_log::test(tokio::test)]
     #[timeout(Duration::from_secs(10))]
     async fn heavy4_test_semaphore_permits_released(#[case] concurrency: u16) -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_semaphore"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_semaphore")
+            .with_tracing()
+            .build();
         let config = create_test_config_with_chunks(&tmp_dir, concurrency, 5);
 
         let service = InternalPackingService::new(Arc::new(config.clone()));
@@ -733,7 +745,10 @@ mod tests {
     #[case::many_sms(vec![0, 1, 2, 3, 4])]
     #[test_log::test(tokio::test)]
     async fn test_storage_module_queue_isolation(#[case] sm_ids: Vec<usize>) -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_sm_isolation"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_sm_isolation")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 4);
         let service = InternalPackingService::new(Arc::new(config.clone()));
         let handle = service.spawn_tokio_service(tokio::runtime::Handle::current());
@@ -777,7 +792,10 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn test_channel_saturation_drops_jobs_gracefully() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_channel_saturation"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_channel_saturation")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 2);
         let service = InternalPackingService::new(Arc::new(config.clone()));
 

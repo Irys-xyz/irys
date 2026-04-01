@@ -1,6 +1,6 @@
 use irys_types::{IrysBlockHeader, IrysBlockHeaderV1};
 use std::{
-    fs::{create_dir_all, File},
+    fs::{File, create_dir_all},
     io::Write as _,
     path::{Path, PathBuf},
     sync::Arc,

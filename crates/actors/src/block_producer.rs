@@ -26,7 +26,7 @@ use irys_domain::{
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
     IrysBuiltPayload, IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
-    IrysPayloadTypes, compose_shadow_tx, reth_node_ethereum::EthEngineTypes,
+    IrysPayloadTypes, reth_node_ethereum::EthEngineTypes,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::NodeProvider;
@@ -716,6 +716,14 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        // Cap on parent-chain rebuilds per solution. This is distinct from
+        // MAX_RETRY_ATTEMPTS (5) in fully_produce_new_block_without_gossip,
+        // which retries transient errors (e.g. stale parent during tx selection).
+        // Here we handle the case where the canonical tip keeps advancing while
+        // we're building: each rebuild reuses the same mining solution on the
+        // new parent. 20 is a generous upper bound — in practice even a few
+        // consecutive tip changes are rare.
+        const MAX_REBUILD_ATTEMPTS: usize = 20;
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -737,6 +745,17 @@ pub trait BlockProdStrategy {
                 }
 
                 ParentCheckResult::MustRebuild { new_parent } => {
+                    if rebuild_attempts >= MAX_REBUILD_ATTEMPTS {
+                        warn!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            rebuild.count = rebuild_attempts,
+                            rebuild.max_attempts = MAX_REBUILD_ATTEMPTS,
+                            "Max rebuild attempts reached, discarding solution"
+                        );
+                        return Ok(None);
+                    }
+
                     info!(
                         solution.hash = %solution.solution_hash,
                         solution.vdf_step = solution.vdf_step,
@@ -870,9 +889,8 @@ pub trait BlockProdStrategy {
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
             let metadata = tx_result?;
-            let mut tx_raw = compose_shadow_tx(
+            let mut tx_raw = metadata.shadow_tx.compose(
                 self.inner().config.consensus.chain_id,
-                &metadata.shadow_tx,
                 metadata.transaction_fee,
             );
             let signature = local_signer
@@ -1386,14 +1404,23 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let (fresh_price, oracle_updated_at) = self.inner().price_oracle.current_snapshot()?;
+        let oracle_irys_price = match self.inner().price_oracle.current_snapshot() {
+            Ok((fresh_price, oracle_updated_at)) => choose_oracle_price(
+                parent_block.timestamp.to_secs(),
+                parent_block.oracle_irys_price,
+                fresh_price,
+                oracle_updated_at,
+            ),
 
-        let oracle_irys_price = choose_oracle_price(
-            parent_block.timestamp.to_secs(),
-            parent_block.oracle_irys_price,
-            fresh_price,
-            oracle_updated_at,
-        );
+            Err(irys_price_oracle::PriceOracleError::NoOraclesConfigured) => {
+                // No oracles configured — carry forward the parent block's price.
+                tracing::debug!(
+                    parent_price = %parent_block.oracle_irys_price,
+                    "no oracle available, reusing parent block price"
+                );
+                parent_block.oracle_irys_price
+            }
+        };
 
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
@@ -1410,7 +1437,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxsBundle> {
+    ) -> Result<MempoolTxsBundle, crate::tx_selector::TxSelectorError> {
         // Fetch mempool once
         let mut mempool_txs = self
             .fetch_best_mempool_txs(prev_block_header, block_timestamp)
@@ -1507,7 +1534,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
-    ) -> eyre::Result<MempoolTxs> {
+    ) -> Result<MempoolTxs, crate::tx_selector::TxSelectorError> {
         let ctx = crate::tx_selector::TxSelectionContext {
             block_tree: &self.inner().block_tree_guard,
             db: &self.inner().db,
@@ -1763,79 +1790,40 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 mod oracle_choice_tests {
     use super::choose_oracle_price;
     use irys_types::{UnixTimestamp, storage_pricing::Amount};
+    use rstest::rstest;
     use rust_decimal_macros::dec;
 
-    const MAX_AGE_SECS: u64 = 3 * 60; // 3 minutes
+    const MAX_AGE_SECS: u64 = 3 * 60;
 
-    #[test]
-    fn chooses_parent_when_oracle_is_too_stale() {
+    #[rstest]
+    // Oracle is more than 3 minutes behind parent - use parent
+    #[case::stale_oracle(1000, 1000 - MAX_AGE_SECS - 1, true)]
+    // Oracle is exactly at the 3-minute tolerance boundary - still use oracle
+    #[case::at_tolerance_boundary(1000, 1000 - MAX_AGE_SECS, false)]
+    // Oracle is fresher than parent - definitely use oracle
+    #[case::fresher_oracle(100, 200, false)]
+    // Both at same second - prefer oracle (authoritative source)
+    #[case::equal_timestamps(500, 500, false)]
+    fn choose_oracle_price_scenarios(
+        #[case] parent_ts_secs: u64,
+        #[case] oracle_ts_secs: u64,
+        #[case] expect_parent: bool,
+    ) {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
 
-        // Oracle is more than 3 minutes behind parent - use parent
         let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(1000),
+            UnixTimestamp::from_secs(parent_ts_secs),
             parent_price,
             oracle_price,
-            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS - 1), // 181 seconds behind
+            UnixTimestamp::from_secs(oracle_ts_secs),
         );
-        assert_eq!(
-            chosen, parent_price,
-            "should choose parent price when oracle is more than 3 minutes stale"
-        );
-    }
 
-    #[test]
-    fn chooses_oracle_when_within_tolerance() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Oracle is exactly at the 3-minute tolerance boundary - still use oracle
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(1000),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS), // exactly 180 seconds behind
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when exactly at 3-minute tolerance"
-        );
-    }
-
-    #[test]
-    fn chooses_oracle_when_oracle_is_fresher() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Oracle is fresher than parent - definitely use oracle
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(100),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(200),
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when oracle is fresher"
-        );
-    }
-
-    #[test]
-    fn chooses_oracle_when_timestamps_are_equal() {
-        let parent_price = Amount::token(dec!(2.0)).unwrap();
-        let oracle_price = Amount::token(dec!(1.0)).unwrap();
-
-        // Both at same second - prefer oracle (authoritative source)
-        let chosen = choose_oracle_price(
-            UnixTimestamp::from_secs(500),
-            parent_price,
-            oracle_price,
-            UnixTimestamp::from_secs(500),
-        );
-        assert_eq!(
-            chosen, oracle_price,
-            "should choose oracle price when timestamps are equal"
-        );
+        let expected = if expect_parent {
+            parent_price
+        } else {
+            oracle_price
+        };
+        assert_eq!(chosen, expected);
     }
 }

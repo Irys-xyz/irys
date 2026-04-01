@@ -1,5 +1,5 @@
 use crate::utils::*;
-use alloy_core::primitives::{Bytes, TxKind, B256, U256};
+use alloy_core::primitives::{B256, Bytes, TxKind, U256};
 use alloy_eips::{BlockId, Encodable2718 as _};
 use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
@@ -8,14 +8,14 @@ use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs;
 use irys_macros_diag_slow::diag_slow;
 use irys_reth_node_bridge::{
-    ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
-    IrysRethNodeAdapter,
+    IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _,
+    reth_e2e_test_utils::transaction::TransactionTestContext,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, SystemLedger, H256,
+    CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction, H256, IngressProofsList,
+    IrysBlockHeader, NodeConfig, SystemLedger, irys::IrysSigner,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -23,13 +23,13 @@ use reth::rpc::{
     api::EthApiClient,
     types::{Block, Header, TransactionRequest},
 };
-use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{
     sync::{
-        atomic::{AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -37,7 +37,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[tokio::test]
-async fn heavy_pending_chunks_test() -> eyre::Result<()> {
+async fn pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -126,10 +126,22 @@ async fn heavy_pending_chunks_test_inner(
     phase.store(4, Ordering::Relaxed);
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
-    // Mine some blocks to trigger block and chunk migration
+    // Wait for proofs before mining so the first inclusion path is stable.
     phase.store(5, Ordering::Relaxed);
     genesis_node
-        .mine_blocks((1 + block_migration_depth).try_into()?)
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
+        .await?;
+
+    // Mine the first block, then wait for the mempool confirmation metadata
+    // that later block templates rely on before mining the rest.
+    let inclusion_block = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
+        .await?;
+
+    // Mine the remaining blocks to trigger block and chunk migration.
+    genesis_node
+        .mine_blocks(block_migration_depth.try_into()?)
         .await?;
     phase.store(6, Ordering::Relaxed);
     genesis_node.wait_until_block_index_height(1, 5).await?;
@@ -152,6 +164,95 @@ async fn heavy_pending_chunks_test_inner(
     phase.store(10, Ordering::Relaxed);
     genesis_node.stop().await;
 
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::Result<()> {
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.consensus.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(1_000_000_000_000_000_000_000_000_u128),
+            ..Default::default()
+        },
+    )]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = signer.create_publish_transaction(
+        data,
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+
+    post_chunk(&app, &tx, 0, &chunks).await;
+    post_chunk(&app, &tx, 1, &chunks).await;
+    post_chunk(&app, &tx, 2, &chunks).await;
+    post_data_tx(&app, &tx).await;
+
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
+        .await?;
+
+    let stale_parent_hash = genesis_node.get_max_difficulty_block().block_hash;
+    let inclusion_block = genesis_node.mine_block().await?;
+    assert!(
+        inclusion_block.data_ledgers[DataLedger::Publish]
+            .tx_ids
+            .0
+            .contains(&tx.header.id),
+        "tx should be promoted into Publish when all chunks are present before tx ingress"
+    );
+
+    let raw_mempool_header = genesis_node
+        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
+        .await?;
+    assert_eq!(
+        raw_mempool_header.metadata().included_height,
+        Some(inclusion_block.height)
+    );
+    assert_eq!(
+        raw_mempool_header.promoted_height(),
+        Some(inclusion_block.height)
+    );
+
+    let best_txs = genesis_node.get_best_mempool_tx(stale_parent_hash).await?;
+
+    assert!(
+        !best_txs
+            .submit_tx
+            .iter()
+            .any(|header| header.id == tx.header.id),
+        "confirmed promoted tx must not be reselected into Submit when building on a stale parent"
+    );
+    assert!(
+        !best_txs
+            .publish_tx
+            .txs
+            .iter()
+            .any(|header| header.id == tx.header.id),
+        "already-promoted tx must not be selected for Publish again"
+    );
+
+    genesis_node.stop().await;
     Ok(())
 }
 
@@ -507,10 +608,12 @@ async fn heavy_mempool_persistence_test() -> eyre::Result<()> {
         .atomic_state()
         .batch_valid_submit_ledger_tx_cloned(&[storage_tx.header.id])
         .await;
-    assert!(data_tx_from_mempool
-        .first()
-        .expect("expected a data tx")
-        .is_some());
+    assert!(
+        data_tx_from_mempool
+            .first()
+            .expect("expected a data tx")
+            .is_some()
+    );
 
     // confirm the commitment tx has appeared back in the mempool after a restart
     let result = restarted_node
@@ -524,14 +627,14 @@ async fn heavy_mempool_persistence_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
+            "RUST_LOG",
+            "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+        );
     }
 
     initialize_tracing();
@@ -797,6 +900,10 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer2_block.block_hash, peer1_block.block_hash, genesis_block.height
         );
         reorg_tx = peer1_tx; // Peer1 won initially, so peer2's chain will overtake it
+        // Wait for the fork block's tx to be processed into peer2's mempool before mining
+        peer2_node
+            .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
+            .await?;
         peer2_node.mine_block().await?;
         expected_height += 1;
         peer2_node.get_block_by_height(expected_height).await?
@@ -806,6 +913,10 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
             peer1_block.block_hash, peer2_block.block_hash, genesis_block.height
         );
         reorg_tx = peer2_tx; // Peer2 won initially, so peer1's chain will overtake it
+        // Wait for the fork block's tx to be processed into peer1's mempool before mining
+        peer1_node
+            .wait_for_mempool(reorg_tx.header.id, seconds_to_wait)
+            .await?;
         peer1_node.mine_block().await?;
         expected_height += 1;
         peer1_node.get_block_by_height(expected_height).await?
@@ -870,9 +981,11 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
 
-    assert!(reorg_block.data_ledgers[DataLedger::Submit]
-        .tx_ids
-        .contains(&reorg_tx.header.id));
+    assert!(
+        reorg_block.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .contains(&reorg_tx.header.id)
+    );
 
     // Wind down test
     tokio::join!(genesis_node.stop(), peer1_node.stop(), peer2_node.stop());
@@ -911,15 +1024,15 @@ async fn heavy4_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 #[case::full_validation(true)]
 #[case::default(false)]
 #[test_log::test(tokio::test)]
-async fn heavy4_mempool_publish_fork_recovery_test(
+async fn heavy3_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
+            "RUST_LOG",
+            "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+        );
     }
     initialize_tracing();
 
@@ -1271,11 +1384,13 @@ async fn heavy4_mempool_publish_fork_recovery_test(
     assert!(b_blk3.data_ledgers[DataLedger::Publish].proofs.is_some());
 
     // a_blk1_tx1 should have a new ingress proof (assert it's not the original from a_blk2)
-    assert!(b_blk3.data_ledgers[DataLedger::Publish]
-        .proofs
-        .clone()
-        .unwrap()
-        .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
+    assert!(
+        b_blk3.data_ledgers[DataLedger::Publish]
+            .proofs
+            .clone()
+            .unwrap()
+            .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()]))
+    );
 
     // now we send (bypassing gossip) B3 back to A
     // it shouldn't reorg, and should accept the block
@@ -1343,7 +1458,7 @@ async fn heavy4_mempool_publish_fork_recovery_test(
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
 #[test_log::test(tokio::test)]
-async fn heavy4_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     // std::env::set_var(
     //     "RUST_LOG",
     //     "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -1615,7 +1730,7 @@ async fn heavy4_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
 #[test_log::test(tokio::test)]
-async fn heavy4_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -1929,12 +2044,12 @@ async fn heavy4_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let height = peer1.get_canonical_chain_height().await;
     peer1.mine_block().await?;
     // peers should be able to sync
-    let (gen, p2) = tokio::join!(
+    let (genesis_result, p2) = tokio::join!(
         genesis.wait_until_height(height + 1, 20),
         peer2.wait_until_height(height + 1, 20)
     );
 
-    let _block_hash = gen?;
+    let _block_hash = genesis_result?;
     let _block_hash = p2?;
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
@@ -1956,7 +2071,7 @@ async fn heavy4_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy3_test_evm_gossip() -> eyre::Result<()> {
+async fn heavy_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
@@ -2152,8 +2267,7 @@ async fn heavy3_test_evm_gossip() -> eyre::Result<()> {
 /// send (staked) invalid pledge commitment txs where tx id has been tampered with
 /// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
-async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()>
-{
+async fn heavy_staked_stake_and_pledge_tampered_id_rejected_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2184,7 +2298,10 @@ async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
         .expect_err("expected failure but got success");
     match res {
         AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
-            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
+            tracing::info!(
+                "Transaction from address {} failed to ingress with invalid signature, as expected!",
+                address
+            );
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2221,7 +2338,10 @@ async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
         .expect_err("expected failure but got success");
     match res {
         AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
-            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
+            tracing::info!(
+                "Transaction from address {} failed to ingress with invalid signature, as expected!",
+                address
+            );
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2243,7 +2363,7 @@ async fn heavy_staked_pledge_commitment_tx_signature_validation_on_ingress_test(
 #[test_log::test(tokio::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
-async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_unstaked_pledge_tampered_id_rejected_on_ingress_test() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
 
     let signer = genesis_config.new_random_signer();
@@ -2291,7 +2411,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 /// expect valid tx to ingress successfully
-async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
+async fn heavy_data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let seconds_to_wait = 10;
 
     let mut genesis_config = NodeConfig::testing();
@@ -2364,7 +2484,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     },
 )]
 #[test_log::test(tokio::test)]
-async fn stake_tx_fee_and_value_validation_test(
+async fn heavy_stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -2435,7 +2555,7 @@ async fn stake_tx_fee_and_value_validation_test(
     },
 )]
 #[test_log::test(tokio::test)]
-async fn pledge_tx_fee_validation_test(
+async fn heavy_pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
@@ -2558,7 +2678,7 @@ async fn heavy_commitment_tx_valid_higher_fee_test(
 /// see what txs get included (assert its count is equal to `initial_commitments` + 1)
 /// transfer the user enough funds to afford the remaining commitments
 /// produce another block, make sure it includes the rest
-async fn heavy_commitment_tx_cumulative_fee_validation_test(
+async fn commitment_tx_cumulative_fee_validation_test(
     #[case] starting_balance: irys_types::U256,
     #[case] initial_commitments: u64,
     #[case] total_pledge_count: u64,
@@ -2726,10 +2846,12 @@ async fn heavy_commitment_tx_cumulative_fee_validation_test(
         .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
         .unwrap_or_else(HashSet::new);
 
-    assert!(block3_tx_ids
-        .difference(&third_block_commitments)
-        .collect::<Vec<_>>()
-        .is_empty());
+    assert!(
+        block3_tx_ids
+            .difference(&third_block_commitments)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 
     assert_eq!(
         first_block_commitments.len() + third_block_commitments.len(),

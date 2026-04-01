@@ -1,5 +1,5 @@
 use crate::ApiState;
-use actix_web::{http::header::ContentType, web, HttpResponse};
+use actix_web::{HttpResponse, http::header::ContentType, web};
 use irys_types::BlockHash;
 use serde::{Deserialize, Serialize};
 

@@ -1,14 +1,11 @@
-use std::time::Duration;
-
-use irys_chain::{utils::load_config, IrysNode};
+use irys_chain::{IrysNode, utils::load_config};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
-use tokio::time::sleep;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Registry,
+    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 #[cfg(feature = "telemetry")]
@@ -20,12 +17,26 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 #[tokio::main]
 #[tracing::instrument(level = "trace", skip_all)]
 async fn main() -> eyre::Result<()> {
+    // IMPORTANT: Must run before any code that calls `get_version()` (e.g. handshake defaults).
+    // The OnceLock is set-once, so late initialization panics.
+    irys_types::init_version(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA"),
+        env!("GIT_HAS_TAG")
+            .parse()
+            .expect("GIT_HAS_TAG must be 'true' or 'false'"),
+        env!("GIT_DIRTY")
+            .parse()
+            .expect("GIT_DIRTY must be 'true' or 'false'"),
+    );
+
     // Load .env file if present (silently ignore if not found)
     let _ = dotenvy::dotenv();
 
     if cfg!(debug_assertions) {
-        eprintln!("WARNING: cfg!(debug_assertions) is TRUE. this setting toggles certain performance and durability settings to improve test performance, which is detrimental to production usecases. RECOMPILE WITH --release, or wait 5 seconds.");
-        sleep(Duration::from_secs(5)).await;
+        eprintln!(
+            "WARNING: Running a debug build. Performance will be degraded. RECOMPILE WITH --release for production use."
+        );
     }
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -60,8 +71,18 @@ async fn main() -> eyre::Result<()> {
     // load the config
     let config = load_config()?;
 
+    if config.run_mode.is_test() {
+        eprintln!(
+            "WARNING: run_mode is set to Test. Durability and performance settings are optimized for testing, not production. If this is unintentional, check your node configuration."
+        );
+    }
+
     // start the node
-    info!("starting the node, mode: {:?}", &config.node_mode);
+    info!(
+        node_version = %irys_types::get_version(),
+        "starting irys node, mode: {:?}",
+        &config.node_mode
+    );
     let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(config)?;
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
         .start()

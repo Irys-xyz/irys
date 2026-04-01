@@ -1,6 +1,13 @@
 #!/bin/bash
 # custom devcontainer setup script
 # this is designed for linux hosts! (notably the tempfs in the main devcontainer config - everything else should be platform-agnostic)
+
+# Docker mounts tmpfs with noexec by default; remount with exec so tests
+# can spawn stub binaries from IRYS_CUSTOM_TMP_DIR=/tmpfs.
+if mountpoint -q /tmpfs && findmnt -no OPTIONS /tmpfs | grep -q noexec; then
+    sudo mount -o remount,exec /tmpfs
+fi
+
 mkdir -p ~/.cargo
 cat << 'EOF' >> ~/.cargo/config.toml
 [build]

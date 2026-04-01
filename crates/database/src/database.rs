@@ -1,6 +1,8 @@
 use std::ops::RangeBounds;
 use std::path::Path;
 
+use irys_types::DbSyncMode;
+
 use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
@@ -16,9 +18,9 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem,
-    TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    DataRoot, DataTransactionHeader, DatabaseProvider, DatabaseVersion, H256, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE,
+    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -29,31 +31,59 @@ use reth_db::transaction::DbTxMut;
 use reth_db::{
     ClientVersion, DatabaseEnv, DatabaseError,
     cursor::*,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration, SyncMode},
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
 };
 use reth_db_api::Database as _;
 use tracing::{debug, warn};
+
+/// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
+pub trait IrysDatabaseArgs {
+    /// Default args with the given sync mode.
+    ///
+    /// Unbounded read transaction duration, 10 MB growth step, 20 MB shrink threshold.
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+
+    /// Default args with `UtterlyNoSync` — for tests only.
+    fn irys_testing() -> eyre::Result<DatabaseArguments>;
+
+    /// Cache-tuned args: larger growth/shrink thresholds (50 MB / 100 MB).
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+}
+
+impl IrysDatabaseArgs for DatabaseArguments {
+    fn irys_default(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((10 * MEGABYTE).into())
+            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
+            .with_sync_mode(Some(sync_mode.into())))
+    }
+
+    fn irys_testing() -> eyre::Result<DatabaseArguments> {
+        Self::irys_default(DbSyncMode::UtterlyNoSync)
+    }
+
+    fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
+        Ok(Self::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((50 * MEGABYTE).into())
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
+            // Cache preset adjusts geometry for larger write batches (bigger growth
+            // step / shrink threshold). Durability semantics are determined by the
+            // caller-provided sync_mode, not by this preset.
+            .with_sync_mode(Some(sync_mode.into())))
+    }
+}
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
 pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
+    args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = args.unwrap_or(
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((10 * MEGABYTE).into())
-            .with_shrink_threshold((20 * MEGABYTE).try_into()?)
-            .with_sync_mode(if cfg!(debug_assertions) {
-                Some(SyncMode::UtterlyNoSync)
-            } else {
-                Some(SyncMode::Durable)
-            }),
-    );
-
     // Note: Metrics recorder should be installed via init_telemetry() before this is called.
     // The OpenTelemetryRecorder bridges `metrics` crate to OTEL for push-based export.
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
@@ -64,25 +94,9 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     path: P,
     tables: &[T],
-    args: Option<DatabaseArguments>,
+    sync_mode: DbSyncMode,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = args.unwrap_or(
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((50 * MEGABYTE).into())
-            .with_shrink_threshold((100 * MEGABYTE).try_into()?)
-            // Cache data is non-authoritative and can be rebuilt from chain state,
-            // so trade durability for write throughput by skipping fsync operations.
-            // SafeNoSync preserves DB integrity on crash (rolls back to last steady
-            // commit) — only recent uncommitted transactions are lost.
-            .with_sync_mode(if cfg!(debug_assertions) {
-                Some(SyncMode::UtterlyNoSync)
-            } else {
-                Some(SyncMode::SafeNoSync)
-            }),
-    );
-    open_or_create_db(path, tables, Some(args))
+    open_or_create_db(path, tables, DatabaseArguments::irys_cache(sync_mode)?)
 }
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
@@ -756,7 +770,7 @@ pub fn block_index_latest_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
 /// Returns the number of blocks stored in the block index.
 pub fn block_index_num_blocks<T: DbTx>(tx: &T) -> eyre::Result<u64> {
     let count = tx.entries::<MigratedBlockHashes>()?;
-    Ok(count as u64)
+    Ok(u64::try_from(count)?)
 }
 
 /// Deletes block index entries for all heights in the given range from both tables.
@@ -796,8 +810,14 @@ pub fn walk_all<T: Table, TX: DbTx>(
     Ok(walker.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(), DatabaseError> {
-    tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
+pub fn set_database_schema_version<T: DbTxMut>(
+    tx: &T,
+    version: DatabaseVersion,
+) -> Result<(), DatabaseError> {
+    tx.put::<Metadata>(
+        MetadataKey::DBSchemaVersion,
+        (version as u32).to_le_bytes().to_vec(),
+    )
 }
 
 pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
@@ -816,22 +836,24 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 
 #[cfg(test)]
 mod tests {
-    use arbitrary::Arbitrary as _;
-    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
-    use rand::Rng as _;
-    use reth_db::Database as _;
-    use tempfile::tempdir;
-
     use crate::{
         block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
         insert_commitment_tx, tables::IrysTables,
     };
+    use arbitrary::Arbitrary as _;
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
+    use rand::Rng as _;
+    use reth_db::Database as _;
 
-    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
+    use super::{
+        IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
+        tx_header_by_txid,
+    };
+    use reth_db::mdbx::DatabaseArguments;
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
-        let path = tempdir()?;
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         println!("TempDir: {:?}", path);
 
         // Generate arbitrary metadata using Arbitrary trait with properly sized buffer
@@ -847,7 +869,12 @@ mod tests {
                 metadata: irys_types::DataTransactionMetadata::arbitrary(&mut u)?,
             });
 
-        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
 
         // Write a Tx
         let _ = db.update(|tx| insert_tx_header(tx, &tx_header))?;
@@ -902,9 +929,11 @@ mod tests {
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
-        use tempfile::tempdir;
+        use rstest::rstest;
 
         use super::open_or_create_db;
+        use crate::IrysDatabaseArgs as _;
+        use reth_db::mdbx::DatabaseArguments;
 
         fn make_tx_header(tx_id: H256) -> DataTransactionHeader {
             DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
@@ -916,11 +945,24 @@ mod tests {
             })
         }
 
-        /// Tx included at height 5 on canonical chain, queried with max_height=10 → found
-        #[test]
-        fn returns_header_when_included_on_canonical_chain_within_height() {
-            let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+        #[rstest]
+        #[case::within_height_and_migrated(10, true, true)]
+        #[case::height_equals_max(5, true, true)]
+        #[case::height_exceeds_max(3, true, false)]
+        #[case::unmigrated_height(10, false, false)]
+        /// Verifies `tx_header_by_txid_canonical` respects both height bounds and migration status.
+        fn canonical_lookup(
+            #[case] max_height: u64,
+            #[case] insert_migration: bool,
+            #[case] expect_found: bool,
+        ) {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
 
             let tx_id = H256::random();
             let tx_header = make_tx_header(tx_id);
@@ -930,74 +972,21 @@ mod tests {
                 insert_tx_header(tx, &tx_header)
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 set_data_tx_included_height(tx, &tx_id, 5)?;
-                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                if insert_migration {
+                    tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                }
                 Ok(())
             })
             .unwrap()
             .unwrap();
 
             let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
+                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, max_height))
                 .unwrap();
-            assert!(
+            assert_eq!(
                 result.is_some(),
-                "tx on canonical chain within height should be found"
-            );
-        }
-
-        /// Tx included at height 5, but queried with max_height=3 → rejected (too new for parent)
-        #[test]
-        fn rejects_header_when_included_height_exceeds_max() {
-            let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-
-            let tx_id = H256::random();
-            let tx_header = make_tx_header(tx_id);
-            let block_hash_at_5 = H256::random();
-
-            db.update(|tx| -> Result<(), DatabaseError> {
-                insert_tx_header(tx, &tx_header)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                set_data_tx_included_height(tx, &tx_id, 5)?;
-                tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
-                Ok(())
-            })
-            .unwrap()
-            .unwrap();
-
-            let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 3))
-                .unwrap();
-            assert!(
-                result.is_none(),
-                "tx included at height 5 should be rejected when max_height is 3"
-            );
-        }
-
-        /// Tx included at height 5, no MigratedBlockHashes entry → rejected
-        #[test]
-        fn rejects_header_at_unmigrated_height() {
-            let path = tempdir().unwrap();
-            let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-
-            let tx_id = H256::random();
-            let tx_header = make_tx_header(tx_id);
-
-            db.update(|tx| -> Result<(), DatabaseError> {
-                insert_tx_header(tx, &tx_header)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                set_data_tx_included_height(tx, &tx_id, 5)?;
-                Ok(())
-            })
-            .unwrap()
-            .unwrap();
-
-            let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, 10))
-                .unwrap();
-            assert!(
-                result.is_none(),
-                "tx at unmigrated height should be rejected"
+                expect_found,
+                "max_height={max_height}, migrated={insert_migration} => found={expect_found}"
             );
         }
     }

@@ -1,17 +1,17 @@
 use crate::utils::IrysNodeTest;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
-    DataTransactionHeader, DataTransactionHeaderV1, IrysTransactionCommon as _, NodeConfig, H256,
+    DataTransactionHeader, DataTransactionHeaderV1, H256, IrysTransactionCommon as _, NodeConfig,
     U256,
 };
-use reth_db::{transaction::DbTxMut as _, Database as _};
+use reth_db::{Database as _, transaction::DbTxMut as _};
 use tracing::info;
 
 /// Pre-populates the DB with two data roots:
 /// - data_root_1: 3 ingress proofs (2 from signer A with different anchors, 1 from signer B) → dedup to 2
 /// - data_root_2: 2 ingress proofs (1 from signer A, 1 from signer B) → no dedup needed
 #[test_log::test(tokio::test)]
-async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
+async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     let chunk_size = 256_usize;

@@ -44,7 +44,10 @@ fn get_current_time_nanos() -> u64 {
 #[inline]
 fn handle_instant_before_base(instant: Instant, base: Instant) -> u64 {
     match instant.checked_duration_since(base) {
-        Some(duration) => duration.as_nanos().min(u64::MAX as u128) as u64,
+        Some(duration) => {
+            // Saturate at u64::MAX: nanoseconds since base overflowing u64 (~584 years) is unreachable.
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        }
         None => 0,
     }
 }
@@ -57,7 +60,8 @@ fn has_timeout_elapsed(stored_nanos: u64, timeout: Duration) -> bool {
     }
     let current_nanos = get_current_time_nanos();
     let elapsed_nanos = current_nanos.saturating_sub(stored_nanos);
-    let timeout_nanos = timeout.as_nanos().min(u64::MAX as u128) as u64;
+    // Saturate at u64::MAX: a timeout of 584+ years will always be treated as not-yet-elapsed.
+    let timeout_nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
     elapsed_nanos >= timeout_nanos
 }
 

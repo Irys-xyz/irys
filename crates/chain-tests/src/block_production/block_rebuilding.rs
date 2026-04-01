@@ -9,14 +9,14 @@
 //! 1. VDF too old - solution's VDF step is not greater than parent's VDF step
 //! 2. Valid solution reuse - parent changes but solution remains valid
 
-use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_actors::{BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait};
 use irys_reth::IrysBuiltPayload;
-use irys_types::{block_production::SolutionContext, NodeConfig, SealedBlock as IrysSealedBlock};
+use irys_types::{NodeConfig, SealedBlock as IrysSealedBlock, block_production::SolutionContext};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
-use crate::utils::{solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, solution_context};
 
 /// Strategy that can pause and resume block production for testing.
 struct TrackingStrategy {
@@ -59,7 +59,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn heavy3_solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -181,7 +181,7 @@ async fn heavy3_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// then generate the solution on node1 — guaranteeing the solution's VDF
 /// step is strictly greater. The gossiped block triggers the parent change.
 #[test_log::test(tokio::test)]
-async fn heavy3_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup

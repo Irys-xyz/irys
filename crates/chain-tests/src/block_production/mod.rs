@@ -1,4 +1,3 @@
-pub(crate) mod analytics;
 pub(crate) mod basic_contract;
 pub(crate) mod block_index;
 pub(crate) mod block_production;

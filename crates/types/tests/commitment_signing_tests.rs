@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use irys_types::{serde_utils, CommitmentTransaction, IrysTransactionCommon as _};
+use irys_types::{CommitmentTransaction, IrysTransactionCommon as _, serde_utils};
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 

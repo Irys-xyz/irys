@@ -4,8 +4,8 @@ use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::http::header::ContentType;
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{
+    DataLedger, U256, UnixTimestamp,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config},
-    DataLedger, UnixTimestamp, U256,
 };
 
 #[test_log::test(tokio::test)]
@@ -65,7 +65,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_small_data() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -158,7 +158,7 @@ async fn pricing_endpoint_small_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -180,7 +180,7 @@ async fn pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
@@ -266,7 +266,10 @@ async fn pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         price_info.bytes,
         ctx.node_ctx.config.consensus.chunk_size * 2
     );
-    assert_ne!(data_size_bytes, ctx.node_ctx.config.consensus.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
+    assert_ne!(
+        data_size_bytes, ctx.node_ctx.config.consensus.chunk_size,
+        "for the test to be accurate, the requested size must not be equal to the configs chunk size"
+    );
 
     ctx.stop().await;
     Ok(())
@@ -380,9 +383,9 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
 /// A single node is configured with a hardfork that activates ~5 seconds after genesis.
 #[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Result<()> {
+    use irys_types::UnixTimestamp;
     use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD, Sprite};
     use irys_types::storage_pricing::Amount;
-    use irys_types::UnixTimestamp;
     use rust_decimal_macros::dec;
 
     // Define our ingress proof values

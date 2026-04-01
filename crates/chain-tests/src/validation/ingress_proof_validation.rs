@@ -1,18 +1,17 @@
-use crate::utils::{solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, solution_context};
 use irys_actors::{
-    async_trait,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_validation::PreValidationError,
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
-use irys_types::ingress::{generate_ingress_proof, IngressProofV1};
+use irys_types::ingress::{IngressProofV1, generate_ingress_proof};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IngressProofsList, IrysBlockHeader, NodeConfig,
+    CommitmentTransaction, DataTransactionHeader, IngressProof, IngressProofsList, IrysBlockHeader,
+    NodeConfig, irys::IrysSigner,
 };
 use reth_db::Database as _;
 
@@ -21,7 +20,7 @@ use reth_db::Database as _;
 /// signed by an unstaked signer, and asserts that block validation fails with
 /// PreValidationError::UnstakedIngressProofSigner.
 #[test_log::test(tokio::test)]
-async fn heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()> {
+async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub data_tx: DataTransactionHeader,
@@ -38,7 +37,10 @@ async fn heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Resu
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
@@ -168,7 +170,7 @@ async fn heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Resu
 /// 5. Unstake signer B and mine to next epoch (B is no longer staked)
 /// 6. Query mempool's proof collection and verify only 1 proof is returned
 #[test_log::test(tokio::test)]
-async fn heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
+async fn mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
 
@@ -366,8 +368,8 @@ async fn heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
 /// This test verifies that the mempool rejects ingress proofs from completely unstaked
 /// signers (spam protection), but accepts proofs from signers with pending stake commitments.
 #[test_log::test(tokio::test)]
-async fn heavy3_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs(
-) -> eyre::Result<()> {
+async fn heavy_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs()
+-> eyre::Result<()> {
     // 1. Setup: genesis node + two funded signers
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;

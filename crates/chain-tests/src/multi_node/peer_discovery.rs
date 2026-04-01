@@ -4,15 +4,15 @@ use std::{
 };
 
 use crate::utils::IrysNodeTest;
-use actix_web::test::{call_service, read_body, TestRequest};
+use actix_web::test::{TestRequest, call_service, read_body};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
 use irys_domain::ScoreDecreaseReason;
 use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
-    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequestV2, HandshakeResponse,
-    IrysPeerId, NodeConfig, PeerAddress, RethPeerInfo,
+    BlockHash, HandshakeRequestV2, HandshakeResponse, IrysPeerId, NodeConfig, PeerAddress,
+    RethPeerInfo, build_user_agent, irys::IrysSigner,
 };
 use tracing::{debug, error, info};
 
@@ -135,19 +135,16 @@ async fn peer_discovery() -> eyre::Result<()> {
         }
     }
 
-    let miner_signer_2 = IrysSigner::random_signer(&config.consensus_config());
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
     // spellchecker:off
-    let version_json = serde_json::json!({
-        "version": "0.1.0",
+    // Fully literal JSON fixture — tests the server's JSON deserialization path.
+    // All values are hardcoded: the signature was computed from the deterministic
+    // fixture key above and the test's consensus config hash.
+    // To regenerate: build & sign the struct above, print the signature + hash.
+    let version_json: serde_json::Value = serde_json::from_str(r#"{
+        "version": "0.1.0+irys-rs",
         "protocol_version": "V2",
-        "mining_address": "4AV9BV6viDGKWW88TZ65qT1bZDMy",
-        "peer_id": "4JaNfJ1tQ2TCLREq6opq6pWGmCJW",
+        "mining_address": "4LjFMsJ1LSjQ4MppuAfErtDL5DeY",
+        "peer_id": "EnrGHeqCd5UQ2jTW2Mo32o6a2GG",
         "chain_id": 1270,
         "address": {
             "gossip": "127.0.0.2:8080",
@@ -155,19 +152,19 @@ async fn peer_discovery() -> eyre::Result<()> {
             "execution": {
                 "peering_tcp_addr": "127.0.0.2:8082",
                 "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-            },
+            }
         },
-        "timestamp": 0,
-        "user_agent": "miner2/0.1.0 (macos/aarch64)",
-        "consensus_config_hash": "5dGdi2oSdmpFdBGoUKGfHcWoQD4F6d6p8VhY9t9sZdfe",
-        "signature": "EoXNEmq4E4uoEoNVUcJ8A5VtteamtDtLcWfMJevjwLfLNDzebVQtFHcoqwTJqxDo8tVZBcTuHoqdNyb27RMEFK1wH"
-    });
+        "timestamp": 1700000000000,
+        "user_agent": "miner2/0.1.0 (linux/x86_64)",
+        "consensus_config_hash": "93MLiS8McWQZdeJLhe9WqSCjBm2UdUtdTHXPYcycs3wn",
+        "signature": "JXYzVuNxoKzb1c12XoFocbbmZQaRtm4f6uCVmVCnFQH1EcT2ndDhdWFQtfXPUUtu7Bo84oripK1vrpvsGjxFjAX71"
+    }"#).expect("valid JSON fixture");
     // spellchecker:on
 
     let req = TestRequest::post()
         .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.2:12345".parse().unwrap())
-        .set_json(&version_json) // Pass the JSON value directly
+        .set_json(&version_json)
         .to_request();
     let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
@@ -198,6 +195,13 @@ async fn peer_discovery() -> eyre::Result<()> {
             panic!("Expected Accepted response, got {:?}", rejected)
         }
     }
+
+    let miner_signer_2 = IrysSigner::random_signer(&config.consensus_config());
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
 
     let version_json = serde_json::json!({
         "version": "0.1.0",
@@ -360,7 +364,7 @@ async fn peer_discovery() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_should_reinitialize_handshakes() -> eyre::Result<()> {
+async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // TODO: this test should:
     //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.
     //  2. Peer 2 launched. Peer 2 has Peer 1 as trusted peer.
@@ -496,14 +500,18 @@ async fn heavy3_should_reinitialize_handshakes() -> eyre::Result<()> {
         0
     );
     assert!(!ctx_genesis_node.node_ctx.sync_state.is_syncing());
-    assert!(ctx_genesis_node
-        .node_ctx
-        .sync_state
-        .is_gossip_broadcast_enabled());
-    assert!(ctx_genesis_node
-        .node_ctx
-        .sync_state
-        .is_gossip_reception_enabled());
+    assert!(
+        ctx_genesis_node
+            .node_ctx
+            .sync_state
+            .is_gossip_broadcast_enabled()
+    );
+    assert!(
+        ctx_genesis_node
+            .node_ctx
+            .sync_state
+            .is_gossip_reception_enabled()
+    );
     info!(
         "GENESIS sync state: {:?}",
         ctx_genesis_node.node_ctx.sync_state

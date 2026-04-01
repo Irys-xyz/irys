@@ -1,4 +1,4 @@
-use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{BlockValidationOutcome, IrysNodeTest, read_block_from_state};
 use irys_types::NodeConfig;
 
 #[test_log::test(actix_web::test)]

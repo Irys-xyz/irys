@@ -33,3 +33,35 @@ impl TryFrom<u8> for CircuitState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn from_u8_failsafe_never_panics(value: u8) {
+            let state = CircuitState::from_u8_failsafe(value);
+            match value {
+                0 => prop_assert_eq!(state, CircuitState::Closed),
+                1 => prop_assert_eq!(state, CircuitState::Open),
+                2 => prop_assert_eq!(state, CircuitState::HalfOpen),
+                _ => prop_assert_eq!(state, CircuitState::Open, "invalid values default to Open"),
+            }
+        }
+
+        #[test]
+        fn try_from_roundtrip_for_valid_values(value in 0_u8..=2) {
+            let state = CircuitState::try_from(value).unwrap();
+            prop_assert_eq!(state as u8, value);
+        }
+
+        #[test]
+        fn try_from_rejects_invalid_values(value in 3_u8..=u8::MAX) {
+            let result = CircuitState::try_from(value);
+            prop_assert!(result.is_err());
+            prop_assert_eq!(result.unwrap_err(), value);
+        }
+    }
+}

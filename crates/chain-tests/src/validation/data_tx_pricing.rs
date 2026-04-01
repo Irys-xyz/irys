@@ -1,25 +1,24 @@
 use super::send_block_and_read_state;
 use crate::utils::{
-    assert_validation_error, gossip_data_tx_to_node, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    BlockValidationOutcome, IrysNodeTest, assert_validation_error, gossip_data_tx_to_node,
+    solution_context,
 };
 use irys_actors::{
-    async_trait,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
 use irys_domain::{BlockTreeReadGuard, ChainState};
-use irys_types::storage_pricing::{
-    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
-};
 use irys_types::IngressProofsList;
+use irys_types::storage_pricing::{
+    Amount, calculate_perm_fee_from_config, calculate_term_fee_from_config,
+};
 use irys_types::{
-    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
-    UnixTimestamp, U256,
+    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256,
+    UnixTimestamp,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
@@ -43,7 +42,10 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
@@ -146,7 +148,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
 
 // This test ensures that during full block validation, data transaction pricing validates the term fee
 #[test_log::test(actix_web::test)]
-async fn heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
+async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub malicious_tx: DataTransactionHeader,
@@ -162,7 +164,10 @@ async fn heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
@@ -270,7 +275,7 @@ async fn heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
 // Happy path: adjust EMA interval, mine enough blocks so pricing EMA differs from genesis,
 // submit a valid data tx priced via API, and expect the block to be fully validated.
 #[test_log::test(actix_web::test)]
-async fn heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
+async fn block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with small EMA interval so pricing EMA diverges from genesis quickly
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -338,7 +343,7 @@ async fn heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Res
 // The test deliberately proomotes the tx in a future EMA interval, meaning that
 // future price validations will always be invalid
 #[test_log::test(tokio::test)]
-async fn heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -463,7 +468,7 @@ async fn heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::
 // This is done by crafting a tx with invalid price fields -
 // if we skip validation then the block won't be rejected.
 #[test_log::test(tokio::test)]
-async fn heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -577,7 +582,10 @@ async fn heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],

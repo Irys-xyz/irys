@@ -1,8 +1,8 @@
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 use actix_web::{
-    web::{self, Json},
     Result,
+    web::{self, Json},
 };
 use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::block_tree_service;
@@ -334,3 +334,53 @@ impl Display for BlockParam {
 //         Ok(())
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn block_param_roundtrip_keywords(variant in prop_oneof![
+            Just("latest"),
+            Just("pending"),
+            Just("finalized"),
+        ]) {
+            let parsed = BlockParam::from_str(variant).unwrap();
+            let displayed = parsed.to_string();
+            prop_assert_eq!(displayed.as_str(), variant);
+
+            let reparsed = BlockParam::from_str(&displayed).unwrap();
+            prop_assert_eq!(reparsed, parsed);
+        }
+
+        #[test]
+        fn block_param_roundtrip_height(height: u64) {
+            let param = BlockParam::BlockHeight(height);
+            let displayed = param.to_string();
+            let reparsed = BlockParam::from_str(&displayed).unwrap();
+            prop_assert_eq!(reparsed, param);
+        }
+
+        #[test]
+        fn block_param_roundtrip_hash(bytes in proptest::collection::vec(any::<u8>(), 32)) {
+            let mut arr = [0_u8; 32];
+            arr.copy_from_slice(&bytes);
+            let param = BlockParam::Hash(H256(arr));
+            let displayed = param.to_string();
+            let reparsed = BlockParam::from_str(&displayed).unwrap();
+            prop_assert_eq!(reparsed, param);
+        }
+
+        #[test]
+        fn block_param_rejects_invalid_base58(s in "[^0-9a-zA-Z]+") {
+            if s.parse::<u64>().is_err()
+                && !matches!(s.as_str(), "latest" | "pending" | "finalized")
+            {
+                let result = BlockParam::from_str(&s);
+                prop_assert!(result.is_err());
+            }
+        }
+    }
+}

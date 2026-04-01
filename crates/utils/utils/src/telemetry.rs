@@ -413,15 +413,29 @@ pub fn flush_telemetry() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
-    #[test]
-    fn uuid_v7_trace_id_has_correct_version_and_variant() {
-        let id_gen = UuidV7IdGenerator;
-        let trace_id = id_gen.new_trace_id();
-        let bytes = trace_id.to_bytes();
+    proptest! {
+        #[test]
+        fn uuid_v7_trace_id_has_correct_version_and_variant(_ in 0_u32..100) {
+            let id_gen = UuidV7IdGenerator;
+            let trace_id = id_gen.new_trace_id();
+            let bytes = trace_id.to_bytes();
 
-        assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
-        assert_eq!(bytes[8] >> 6, 0b10, "variant bits must be 0b10");
+            prop_assert_eq!(bytes[6] >> 4, 0x7, "version nibble must be 7");
+            prop_assert_eq!(bytes[8] >> 6, 0b10, "variant bits must be 0b10");
+        }
+
+        #[test]
+        fn uuid_v7_span_id_is_nonzero(_ in 0_u32..100) {
+            let id_gen = UuidV7IdGenerator;
+            let span_id = id_gen.new_span_id();
+            prop_assert_ne!(
+                span_id.to_bytes(),
+                [0_u8; 8],
+                "span ID must not be all zeros"
+            );
+        }
     }
 
     #[test]
@@ -434,17 +448,6 @@ mod tests {
         assert!(
             id1.to_bytes() < id2.to_bytes(),
             "later trace ID must sort after earlier one"
-        );
-    }
-
-    #[test]
-    fn uuid_v7_span_id_is_nonzero() {
-        let id_gen = UuidV7IdGenerator;
-        let span_id = id_gen.new_span_id();
-        assert_ne!(
-            span_id.to_bytes(),
-            [0_u8; 8],
-            "span ID must not be all zeros"
         );
     }
 }

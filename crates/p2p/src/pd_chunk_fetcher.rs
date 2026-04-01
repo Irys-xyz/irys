@@ -1,6 +1,6 @@
 use irys_domain::PeerList;
-use irys_types::chunk_provider::{PdChunkFetchFailure, PdChunkFetchSuccess, PdChunkFetcher};
 use irys_types::PeerAddress;
+use irys_types::chunk_provider::{PdChunkFetchFailure, PdChunkFetchSuccess, PdChunkFetcher};
 
 use crate::gossip_client::GossipClient;
 

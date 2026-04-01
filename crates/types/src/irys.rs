@@ -1,8 +1,8 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Base64,
-    BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
-    HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysSignature, Signature, H256,
+    Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
+    H256, HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysSignature, Signature, generate_data_root, generate_leaves, resolve_proofs,
+    versioning::Signable as _,
 };
 use alloy_core::primitives::keccak256;
 
@@ -250,7 +250,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use crate::versioning::Signable as _;
-    use crate::{hash_sha256, validate_chunk, IrysAddress, H256};
+    use crate::{H256, IrysAddress, hash_sha256, validate_chunk};
     use rand::Rng as _;
     use reth_primitives_traits::crypto::secp256k1::recover_signer;
 

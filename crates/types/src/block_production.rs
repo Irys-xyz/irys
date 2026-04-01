@@ -1,4 +1,4 @@
-use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysAddress, TxPath, H256};
+use crate::{ChunkDataPath, H256, H256List, IrysAddress, TxPath, partition::PartitionHash};
 
 use serde::{Deserialize, Serialize};
 

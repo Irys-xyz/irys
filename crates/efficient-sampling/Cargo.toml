@@ -1,5 +1,5 @@
 [package]
-edition = "2021"
+edition.workspace = true
 name = "irys-efficient-sampling"
 version = "0.1.0"
 
@@ -12,6 +12,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+proptest.workspace = true
+test-log.workspace = true
 
 [lints]
 workspace = true

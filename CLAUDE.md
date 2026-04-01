@@ -114,6 +114,7 @@ Never add "Co-Authored-By" lines to commit messages.
 - `rstest` for parameterized tests, `proptest` for property-based tests
 - Failure tracking: `cargo xtask test` records failures to `target/nextest-failure-tracking/failures.json`
 - Crypto crates (`irys-vdf`, `irys-packing`, `irys-c`, `sha2`, `openssl`) are always compiled with `opt-level = 3`, even in dev builds
+- Use `irys_testing_utils::TempDirBuilder` for temp dirs in tests — never use `tempfile::tempdir()` or `std::env::temp_dir()` directly, so all test dirs go through `.tmp/`
 
 ### Local changes
 

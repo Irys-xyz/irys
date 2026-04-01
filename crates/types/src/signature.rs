@@ -1,10 +1,10 @@
 use crate::{Arbitrary, IrysAddress, Signature};
-use alloy_primitives::{bytes, U256 as RethU256};
+use alloy_primitives::{U256 as RethU256, bytes};
 use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_primitives_traits::crypto::secp256k1::recover_signer;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 //==============================================================================
 // IrysSignature
@@ -201,7 +201,7 @@ mod tests {
         BoundedFee, CommitmentTransaction, CommitmentTypeV2, DataLedger, IrysAddress, Signable as _,
     };
 
-    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
+    use crate::{ConsensusConfig, DataTransaction, DataTransactionHeader, H256, irys::IrysSigner};
     use alloy_core::hex;
 
     use alloy_rlp::{Decodable as _, Encodable as _};
@@ -403,5 +403,39 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn validate_signature_returns_false_when_recovery_fails() {
+        let default_sig = IrysSignature::default();
+        let prehash = [0_u8; 32];
+        let any_address = IrysAddress::from([1_u8; 20]);
+        assert!(default_sig.recover_signer(prehash).is_err());
+        assert!(!default_sig.validate_signature(prehash, any_address));
+    }
+
+    #[test]
+    fn from_base58_rejects_oversized_input() {
+        let long_string = "A".repeat(MAX_BS58_SIG_STRING_LENGTH + 1);
+        let err_msg = IrysSignature::from_base58(&long_string)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err_msg.contains("Invalid signature length"),
+            "expected length-guard error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn from_base58_accepts_max_length_input() {
+        // Passes length check but fails on invalid base58 decode
+        let max_length_string = "1".repeat(MAX_BS58_SIG_STRING_LENGTH);
+        let result = IrysSignature::from_base58(&max_length_string);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.contains("Invalid signature length"),
+            "should not fail on length check at boundary, got: {err_msg}"
+        );
     }
 }

@@ -8,7 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
-use crate::{IrysPeerId, UnixTimestamp, H256};
+use crate::{H256, IrysPeerId, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -89,8 +89,11 @@ impl Config {
 
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
-            std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.tx_anchor_expiry_depth)
+            self.consensus.block_migration_depth
+                <= u32::from(self.consensus.mempool.tx_anchor_expiry_depth),
+            "tx_anchor_expiry_depth ({}) must be >= block_migration_depth ({})",
+            self.consensus.mempool.tx_anchor_expiry_depth,
+            self.consensus.block_migration_depth,
         );
 
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
@@ -105,7 +108,12 @@ impl Config {
             .consensus
             .num_chunks_in_partition
             .div_ceil(self.consensus.num_chunks_in_recall_range);
-        ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
+        ensure!(
+            self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity,
+            "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})",
+            &self.consensus.vdf.max_allowed_vdf_fork_steps,
+            &minimum_step_capacity
+        );
 
         // ensure that prune_at_capacity_percent is a sane value
         let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
@@ -146,6 +154,22 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
+        // publish_ledger_epoch_length must be > 0 if set, and must not overflow when multiplied
+        if let Some(n) = self.consensus.epoch.publish_ledger_epoch_length {
+            ensure!(
+                n > 0,
+                "publish_ledger_epoch_length must be > 0 when set (got {})",
+                n
+            );
+            ensure!(
+                n.checked_mul(self.consensus.epoch.num_blocks_in_epoch)
+                    .is_some(),
+                "publish_ledger_epoch_length ({}) * num_blocks_in_epoch ({}) overflows u64",
+                n,
+                self.consensus.epoch.num_blocks_in_epoch
+            );
+        }
+
         Ok(())
     }
 }
@@ -177,6 +201,7 @@ impl From<&NodeConfig> for VdfConfig {
             num_checkpoints_in_vdf_step: consensus.num_checkpoints_in_vdf_step,
             max_allowed_vdf_fork_steps: consensus.max_allowed_vdf_fork_steps,
             sha_1s_difficulty: consensus.sha_1s_difficulty,
+            throttle: value.vdf.throttle,
         }
     }
 }
@@ -232,6 +257,10 @@ pub struct VdfConfig {
 
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
+
+    /// When true, enforce a minimum step duration to prevent VDF from
+    /// outrunning block production when sha_1s_difficulty is low.
+    pub throttle: bool,
 }
 
 impl VdfConfig {
@@ -537,7 +566,7 @@ pub mod serde_utils {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{PeerAddress, RethPeerInfo, H256};
+    use crate::{H256, PeerAddress, RethPeerInfo};
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -597,10 +626,10 @@ mod tests {
         min_difficulty_adjustment_factor = 0.25
 
         [vdf]
-        reset_frequency = 600
+        reset_frequency = 1200
         max_allowed_vdf_fork_steps = 60000
         num_checkpoints_in_vdf_step = 25
-        sha_1s_difficulty = 70000
+        sha_1s_difficulty = 1000
 
         [block_reward_config]
         inflation_cap = 100000000
@@ -723,7 +752,8 @@ mod tests {
         public_port = 0
 
         [vdf]
-        parallel_verification_thread_limit = 4
+        parallel_verification_thread_limit = 8
+        throttle = true
 
         [mempool]
         max_pending_pledge_items = 100
@@ -771,6 +801,13 @@ mod tests {
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
+        // TOML doesn't include these fields, so they default to production values
+        expected_config.run_mode = RunMode::default();
+        expected_config.database = DatabaseConfig::default();
+        expected_config.reth.db_sync_mode = DbSyncMode::Durable;
+        expected_config.reth.cross_block_cache_size_megabytes = None;
+        expected_config.reth.additional_validation_tasks = 2;
+        expected_config.vdf.core_pinning = CorePinning::default();
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
@@ -843,6 +880,49 @@ mod tests {
     }
 
     #[test]
+    fn test_publish_ledger_epoch_length_validation() {
+        // Some(0) should fail
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(0);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
+
+        // Some(1) should pass
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(1);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // None should pass
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = None;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // u64::MAX should fail (overflow with num_blocks_in_epoch)
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .epoch
+            .publish_ledger_epoch_length = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_with_expected_genesis_hash() {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         assert!(config.consensus.expected_genesis_hash.is_none());
@@ -853,5 +933,170 @@ mod tests {
         assert_eq!(updated.consensus.expected_genesis_hash, Some(hash));
         assert_eq!(updated.consensus.chain_id, config.consensus.chain_id);
         assert_eq!(updated.peer_id(), config.peer_id());
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn valid_config() -> Config {
+        Config::new_with_random_peer_id(NodeConfig::testing())
+    }
+
+    fn config_with_consensus(f: impl FnOnce(&mut ConsensusConfig)) -> Config {
+        let mut nc = NodeConfig::testing();
+        f(nc.consensus.get_mut());
+        Config::new_with_random_peer_id(nc)
+    }
+
+    fn config_with_node(f: impl FnOnce(&mut NodeConfig)) -> Config {
+        let mut nc = NodeConfig::testing();
+        f(&mut nc);
+        Config::new_with_random_peer_id(nc)
+    }
+
+    #[test]
+    fn valid_testing_config_passes_validation() {
+        valid_config()
+            .validate()
+            .expect("testing config should pass validation");
+    }
+
+    #[rstest]
+    #[case::tree_depth_equal_to_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_tree_depth = u64::from(c.block_migration_depth);
+        },
+        "Block tree depth"
+    )]
+    #[case::tree_depth_less_than_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_tree_depth = 1;
+            c.block_migration_depth = 2;
+        },
+        "Block tree depth"
+    )]
+    #[case::anchor_expiry_less_than_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 6;
+            c.mempool.tx_anchor_expiry_depth = 5;
+        },
+        "tx_anchor_expiry_depth"
+    )]
+    fn validate_rejects_depth_invariant_violations(
+        #[case] mutate: fn(&mut ConsensusConfig),
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_consensus(mutate);
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_peer_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Peer;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("expected_genesis_hash"),
+            "expected error about genesis hash, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_genesis_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Genesis;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        cfg.validate()
+            .expect("genesis mode should not require expected_genesis_hash");
+    }
+
+    #[test]
+    fn validate_rejects_insufficient_vdf_fork_steps() {
+        let cfg = config_with_consensus(|c| {
+            c.vdf.max_allowed_vdf_fork_steps = 0;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_allowed_vdf_fork_steps"),
+            "expected error about vdf fork steps, got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::zero_percent(0.0, "too low")]
+    #[case::negative_percent(-1.0, "too low")]
+    #[case::hundred_percent(100.0, "too high")]
+    #[case::over_hundred_percent(200.0, "too high")]
+    fn validate_rejects_bad_prune_capacity_percent(
+        #[case] percent: f64,
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.cache.prune_at_capacity_percent = percent;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_misaligned_partition_chunks() {
+        let cfg = config_with_consensus(|c| {
+            c.num_chunks_in_partition = 11;
+            c.num_chunks_in_recall_range = 2;
+            c.vdf.max_allowed_vdf_fork_steps = 60_000;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("num_chunks_in_partition must be a multiple"),
+            "expected alignment error, got: {msg}"
+        );
+    }
+
+    #[rstest]
+    #[case::max_valid_chunks(
+        |nc: &mut NodeConfig| { nc.mempool.max_valid_chunks = 0; },
+        "max_valid_chunks"
+    )]
+    #[case::max_preheader_chunks_per_item(
+        |nc: &mut NodeConfig| { nc.mempool.max_preheader_chunks_per_item = 0; },
+        "max_preheader_chunks_per_item"
+    )]
+    #[case::max_concurrent_chunk_ingress_tasks(
+        |nc: &mut NodeConfig| { nc.mempool.max_concurrent_chunk_ingress_tasks = 0; },
+        "max_concurrent_chunk_ingress_tasks"
+    )]
+    #[case::max_pending_chunk_items(
+        |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
+        "max_pending_chunk_items"
+    )]
+    fn validate_rejects_zero_mempool_capacities(
+        #[case] mutate: fn(&mut NodeConfig),
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_node(mutate);
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {msg}"
+        );
     }
 }

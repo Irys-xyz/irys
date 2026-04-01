@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, DataLedger, NodeConfig};
+use irys_types::{DataLedger, NodeConfig, irys::IrysSigner};
 
 #[tokio::test]
 /// demonstrate that duplicate txs are allowed into mempool, to allow for forks, but not returned by handle_get_best_mempool_txs()
@@ -36,11 +36,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // mine block including tx_for_migration
     node.mine_block().await?;
     let block1 = node.get_block_by_height(1).await?;
-    assert!(block1
-        .get_data_ledger_tx_ids()
-        .get(&DataLedger::Submit)
-        .unwrap()
-        .contains(&txid));
+    assert!(
+        block1
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .unwrap()
+            .contains(&txid)
+    );
 
     // mine enough blocks to cause block with tx_for_migration to migrate to index
     node.mine_blocks(
@@ -118,11 +120,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
         .await?;
     // retrieve block 2 once again
     let block2 = node.get_block_by_height(2).await?;
-    assert!(!block2
-        .get_data_ledger_tx_ids()
-        .get(&DataLedger::Submit)
-        .unwrap()
-        .contains(&txid));
+    assert!(
+        !block2
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .unwrap()
+            .contains(&txid)
+    );
 
     let final_block = node
         .get_block_by_height(config.consensus.get_mut().block_migration_depth as u64 + 2)

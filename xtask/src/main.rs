@@ -3,14 +3,15 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
-use xshell::{cmd, Cmd, Shell};
+use xshell::{Cmd, Shell, cmd};
 
 use xtask::failures::{
-    self, generate_nextest_config, get_failures_file_path, get_stats_file_path, FailuresFile,
-    RunResults,
+    self, FailuresFile, RunResults, generate_nextest_config, get_failures_file_path,
+    get_stats_file_path,
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
+const LLVM_COV_VERSION: &str = "0.6.16";
 const NEXTEST_VERSION: &str = "0.9.124";
 
 #[derive(Parser, Debug)]
@@ -25,7 +26,12 @@ enum Commands {
     /// Runs tests via nextest, with failure tracking (& optional failure-only reruns)
     Test {
         /// Produce coverage files
-        #[clap(short, long, default_value_t = false)]
+        #[clap(
+            short,
+            long,
+            default_value_t = false,
+            conflicts_with = "rerun_failures"
+        )]
         coverage: bool,
         /// Only run tests that failed in the previous run
         #[clap(long, default_value_t = false)]
@@ -82,6 +88,53 @@ enum Commands {
         fix: bool,
     },
     CleanWorkspace,
+    /// Run multiversion integration tests from the multiversion-tests crate.
+    ///
+    /// Examples:
+    ///   cargo xtask multiversion-test                          # all tests
+    ///   cargo xtask multiversion-test --test upgrade           # only tests/upgrade.rs
+    ///   cargo xtask multiversion-test --filter rolling         # tests matching "rolling"
+    ///   cargo xtask multiversion-test --test upgrade --filter rolling   # "rolling" in upgrade.rs
+    MultiversionTest {
+        /// Path to pre-built binary for the new (HEAD) version
+        #[clap(long)]
+        binary_new: Option<String>,
+        /// Path to pre-built binary for the old (base) version
+        #[clap(long)]
+        binary_old: Option<String>,
+        /// Git ref (branch/tag/hash) for the old version, or "CURRENT" to build
+        /// from the working tree (default: CURRENT)
+        #[clap(long)]
+        old_ref: Option<String>,
+        /// Git ref (branch/tag/hash) for the new version, or "CURRENT" to build
+        /// from the working tree (default: CURRENT)
+        #[clap(long)]
+        new_ref: Option<String>,
+        /// Which test file to run (e.g. "upgrade", "e2e"). Maps to `cargo test --test <name>`.
+        /// Can be specified multiple times.
+        #[clap(long = "test", short = 't')]
+        test_targets: Vec<String>,
+        /// Substring filter for test names (e.g. "rolling_upgrade").
+        /// Passed to the test runner after `--`.
+        #[clap(long, short)]
+        filter: Option<String>,
+        /// Cargo profile to build binaries with (e.g. "dev", "release", "debug-release").
+        /// When omitted, tries "debug-release" then falls back to "release".
+        #[clap(long)]
+        profile: Option<String>,
+        /// Remove the target/multiversion directory before running
+        #[clap(long, default_value_t = false)]
+        clean: bool,
+        /// Remove only the target/multiversion/test-data directory before running
+        #[clap(long, default_value_t = false)]
+        clean_data: bool,
+        /// Passthrough args forwarded verbatim after the built-in flags.
+        /// The first `--` ends xtask flags; a second `--` separates cargo
+        /// args from test-runner args (which land in `runner_passthrough`).
+        /// e.g. cargo xtask multiversion-test -- -- --test-threads=2
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Flaky {
         #[clap(short, long, help = "Number of iterations to run")]
         iterations: Option<usize>,
@@ -140,6 +193,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             monitor,
             heap_profile,
         } => {
+            if coverage && heap_profile {
+                return Err(eyre::eyre!(
+                    "--coverage and --heap-profile cannot be used together"
+                ));
+            }
             println!("cargo test");
             let _ = cmd!(
                 sh,
@@ -148,14 +206,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             .remove_and_run();
 
             if coverage {
-                cmd!(sh, "cargo install --locked --version 0.10.5 grcov").remove_and_run()?;
-                for (key, val) in [
-                    ("CARGO_INCREMENTAL", "0"),
-                    ("RUSTFLAGS", "-Cinstrument-coverage"),
-                    ("LLVM_PROFILE_FILE", "target/coverage/%p-%m.profraw"),
-                ] {
-                    sh.set_var(key, val);
-                }
+                println!("Installing llvm-tools and cargo-llvm-cov...");
+                cmd!(sh, "rustup component add llvm-tools").run()?;
+                cmd!(
+                    sh,
+                    "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                )
+                .remove_and_run()?;
+                cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
             }
 
             // this is needed otherwise some tests will fail (that assert panic messages)
@@ -258,17 +316,32 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let wrapper_path = build_wrapper(sh, wrapper_features)?;
                 let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
 
-                generate_nextest_config(&wrapper_path_str, failed_tests_filter.as_deref())?
+                generate_nextest_config(
+                    &wrapper_path_str,
+                    failed_tests_filter.as_deref(),
+                    coverage,
+                )?
             };
 
-            // Build the nextest command
-            let mut nextest_args = vec![
-                "nextest".to_string(),
-                "run".to_string(),
-                "--workspace".to_string(),
-                "--tests".to_string(),
-                "--all-targets".to_string(),
-            ];
+            let user_has_package = args
+                .iter()
+                .any(|a| a == "-p" || a == "--package" || a.starts_with("--package="));
+
+            let mut nextest_args = if coverage {
+                vec![
+                    "llvm-cov".to_string(),
+                    "nextest".to_string(),
+                    "--no-report".to_string(),
+                ]
+            } else {
+                vec!["nextest".to_string(), "run".to_string()]
+            };
+
+            if !user_has_package {
+                nextest_args.push("--workspace".to_string());
+            }
+            nextest_args.push("--tests".to_string());
+            nextest_args.push("--all-targets".to_string());
 
             // Validate passthrough args don't conflict with xtask-injected flags.
             let user_has_config_file = args
@@ -297,6 +370,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
                 nextest_args.push("--profile".to_string());
                 nextest_args.push("xtask-rerun-failures".to_string());
+            } else if coverage {
+                if user_has_profile {
+                    return Err(eyre::eyre!(
+                        "Do not pass --profile via xtask passthrough args when using --coverage; xtask selects the profile."
+                    ));
+                }
+                nextest_args.push("--profile".to_string());
+                nextest_args.push("coverage".to_string());
             } else if heap_profile {
                 if user_has_profile {
                     return Err(eyre::eyre!(
@@ -309,8 +390,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 nextest_args.push("heap-profile".to_string());
             }
 
-            // Add user-provided args
-            nextest_args.extend(args);
+            // Add user-provided args (by reference — args is needed later for coverage scope)
+            nextest_args.extend(args.iter().cloned());
 
             // Run nextest
             let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
@@ -360,22 +441,86 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
             }
 
-            // Propagate the test result
-            test_result?;
-
+            // Generate coverage reports before propagating test failures,
+            // so reports are available even when some tests fail.
             if coverage {
-                cmd!(sh, "mkdir -p target/coverage").remove_and_run()?;
-                cmd!(sh, "grcov . --binary-path ./target/debug/deps/ -s . -t html,cobertura --branch --ignore-not-existing --ignore '../*' --ignore \"/*\" -o target/coverage/").remove_and_run()?;
+                println!("Generating coverage reports...");
+                fs::create_dir_all("target/llvm-cov")?;
 
-                // Open the generated file
-                if std::option_env!("CI").is_none() {
-                    #[cfg(target_os = "macos")]
-                    cmd!(sh, "open target/coverage/html/index.html").remove_and_run()?;
+                // Forward package scope flags to `cargo llvm-cov report`.
+                // The report subcommand only accepts --package/-p, not
+                // --workspace or --exclude. When unsupported scope flags
+                // are present, warn that report coverage may be broader.
+                let mut scope_args: Vec<String> = Vec::new();
+                let mut has_unsupported_scope = false;
+                let mut iter = args.iter();
+                while let Some(arg) = iter.next() {
+                    if arg.starts_with("--package=") || arg.starts_with("-p=") {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                    } else if arg == "-p" || arg == "--package" {
+                        scope_args.push(arg.clone()); // clone: collecting user args for reuse
+                        if let Some(val) = iter.next() {
+                            scope_args.push(val.clone()); // clone: collecting user args for reuse
+                        }
+                    } else if arg == "--exclude"
+                        || arg.starts_with("--exclude=")
+                        || arg == "--workspace"
+                    {
+                        has_unsupported_scope = true;
+                        if arg == "--exclude" {
+                            iter.next(); // skip the value
+                        }
+                    }
+                }
+                if has_unsupported_scope {
+                    eprintln!(
+                        "Warning: cargo llvm-cov report does not support --workspace/--exclude; \
+                         report may include crates excluded from the test run"
+                    );
+                }
 
-                    #[cfg(target_os = "linux")]
-                    cmd!(sh, "xdg-open target/coverage/html/index.html").remove_and_run()?;
+                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
+                let html_result = cmd!(
+                    sh,
+                    "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
+                )
+                .remove_and_run();
+
+                if let Err(e) = &html_result {
+                    eprintln!("Warning: HTML coverage report generation failed: {e}");
+                }
+
+                let lcov_result = cmd!(
+                    sh,
+                    "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args_lcov...}"
+                )
+                .remove_and_run();
+
+                if let Err(e) = &lcov_result {
+                    eprintln!("Warning: LCOV coverage report generation failed: {e}");
+                }
+
+                if html_result.is_ok() {
+                    println!("  HTML report: target/llvm-cov/html/index.html");
+                    if std::env::var("CI").is_err() {
+                        #[cfg(target_os = "macos")]
+                        let _ = cmd!(sh, "open target/llvm-cov/html/index.html").remove_and_run();
+
+                        #[cfg(target_os = "linux")]
+                        let _ =
+                            cmd!(sh, "xdg-open target/llvm-cov/html/index.html").remove_and_run();
+                    }
+                }
+                if lcov_result.is_ok() {
+                    println!("  LCOV report: target/llvm-cov/lcov.info");
+                }
+
+                if let Err(e) = lcov_result {
+                    eprintln!("Warning: LCOV report generation failed: {e}");
                 }
             }
+
+            test_result?;
         }
         Commands::Check { args } => {
             println!("cargo check");
@@ -418,7 +563,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             println!("cargo doc");
             cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
 
-            if std::option_env!("CI").is_none() {
+            if std::env::var("CI").is_err() {
                 #[cfg(target_os = "macos")]
                 cmd!(sh, "open target/doc/irys/index.html").remove_and_run()?;
 
@@ -501,6 +646,142 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 println!("Cleaning {}", &name);
                 cmd!(sh, "cargo clean --package {name}").remove_and_run()?;
             }
+        }
+        Commands::MultiversionTest {
+            binary_new,
+            binary_old,
+            old_ref,
+            new_ref,
+            test_targets,
+            filter,
+            profile,
+            clean,
+            clean_data,
+            args,
+        } => {
+            println!("multiversion integration tests");
+            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("xtask CARGO_MANIFEST_DIR must have a parent");
+            let multiversion_dir = workspace_root.join("target/multiversion");
+            if clean {
+                if multiversion_dir.exists() {
+                    println!("Cleaning {}...", multiversion_dir.display());
+                    fs::remove_dir_all(&multiversion_dir)?;
+                    println!("Done.");
+                } else {
+                    println!("Nothing to clean (target/multiversion does not exist).");
+                }
+            } else if clean_data {
+                let test_data_dir = multiversion_dir.join("test-data");
+                if test_data_dir.exists() {
+                    println!("Cleaning {}...", test_data_dir.display());
+                    fs::remove_dir_all(&test_data_dir)?;
+                    println!("Done.");
+                } else {
+                    println!("Nothing to clean (target/multiversion/test-data does not exist).");
+                }
+            }
+            let binary_new = binary_new
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("binary_new: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            let binary_old = binary_old
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("binary_old: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            // Generate a human-readable, collision-resistant run ID.
+            let now = chrono::Local::now();
+            let run_id = format!(
+                "{}.{:03}-pid{}",
+                now.format("%Y-%m-%d_%H-%M-%S"),
+                now.timestamp_subsec_millis(),
+                std::process::id()
+            );
+            let _dir = sh.push_dir(workspace_root.join("crates/tooling/multiversion-tests"));
+            if let Some(ref path) = binary_new {
+                sh.set_var("IRYS_BINARY_NEW", path);
+            }
+            if let Some(ref path) = binary_old {
+                sh.set_var("IRYS_BINARY_OLD", path);
+            }
+            if let Some(ref git_ref) = old_ref {
+                sh.set_var("IRYS_OLD_REF", git_ref);
+            }
+            if let Some(ref git_ref) = new_ref {
+                sh.set_var("IRYS_NEW_REF", git_ref);
+            }
+            if let Some(ref p) = profile {
+                sh.set_var("IRYS_BUILD_PROFILE", p);
+            }
+            sh.set_var("IRYS_RUN_ID", &run_id);
+
+            // Pre-flight: when running *all* test targets, an explicit old version
+            // must be specified to avoid testing CURRENT against itself.
+            if test_targets.is_empty()
+                && binary_old.is_none()
+                && old_ref.as_deref().is_none_or(|r| r == "CURRENT")
+            {
+                return Err(eyre::eyre!(
+                    "multiversion-test: running all tests requires an old version.\n\
+                     Provide --binary-old <path> or --old-ref <git-ref> (not CURRENT)."
+                ));
+            }
+
+            // Build cargo test invocation.
+            // cargo test [--test <target>...] [--tests] <passthrough_cargo>
+            //   -- --ignored --test-threads=1 --nocapture [<filter>] <passthrough_runner>
+            let mut test_args = vec!["test".to_string()];
+            if test_targets.is_empty() {
+                // No specific test files — run all test targets.
+                test_args.push("--tests".to_string());
+            } else {
+                for target in &test_targets {
+                    test_args.push("--test".to_string());
+                    test_args.push(target.clone());
+                }
+            }
+
+            // Split passthrough args on `--` into cargo args and test runner args.
+            let (cargo_passthrough, runner_passthrough) = match args.iter().position(|a| a == "--")
+            {
+                Some(pos) => (args[..pos].to_vec(), args[pos + 1..].to_vec()),
+                None => (args, vec![]),
+            };
+            test_args.extend(cargo_passthrough);
+            test_args.extend([
+                "--".to_string(),
+                "--ignored".to_string(),
+                "--test-threads=1".to_string(),
+                "--nocapture".to_string(),
+            ]);
+            if let Some(ref f) = filter {
+                test_args.push(f.clone());
+            }
+            test_args.extend(runner_passthrough);
+            let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
+            let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
+
+            // Aggregate per-test .status marker files into a summary.
+            write_status_summary(&test_data_dir);
+
+            if result.is_err() {
+                if test_data_dir.exists() {
+                    eprintln!("test artifacts preserved at: {}", test_data_dir.display());
+                }
+                if let Ok(entries) = std::fs::read_dir(&multiversion_dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_name().to_string_lossy().starts_with("worktree-") {
+                            eprintln!("worktree preserved at: {}", entry.path().display());
+                        }
+                    }
+                }
+            }
+            result?;
         }
         Commands::Flaky {
             iterations,
@@ -612,7 +893,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         .run()
                 } else {
                     // Fallback for other platforms - try basic tee without script
-                    eprintln!("Warning: script command may not be available on this platform, progress bars may not display correctly");
+                    eprintln!(
+                        "Warning: script command may not be available on this platform, progress bars may not display correctly"
+                    );
                     let tee_command = format!(
                         "cargo {} 2>&1 | tee -a '{}'",
                         command_args.join(" "),
@@ -664,6 +947,79 @@ fn main() -> eyre::Result<()> {
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
+}
+
+/// Scans per-test `.status` marker files and writes an aggregate `status.txt`.
+///
+/// Each test's `Cluster::start()` writes `.status = "RUNNING"` into its run
+/// subdirectory; `Cluster::shutdown()` overwrites it with `"PASSED"`.  If the
+/// test panicked, shutdown never ran and the marker stays `RUNNING` → FAILED.
+fn write_status_summary(run_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(run_dir) else {
+        return;
+    };
+
+    let mut tests: Vec<(String, String, Option<String>, Option<String>)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let raw = match std::fs::read_to_string(e.path().join(".status")) {
+                Ok(contents) => contents,
+                Err(err) => {
+                    eprintln!("warning: failed to read .status for {name}: {err}");
+                    "FAILED".to_string()
+                }
+            };
+            let mut lines = raw.lines();
+            let status_line = lines.next().unwrap_or("").trim();
+            let status = match status_line {
+                "PASSED" => "PASSED",
+                "RUNNING" => "FAILED",
+                other => other,
+            };
+            let mut old_ref = None;
+            let mut new_ref = None;
+            for line in lines {
+                if let Some(val) = line.strip_prefix("old_ref: ") {
+                    old_ref = Some(val.to_owned());
+                } else if let Some(val) = line.strip_prefix("new_ref: ") {
+                    new_ref = Some(val.to_owned());
+                }
+            }
+            (name, status.to_owned(), old_ref, new_ref)
+        })
+        .collect();
+
+    if tests.is_empty() {
+        return;
+    }
+
+    tests.sort();
+
+    let mut summary = String::new();
+    for (name, status, old_ref, new_ref) in &tests {
+        let mut line = format!("{name}: {status}");
+        if let Some(r) = old_ref {
+            line.push_str(&format!(" (old: {r}"));
+            if let Some(r) = new_ref {
+                line.push_str(&format!(", new: {r})"));
+            } else {
+                line.push(')');
+            }
+        } else if let Some(r) = new_ref {
+            line.push_str(&format!(" (new: {r})"));
+        }
+        line.push('\n');
+        summary.push_str(&line);
+    }
+
+    let path = run_dir.join("status.txt");
+    if let Err(e) = std::fs::write(&path, &summary) {
+        eprintln!("warning: failed to write status summary: {e}");
+    } else {
+        eprintln!("test status summary: {}", path.display());
+    }
 }
 
 pub trait CmdExt {

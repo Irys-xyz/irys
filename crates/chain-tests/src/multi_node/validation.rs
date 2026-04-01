@@ -1,22 +1,22 @@
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+    IrysNodeTest, assert_validation_error, read_block_from_state, solution_context,
 };
 use irys_actors::{
+    BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
     async_trait,
     block_discovery::{AnchorItemType, BlockDiscoveryError, BlockDiscoveryFacade as _},
     block_validation::ValidationError,
     reth_ethereum_primitives,
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_reth::IrysBuiltPayload;
 use irys_types::{
-    ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
-    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, SendTraced as _,
-    UnixTimestampMs, H256, U256,
+    CommitmentTransaction, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader,
+    NodeConfig, SendTraced as _, U256, UnixTimestampMs, ingress::generate_ingress_proof,
+    storage_pricing::Amount,
 };
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ fn insert_block_header_for_gossip_test(
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
 #[test_log::test(tokio::test)]
-async fn heavy3_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -146,7 +146,7 @@ async fn heavy3_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<(
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
 #[test_log::test(tokio::test)]
-async fn heavy3_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -223,7 +223,7 @@ async fn heavy3_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
 #[test_log::test(tokio::test)]
-async fn heavy3_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
+async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub extra_tx: DataTransactionHeader,
@@ -337,7 +337,7 @@ async fn heavy3_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<(
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
 // "heavy3_" prefix: requires 3 CI threads (see .config/nextest.toml)
 #[test_log::test(tokio::test)]
-async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
+async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -450,13 +450,13 @@ async fn heavy3_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
+async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
-        "RUST_LOG",
-        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
-    );
+            "RUST_LOG",
+            "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        );
     }
     irys_testing_utils::initialize_tracing();
 
@@ -475,7 +475,7 @@ async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<MempoolTxs> {
+        ) -> Result<MempoolTxs, irys_actors::tx_selector::TxSelectorError> {
             Ok(self.txs.lock().unwrap().clone())
         }
     }
@@ -823,7 +823,11 @@ async fn heavy3_ensure_block_validation_double_checks_anchors() -> eyre::Result<
         })
     ) {
         info!("bug detected! this is now a regression test, panicking");
-        eyre::bail!("REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}", &edge_case_height, &preval_res );
+        eyre::bail!(
+            "REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}",
+            &edge_case_height,
+            &preval_res
+        );
     } else if preval_res.is_ok() {
         info!("block validation succeeded with edge case anchor");
     } else {

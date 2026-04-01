@@ -1,20 +1,21 @@
-use crate::types::{GossipResponse, RejectionReason};
-use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
+use crate::wire_types::{GossipResponse, RejectionReason};
+use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
 use eyre::{Report, Result as EyreResult};
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
+use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
-    HandshakeRequest, HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress,
-    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
-    PeerResponse, ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle,
+    AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage, HandshakeRequest,
+    HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
+    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
+    ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent,
+    get_version,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
-use reth::tasks::shutdown::{signal, Shutdown};
+use reth::tasks::shutdown::{Shutdown, signal};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
-use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tokio::time::{MissedTickBehavior, interval, sleep};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -146,7 +147,7 @@ impl PeerNetworkServiceState {
             address: self.peer_address,
             chain_id: self.chain_id,
             protocol_version: ProtocolVersion::V1,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some(build_user_agent("irys", &get_version().to_string())),
             ..HandshakeRequest::default()
         };
         self.config
@@ -163,7 +164,7 @@ impl PeerNetworkServiceState {
             chain_id: self.chain_id,
             peer_id,
             protocol_version: ProtocolVersion::V2,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some(build_user_agent("irys", &get_version().to_string())),
             consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
@@ -505,14 +506,14 @@ impl PeerNetworkService {
                 return;
             }
 
-            if let Some(until) = state.blocklist_until.get(&api_address).copied() {
-                if std::time::Instant::now() < until {
-                    debug!(
-                        "Peer {:?} is blacklisted until {:?}, skipping announce",
-                        api_address, until
-                    );
-                    return;
-                }
+            if let Some(until) = state.blocklist_until.get(&api_address).copied()
+                && std::time::Instant::now() < until
+            {
+                debug!(
+                    "Peer {:?} is blacklisted until {:?}, skipping announce",
+                    api_address, until
+                );
+                return;
             }
 
             debug!("Need to announce yourself to peer {:?}", api_address);
@@ -972,7 +973,13 @@ impl PeerNetworkService {
             our_supported_versions
         );
 
-        let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
+        let protocol_version: irys_types::ProtocolVersion =
+            negotiated_protocol_version.try_into().map_err(|e| {
+                PeerListServiceError::PostVersionError(format!(
+                    "negotiated unknown protocol version with {}: {}",
+                    gossip_address, e
+                ))
+            })?;
 
         // Create the appropriate handshake based on a negotiated version
         let peer_response_result = match protocol_version {
@@ -1141,10 +1148,11 @@ mod tests {
     use futures::FutureExt as _;
     use irys_database::{tables::PeerListItems, walk_all};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
+        Config, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage,
+        RethPeerInfo,
     };
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
@@ -1152,7 +1160,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::test;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
 
     fn create_test_peer(
         mining_addr: &str,
@@ -1186,7 +1194,8 @@ mod tests {
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
         DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&path.to_path_buf()).expect("open test database"),
+            open_or_create_irys_consensus_data_db(path, DbSyncMode::UtterlyNoSync)
+                .expect("open test database"),
         ))
     }
 
@@ -1232,7 +1241,7 @@ mod tests {
 
     #[test]
     async fn test_add_peer() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1261,7 +1270,7 @@ mod tests {
 
     #[test]
     async fn test_active_peers_request() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1376,7 +1385,7 @@ mod tests {
 
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let harness = TestHarness::new(temp_dir.path(), config);
         let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
@@ -1402,91 +1411,9 @@ mod tests {
         assert!(blocklisted);
     }
 
-    // #[test]
-    // async fn should_prevent_infinite_handshake_loop() {
-    //     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    //     let mut node_config = NodeConfig::testing();
-    //     node_config.trusted_peers = vec![];
-    //     let config = Config::new_with_random_peer_id(node_config);
-    //     let harness = TestHarness::new(temp_dir.path(), config);
-    //     let peer = create_test_peer(
-    //         "0x1234567890123456789012345678901234567890",
-    //         8080,
-    //         true,
-    //         None,
-    //     )
-    //     .1;
-    //     harness
-    //         .peer_list()
-    //         .add_or_update_peer(peer.clone(), true);
-    //     harness
-    //         .api_client
-    //         .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
-    //         .await;
-    //     harness
-    //         .service
-    //         .handle_handshake_request(HandshakeMessage {
-    //             api_address: peer.address.api,
-    //             force: false,
-    //         })
-    //         .await;
-    //     sleep(Duration::from_millis(50)).await;
-    //
-    //     debug!("Handshake test: Checking API calls");
-    //     let api_calls = harness.api_client.calls().await;
-    //     assert_eq!(api_calls.len(), 1, "Expected one API call");
-    //     harness
-    //         .service
-    //         .handle_announcement_finished(AnnouncementFinishedMessage {
-    //             peer_api_address: peer.address.api,
-    //             success: true,
-    //             retry: false,
-    //         })
-    //         .await;
-    //     harness
-    //         .api_client
-    //         .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
-    //         .await;
-    //     harness
-    //         .service
-    //         .handle_handshake_request(HandshakeMessage {
-    //             api_address: peer.address.api,
-    //             force: true,
-    //         })
-    //         .await;
-    //     sleep(Duration::from_millis(50)).await;
-    //
-    //     debug!("Handshake test: Checking API calls after a forced handshake");
-    //     assert_eq!(harness.api_client.calls().await.len(), 2);
-    // }
-    //
-    // #[test]
-    // async fn test_reth_sender_receives_reth_peer_info() {
-    //     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    //     let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-    //     let harness = TestHarness::new(temp_dir.path(), config);
-    //     harness
-    //         .api_client
-    //         .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
-    //         .await;
-    //     let (_, peer) = create_test_peer(
-    //         "0x1234567890123456789012345678901234567890",
-    //         8080,
-    //         true,
-    //         None,
-    //     );
-    //     harness
-    //         .service
-    //         .handle_message(PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer))
-    //         .await;
-    //     sleep(Duration::from_millis(50)).await;
-    //     let calls = harness.reth_calls.lock().await;
-    //     assert!(!calls.is_empty());
-    // }
-
     #[test]
     async fn test_periodic_flush() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
@@ -1538,7 +1465,7 @@ mod tests {
 
     #[test]
     async fn test_load_from_database() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
@@ -1585,12 +1512,16 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
-        assert!(new_peer_list
-            .peer_by_gossip_address(peer1.address.gossip)
-            .is_some());
-        assert!(new_peer_list
-            .peer_by_gossip_address(peer2.address.gossip)
-            .is_some());
+        assert!(
+            new_peer_list
+                .peer_by_gossip_address(peer1.address.gossip)
+                .is_some()
+        );
+        assert!(
+            new_peer_list
+                .peer_by_gossip_address(peer2.address.gossip)
+                .is_some()
+        );
         let TokioServiceHandle {
             shutdown_signal,
             handle,
@@ -1602,7 +1533,7 @@ mod tests {
 
     #[test]
     async fn test_wait_for_active_peer() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1633,7 +1564,7 @@ mod tests {
 
     #[test]
     async fn test_wait_for_active_peer_no_peers() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
@@ -1654,7 +1585,7 @@ mod tests {
 
     #[test]
     async fn test_staked_unstaked_peer_flush_behavior() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new_with_random_peer_id(node_config);
@@ -1695,7 +1626,7 @@ mod tests {
 
     #[test]
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();

@@ -22,9 +22,9 @@ use tracing::{info, warn};
 
 use crate::external::utils::{
     api::*,
-    client::{make_http_client, RemoteNodeClient},
+    client::{RemoteNodeClient, make_http_client},
     monitoring::*,
-    signer::{load_test_signers_from_env, TestSigner},
+    signer::{TestSigner, load_test_signers_from_env},
     transactions::*,
     types::AssignmentStatus,
     utils::{create_consensus_config_from_response, get_env_duration, parse_node_urls},
@@ -164,17 +164,18 @@ async fn sync_partition_data_remote_test() -> Result<()> {
                 .send()
                 .await;
 
-            if let Ok(resp) = publish_result {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(intervals) = json.get("intervals").and_then(|v| v.as_array()) {
-                        if !intervals.is_empty() {
-                            info!("✓ Data appeared in Publish(0) ledger after {} attempts ({} intervals)",
-                                  attempt, intervals.len());
-                            data_in_ledgers = true;
-                            break;
-                        }
-                    }
-                }
+            if let Ok(resp) = publish_result
+                && let Ok(json) = resp.json::<serde_json::Value>().await
+                && let Some(intervals) = json.get("intervals").and_then(|v| v.as_array())
+                && !intervals.is_empty()
+            {
+                info!(
+                    "✓ Data appeared in Publish(0) ledger after {} attempts ({} intervals)",
+                    attempt,
+                    intervals.len()
+                );
+                data_in_ledgers = true;
+                break;
             }
 
             if attempt % 10 == 0 {

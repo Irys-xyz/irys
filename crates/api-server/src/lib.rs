@@ -4,10 +4,10 @@ pub mod routes;
 
 use actix_cors::Cors;
 use actix_web::{
+    App, HttpResponse, HttpServer,
     dev::{HttpServiceFactory, Server},
     error::InternalError,
     web::{self, JsonConfig, Redirect},
-    App, HttpResponse, HttpServer,
 };
 use irys_actors::{
     chunk_ingress_service::{ChunkIngressMessage, ChunkIngressState},
@@ -20,7 +20,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList, SupplyStateReadGuard,
 };
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress, Traced};
+use irys_types::{Config, IrysAddress, PeerAddress, Traced, app_state::DatabaseProvider};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
     mining, pd_pricing, peer_list, post_chunk, price, proxy::proxy, storage, tx,

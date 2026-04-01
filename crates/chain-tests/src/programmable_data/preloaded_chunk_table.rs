@@ -25,8 +25,8 @@ use tracing::info;
 
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::PdDataRead;
-use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{IrysAddress, irys::IrysSigner};
 
 use rstest::rstest;
 

@@ -1,19 +1,19 @@
 use crate::utils::post_chunk;
-use crate::utils::{verify_published_chunk, IrysNodeTest};
+use crate::utils::{IrysNodeTest, verify_published_chunk};
 use actix_web::http::StatusCode;
-use actix_web::test::{self, call_service, TestRequest};
+use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
 use irys_database::{tables::IngressProofs, walk_all};
-use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
+use irys_types::{DataTransaction, DataTransactionHeader, LedgerChunkOffset, irys::IrysSigner};
 use reth_db::Database as _;
 use std::time::Duration;
 use tracing::debug;
 
 #[test_log::test(tokio::test)]
-async fn heavy_double_root_data_promotion_test() -> eyre::Result<()> {
+async fn spiky_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;

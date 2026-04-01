@@ -73,7 +73,8 @@ serde_json.workspace = true
 alloy-rpc-types-engine.workspace = true
 test-log.workspace = true
 rstest.workspace = true
-proptest = "1.6"
+proptest.workspace = true
+futures.workspace = true
 alloy-signer-local.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true

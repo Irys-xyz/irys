@@ -6,6 +6,7 @@ use base58::ToBase58 as _;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
+    BlockValidationTracker, DataSyncService, StorageModuleService,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -27,9 +28,8 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_api_server::{create_listener, run_server, ApiState, API_VERSION};
+use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
@@ -37,44 +37,44 @@ use irys_database::{add_genesis_commitments, database};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
-    reth_provider, BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider,
-    ChunkType, EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner,
-    PeerList, StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState,
-    SupplyStateReadGuard,
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, ChunkProvider, ChunkType,
+    EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
+    reth_provider,
 };
 use irys_p2p::{
-    spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
-    ChainSyncServiceInner, GossipDataHandler, GossipServer, P2PService,
-    ServiceHandleWithShutdownSignal, SyncChainServiceFacade, SyncChainServiceMessage,
+    BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GossipDataHandler,
+    GossipServer, P2PService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
+    SyncChainServiceMessage, spawn_peer_network_service,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
-use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_types::chainspec::irys_chain_spec;
 use irys_types::BlockHash;
+use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, BlockBody, CommitmentTransaction,
-    Config, ConsensusOptions, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
-    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, SealedBlock,
-    SendTraced as _, ServiceSet, SystemLedger, TokioServiceHandle, Traced, UnixTimestamp,
-    UnixTimestampMs, H256, U256,
+    BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
+    NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
+    PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
+    SystemLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
+    app_state::DatabaseProvider, calculate_initial_difficulty,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
+    VdfStep,
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
-    VdfStep,
 };
 use reth::{
     chainspec::ChainSpec,
     tasks::{RuntimeBuilder, RuntimeConfig, TaskExecutor, TokioConfig},
 };
-use reth_db::{transaction::DbTx as _, Database as _};
+use reth_db::{Database as _, transaction::DbTx as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{
@@ -91,7 +91,7 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -630,7 +630,7 @@ impl IrysNode {
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
             number_of_ingress_proofs_total,
-        );
+        )?;
 
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
@@ -643,11 +643,15 @@ impl IrysNode {
         let (commitments, initial_treasury) =
             add_genesis_commitments(&mut genesis_block, &self.config).await;
 
-        // Calculate initial difficulty based on number of storage modules
-        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
-        let difficulty =
-            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
-                .expect("valid calculated initial difficulty");
+        // Subtract 1 for stake commitment
+        let storage_module_count = commitments
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| eyre::eyre!("commitments must contain at least the stake commitment"))?;
+        let difficulty = calculate_initial_difficulty(
+            &self.config.consensus,
+            f64::from(u32::try_from(storage_module_count)?),
+        )?;
         genesis_block.diff = difficulty;
 
         // Set the genesis treasury to the total value of all commitments
@@ -1025,7 +1029,7 @@ impl IrysNode {
                 loop {
                     interval.tick().await;
 
-                    let info = irys_domain::get_node_info(
+                    let info = match irys_domain::get_node_info(
                         &block_index,
                         &block_tree,
                         &peer_list,
@@ -1034,7 +1038,14 @@ impl IrysNode {
                         mining_address,
                         chain_id,
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(info) => info,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to retrieve node info");
+                            continue;
+                        }
+                    };
 
                     let pl_info = peer_list
                         .all_peers_sorted_by_score()
@@ -1046,11 +1057,12 @@ impl IrysNode {
 
                     info!(
                     target = "node-state",
+                    node_version = %irys_types::get_version(),
                     "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
                 );
 
                     metrics::record_block_height(info.height);
-                    metrics::record_peer_count(info.peer_count as u64);
+                    metrics::record_peer_count(info.peer_count);
                     metrics::record_pending_chunks(mempool_status.pending_chunks_count as u64);
                     metrics::record_pending_data_txs(mempool_status.data_tx_count as u64);
                     metrics::record_sync_state(!info.is_syncing);
@@ -2111,7 +2123,6 @@ impl IrysNode {
         Arc::new(chunk_provider)
     }
 
-    #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
@@ -2128,38 +2139,44 @@ impl IrysNode {
         shutdown_token: CancellationToken,
     ) -> oneshot::Receiver<()> {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
-        // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
-        // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
-        let is_test_based_on_base_dir = config
-            .node_config
-            .base_directory
-            .parent()
-            .is_some_and(|p| p.ends_with(".tmp"));
-        let is_test_based_on_cfg_flag = cfg!(debug_assertions);
-        if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            panic!(
-                "VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)"
-            )
-        }
         let span = tracing::Span::current();
         let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
 
         std::thread::spawn({
             let vdf_config = config.vdf.clone();
+            let core_pinning = config.node_config.vdf.core_pinning;
             move || {
                 let _span = span.enter();
 
-                // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
-                if is_test_based_on_base_dir || is_test_based_on_cfg_flag {
-                    info!("Disabling VDF core pinning")
-                } else {
-                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-
-                    for core in core_ids {
-                        let success = core_affinity::set_for_current(core);
-                        if success {
+                match core_pinning {
+                    CorePinning::Disabled => {
+                        info!("VDF core pinning disabled");
+                    }
+                    CorePinning::Auto => {
+                        if let Some(core_ids) = core_affinity::get_core_ids() {
+                            let pinned = core_ids.into_iter().any(|core| {
+                                if core_affinity::set_for_current(core) {
+                                    info!("VDF thread pinned to core {:?}", core);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if !pinned {
+                                warn!(
+                                    "VDF core pinning failed: no core could be set, running unpinned"
+                                );
+                            }
+                        } else {
+                            warn!("VDF core pinning skipped: could not enumerate core IDs");
+                        }
+                    }
+                    CorePinning::Core(id) => {
+                        let core = core_affinity::CoreId { id };
+                        if core_affinity::set_for_current(core) {
                             info!("VDF thread pinned to core {:?}", core);
-                            break;
+                        } else {
+                            warn!("Failed to pin VDF thread to core {}", id);
                         }
                     }
                 }
@@ -2232,17 +2249,16 @@ impl IrysNode {
             runtime_handle.spawn(async move {
                 for interval in uninitialized {
                     if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval))
+                        && let Err(e) = sender.send(req).await
                     {
-                        if let Err(e) = sender.send(req).await {
-                            tracing::event!(
-                                target: "irys::packing",
-                                tracing::Level::ERROR,
-                                storage_module.id = %sm.id,
-                                packing.interval = ?interval,
-                                "Packing channel closed - {e}; failed to enqueue repacking request"
-                            );
-                            return; // assume this is unrecoverable
-                        }
+                        tracing::event!(
+                            target: "irys::packing",
+                            tracing::Level::ERROR,
+                            storage_module.id = %sm.id,
+                            packing.interval = ?interval,
+                            "Packing channel closed - {e}; failed to enqueue repacking request"
+                        );
+                        return; // assume this is unrecoverable
                     }
                 }
             });
@@ -2302,8 +2318,15 @@ impl IrysNode {
         config: &Config,
         runtime_handle: &tokio::runtime::Handle,
     ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
-        // Use configured oracles (must be provided in config)
-        let oracle_cfgs: Vec<OracleConfig> = config.node_config.oracles.clone();
+        let oracle_cfgs: Vec<OracleConfig> = if config.node_config.oracles.is_empty() {
+            tracing::info!(
+                "No oracles configured — block production will reuse the \
+                 previous block's oracle price."
+            );
+            vec![]
+        } else {
+            config.node_config.oracles.clone()
+        };
 
         let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
         let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
@@ -2527,8 +2550,11 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env =
-        open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
+    let irys_db_env = open_or_create_irys_consensus_data_db(
+        node_config.irys_consensus_data_dir(),
+        node_config.database.sync_mode,
+    )?;
+    irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
     debug!("Irys DB initialized");
     Ok(irys_db)

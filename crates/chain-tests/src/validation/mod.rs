@@ -14,25 +14,24 @@ mod unstake_edge_cases;
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
-    BlockValidationOutcome, IrysNodeTest,
+    BlockValidationOutcome, IrysNodeTest, assert_validation_error, gossip_commitment_to_node,
+    read_block_from_state, solution_context,
 };
 use irys_actors::block_tree_service::ValidationResult;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
-    async_trait,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_tree_service::BlockTreeServiceMessage,
     block_validation::PreValidationError,
     shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger,
-    H256,
+    BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256,
+    H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock,
+    SystemTransactionLedger,
 };
 use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
@@ -75,7 +74,7 @@ pub(crate) async fn send_block_and_read_state(
 // The assertion will fail (block will be discarded) because stake commitments must have exact stake_value
 // from the consensus config.
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
+async fn block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
@@ -93,7 +92,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_stake = self.invalid_stake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_stake.clone()],
@@ -173,7 +175,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because pledge commitments must have value
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
-async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
+async fn block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
@@ -191,7 +193,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_pledge = self.invalid_pledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_pledge.clone()],
@@ -272,7 +277,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 // This test creates a malicious block producer that includes commitments in wrong order.
 // The assertion will fail (block will be discarded) because stake commitments must come before pledge commitments.
 #[test_log::test(tokio::test)]
-async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
+async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -288,7 +293,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitments.clone(),
@@ -391,7 +399,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 // The evil block swaps the order (low fee before high fee), violating the
 // canonical fee-descending ordering.
 #[test_log::test(tokio::test)]
-async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
+async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -407,7 +415,10 @@ async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitments.clone(),
@@ -551,7 +562,7 @@ async fn heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because epoch blocks must contain exactly
 // the commitments from the parent's snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
+async fn block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub wrong_commitment: CommitmentTransaction,
@@ -567,7 +578,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![self.wrong_commitment.clone()],
                 commitment_txs_to_bill: vec![],
@@ -648,7 +662,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 // Firstly verify rejection of malformed/incorrect last_epoch_hash
 // Secondly verify the first-after-epoch rule
 #[test_log::test(tokio::test)]
-async fn heavy_block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
+async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -794,13 +808,13 @@ async fn heavy_block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Resul
 // This test creates a malicious block producer that includes duplicate ingress proof signers for the same data root.
 // The assertion will fail (block will be discarded) because each address can only provide one proof per data root.
 #[test_log::test(tokio::test)]
-async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
+async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
     use irys_types::{
-        ingress::{generate_ingress_proof, CachedIngressProof},
         IngressProofsList, U256,
+        ingress::{CachedIngressProof, generate_ingress_proof},
     };
-    use reth_db::{transaction::DbTxMut as _, Database as _};
+    use reth_db::{Database as _, transaction::DbTxMut as _};
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -818,7 +832,10 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             // Create publish ledger with duplicate proofs from the same signer for one transaction
             // This tests that each transaction must have unique signers
             let proofs = IngressProofsList(
@@ -1013,7 +1030,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 // The assertion will fail (block will be discarded) because epoch blocks must contain all
 // commitments from the parent's snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
+async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -1028,7 +1045,10 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
@@ -1111,7 +1131,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 ///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
-async fn heavy3_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
     // max time to wait for block validations
     let max_seconds = 10;
     let num_blocks_in_epoch = 2;

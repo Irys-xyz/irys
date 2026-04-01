@@ -1443,11 +1443,12 @@ impl PdService {
 mod tests {
     use super::*;
     use dashmap::DashMap;
-    use irys_database::{open_or_create_db, tables::IrysTables};
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::range_specifier::PdDataRead;
     use irys_types::{ConsensusConfig, IrysBlockHeader};
+    use reth_db::mdbx::DatabaseArguments;
     use std::sync::RwLock;
     use tokio::sync::{mpsc, oneshot};
 
@@ -1541,7 +1542,12 @@ mod tests {
 
         // Create test DB and domain objects for the P2P fetch infrastructure
         let tmp_dir = tempfile::tempdir().unwrap();
-        let db_env = open_or_create_db(tmp_dir.path(), IrysTables::ALL, None).unwrap();
+        let db_env = open_or_create_db(
+            tmp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
         let db = DatabaseProvider(Arc::new(db_env));
 
         let mut genesis = IrysBlockHeader::new_mock_header();

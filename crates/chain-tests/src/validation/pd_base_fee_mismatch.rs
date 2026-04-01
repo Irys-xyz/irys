@@ -1,5 +1,5 @@
-use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
-use irys_types::{storage_pricing::Amount, NodeConfig};
+use crate::utils::{BlockValidationOutcome, IrysNodeTest, read_block_from_state};
+use irys_types::{NodeConfig, storage_pricing::Amount};
 use rust_decimal_macros::dec;
 
 /// Test that blocks with incorrect PD base fee are rejected.

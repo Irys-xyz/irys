@@ -27,6 +27,7 @@ members = [
   "crates/macros/integer-tagged",
   "crates/macros/diag-slow",
   "crates/chain-tests",
+  "crates/tooling/multiversion-tests",
 ]
 resolver = "2"
 
@@ -80,9 +81,9 @@ assert_matches = "1"
 bytes = "1.5"
 derive_more = { version = "2", features = ["full"] }
 eyre = "0.6"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["compress"] }
 rayon = "1.8.0"
-reqwest = "0.12.15"
+reqwest = { version = "0.12.15", features = ["json"] }
 color-eyre = "0.6"
 dashmap = "6.0"
 itertools = "0.13"
@@ -144,6 +145,8 @@ priority-queue = "2.5"
 moka = "0.12.10"
 socket2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+nix = { version = "0.29", features = ["signal", "process", "feature"] }
 
 
 # Reth & Alloy deps
@@ -393,14 +396,39 @@ overflow-checks = true
 lto = "thin"
 codegen-units = 1
 
+# Release-like testing with faster builds: `cargo test --profile test-release`
+# Use for performance/regression tests where debug builds are too slow but full
+# release LTO is unnecessary. Not intended for production binaries.
+[profile.test-release]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+
+[profile.test-release.package.irys-vdf]
+opt-level = 3
+
+[profile.test-release.package.irys-packing]
+opt-level = 3
+
+[profile.test-release.package.irys-c]
+opt-level = 3
+
+[profile.test-release.package.sha2]
+opt-level = 3
+
+[profile.test-release.package.openssl]
+opt-level = 3
+
 [profile.debug-release]
 inherits = "release"
 debug = true
 
 [profile.heap-profile]
 inherits = "dev"
-debug = 2                  # Full DWARF debug info for meaningful heaptrack backtraces
-split-debuginfo = "off"    # Keep debug info in binary for heaptrack
+debug = 2               # Full DWARF debug info for meaningful heaptrack backtraces
+split-debuginfo = "off" # Keep debug info in binary for heaptrack
 
 [profile.dev]
 panic = "unwind"

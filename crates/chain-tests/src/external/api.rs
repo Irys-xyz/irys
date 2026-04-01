@@ -5,9 +5,9 @@ use alloy_genesis::GenesisAccount;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, IrysAddress, NodeConfig};
-use reth_db::transaction::DbTx as _;
+use irys_types::{IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -26,7 +26,10 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn external_api() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
-        std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off")
+        std::env::set_var(
+            "RUST_LOG",
+            "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off",
+        )
     };
     initialize_tracing();
     let mut testing_config = NodeConfig::testing();

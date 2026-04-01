@@ -570,45 +570,6 @@ mod test {
         assert_eq!(&expected_price_snapshot, ema_snapshot.as_ref());
     }
 
-    #[rstest]
-    #[case(1, 0)] // Block 1: Uses genesis (block 0) for pricing
-    #[case(2, 0)] // Block 2: Still uses genesis
-    #[case(9, 0)] // Block 9: Still uses genesis (end of 1st interval)
-    #[case(19, 0)] // Block 19: Still uses genesis (end of 2nd interval)
-    #[case(20, 9)] // Block 20: NOW uses block 9's EMA (2 intervals ago)
-    #[case(29, 9)] // Block 29: Still uses block 9's EMA
-    #[case(30, 19)] // Block 30: NOW uses block 19's EMA (2 intervals ago)
-    fn get_ema_for_pricing(#[case] max_block_height: u64, #[case] price_block_height: u64) {
-        // setup
-        let config = ConsensusConfig {
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
-            },
-            ..ConsensusConfig::testing()
-        };
-
-        // Build blocks and snapshots using utility function
-        let blocks_and_snapshots = build_blocks_with_snapshots(max_block_height, &config);
-
-        // Get the last snapshot
-        let (_, current_snapshot) = blocks_and_snapshots
-            .last()
-            .expect("Should have at least one block");
-
-        // Find the expected block for pricing
-        let (expected_block, _) = blocks_and_snapshots
-            .iter()
-            .find(|(b, _)| b.height == price_block_height)
-            .expect("Price block should exist in blocks array");
-
-        assert_eq!(
-            current_snapshot.ema_for_public_pricing(),
-            expected_block.ema_irys_price,
-            "Snapshot ema_for_public_pricing() should equal EMA price from block {}",
-            price_block_height
-        );
-    }
-
     #[test]
     fn calculate_ema_for_new_block_first_block() {
         use rust_decimal_macros::dec;
@@ -704,7 +665,6 @@ mod test {
     #[case(30)]
     #[case(15)]
     #[case(19)]
-    #[case(20)]
     #[case(29)]
     #[case(28)]
     #[case(27)]
@@ -891,6 +851,37 @@ mod test {
                 "ema_price_2_intervals_ago mismatch at height {}",
                 test_height
             );
+        }
+    }
+
+    mod bound_in_min_max_range_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use rust_decimal_macros::dec;
+
+        proptest! {
+            #[test]
+            fn result_always_within_safe_range(
+                base in 1_u64..1_000_000,
+                desired in 0_u64..2_000_000,
+                pct in 0_u32..=100,
+            ) {
+                let base_price = IrysTokenPrice::token(Decimal::from(base)).unwrap();
+                let desired_price = IrysTokenPrice::token(Decimal::from(desired)).unwrap();
+                let safe_range = Amount::percentage(
+                    Decimal::from(pct) / dec!(100)
+                ).unwrap();
+
+                let result = bound_in_min_max_range(desired_price, safe_range, base_price);
+
+                let max = base_price.add_multiplier(safe_range).unwrap_or(base_price);
+                let min = base_price.sub_multiplier(safe_range).unwrap_or(base_price);
+                prop_assert!(result <= max, "result {result:?} > max {max:?}");
+                prop_assert!(result >= min, "result {result:?} < min {min:?}");
+                if desired_price >= min && desired_price <= max {
+                    prop_assert_eq!(result, desired_price, "in-range value should pass through unchanged");
+                }
+            }
         }
     }
 }

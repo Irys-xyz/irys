@@ -2,16 +2,19 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
-    irys::IrysSigner,
     CommitmentTransaction, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
     CommitmentTypeV2, ConsensusConfig, IrysTransactionId, NodeConfig, UnixTimestamp,
+    hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
+    irys::IrysSigner,
 };
 use rstest::rstest;
 use tracing::info;
 
 const ONE_HOUR_SECS: u64 = 3600;
 const ACTIVATION_DELAY_SECS: u64 = 10;
+// Tests that must submit transactions BEFORE activation need a wider window to
+// account for node startup time under parallel CI load (can exceed 10s).
+const PRE_ACTIVATION_WINDOW_SECS: u64 = 45;
 const AURORA_MIN_VERSION: u8 = 2;
 const MAX_ACTIVATION_BLOCKS: u32 = 50;
 const MAX_BLOCKS_TO_SEARCH: u64 = 5;
@@ -326,10 +329,10 @@ mod boundary_crossing {
     use super::*;
 
     #[test_log::test(tokio::test)]
-    async fn heavy_test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
+    async fn test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
@@ -414,7 +417,7 @@ mod edge_cases {
     async fn test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
@@ -629,10 +632,9 @@ mod epoch_block_filtering {
     /// Epoch block at hardfork boundary: V1 commitments accepted pre-activation
     /// should NOT be filtered out when the epoch block falls post-activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
+    async fn test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
-        // Hardfork activates slightly in the future
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
@@ -705,7 +707,7 @@ mod epoch_block_filtering {
 #[cfg(test)]
 mod borealis_hardfork {
     use super::*;
-    use irys_types::{hardfork_config::Borealis, IrysAddress};
+    use irys_types::{IrysAddress, hardfork_config::Borealis};
 
     fn create_borealis_config(borealis: Option<Borealis>, aurora: Option<Aurora>) -> NodeConfig {
         let mut config = NodeConfig::testing();
@@ -891,8 +893,6 @@ mod borealis_hardfork {
 
 #[cfg(test)]
 mod peer_sync_recovery {
-    use std::time::Duration;
-
     use super::*;
     use irys_database::db::IrysDatabaseExt as _;
 
@@ -907,7 +907,7 @@ mod peer_sync_recovery {
     /// then blocks are mined with V1 commitments before activation and V2 after.
     /// After restart with Aurora enabled, verifies peer syncs correctly through the boundary.
     #[test_log::test(tokio::test)]
-    async fn slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
+    async fn spiky_slow_heavy3_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
         initialize_tracing();
 
         // Step 1: Setup Configuration (Aurora disabled initially)
@@ -1034,8 +1034,6 @@ mod peer_sync_recovery {
 
         // Step 4: Stop Both Nodes, Activate Aurora, Restart
         let mut stopped_genesis = genesis_node.stop().await;
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Set activation in the past so all new blocks are post-activation
         let activation_timestamp = now_secs();

@@ -1,9 +1,9 @@
 use crate::block_pool::{BlockRemovalReason, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
+use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::RethServiceMessage;
-use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::Traced;
@@ -14,14 +14,14 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::{
     sync::{mpsc, oneshot},
     time::{interval, timeout},
 };
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{Instrument as _, debug, error, info, instrument, trace, warn};
 
 /// Grace period after triggering a retry block request, giving validation time to start
 /// before the sync loop continues.
@@ -29,6 +29,18 @@ const RETRY_BLOCK_VALIDATION_GRACE: Duration = Duration::from_millis(500);
 
 /// Number of retry attempts when fetching a block index from peers.
 const BLOCK_INDEX_RETRIES: usize = 5;
+
+/// How long `synced_peers_sorted_by_cumulative_diff` will keep retrying when peers
+/// are online but all report `is_syncing = true`.  This covers the common startup
+/// race where multiple nodes begin `initial_sync` simultaneously and briefly see
+/// each other as "syncing".
+///
+/// Keep this well below the nextest slow-timeout (currently 60 s) so the retry
+/// loop cannot consume the entire test budget.
+const SYNCED_PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Interval between retries when waiting for a non-syncing peer.
+const SYNCED_PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Fewer retries for the best-effort block index fetch inside queue-slot recovery.
 const QUEUE_SLOT_RETRY_BLOCK_INDEX_RETRIES: usize = 3;
@@ -38,6 +50,8 @@ const QUEUE_SLOT_RETRY_BLOCK_INDEX_RETRIES: usize = 3;
 pub enum ChainSyncError {
     #[error("Network error: {0}")]
     Network(String),
+    #[error("Peer {0:?} is syncing, skipping")]
+    PeerSyncing(IrysPeerId),
     #[error("Service communication error: {0}")]
     ServiceCommunication(String),
     #[error("Internal sync error: {0}")]
@@ -201,12 +215,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
             debug!("Sync task: Sync already in progress, skipping the new sync request");
-            if let Some(response_sender) = response {
-                if let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
+            if let Some(response_sender) = response
+                && let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
                     "Sync already in progress".to_string(),
-                ))) {
-                    error!("Failed to send the sync response: {:?}", e);
-                }
+                )))
+            {
+                error!("Failed to send the sync response: {:?}", e);
             }
             return;
         }
@@ -283,11 +297,10 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     }
                 }
 
-                if let Some(response_sender) = response {
-                    if let Err(e) = response_sender.send(res) {
+                if let Some(response_sender) = response
+                    && let Err(e) = response_sender.send(res) {
                         error!("Failed to send the sync response: {:?}", e);
                     }
-                }
             }
             .in_current_span(),
         );
@@ -353,7 +366,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let is_task_already_running =
             stake_and_pledge_whitelist_running_flag.load(Ordering::Relaxed);
         if is_task_already_running {
-            debug!("Stake and pledge whitelist update task is already running, skipping new task spawn");
+            debug!(
+                "Stake and pledge whitelist update task is already running, skipping new task spawn"
+            );
             return;
         } else {
             stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
@@ -544,17 +559,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 block_hash,
                 response,
             } => {
-                debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
+                debug!(
+                    "SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants",
+                    block_hash
+                );
                 let inner = self.inner.clone();
                 // Check for whitelist updates after every block validation
                 self.inner.spawn_stake_and_pledge_update_task();
                 self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.process_orphaned_ancestors(block_hash).await;
-                        if let Some(sender) = response {
-                            if let Err(e) = sender.send(result) {
-                                tracing::error!("Failed to send response: {:?}", e);
-                            }
+                        if let Some(sender) = response
+                            && let Err(e) = sender.send(result)
+                        {
+                            tracing::error!("Failed to send response: {:?}", e);
                         }
                     }
                     .instrument(tracing::info_span!("process_orphaned_ancestors")),
@@ -572,10 +590,10 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                 self.inner.runtime_handle.spawn(
                     async move {
                         let result = inner.request_parent_block(parent_block_hash).await;
-                        if let Some(sender) = response {
-                            if let Err(e) = sender.send(result) {
-                                tracing::error!("Failed to send response: {:?}", e);
-                            }
+                        if let Some(sender) = response
+                            && let Err(e) = sender.send(result)
+                        {
+                            tracing::error!("Failed to send response: {:?}", e);
                         }
                     }
                     .instrument(tracing::info_span!("request_parent_block")),
@@ -809,10 +827,18 @@ async fn initialize_sync_mode(
     gossip_client: &GossipClient,
     start_sync_from_height: usize,
 ) -> ChainSyncResult<bool> {
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", params.sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
+    debug!(
+        "Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}",
+        params.sync_mode,
+        start_sync_from_height,
+        sync_state.is_trusted_sync()
+    );
 
     if params.is_a_genesis_node {
-        warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", params.genesis_peer_discovery_timeout_millis);
+        warn!(
+            "Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task",
+            params.genesis_peer_discovery_timeout_millis
+        );
         match timeout(
             Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
             peer_list.wait_for_active_peers(),
@@ -823,7 +849,10 @@ async fn initialize_sync_mode(
                 info!("Genesis node has active peers");
             }
             Err(elapsed) => {
-                warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
+                warn!(
+                    "Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task",
+                    elapsed
+                );
                 sync_state.finish_sync();
                 return Ok(false);
             }
@@ -858,7 +887,10 @@ async fn initialize_sync_mode(
         .await
         {
             if params.is_a_genesis_node {
-                warn!("Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}", err);
+                warn!(
+                    "Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}",
+                    err
+                );
             } else {
                 return Err(err);
             }
@@ -894,7 +926,9 @@ async fn fetch_initial_block_index(
         Err(err) => {
             error!("Sync task: Failed to fetch block index: {}", err);
             if params.is_a_genesis_node {
-                warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
+                warn!(
+                    "Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers"
+                );
                 vec![]
             } else {
                 return Err(err);
@@ -907,7 +941,9 @@ async fn fetch_initial_block_index(
     // If no new blocks were added to the index, nothing is going to mark
     //  the tip as processed
     if block_queue.is_empty() {
-        debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
+        debug!(
+            "Sync task: No new blocks to process, marking the current sync target height as processed"
+        );
         sync_state.mark_processed(sync_state.sync_target_height());
     } else {
         sync_state.set_is_syncing(true);
@@ -984,7 +1020,9 @@ async fn finalize_sync<B: BlockDiscoveryFacade, M: MempoolFacade>(
     gossip_client: &GossipClient,
     gossip_data_handler: &Arc<GossipDataHandler<M, B>>,
 ) {
-    debug!("Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height");
+    debug!(
+        "Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height"
+    );
     sync_state
         .wait_for_processed_block_to_reach_target()
         .in_current_span()
@@ -1432,9 +1470,9 @@ async fn check_and_update_full_validation_switch_height(
                 Ok(info) => info,
                 Err(err) => {
                     warn!(
-                            "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                            peer.address.gossip, err
-                        );
+                        "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                        peer.address.gossip, err
+                    );
                     continue;
                 }
             };
@@ -1585,7 +1623,10 @@ async fn is_local_index_is_behind_trusted_peers(
         let node_info = match gossip_client.get_info(peer.address).await {
             Ok(info) => info,
             Err(err) => {
-                warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
+                warn!(
+                    "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                    peer.address.gossip, err
+                );
                 continue;
             }
         };
@@ -1622,7 +1663,9 @@ async fn estimate_canonical_height(
     // Don't wait for hydration, since we're just asking the API endpoints of trusted peers
     let trusted_peers = peer_list.all_trusted_peers();
     if trusted_peers.is_empty() {
-        warn!("The node has no trusted peers configured, falling back to local index height for canonical height estimation");
+        warn!(
+            "The node has no trusted peers configured, falling back to local index height for canonical height estimation"
+        );
         return highest_trusted_peer_height;
     }
 
@@ -1662,58 +1705,87 @@ async fn synced_peers_sorted_by_cumulative_diff(
     gossip_client: &GossipClient,
     trusted_peers_only: bool,
 ) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
-    let peers = if trusted_peers_only {
-        peer_list.online_trusted_peers()
-    } else {
-        peer_list.top_active_peers(None, None)
-    };
-    if peers.is_empty() {
-        return Err(ChainSyncError::Network(
-            "No online peers available".to_string(),
-        ));
-    }
+    let deadline = tokio::time::Instant::now() + SYNCED_PEER_DISCOVERY_TIMEOUT;
 
-    let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
-        let gossip_client = gossip_client.clone();
-        async move {
-            match gossip_client.get_info(peer.address).await {
-                Ok(info) => {
-                    if !info.is_syncing {
-                        Ok((addr, peer, info.cumulative_difficulty))
+    loop {
+        let peers = if trusted_peers_only {
+            peer_list.online_trusted_peers()
+        } else {
+            peer_list.top_active_peers(None, None)
+        };
+        if peers.is_empty() {
+            return Err(ChainSyncError::Network(
+                "No online peers available".to_string(),
+            ));
+        }
+
+        let mut had_syncing_peers = false;
+        let mut had_non_syncing_errors = false;
+
+        let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
+            let gossip_client = gossip_client.clone();
+            async move {
+                match gossip_client.get_info(peer.address).await {
+                    Ok(info) => {
+                        if !info.is_syncing {
+                            Ok((addr, peer, info.cumulative_difficulty))
+                        } else {
+                            Err(ChainSyncError::PeerSyncing(addr))
+                        }
+                    }
+                    Err(err) => Err(ChainSyncError::Network(format!(
+                        "Failed to fetch node info from peer {:?}: {}",
+                        addr, err
+                    ))),
+                }
+            }
+        });
+
+        let mut peers_and_diffs = BTreeMap::new();
+        for res in futures::future::join_all(peers_and_diffs_futures).await {
+            match res {
+                Ok((addr, peer, diff)) => {
+                    peers_and_diffs
+                        .entry(diff)
+                        .or_insert_with(Vec::new)
+                        .push((addr, peer));
+                }
+                Err(ref err) => {
+                    if matches!(err, ChainSyncError::PeerSyncing(_)) {
+                        had_syncing_peers = true;
+                        trace!("{}", err);
                     } else {
-                        Err(ChainSyncError::Network(format!(
-                            "Peer {addr:?} is syncing, skipping"
-                        )))
+                        had_non_syncing_errors = true;
+                        warn!("{}", err);
                     }
                 }
-                Err(err) => Err(ChainSyncError::Network(format!(
-                    "Failed to fetch node info from peer {:?}: {}",
-                    addr, err
-                ))),
             }
         }
-    });
 
-    let mut peers_and_diffs = BTreeMap::new();
-    for res in futures::future::join_all(peers_and_diffs_futures).await {
-        match res {
-            Ok((addr, peer, diff)) => {
-                peers_and_diffs
-                    .entry(diff)
-                    .or_insert_with(Vec::new)
-                    .push((addr, peer));
-            }
-            Err(err) => warn!("{}", err),
+        if !peers_and_diffs.is_empty() {
+            return Ok(peers_and_diffs);
         }
-    }
 
-    if peers_and_diffs.is_empty() {
-        return Err(ChainSyncError::Network(
-            "No peers available after fetching cumulative difficulties".to_string(),
-        ));
-    }
+        // Only retry when all failures were PeerSyncing (no network/other errors).
+        // Mixed failures or pure non-syncing errors should fail immediately.
+        let only_syncing = had_syncing_peers && !had_non_syncing_errors;
+        if !only_syncing || tokio::time::Instant::now() >= deadline {
+            if only_syncing {
+                return Err(ChainSyncError::Network(
+                    "All peers are still syncing after timeout".to_string(),
+                ));
+            }
+            return Err(ChainSyncError::Network(
+                "No peers available after fetching cumulative difficulties".to_string(),
+            ));
+        }
 
-    Ok(peers_and_diffs)
+        debug!(
+            "All peers are currently syncing, retrying in {:?}",
+            SYNCED_PEER_DISCOVERY_INTERVAL
+        );
+        tokio::time::sleep(SYNCED_PEER_DISCOVERY_INTERVAL).await;
+    }
 }
 
 #[cfg(test)]
@@ -1722,7 +1794,7 @@ mod tests {
     use crate::peer_network_service::spawn_peer_network_service_with_client;
     use crate::tests::util::FakeGossipServer;
     use futures::future::BoxFuture;
-    use futures::{future, FutureExt as _};
+    use futures::{FutureExt as _, future};
     use irys_types::RethPeerInfo;
     use std::sync::Arc;
 
@@ -1740,23 +1812,23 @@ mod tests {
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysBlockHeader, IrysPeerId,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
 
         #[tokio::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
                     .expect("can't open temp dir"),
             ));
 
@@ -1927,14 +1999,14 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers(
-        ) -> eyre::Result<()> {
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
+        async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers()
+        -> eyre::Result<()> {
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
                     .expect("can't open temp dir"),
             ));
 
@@ -2004,16 +2076,16 @@ mod tests {
 
     mod post_sync_unique_highest_blocks {
         use super::*;
-        use crate::tests::util::data_handler_stub;
         use crate::tests::util::FakeGossipServer;
+        use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-            PeerNetworkSender, PeerScore, SyncMode,
+            Config, DatabaseProvider, DbSyncMode, IrysAddress, NodeConfig, NodeInfo, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -2078,9 +2150,10 @@ mod tests {
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
-            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                .expect("can't open temp dir");
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
+            let db_env =
+                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                    .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();
@@ -2208,9 +2281,10 @@ mod tests {
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let temp_dir = setup_tracing_and_temp_dir(None, false);
-            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-                .expect("can't open temp dir");
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
+            let db_env =
+                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                    .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();
@@ -2277,6 +2351,179 @@ mod tests {
                 "expected both peers to be attempted"
             );
             Ok(())
+        }
+    }
+
+    mod synced_peers_sorted_by_cumulative_diff_tests {
+        use super::*;
+        use crate::tests::util::FakeGossipServer;
+        use crate::types::GossipResponse;
+        use irys_types::{
+            IrysAddress, IrysPeerId, NodeInfo, PeerAddress, PeerListItem, PeerScore, U256,
+        };
+        use irys_utils::circuit_breaker::CircuitBreakerConfig;
+        use std::net::SocketAddr;
+
+        fn make_peer(byte: u8, addr: SocketAddr) -> PeerListItem {
+            let mining_address = IrysAddress::repeat_byte(byte);
+            PeerListItem {
+                peer_id: IrysPeerId::from(mining_address),
+                mining_address,
+                reputation_score: PeerScore::new(100),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online: true,
+                protocol_version: Default::default(),
+            }
+        }
+
+        fn setup() -> (PeerList, GossipClient) {
+            let peer_list = PeerList::test_mock().expect("test_mock peer list");
+            let gossip_client = GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(5),
+                IrysAddress::repeat_byte(0xFF),
+                IrysPeerId::from([0xAA_u8; 20]),
+                CircuitBreakerConfig::testing(),
+                tokio::runtime::Handle::current(),
+            );
+            (peer_list, gossip_client)
+        }
+
+        /// Two servers: one syncing, one not. The non-syncing peer
+        /// should appear in the returned BTreeMap.
+        #[tokio::test]
+        async fn success_non_syncing_peer() {
+            let (peer_list, gossip_client) = setup();
+
+            let server_syncing = FakeGossipServer::new();
+            server_syncing.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(10),
+                    ..NodeInfo::default()
+                })
+            });
+
+            let server_ok = FakeGossipServer::new();
+            server_ok.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: false,
+                    cumulative_difficulty: U256::from(42),
+                    ..NodeInfo::default()
+                })
+            });
+
+            let addr_syncing = server_syncing.spawn();
+            let addr_ok = server_ok.spawn();
+
+            let peer_syncing = make_peer(0x01, addr_syncing);
+            let peer_ok = make_peer(0x02, addr_ok);
+            let expected_peer_id = peer_ok.peer_id;
+
+            peer_list.add_or_update_peer(peer_syncing, true);
+            peer_list.add_or_update_peer(peer_ok, true);
+
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
+
+            let map = result.expect("expected Ok(BTreeMap)");
+            assert_eq!(map.len(), 1, "expected exactly one difficulty bucket");
+            let (difficulty, peers) = map.into_iter().next().unwrap();
+            assert_eq!(difficulty, U256::from(42));
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].0, expected_peer_id);
+        }
+
+        /// Both peers report is_syncing = true. The function should
+        /// retry until SYNCED_PEER_DISCOVERY_TIMEOUT, then return
+        /// the "still syncing after timeout" error.
+        #[tokio::test]
+        async fn all_peers_syncing_timeout() {
+            let (peer_list, gossip_client) = setup();
+
+            let server1 = FakeGossipServer::new();
+            server1.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(5),
+                    ..NodeInfo::default()
+                })
+            });
+            let server2 = FakeGossipServer::new();
+            server2.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(8),
+                    ..NodeInfo::default()
+                })
+            });
+
+            let addr1 = server1.spawn();
+            let addr2 = server2.spawn();
+
+            peer_list.add_or_update_peer(make_peer(0x10, addr1), true);
+            peer_list.add_or_update_peer(make_peer(0x11, addr2), true);
+
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
+
+            let err = result.expect_err("expected error when all peers are syncing");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("All peers are still syncing after timeout"),
+                "unexpected error message: {msg}"
+            );
+            assert!(
+                matches!(err, ChainSyncError::Network(_)),
+                "expected ChainSyncError::Network, got: {err:?}"
+            );
+        }
+
+        /// One peer returns is_syncing = true, the other causes a
+        /// network error (via Rejected response). The function
+        /// should fail immediately (no retry).
+        #[tokio::test]
+        async fn mixed_failures_immediate_error() {
+            let (peer_list, gossip_client) = setup();
+
+            let server_syncing = FakeGossipServer::new();
+            server_syncing.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    is_syncing: true,
+                    cumulative_difficulty: U256::from(1),
+                    ..NodeInfo::default()
+                })
+            });
+
+            let server_error = FakeGossipServer::new();
+            server_error.set_on_info_request(|| {
+                GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+            });
+
+            let addr_syncing = server_syncing.spawn();
+            let addr_error = server_error.spawn();
+
+            peer_list.add_or_update_peer(make_peer(0x20, addr_syncing), true);
+            peer_list.add_or_update_peer(make_peer(0x21, addr_error), true);
+
+            let result =
+                synced_peers_sorted_by_cumulative_diff(&peer_list, &gossip_client, false).await;
+
+            let err = result.expect_err("expected error when mixed syncing + network failures");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("No peers available after fetching cumulative difficulties"),
+                "unexpected error message: {msg}"
+            );
+            assert!(
+                matches!(err, ChainSyncError::Network(_)),
+                "expected ChainSyncError::Network, got: {err:?}"
+            );
         }
     }
 }

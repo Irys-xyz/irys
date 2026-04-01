@@ -12,7 +12,7 @@ pub async fn get_node_info(
     started_at: std::time::Instant,
     mining_address: irys_types::IrysAddress,
     chain_id: u64,
-) -> NodeInfo {
+) -> eyre::Result<NodeInfo> {
     let (block_index_height, block_index_hash) = {
         let state = block_index.read();
         (
@@ -23,23 +23,25 @@ pub async fn get_node_info(
         )
     };
 
-    let (chain, blocks) = get_canonical_chain(block_tree.clone()).await.unwrap();
-    let latest = chain.last().unwrap();
+    let (chain, blocks) = get_canonical_chain(block_tree.clone()).await?;
+    let latest = chain
+        .last()
+        .ok_or_else(|| eyre::eyre!("canonical chain is empty"))?;
     let max_diff = block_tree.read().get_max_cumulative_difficulty_block();
 
-    NodeInfo {
+    Ok(NodeInfo {
         version: "0.0.1".into(),
-        peer_count: peer_list.peer_count(),
+        peer_count: u64::try_from(peer_list.peer_count())?,
         chain_id,
         height: latest.height(),
         block_hash: latest.block_hash(),
         block_index_height,
         block_index_hash,
-        pending_blocks: blocks as u64,
+        pending_blocks: u64::try_from(blocks)?,
         is_syncing: sync_state.is_syncing(),
-        current_sync_height: sync_state.sync_target_height(),
+        current_sync_height: u64::try_from(sync_state.sync_target_height())?,
         uptime_secs: started_at.elapsed().as_secs(),
         cumulative_difficulty: max_diff.0,
         mining_address,
-    }
+    })
 }

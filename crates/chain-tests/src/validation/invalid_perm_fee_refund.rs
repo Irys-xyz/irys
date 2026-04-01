@@ -1,15 +1,15 @@
 // These tests create malicious block producers that include invalid PermFeeRefund shadow transactions.
 // They verify that blocks are rejected when they contain inappropriate refunds.
-use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
 use crate::validation::send_block_and_read_state;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_types::IrysAddress;
-use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256};
+use irys_types::{DataLedger, DataTransactionHeader, H256, IrysBlockHeader, NodeConfig, U256};
 use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
@@ -32,7 +32,10 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             // Include the data transaction in submit ledger
             // Create an invalid refund - refunding a promoted transaction
             let user_perm_fee_refunds = vec![self.invalid_refund];
@@ -163,7 +166,10 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
             Ok(irys_actors::block_producer::MempoolTxsBundle {

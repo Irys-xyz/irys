@@ -1,8 +1,8 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::block_tree_service;
-use irys_types::{u64_stringify, BlockHash, IrysAddress, U256};
+use irys_types::{BlockHash, IrysAddress, U256, u64_stringify};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -167,11 +167,11 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
                 }
             }
 
-            if let Ok(decoded) = base58::FromBase58::from_base58(block) {
-                if decoded.len() == 32 {
-                    let irys_block_hash = BlockHash::from_slice(&decoded);
-                    return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
-                }
+            if let Ok(decoded) = base58::FromBase58::from_base58(block)
+                && decoded.len() == 32
+            {
+                let irys_block_hash = BlockHash::from_slice(&decoded);
+                return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
             }
 
             Err(ApiError::InvalidBlockParameter {
@@ -184,6 +184,7 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     #[rstest]
@@ -267,5 +268,21 @@ mod tests {
     fn test_parse_invalid_block_parameter(#[case] input: &str) {
         let result = parse_block_parameter(input);
         assert!(result.is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn parse_block_parameter_never_panics(s in ".*") {
+            let _ = parse_block_parameter(&s);
+        }
+
+        #[test]
+        fn parse_block_parameter_decimal_roundtrip(n: u64) {
+            let s = n.to_string();
+            let result = parse_block_parameter(&s);
+            prop_assert!(
+                matches!(result, Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(v))) if v == n)
+            );
+        }
     }
 }

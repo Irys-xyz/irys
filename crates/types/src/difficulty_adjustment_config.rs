@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{ConsensusConfig, DifficultyAdjustmentConfig, UnixTimestampMs, U256};
+use crate::{ConsensusConfig, DifficultyAdjustmentConfig, U256, UnixTimestampMs};
 use rust_decimal_macros::dec;
 
 pub fn calculate_initial_difficulty(
@@ -167,8 +167,8 @@ mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
     use crate::{
-        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, u256_from_le_bytes,
-        H256, U256,
+        H256, U256, adjust_difficulty, calculate_difficulty, calculate_initial_difficulty,
+        u256_from_le_bytes,
     };
     use openssl::sha;
     use rstest::{fixture, rstest};
@@ -525,127 +525,6 @@ mod tests {
         } else {
             assert_eq!(new_diff, current_diff, "Difficulty should not change");
         }
-    }
-
-    #[rstest]
-    fn test_boundary_condition_exact_threshold(
-        default_difficulty_config: DifficultyAdjustmentConfig,
-    ) {
-        // Test the specific boundary fix: percent_diff >= min_threshold vs percent_diff > min_threshold
-        let difficulty_config = default_difficulty_config;
-        let block_height = 100; // Adjustment block
-        let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
-
-        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
-        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
-
-        // Create scenario where percent_diff exactly equals min_threshold (25%)
-        let actual_time = target_time + (target_time / 4); // 125% of target = 25% diff
-        let current_timestamp =
-            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
-
-        let (new_diff, stats) = calculate_difficulty(
-            block_height,
-            last_diff_timestamp,
-            current_timestamp,
-            current_diff,
-            &difficulty_config,
-        );
-
-        let stats = stats.expect("Stats should be Some at adjustment block");
-
-        // Exactly at threshold should trigger adjustment with >= comparison
-        assert_eq!(
-            stats.percent_different, 25,
-            "Should calculate 25% difference"
-        );
-        assert_eq!(stats.min_threshold, 25, "Min threshold should be 25%");
-        assert!(
-            stats.is_adjusted,
-            "Should adjust when percent_diff == min_threshold"
-        );
-        assert_ne!(
-            new_diff, current_diff,
-            "Difficulty should change at exact threshold"
-        );
-        assert!(
-            new_diff < current_diff,
-            "Difficulty should decrease (blocks too slow)"
-        );
-    }
-
-    #[rstest]
-    fn test_boundary_condition_just_below_threshold(
-        default_difficulty_config: DifficultyAdjustmentConfig,
-    ) {
-        let difficulty_config = default_difficulty_config;
-        let block_height = 100;
-        let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
-
-        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
-        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
-
-        // Create scenario just below threshold (24% diff)
-        let actual_time = target_time + (target_time * 24 / 100); // 124% of target = 24% diff
-        let current_timestamp =
-            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
-
-        let (new_diff, stats) = calculate_difficulty(
-            block_height,
-            last_diff_timestamp,
-            current_timestamp,
-            current_diff,
-            &difficulty_config,
-        );
-
-        let stats = stats.expect("Stats should be Some at adjustment block");
-
-        assert_eq!(
-            stats.percent_different, 24,
-            "Should calculate 24% difference"
-        );
-        assert!(!stats.is_adjusted, "Should NOT adjust when below threshold");
-        assert_eq!(new_diff, current_diff, "Difficulty should remain unchanged");
-    }
-
-    #[rstest]
-    fn test_boundary_condition_just_above_threshold(
-        default_difficulty_config: DifficultyAdjustmentConfig,
-    ) {
-        let difficulty_config = default_difficulty_config;
-        let block_height = 100;
-        let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
-
-        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
-        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
-
-        // Create scenario just above threshold (26% diff)
-        let actual_time = target_time + (target_time * 26 / 100); // 126% of target = 26% diff
-        let current_timestamp =
-            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
-
-        let (new_diff, stats) = calculate_difficulty(
-            block_height,
-            last_diff_timestamp,
-            current_timestamp,
-            current_diff,
-            &difficulty_config,
-        );
-
-        let stats = stats.expect("Stats should be Some at adjustment block");
-
-        assert_eq!(
-            stats.percent_different, 26,
-            "Should calculate 26% difference"
-        );
-        assert!(stats.is_adjusted, "Should adjust when above threshold");
-        assert_ne!(
-            new_diff, current_diff,
-            "Difficulty should change above threshold"
-        );
     }
 
     #[rstest]

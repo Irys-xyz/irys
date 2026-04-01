@@ -1,6 +1,6 @@
 use actix_web::{
-    web::{self, Data, Payload},
     HttpRequest, HttpResponse,
+    web::{self, Data, Payload},
 };
 use awc::Client;
 use std::time::Duration;
@@ -102,4 +102,31 @@ const HOP_BY_HOP_HEADERS: [&str; 8] = [
 
 fn is_hop_by_hop_header(header: &str) -> bool {
     HOP_BY_HOP_HEADERS.contains(&header.to_lowercase().as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("connection", true)]
+    #[case("Connection", true)]
+    #[case("CONNECTION", true)]
+    #[case("keep-alive", true)]
+    #[case("Keep-Alive", true)]
+    #[case("proxy-authenticate", true)]
+    #[case("transfer-encoding", true)]
+    #[case("Transfer-Encoding", true)]
+    #[case("upgrade", true)]
+    #[case("proxy-authorization", true)]
+    #[case("te", true)]
+    #[case("trailers", true)]
+    #[case("content-type", false)]
+    #[case("authorization", false)]
+    #[case("accept", false)]
+    #[case("x-custom-header", false)]
+    fn hop_by_hop_detection(#[case] header: &str, #[case] expected: bool) {
+        assert_eq!(is_hop_by_hop_header(header), expected);
+    }
 }

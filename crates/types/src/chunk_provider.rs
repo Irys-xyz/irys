@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::range_specifier::PdDataRead;
 use crate::ChunkFormat;
+use crate::range_specifier::PdDataRead;
 
 /// Configuration values needed for chunk operations.
 #[derive(Debug, Clone, Copy)]

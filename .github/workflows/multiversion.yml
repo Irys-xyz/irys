@@ -1,0 +1,57 @@
+name: Multiversion Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: multiversion-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  multiversion-tests:
+    name: Cross-version integration tests
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, misc-runner]
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine old ref
+        id: refs
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "old_ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            echo "old_ref=origin/${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
+          else
+            # workflow_dispatch: default to the repo's default branch
+            echo "old_ref=origin/${{ github.event.repository.default_branch || 'master' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Run multiversion tests
+        run: cargo xtask multiversion-test --profile dev --old-ref ${{ steps.refs.outputs.old_ref }} --new-ref HEAD --clean
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats

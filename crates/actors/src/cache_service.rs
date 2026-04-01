@@ -887,7 +887,7 @@ impl ChunkCacheService {
 mod tests {
     use super::*;
     use irys_database::{
-        database, open_or_create_db,
+        IrysDatabaseArgs as _, database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
@@ -898,6 +898,7 @@ mod tests {
         UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
@@ -906,10 +907,11 @@ mod tests {
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -990,10 +992,11 @@ mod tests {
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1068,35 +1071,16 @@ mod tests {
         Ok(())
     }
 
-    // ========================================================================
-    // FIFO Ordering Property Tests
-    // ========================================================================
-
-    #[cfg(test)]
-    mod fifo_properties {
-
-        use irys_types::UnixTimestamp;
-        use proptest::prelude::*;
-
-        prop_compose! {
-            fn unix_timestamps()(
-                // Realistic range: 2020-01-01 to 2030-01-01
-                secs in 1_577_836_800_u64..1_893_456_000_u64
-            ) -> UnixTimestamp {
-                UnixTimestamp::from_secs(secs)
-            }
-        }
-    }
-
     // Chunks should remain when there is an active ingress proof present for the data_root.
     #[tokio::test]
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1189,10 +1173,11 @@ mod tests {
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1266,10 +1251,11 @@ mod tests {
     // Chunks older than threshold should be deleted while newer ones should remain.
     #[tokio::test]
     async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1406,10 +1392,11 @@ mod tests {
         node_config.cache.max_cache_size_bytes = 96;
         let config_below = Config::new_with_random_peer_id(node_config.clone());
 
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
@@ -1528,10 +1515,11 @@ mod tests {
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1596,10 +1584,11 @@ mod tests {
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
+            &_temp_dir,
             IrysTables::ALL,
-            None,
+            DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 

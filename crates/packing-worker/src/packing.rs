@@ -37,6 +37,8 @@ impl PackingWorkerState {
         match PACKING_TYPE {
             PackingType::CPU => {
                 let cpu_packing_concurrency = self.0.config.cpu_packing_concurrency;
+                let chunk_size_usize =
+                    usize::try_from(chunk_size).expect("protocol-fixed chunk_size fits usize");
                 let stream = stream::iter(start_value..=end_value).map(move  |i| {
                     let runtime_handle = runtime_handle.clone();
                     let semaphore = semaphore.clone();
@@ -51,15 +53,14 @@ impl PackingWorkerState {
                             );
                         }
 
-                        // Spawn blocking task
                         let result = runtime_handle.spawn_blocking(move || {
-                            let mut out = Vec::with_capacity(chunk_size as usize);
+                            let mut out = Vec::with_capacity(chunk_size_usize);
                             irys_packing::capacity_single::compute_entropy_chunk(
                                 mining_address,
-                                i as u64,
+                                u64::from(i),
                                 partition_hash.0,
                                 entropy_packing_iterations,
-                                chunk_size as usize,
+                                chunk_size_usize,
                                 &mut out,
                                 chain_id,
                             );
@@ -71,9 +72,8 @@ impl PackingWorkerState {
                     }
                 )
                 // note: `buffered` both spawns multiple futures (up to `cpu_packing_concurrency`) and ensures they yield in the correct order
-                .buffered(cpu_packing_concurrency as usize)
+                .buffered(usize::from(cpu_packing_concurrency))
                 .inspect(move |_| {
-                    // This runs after all tasks complete
                     trace!(
                         target: "irys::packing::done",
                         "CPU Packed chunks complete for  partition_hash {:?} mining_address {:?} iterations {}",
@@ -108,17 +108,19 @@ impl PackingWorkerState {
                             &start, &end, &num_chunks
                         );
 
-
+                        let chunk_size_u32 =
+                            u32::try_from(chunk_size).expect("protocol-fixed chunk_size fits u32");
                         let out = runtime_handle
                             .spawn_blocking(move || {
 
                                 let mut out: Vec<u8> = Vec::with_capacity(
-                                    (num_chunks * chunk_size as u32).try_into().unwrap(),
+                                    usize::try_from(num_chunks * chunk_size_u32)
+                                        .expect("total size fits in usize"),
                                 );
                                 capacity_pack_range_cuda_c(
                                     num_chunks,
                                     mining_address,
-                                    start as u64,
+                                    u64::from(start),
                                     partition_hash,
                                     entropy_packing_iterations,
                                     chain_id,
@@ -140,7 +142,7 @@ impl PackingWorkerState {
                     }}).buffered(1).boxed();
                 Ok(stream)
             }
-            _ => unimplemented!(),
+            other => eyre::bail!("unsupported packing type: {other:?}"),
         }
     }
 }

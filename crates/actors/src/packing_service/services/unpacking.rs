@@ -365,7 +365,7 @@ impl InternalUnpackingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{ConsensusConfig, NodeConfig, StorageSyncConfig};
 
     fn create_test_config(tmp_dir: &tempfile::TempDir, unpacking_concurrency: u16) -> Config {
@@ -396,7 +396,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_unpacking_controllers() {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_controllers"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_controllers")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 3);
 
         let service = InternalUnpackingService::new(Arc::new(config));
@@ -414,7 +417,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_request_handling() {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_empty"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_empty")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 1);
 
         let mut service = InternalUnpackingService::new(Arc::new(config));
@@ -479,7 +485,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_unpacking_chunks() {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_actual_unpack"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_actual_unpack")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 4);
 
         // Create a packed chunk
@@ -520,7 +529,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_queue_ordering() {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_priority_order"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_priority_order")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 1); // Single worker to serialize
 
         let mut service = InternalUnpackingService::new(Arc::new(config.clone()));
@@ -596,7 +608,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_unpacking_multiple_chunks() {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_concurrent"), false);
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("test_concurrent")
+            .with_tracing()
+            .build();
         let config = create_test_config(&tmp_dir, 4); // Multiple workers
 
         let mut service = InternalUnpackingService::new(Arc::new(config.clone()));

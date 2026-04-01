@@ -3,9 +3,9 @@
 //! Provides a unified endpoint for querying PD base fees, utilization, and priority fees
 //! following Ethereum's eth_feeHistory pattern.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 
 // Re-export response types from actors module
 pub use irys_actors::pd_pricing::{

@@ -6,11 +6,9 @@ mod platform {
 
     /// Get the page size in bytes (falls back to 4096 if sysconf fails).
     fn get_page_size() -> u64 {
-        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if raw < 1 {
-            4096
-        } else {
-            raw as u64
+        match nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE) {
+            Ok(Some(n)) if n >= 1 => n as u64,
+            _ => 4096,
         }
     }
 
@@ -34,10 +32,10 @@ mod platform {
             if let Ok(content) = fs::read_to_string(&statm_path) {
                 let fields: Vec<&str> = content.split_whitespace().collect();
                 // Field 0 = total pages, Field 1 = resident pages
-                if fields.len() > 1 {
-                    if let Ok(resident_pages) = fields[1].parse::<u64>() {
-                        return resident_pages * self.page_size;
-                    }
+                if fields.len() > 1
+                    && let Ok(resident_pages) = fields[1].parse::<u64>()
+                {
+                    return resident_pages * self.page_size;
                 }
             }
             0

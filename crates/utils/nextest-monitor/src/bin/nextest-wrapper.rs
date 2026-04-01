@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use nextest_monitor::cpu_monitor::CpuMonitor;
 use nextest_monitor::memory_monitor::MemoryMonitor;
-use nextest_monitor::types::{append_stats, CpuSample, MemorySample, TestStats};
+use nextest_monitor::types::{CpuSample, MemorySample, TestStats, append_stats};
 
 /// Flags known to take a following value argument.
 const VALUE_TAKING_FLAGS: &[&str] = &[
@@ -89,12 +89,11 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
         }
 
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                if content.contains("[workspace]") {
-                    return Some(current);
-                }
-            }
+        if cargo_toml.exists()
+            && let Ok(content) = fs::read_to_string(&cargo_toml)
+            && content.contains("[workspace]")
+        {
+            return Some(current);
         }
 
         if !current.pop() {
@@ -396,10 +395,9 @@ fn find_heaptrack_output(base_path: &Path) -> Option<PathBuf> {
                     if let (Ok(prev_time), Ok(cur_time)) = (
                         fs::metadata(prev).and_then(|m| m.modified()),
                         meta.modified(),
-                    ) {
-                        if cur_time > prev_time {
-                            best = Some(entry.path());
-                        }
+                    ) && cur_time > prev_time
+                    {
+                        best = Some(entry.path());
                     }
                 }
                 _ => {}
@@ -625,49 +623,35 @@ fn calculate_memory_stats(samples: &[MemorySample], duration_ms: u64) -> Calcula
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_extract_test_name_basic() {
-        let args = vec![
-            "my_module::test_foo".to_string(),
-            "--exact".to_string(),
-            "--nocapture".to_string(),
-        ];
-        assert_eq!(
-            extract_test_name(&args),
-            Some("my_module::test_foo".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_test_name_with_leading_flags() {
-        // Boolean flags (not in VALUE_TAKING_FLAGS) don't consume the next token.
-        let args = vec!["--some-flag".to_string(), "test_name".to_string()];
-        assert_eq!(extract_test_name(&args), Some("test_name".to_string()));
-    }
-
-    #[test]
-    fn test_extract_test_name_skips_option_values() {
-        // "--test-threads 1" should not cause "1" to be returned as the test name.
-        let args = vec![
-            "--test-threads".to_string(),
-            "1".to_string(),
-            "my_test".to_string(),
-            "--exact".to_string(),
-        ];
-        assert_eq!(extract_test_name(&args), Some("my_test".to_string()));
-    }
-
-    #[test]
-    fn test_extract_test_name_empty() {
-        let args: Vec<String> = vec![];
-        assert_eq!(extract_test_name(&args), None);
-    }
-
-    #[test]
-    fn test_extract_test_name_only_flags() {
-        let args = vec!["--exact".to_string(), "--nocapture".to_string()];
-        assert_eq!(extract_test_name(&args), None);
+    #[rstest]
+    #[case::basic(
+        &["my_module::test_foo", "--exact", "--nocapture"],
+        Some("my_module::test_foo")
+    )]
+    #[case::leading_flags(
+        &["--some-flag", "test_name"],
+        Some("test_name")
+    )]
+    #[case::skips_option_values(
+        &["--test-threads", "1", "my_test", "--exact"],
+        Some("my_test")
+    )]
+    #[case::skips_forward_slash_path(
+        &["src/tests/foo.rs", "my_test"],
+        Some("my_test")
+    )]
+    #[case::skips_backslash_path(
+        &["src\\tests\\foo.rs", "my_test"],
+        Some("my_test")
+    )]
+    #[case::only_path_arg(&["src/tests/foo.rs"], None)]
+    #[case::empty(&[], None)]
+    #[case::only_flags(&["--exact", "--nocapture"], None)]
+    fn extract_test_name_cases(#[case] args: &[&str], #[case] expected: Option<&str>) {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(extract_test_name(&args), expected.map(String::from));
     }
 
     #[test]
@@ -817,5 +801,43 @@ mod tests {
         assert_eq!(sample_deltas(&[50]), vec![50]);
         assert_eq!(sample_deltas(&[50, 100, 150]), vec![50, 50, 50]);
         assert_eq!(sample_deltas(&[50, 120, 160]), vec![50, 70, 40]);
+    }
+
+    mod proptest_percentile {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn percentile_index_always_in_bounds(
+                len in 1_usize..=10_000,
+                pct in 0.0_f64..=100.0,
+            ) {
+                let idx = percentile_index(len, pct);
+                prop_assert!(idx < len, "index {} out of bounds for len {}", idx, len);
+            }
+
+            #[test]
+            fn percentile_index_monotonic(
+                len in 2_usize..=1_000,
+                pct_a in 0.0_f64..=100.0,
+                pct_b in 0.0_f64..=100.0,
+            ) {
+                let (lo, hi) = if pct_a <= pct_b { (pct_a, pct_b) } else { (pct_b, pct_a) };
+                let idx_lo = percentile_index(len, lo);
+                let idx_hi = percentile_index(len, hi);
+                prop_assert!(
+                    idx_lo <= idx_hi,
+                    "percentile_index not monotonic: p{}={} > p{}={}",
+                    lo, idx_lo, hi, idx_hi
+                );
+            }
+
+            #[test]
+            fn percentile_100_returns_last(len in 1_usize..=10_000) {
+                let idx = percentile_index(len, 100.0);
+                prop_assert_eq!(idx, len - 1);
+            }
+        }
     }
 }

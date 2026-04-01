@@ -1,5 +1,5 @@
 [package]
-edition = "2021"
+edition.workspace = true
 name = "irys-reth-node-bridge"
 version = "0.1.0"
 
@@ -33,6 +33,11 @@ alloy-consensus.workspace = true
 alloy-genesis.workspace = true
 alloy-evm.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
 
 [lints]
 workspace = true

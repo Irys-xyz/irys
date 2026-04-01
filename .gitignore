@@ -17,3 +17,4 @@ ecosystem.config.js
 docker/build-output/
 .worktrees/
 .claude/local/
+.claude/worktrees/

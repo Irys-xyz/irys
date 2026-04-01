@@ -21,6 +21,8 @@ mod packing;
 #[cfg(test)]
 mod partition_assignments;
 #[cfg(test)]
+mod perm_ledger_expiry;
+#[cfg(test)]
 mod programmable_data;
 #[cfg(test)]
 mod promotion;

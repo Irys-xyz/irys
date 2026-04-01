@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, gossip_commitment_to_node, solution_context, IrysNodeTest,
+    IrysNodeTest, assert_validation_error, gossip_commitment_to_node, solution_context,
 };
 use crate::validation::{send_block_and_read_state, send_block_to_block_tree};
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
-async fn heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
+async fn spiky_heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unpledge: CommitmentTransaction,
@@ -31,7 +31,10 @@ async fn heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resu
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unpledge = self.invalid_unpledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unpledge.clone()],
@@ -152,7 +155,7 @@ async fn heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resu
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> {
+async fn block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -168,7 +171,10 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitment_txs = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitment_txs.clone(),
@@ -273,7 +279,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> {
+async fn block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitment: CommitmentTransaction,
@@ -289,7 +295,10 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitment = self.commitment.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![commitment.clone()],
@@ -369,7 +378,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
+async fn epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
     struct EvilEpochStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -385,7 +394,10 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let mut commitments = self.commitments.clone();
             commitments.sort(); // mimic canonical ordering
             Ok(irys_actors::block_producer::MempoolTxsBundle {

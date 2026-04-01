@@ -144,6 +144,43 @@ impl BlockValidationTask {
         }
     }
 
+    /// Create a task suitable only for priority-queue operations in tests.
+    ///
+    /// The `service_inner` field contains uninitialized data — calling
+    /// `execute_concurrent` or any method that reads it is undefined behavior.
+    /// Only queue operations (Hash/Eq/Ord on block_hash) and `check_preemption`
+    /// (reads only the associated priority, not the task) are safe.
+    #[cfg(test)]
+    pub(super) fn test_stub(
+        sealed_block: Arc<SealedBlock>,
+        block_tree_guard: BlockTreeReadGuard,
+    ) -> Self {
+        // SAFETY: We allocate a real ArcInner<MaybeUninit<ValidationServiceInner>>
+        // (with valid refcounts), cast it to Arc<ValidationServiceInner>, and keep
+        // one strong reference in ManuallyDrop so the inner data is never dropped
+        // or freed.
+        //
+        // Layout is identical because MaybeUninit<T> has the same size/alignment as T.
+        // Dropping the returned Arc only decrements the strong count back to 1, so
+        // drop_in_place is never called on the uninitialized data.
+        let fake_inner: Arc<ValidationServiceInner> = unsafe {
+            let uninit = Arc::new(std::mem::MaybeUninit::<ValidationServiceInner>::uninit());
+            let raw = Arc::into_raw(uninit) as *const ValidationServiceInner;
+            let arc = Arc::from_raw(raw);
+            let leaked_arc = std::mem::ManuallyDrop::new(arc);
+
+            Arc::clone(&leaked_arc)
+        };
+
+        Self {
+            sealed_block,
+            service_inner: fake_inner,
+            block_tree_guard,
+            skip_vdf_validation: false,
+            parent_span: tracing::Span::none(),
+        }
+    }
+
     /// Execute the concurrent validation task
     #[tracing::instrument(parent = &self.parent_span, skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
@@ -352,7 +389,7 @@ impl BlockValidationTask {
                 });
             }
         };
-        tracing::info!("Using parent epoch snapshot for PoA validation");
+        tracing::debug!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
         let block_hash_for_error_log = self.sealed_block.header().block_hash;

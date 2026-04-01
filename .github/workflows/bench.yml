@@ -1,0 +1,222 @@
+name: Benchmarks
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+on:
+  pull_request:
+    types: [opened, closed]
+  pull_request_review:
+    types: [submitted]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: gate
+    runs-on: [self-hosted, misc-runner]
+    outputs:
+      should-run: ${{ steps.set-output.outputs.should-run }}
+    steps:
+      - name: Check if benchmarks should run
+        id: set-output
+        env:
+          PR_DISABLE_CI: ${{ contains(github.event.pull_request.body, '#disable-ci') }}
+          COMMIT_DISABLE_CI: ${{ contains(github.event.head_commit.message, '#disable-ci') }}
+        run: |
+          SHOULD_RUN=false
+
+          # Fork PRs must not run on self-hosted runners that have write access
+          # to gh-pages and shared caches — require same-repo origin.
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "opened" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          if [[ "$PR_DISABLE_CI" == "true" || "$COMMIT_DISABLE_CI" == "true" ]]; then
+            echo "#disable-ci found, skipping benchmarks"
+            SHOULD_RUN=false
+          fi
+
+          echo "Should run benchmarks? ${SHOULD_RUN}"
+          echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+
+  cleanup-branch-data:
+    name: cleanup branch benchmark data
+    runs-on: [self-hosted, misc-runner]
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: Remove branch benchmark data
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+        run: |
+          if [ -d "dev/bench/$BRANCH_NAME" ]; then
+            git rm -rf "dev/bench/$BRANCH_NAME"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "cleanup: remove benchmark data for merged branch $BRANCH_NAME"
+            git push
+          else
+            echo "No benchmark data found for branch $BRANCH_NAME"
+          fi
+
+  cargo-bench:
+    name: cargo bench
+    runs-on: [self-hosted, misc-runner]
+    needs: gate
+    if: ${{ needs.gate.outputs.should-run == 'true' }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Run benchmarks
+        run: cargo bench --workspace --bench '*' -- --output-format bencher | tee bench-output.txt
+
+      - name: Convert benchmark output to milliseconds
+        run: |
+          python3 -c "
+          import re, json
+          results = []
+          with open('bench-output.txt') as f:
+              for line in f:
+                  m = re.match(r'test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter\s+\(\+/-\s+([\d,]+)\)', line)
+                  if m:
+                      name = m.group(1)
+                      value_ns = int(m.group(2).replace(',', ''))
+                      range_ns = int(m.group(3).replace(',', ''))
+                      results.append({
+                          'name': name,
+                          'unit': 'ms/iter',
+                          'value': round(value_ns / 1e6, 6),
+                          'range': '± ' + str(round(range_ns / 1e6, 6))
+                      })
+          with open('bench-output.json', 'w') as f:
+              json.dump(results, f, indent=2)
+          print(f'Converted {len(results)} benchmarks from ns to ms')
+          "
+
+      - name: Seed branch with master baseline
+        if: (github.head_ref || github.ref_name) != github.event.repository.default_branch
+        env:
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+        run: |
+          git fetch origin gh-pages:gh-pages
+          git worktree add /tmp/gh-pages gh-pages
+
+          BRANCH_DIR="/tmp/gh-pages/dev/bench/$BRANCH_NAME"
+          MASTER_DATA="/tmp/gh-pages/data.js"
+
+          if [ ! -f "$BRANCH_DIR/data.js" ] && [ -f "$MASTER_DATA" ]; then
+            mkdir -p "$BRANCH_DIR"
+            cp "$MASTER_DATA" "$BRANCH_DIR/data.js"
+            cd /tmp/gh-pages
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "dev/bench/$BRANCH_NAME/data.js"
+            git commit -m "seed: copy master baseline to branch $BRANCH_NAME"
+            git push origin gh-pages
+          else
+            echo "Branch data already exists or no master baseline found, skipping seed"
+          fi
+
+          git worktree remove /tmp/gh-pages
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'customSmallerIsBetter'
+          output-file-path: bench-output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          benchmark-data-dir-path: ${{ (github.head_ref || github.ref_name) != github.event.repository.default_branch && format('dev/bench/{0}', github.head_ref || github.ref_name) || '.' }}
+          alert-threshold: '120%'
+          comment-on-alert: true
+          fail-on-alert: false
+
+      - name: Comment benchmark results URL on PR
+        if: (github.head_ref || github.ref_name) != github.event.repository.default_branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber = context.payload.pull_request?.number
+              ?? context.payload.review?.pull_request?.number;
+
+            if (!prNumber) {
+              const branch = '${{ github.head_ref || github.ref_name }}';
+              const { data: prs } = await github.rest.pulls.list({
+                ...context.repo,
+                head: `${context.repo.owner}:${branch}`,
+                state: 'open',
+              });
+              prNumber = prs[0]?.number;
+            }
+            if (!prNumber) return;
+
+            const branch = '${{ github.head_ref || github.ref_name }}';
+            const url = `https://irys-xyz.github.io/irys/dev/bench/${encodeURIComponent(branch)}/index.html`;
+            const marker = '<!-- benchmark-results-url -->';
+            const body = `${marker}\n**Benchmark results:** ${url}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats

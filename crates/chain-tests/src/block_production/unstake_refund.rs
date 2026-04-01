@@ -2,15 +2,15 @@ use alloy_consensus::Transaction as _;
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::HashOrNumber;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
-    shadow_tx_topics, ShadowTransaction, TransactionPacket,
+    ShadowTransaction, TransactionPacket, shadow_tx_topics,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    partition::PartitionAssignment, CommitmentTransaction, PledgeDataProvider as _, U256,
+    CommitmentTransaction, PledgeDataProvider as _, U256, partition::PartitionAssignment,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 use reth::rpc::types::BlockNumberOrTag;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crate::block_production::unpledge_refund::{
     assert_single_log_for, send_unpledge_all, setup_env, setup_env_with_block_migration_depth,
@@ -22,7 +22,7 @@ use crate::utils::IrysNodeTest;
 /// 2. Submit an unstake commitment, mine the inclusion block, and ensure it is fee-only.
 /// 3. Advance to the next epoch to assert the unstake refund, treasury delta, and stake removal.
 #[test_log::test(tokio::test)]
-async fn heavy3_unstake_epoch_refund_flow() -> eyre::Result<()> {
+async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -320,7 +320,7 @@ async fn heavy3_unstake_epoch_refund_flow() -> eyre::Result<()> {
 /// 3. No balance changes or treasury changes occur from the unstake attempt
 /// 4. After all pledges are cleared, the same unstake transaction can be included and processed normally
 #[test_log::test(tokio::test)]
-async fn heavy3_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
+async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -567,7 +567,7 @@ async fn heavy3_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 /// 3. The simulation validation sees the pledge being added, which creates an active pledge that blocks the unstake
 /// 4. This demonstrates transaction priority ordering: Pledge (1) < Unstake (3)
 #[test_log::test(tokio::test)]
-async fn heavy3_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
+async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -1021,17 +1021,16 @@ fn assert_unstake_debit_packet<T: alloy_rpc_types_eth::TransactionTrait>(
 ) {
     let mut found = false;
     for tx in transactions {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnstakeDebit(debit)) = shadow_tx.as_v1() {
-                if debit.target == peer_addr.to_alloy_address() {
-                    assert_eq!(
-                        debit.irys_ref, expected_irys_ref,
-                        "Unstake debit irys_ref must match commitment id"
-                    );
-                    found = true;
-                    break;
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::UnstakeDebit(debit)) = shadow_tx.as_v1()
+            && debit.target == peer_addr.to_alloy_address()
+        {
+            assert_eq!(
+                debit.irys_ref, expected_irys_ref,
+                "Unstake debit irys_ref must match commitment id"
+            );
+            found = true;
+            break;
         }
     }
     assert!(
@@ -1050,22 +1049,21 @@ fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
 ) {
     let mut found = false;
     for tx in transactions {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnstakeRefund(increment)) = shadow_tx.as_v1() {
-                if increment.target == peer_addr.to_alloy_address() {
-                    let expected_amount_alloy: alloy_primitives::U256 = expected_amount.into();
-                    assert_eq!(
-                        increment.amount, expected_amount_alloy,
-                        "Unstake refund amount must equal configured stake value"
-                    );
-                    assert_eq!(
-                        increment.irys_ref, expected_irys_ref,
-                        "Unstake refund irys_ref must match commitment id"
-                    );
-                    found = true;
-                    break;
-                }
-            }
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref())
+            && let Some(TransactionPacket::UnstakeRefund(increment)) = shadow_tx.as_v1()
+            && increment.target == peer_addr.to_alloy_address()
+        {
+            let expected_amount_alloy: alloy_primitives::U256 = expected_amount.into();
+            assert_eq!(
+                increment.amount, expected_amount_alloy,
+                "Unstake refund amount must equal configured stake value"
+            );
+            assert_eq!(
+                increment.irys_ref, expected_irys_ref,
+                "Unstake refund irys_ref must match commitment id"
+            );
+            found = true;
+            break;
         }
     }
     assert!(
@@ -1106,7 +1104,7 @@ fn assert_no_unstake_in_commitment_snapshot(
 /// 7. No storage modules remain assigned (all pledges cleared)
 /// 8. User is no longer staked (removed from epoch snapshot)
 #[test_log::test(tokio::test)]
-async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
+async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
     initialize_tracing();
 
     let num_blocks_in_epoch = 2_u64;
@@ -1261,19 +1259,19 @@ async fn heavy3_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<(
                 if refund.target == peer_addr.to_alloy_address() {
                     found_unpledge_refunds += 1;
                 }
-            } else if let Some(TransactionPacket::UnstakeRefund(refund)) = shadow_tx.as_v1() {
-                if refund.target == peer_addr.to_alloy_address() {
-                    let refund_amount_alloy: alloy_primitives::U256 = unstake_refund_amount.into();
-                    assert_eq!(
-                        refund.amount, refund_amount_alloy,
-                        "Unstake refund amount must match stake value"
-                    );
-                    assert_eq!(
-                        refund.irys_ref, expected_irys_ref,
-                        "Unstake refund irys_ref must match commitment id"
-                    );
-                    found_unstake_refund = true;
-                }
+            } else if let Some(TransactionPacket::UnstakeRefund(refund)) = shadow_tx.as_v1()
+                && refund.target == peer_addr.to_alloy_address()
+            {
+                let refund_amount_alloy: alloy_primitives::U256 = unstake_refund_amount.into();
+                assert_eq!(
+                    refund.amount, refund_amount_alloy,
+                    "Unstake refund amount must match stake value"
+                );
+                assert_eq!(
+                    refund.irys_ref, expected_irys_ref,
+                    "Unstake refund irys_ref must match commitment id"
+                );
+                found_unstake_refund = true;
             }
         }
     }

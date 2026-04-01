@@ -22,6 +22,7 @@ pub mod ingress;
 pub mod irys;
 pub mod ledger_expiry;
 mod merkle;
+pub mod node_version;
 pub mod partition;
 pub mod peer_list;
 pub mod precompile;
@@ -40,6 +41,7 @@ pub mod tx_known_status;
 pub mod tx_source;
 pub mod version;
 pub mod versioning;
+pub mod versions;
 
 pub mod canonical;
 pub mod traced;
@@ -54,7 +56,7 @@ mod peer_id;
 
 pub use address::IrysAddress;
 
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 
 pub use block::*;
 pub use commitment_common::*;
@@ -81,8 +83,9 @@ pub use app_state::*;
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;
-pub use conversions::{parse_address, u256_from_le_bytes, AddressParseError};
+pub use conversions::{AddressParseError, parse_address, u256_from_le_bytes};
 pub use merkle::*;
+pub use node_version::*;
 pub use nodit::Interval;
 pub use peer_list::*;
 pub use reth_codecs::Compact;
@@ -92,5 +95,6 @@ pub use traced::*;
 pub use tx_known_status::*;
 pub use version::*;
 pub use versioning::*;
+pub use versions::*;
 
 pub type AtomicVdfStepNumber = Arc<AtomicU64>;

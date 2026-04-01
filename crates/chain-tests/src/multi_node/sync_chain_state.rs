@@ -2,22 +2,22 @@ use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 
 use irys_chain::{
-    peer_utilities::{block_index_endpoint_request, info_endpoint_request},
     IrysNodeCtx,
+    peer_utilities::{block_index_endpoint_request, info_endpoint_request},
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    NodeMode, SyncMode,
+    BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo, NodeMode, SyncMode,
+    irys::IrysSigner,
 };
 use reth::rpc::types::BlockNumberOrTag;
 use reth_db::Database as _;
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_p2p_reth_gossip() -> eyre::Result<()> {
+async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
     let mut genesis_config = NodeConfig::testing();
@@ -87,7 +87,7 @@ async fn heavy3_test_p2p_reth_gossip() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
     let peer_account = genesis_config.new_random_signer();
@@ -158,7 +158,7 @@ async fn heavy3_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 #[test_log::test(tokio::test)]
-async fn heavy4_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
+async fn spiky_heavy4_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let required_index_blocks_height: usize = 2;
     let max_seconds = 20;
 
@@ -574,7 +574,11 @@ async fn poll_until_fetch_at_block_index_height(
         if required_blocks_height > json_response.block_index_height {
             tracing::debug!(
                 "{} attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
-                node_name, &attempts, &url, required_blocks_height, json_response.block_index_height
+                node_name,
+                &attempts,
+                &url,
+                required_blocks_height,
+                json_response.block_index_height
             );
             //wait one second and try again
             sleep(Duration::from_millis(100)).await;

@@ -1,15 +1,15 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
+    CommitmentTransaction, NodeConfig, UnixTimestamp,
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig, UnixTimestamp,
 };
 use tracing::info;
 
 /// Test that verifies the treasury field is correctly tracked across blocks
 #[tokio::test]
-async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
+async fn test_treasury_tracking() -> eyre::Result<()> {
     initialize_tracing();
 
     // ===== SETUP =====
@@ -372,18 +372,20 @@ async fn heavy_test_treasury_tracking_with_sprite_activation() -> eyre::Result<(
     let empty_sprite_block2 = node.mine_block().await?;
 
     // Both should have Sprite active
-    assert!(node
-        .node_ctx
-        .config
-        .consensus
-        .hardforks
-        .is_sprite_active(empty_sprite_block1.timestamp_secs()));
-    assert!(node
-        .node_ctx
-        .config
-        .consensus
-        .hardforks
-        .is_sprite_active(empty_sprite_block2.timestamp_secs()));
+    assert!(
+        node.node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(empty_sprite_block1.timestamp_secs())
+    );
+    assert!(
+        node.node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(empty_sprite_block2.timestamp_secs())
+    );
 
     // Empty blocks should have unchanged treasury (verifies EVM state is correctly read)
     assert_eq!(

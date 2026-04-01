@@ -1,7 +1,7 @@
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 use actix_web::{
-    web::{self, Json},
     HttpResponse,
+    web::{self, Json},
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};

@@ -306,7 +306,7 @@ impl ExecutionPayloadCache {
         &self,
         evm_block_hash: B256,
         timeout: std::time::Duration,
-    ) {
+    ) -> eyre::Result<()> {
         if self
             .get_sealed_block_from_cache(&evm_block_hash)
             .await
@@ -315,9 +315,14 @@ impl ExecutionPayloadCache {
             let receiver = self.block_receiver(evm_block_hash).await;
             tokio::time::timeout(timeout, receiver)
                 .await
-                .unwrap()
-                .unwrap();
+                .map_err(|_| eyre::eyre!("timed out waiting for sealed block {evm_block_hash:?}"))?
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "sealed block observer dropped before {evm_block_hash:?} arrived: {err}"
+                    )
+                })?;
         }
+        Ok(())
     }
 }
 

@@ -5,32 +5,32 @@ use crate::{
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
 use actix_web::dev::Server;
-use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpResponse, HttpServer, middleware, web};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
-use futures::{future, FutureExt as _};
+use futures::{FutureExt as _, future};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::mempool_guard::MempoolReadGuard;
-use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
+use irys_actors::mempool_service::{AtomicMempoolState, TxIngressError, TxReadError, create_state};
 use irys_actors::services::ServiceSenders;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, MempoolFacade};
+use irys_actors::{MempoolFacade, block_discovery::BlockDiscoveryFacade};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
+use irys_types::IrysAddress;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
-use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IrysBlockHeader,
-    IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _, TokioServiceHandle,
-    Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, DbSyncMode, GossipRequest, H256,
+    IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _,
+    TokioServiceHandle, Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -248,7 +248,10 @@ impl GossipServiceTestFixture {
     /// Can panic
     #[must_use]
     pub(crate) fn new() -> Self {
-        let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
+        let temp_dir = TempDirBuilder::new()
+            .prefix("gossip_test_fixture")
+            .with_tracing()
+            .build();
         let gossip_port = random_free_port();
         let api_port = random_free_port();
 
@@ -265,8 +268,9 @@ impl GossipServiceTestFixture {
         // peer_id is separate from mining_address in V2
         let config = Config::new_with_random_peer_id(node_config);
 
-        let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
-            .expect("can't open temp dir");
+        let db_env =
+            open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
         let (service_senders, service_receivers) =
@@ -453,6 +457,11 @@ impl GossipServiceTestFixture {
         );
 
         (service_handle, gossip_broadcast)
+    }
+
+    #[must_use]
+    pub(crate) fn gossip_addr(&self) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.gossip_port)
     }
 
     #[must_use]
@@ -660,9 +669,9 @@ impl FakeGossipServer {
     pub(crate) fn set_on_pull_data_request(
         &self,
         on_pull_data_request: impl Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) {
         self.handler
             .write()
@@ -683,9 +692,9 @@ impl FakeGossipServer {
     pub(crate) fn set_on_block_index_request(
         &self,
         on_block_index_request: impl Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) {
         self.handler
             .write()
@@ -1123,6 +1132,38 @@ pub(crate) async fn wait_for_block(
             panic!("Timeout waiting for block at height {}", block_height);
         }
 
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Probe a TCP address until a connection succeeds or the deadline expires.
+/// Use after spawning an HTTP server to wait for it to accept connections.
+pub(crate) async fn wait_until_listening(addr: SocketAddr) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Server at {addr} failed to start accepting connections"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Poll `check` every 100ms until it returns `true`, failing after `timeout`.
+pub(crate) async fn poll_until(
+    timeout: Duration,
+    msg: &str,
+    check: impl Fn() -> bool,
+) -> eyre::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if check() {
+            return Ok(());
+        }
+        eyre::ensure!(tokio::time::Instant::now() < deadline, "{msg}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

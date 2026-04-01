@@ -11,8 +11,8 @@ use alloy_eips::BlobScheduleBlobParams;
 use alloy_genesis::{ChainConfig, Genesis};
 use alloy_primitives::{Address, B256, U256};
 use reth_chainspec::{
-    hardfork, make_genesis_header, BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks,
-    ChainSpec, EthereumHardfork, ForkCondition,
+    BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks, ChainSpec, EthereumHardfork,
+    ForkCondition, hardfork, make_genesis_header,
 };
 use reth_primitives_traits::SealedHeader;
 

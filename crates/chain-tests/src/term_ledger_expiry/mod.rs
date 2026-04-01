@@ -7,8 +7,8 @@ use alloy_primitives::Address;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    fee_distribution::TermFeeCharges, irys::IrysSigner, ConsensusConfig, DataLedger,
-    DataTransaction, IrysAddress, IrysBlockHeader, NodeConfig, U256,
+    ConsensusConfig, DataLedger, DataTransaction, IrysAddress, IrysBlockHeader, NodeConfig, U256,
+    fee_distribution::TermFeeCharges, irys::IrysSigner,
 };
 use std::ops::{Deref, DerefMut};
 use tracing::info;
@@ -16,7 +16,7 @@ use tracing::info;
 // Test 0: Complete slot expiry with 0 transactions
 
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
+async fn ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
     info!("Testing ledger expiry with no transactions at all");
 
     ledger_expiry_test(LedgerExpiryTestParams {
@@ -128,7 +128,7 @@ async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
 // Tx2 and Tx3 start in later partitions, don't expire
 //
 #[test_log::test(tokio::test)]
-async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
+async fn ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
     info!("Testing ledger expiry with large transactions spanning partitions");
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,
@@ -431,26 +431,26 @@ impl LedgerExpiryTestContext {
             );
 
             // Log which transactions moved to publish (expired)
-            if publish_count > 0 {
-                if let Some(publish_txs) = tx_ids.get(&DataLedger::Publish) {
-                    info!("Block {} expired transactions: {:?}", height, publish_txs);
+            if publish_count > 0
+                && let Some(publish_txs) = tx_ids.get(&DataLedger::Publish)
+            {
+                info!("Block {} expired transactions: {:?}", height, publish_txs);
 
-                    // Check which of our transactions expired
-                    let mut expired_count = 0;
-                    for (idx, tx) in self.transactions.iter().enumerate() {
-                        if publish_txs.contains(&tx.header.id) {
-                            info!(
-                                "Transaction {} (index {}) expired in block {}",
-                                tx.header.id, idx, height
-                            );
-                            expired_count += 1;
-                        }
+                // Check which of our transactions expired
+                let mut expired_count = 0;
+                for (idx, tx) in self.transactions.iter().enumerate() {
+                    if publish_txs.contains(&tx.header.id) {
+                        info!(
+                            "Transaction {} (index {}) expired in block {}",
+                            tx.header.id, idx, height
+                        );
+                        expired_count += 1;
                     }
-                    info!(
-                        "Total of our transactions expired in block {}: {}",
-                        height, expired_count
-                    );
                 }
+                info!(
+                    "Total of our transactions expired in block {}: {}",
+                    height, expired_count
+                );
             }
 
             self.blocks_mined.push(block);
@@ -604,8 +604,7 @@ impl LedgerExpiryTestContext {
                     irys_reth_node_bridge::irys_reth::shadow_tx::ShadowTransaction::decode(
                         &mut input,
                     )
-                {
-                    if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
+                    && let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
                         info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}",
                             block.height, reward.target, reward.amount, reward.irys_ref);
                         if reward.target == miner_address {
@@ -613,7 +612,6 @@ impl LedgerExpiryTestContext {
                             actual_expiry_fees = actual_expiry_fees.saturating_add(amount);
                         }
                     }
-                }
             }
         }
 

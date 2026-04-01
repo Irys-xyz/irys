@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use irys_types::IrysPeerId;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, trace};
 
@@ -283,10 +283,10 @@ impl Default for DataRequestTracker {
 mod tests {
     use super::*;
     use irys_types::{IrysAddress, IrysPeerId};
+    use rstest::rstest;
 
-    const TEST_DEDUP_WINDOW_MS: u128 = 10_000; // Test deduplication window
-    const TEST_SLEEP_MS: u64 = 11_000; // Test sleep duration
-                                       //
+    const TEST_DEDUP_WINDOW_MS: u128 = 10_000;
+    const TEST_SLEEP_MS: u64 = 11_000;
     #[tokio::test]
     async fn slow_test_data_request_tracker_score_limiting() {
         let tracker = DataRequestTracker::new();
@@ -377,5 +377,34 @@ mod tests {
         // Reset should make it fresh again
         record.reset_window();
         assert!(!record.is_window_expired());
+    }
+
+    #[rstest]
+    #[case::at_limit(100, true)]
+    #[case::one_over_limit(101, false)]
+    #[case::well_over_limit(110, false)]
+    fn check_request_blocks_after_rate_limit_exceeded(
+        #[case] total_requests: u32,
+        #[case] last_request_should_serve: bool,
+    ) {
+        let tracker = DataRequestTracker::new();
+        let peer_id = IrysPeerId::from(IrysAddress::from([3_u8; 20]));
+
+        let mut last_result = tracker.check_request(&peer_id, 0);
+        for _ in 1..total_requests {
+            last_result = tracker.check_request(&peer_id, 0);
+        }
+
+        assert_eq!(
+            last_result.should_serve(),
+            last_request_should_serve,
+            "After {} requests, should_serve should be {}",
+            total_requests,
+            last_request_should_serve
+        );
+
+        if !last_request_should_serve {
+            assert_eq!(last_result, RequestCheckResult::BlockRequest,);
+        }
     }
 }

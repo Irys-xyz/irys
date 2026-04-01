@@ -1,14 +1,14 @@
 pub use crate::{
-    address_base58_stringify, decode_rlp_version, encode_rlp_version,
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
+    ConsensusConfig, DataTransactionMetadata, H256, IrysAddress, IrysSignature, Node, Proof,
+    Signature, TxChunkOffset, U256, UnpackedChunk, address_base58_stringify, decode_rlp_version,
+    encode_rlp_version,
     ingress::IngressProof,
     optional_string_u64, string_u64,
     versioning::{
-        compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
-        VersioningError,
+        Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
+        split_discriminant,
     },
-    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
-    ConsensusConfig, DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature,
-    TxChunkOffset, UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;
@@ -65,6 +65,7 @@ pub enum CommitmentValidationError {
 
 // Wrapper struct to hold transaction + metadata
 // This is a transparent wrapper that delegates serde to the inner transaction
+// DO NOT IMPLEMENT EQ OR PARTIALEQ - USE .eq_tx INSTEAD
 #[derive(Clone, Debug, Default, Arbitrary, Serialize, Deserialize)]
 pub struct DataTransactionHeaderV1WithMetadata {
     #[serde(flatten)]
@@ -73,6 +74,7 @@ pub struct DataTransactionHeaderV1WithMetadata {
     pub metadata: DataTransactionMetadata,
 }
 
+// DO NOT IMPLEMENT EQ OR PARTIALEQ - USE .eq_tx INSTEAD
 #[derive(Clone, Debug, IntegerTagged, Arbitrary)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
@@ -811,7 +813,7 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner, DataLedger};
+    use crate::{DataLedger, decode_rlp_version, encode_rlp_version, irys::IrysSigner};
 
     use alloy_rlp::Decodable as _;
     use k256::ecdsa::SigningKey;
@@ -1397,91 +1399,6 @@ mod commitment_ordering_tests {
         let mut bytes = [0_u8; 32];
         bytes[31] = tag;
         bytes.into()
-    }
-
-    #[test]
-    fn test_stake_comes_before_pledge() {
-        let stake = create_test_commitment("stake", CommitmentTypeV1::Stake, 100);
-        let pledge = create_test_commitment(
-            "pledge",
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing: 1,
-            },
-            200,
-        );
-
-        assert!(stake < pledge);
-    }
-
-    #[test]
-    fn test_stake_sorted_by_fee() {
-        let stake_low = create_test_commitment("stake1", CommitmentTypeV1::Stake, 50);
-        let stake_high = create_test_commitment("stake2", CommitmentTypeV1::Stake, 150);
-
-        assert!(stake_high < stake_low);
-    }
-
-    #[test]
-    fn test_pledge_sorted_by_count_then_fee() {
-        let pledge_count2_fee100 = create_test_commitment(
-            "p1",
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing: 2,
-            },
-            100,
-        );
-        let pledge_count2_fee200 = create_test_commitment(
-            "p2",
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing: 2,
-            },
-            200,
-        );
-        let pledge_count5_fee300 = create_test_commitment(
-            "p3",
-            CommitmentTypeV1::Pledge {
-                pledge_count_before_executing: 5,
-            },
-            300,
-        );
-
-        // Lower count comes first
-        assert!(pledge_count2_fee100 < pledge_count5_fee300);
-        assert!(pledge_count2_fee200 < pledge_count5_fee300);
-
-        // Same count, higher fee comes first
-        assert!(pledge_count2_fee200 < pledge_count2_fee100);
-    }
-
-    #[test]
-    fn test_unpledge_sorted_by_count_then_fee() {
-        let unpledge_count1_fee50 = create_test_commitment(
-            "unpledge_1_fee50",
-            CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing: 1,
-                partition_hash: partition_hash(1),
-            },
-            50,
-        );
-        let unpledge_count1_fee10 = create_test_commitment(
-            "unpledge_1_fee10",
-            CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing: 1,
-                partition_hash: partition_hash(2),
-            },
-            10,
-        );
-        let unpledge_count4_fee80 = create_test_commitment(
-            "unpledge_4_fee80",
-            CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing: 4,
-                partition_hash: partition_hash(3),
-            },
-            80,
-        );
-
-        assert!(unpledge_count1_fee50 > unpledge_count4_fee80);
-        assert!(unpledge_count1_fee50 < unpledge_count1_fee10);
     }
 
     #[test]

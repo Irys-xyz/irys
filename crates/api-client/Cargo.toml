@@ -1,7 +1,7 @@
 [package]
 name = "irys-api-client"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 reqwest.workspace = true
@@ -13,6 +13,11 @@ async-trait = "0.1"
 tracing = { workspace = true }
 irys-api-server.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
 
 [features]
 default = []

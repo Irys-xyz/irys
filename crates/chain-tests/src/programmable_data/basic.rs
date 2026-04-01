@@ -1,6 +1,6 @@
 use alloy_core::primitives::{Address, B256, U256};
-use alloy_eips::eip2930::AccessListItem;
 use alloy_eips::BlockNumberOrTag;
+use alloy_eips::eip2930::AccessListItem;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
@@ -15,8 +15,8 @@ use tracing::{debug, info};
 use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::PdDataRead;
-use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{IrysAddress, irys::IrysSigner};
 
 use crate::utils::IrysNodeTest;
 
@@ -111,20 +111,22 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         node.node_ctx.config.node_config.http.bind_port
     );
 
-    // server should be running
-    // check with request to `/v1/info`
+    // Poll until the HTTP server is ready
     let client = reqwest::Client::new();
-
-    // Waiting for the server to start
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let response = client
-        .get(format!("{}/v1/info", http_url))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let info_url = format!("{}/v1/info", http_url);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(resp) = client.get(&info_url).send().await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "HTTP server failed to start"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     info!("HTTP server started");
 
     let message = "Hirys, world!";

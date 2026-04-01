@@ -4,7 +4,7 @@ use std::time::Duration;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{ChunkType, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, DataLedger, IrysAddress, NodeConfig};
+use irys_types::{DataLedger, IrysAddress, NodeConfig, irys::IrysSigner};
 use tracing::{debug, info};
 // use tracing::debug;
 
@@ -22,7 +22,7 @@ use crate::utils::IrysNodeTest;
 // 10. Start the two peers and let them sync with the network, but not mine
 // 11. Validate that they are syncing data chunks to their assigned partitions
 #[tokio::test]
-async fn slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()> {
+async fn spiky_slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();
@@ -257,15 +257,30 @@ async fn slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Result<()
         );
         info!(
             "Genesis chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
-            counts1.data, counts1.packed, counts2.data, counts2.packed, counts3.data, counts3.packed
+            counts1.data,
+            counts1.packed,
+            counts2.data,
+            counts2.packed,
+            counts3.data,
+            counts3.packed
         );
         info!(
             "Peer1 chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
-            peer1_counts1.data, peer1_counts1.packed, peer1_counts2.data, peer1_counts2.packed, peer1_counts3.data, peer1_counts3.packed
+            peer1_counts1.data,
+            peer1_counts1.packed,
+            peer1_counts2.data,
+            peer1_counts2.packed,
+            peer1_counts3.data,
+            peer1_counts3.packed
         );
         info!(
             "Peer2 chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
-            peer2_counts1.data, peer2_counts1.packed, peer2_counts2.data, peer2_counts2.packed, peer2_counts3.data, peer2_counts3.packed
+            peer2_counts1.data,
+            peer2_counts1.packed,
+            peer2_counts2.data,
+            peer2_counts2.packed,
+            peer2_counts3.data,
+            peer2_counts3.packed
         );
         info!("Genesis diagnostic: {}", last_genesis_diag);
         info!("Peer1 diagnostic: {}", last_peer1_diag);

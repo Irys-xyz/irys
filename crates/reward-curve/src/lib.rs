@@ -262,4 +262,131 @@ mod tests {
         let res = curve.reward_between(secs(10), secs(9)); // reversed
         assert!(res.is_err(), "expected error for reversed interval");
     }
+
+    mod prop_halving_curve {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// eyre::Report does not implement std::error::Error, so proptest's `?`
+        /// cannot convert it to TestCaseError automatically.
+        fn eyre_to_prop<T>(r: eyre::Result<T>) -> std::result::Result<T, TestCaseError> {
+            r.map_err(|e| TestCaseError::fail(format!("{e:#}")))
+        }
+
+        fn arb_curve() -> impl Strategy<Value = HalvingCurve> {
+            (1_u128..1_000_000_000_000_000_000, 1_u128..3_153_600_000).prop_map(
+                |(cap, half_life)| HalvingCurve {
+                    inflation_cap: Amount::new(U256::from(cap)),
+                    half_life_secs: half_life,
+                },
+            )
+        }
+
+        fn arb_timestamp() -> impl Strategy<Value = u128> {
+            0_u128..6_307_200_000
+        }
+
+        proptest! {
+            #[test]
+            fn prop_emission_bounded_by_cap(
+                curve in arb_curve(),
+                t in arb_timestamp(),
+            ) {
+                let emitted = eyre_to_prop(curve.emitted_until(t))?;
+                prop_assert!(
+                    emitted <= curve.inflation_cap.amount,
+                    "emitted {} exceeded cap {} at t={}",
+                    emitted, curve.inflation_cap.amount, t
+                );
+            }
+
+            #[test]
+            fn prop_reward_additivity(
+                curve in arb_curve(),
+                t0 in arb_timestamp(),
+                delta_ab in 0_u128..315_360_000,
+                delta_bc in 0_u128..315_360_000,
+            ) {
+                let a = t0;
+                let b = a.saturating_add(delta_ab);
+                let c = b.saturating_add(delta_bc);
+
+                let r_ab = eyre_to_prop(curve.reward_between(a, b))?.amount;
+                let r_bc = eyre_to_prop(curve.reward_between(b, c))?.amount;
+                let r_ac = eyre_to_prop(curve.reward_between(a, c))?.amount;
+
+                let sum = r_ab.checked_add(r_bc).expect("sum should not overflow U256");
+
+                prop_assert_eq!(sum, r_ac);
+            }
+
+            #[test]
+            fn prop_emission_monotonically_increases(
+                curve in arb_curve(),
+                t1 in arb_timestamp(),
+                delta in 0_u128..3_153_600_000,
+            ) {
+                let t2 = t1.saturating_add(delta);
+                let e1 = eyre_to_prop(curve.emitted_until(t1))?;
+                let e2 = eyre_to_prop(curve.emitted_until(t2))?;
+                prop_assert!(
+                    e1 <= e2,
+                    "monotonicity violated: emitted_until({})={} > emitted_until({})={}",
+                    t1, e1, t2, e2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_zero_half_life_errors() {
+        let curve = HalvingCurve {
+            inflation_cap: Amount::new(U256::from(1_000_000_u64)),
+            half_life_secs: 0,
+        };
+        let result = curve.reward_between(0, 100);
+        assert!(result.is_err());
+
+        let decay_result = decay_factor(100, 0);
+        assert!(decay_result.is_err());
+    }
+
+    #[test]
+    fn decay_factor_fractional_remainder_reduces_factor() -> Result<()> {
+        // t=5, half_life=2 → q=2, f_secs=1: non-zero and fractional part matters
+        let result = decay_factor(5, 2)?;
+        assert!(
+            result > U256::zero(),
+            "q=2 with fractional part should be non-zero"
+        );
+
+        let result_no_frac = decay_factor(4, 2)?;
+        assert!(
+            result < result_no_frac,
+            "adding fractional decay should reduce the factor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_zero_cap_emits_nothing() -> Result<()> {
+        let curve = HalvingCurve {
+            inflation_cap: Amount::new(U256::zero()),
+            half_life_secs: HALF_LIFE_YEARS * SECS_PER_YEAR,
+        };
+
+        let reward = curve.reward_between(0, secs(10))?.amount;
+        assert!(
+            reward.is_zero(),
+            "expected zero emission with zero cap, got {reward}"
+        );
+
+        let reward_large = curve.reward_between(0, secs(1000))?.amount;
+        assert!(
+            reward_large.is_zero(),
+            "expected zero emission at t=1000 years with zero cap, got {reward_large}"
+        );
+
+        Ok(())
+    }
 }

@@ -25,6 +25,14 @@ nodit.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
 tracing-subscriber.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+rstest.workspace = true
+test-log.workspace = true
+
+[[bench]]
+name = "vdf_bench"
+harness = false
 
 [lints]
 workspace = true

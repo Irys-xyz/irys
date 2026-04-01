@@ -1,14 +1,14 @@
-use actix_web::{web, HttpResponse, Responder, ResponseError as _};
+use actix_web::{HttpResponse, Responder, ResponseError as _, web};
 use awc::http::StatusCode;
-use eyre::{eyre, Result};
+use eyre::{Result, eyre};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
 use irys_types::IrysBlockHeader;
-use irys_types::{serialization::string_u64, U256};
+use irys_types::{U256, serialization::string_u64};
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiError;
 use crate::ApiState;
+use crate::error::ApiError;
 
 const PERCENT_SCALE: u128 = 10000;
 const PERCENT_DIVISOR: u128 = 100;
@@ -157,6 +157,13 @@ mod tests {
         let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
         let emitted_amount = U256::from(emitted) * U256::from(10_u128.pow(18));
         assert_eq!(calculate_inflation_progress(emitted_amount, cap), expected);
+    }
+
+    #[test]
+    fn calculate_inflation_progress_zero_cap_returns_zero() {
+        // Exercises the early-return guard that prevents division by zero.
+        let result = calculate_inflation_progress(U256::from(1_000_u64), U256::zero());
+        assert_eq!(result, "0.00");
     }
 
     #[test]

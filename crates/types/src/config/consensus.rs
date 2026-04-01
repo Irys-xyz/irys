@@ -1,15 +1,15 @@
 use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig, Sprite};
-use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
+    H256, IrysAddress,
     storage_pricing::{
+        Amount,
         phantoms::{
             CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice,
             Percentage, Usd,
         },
-        Amount,
     },
-    IrysAddress, H256,
 };
+use crate::{UnixTimestamp, serde_utils, unix_timestamp_string_serde};
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::GenesisAccount;
@@ -324,6 +324,13 @@ pub struct EpochConfig {
 
     /// Optional configuration for capacity provisioning at genesis
     pub num_capacity_partitions: Option<u64>,
+
+    /// Number of epochs before a publish ledger partition expires.
+    /// `None` = never expire (mainnet). `Some(n)` = expire after n epochs (testnet).
+    /// `skip_serializing_if` ensures `None` is omitted from canonical JSON,
+    /// keeping the consensus hash unchanged for mainnet nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_ledger_epoch_length: Option<u64>,
 }
 
 /// # EMA (Exponential Moving Average) Configuration
@@ -585,6 +592,8 @@ impl ConsensusConfig {
                 submit_ledger_epoch_length: 5,
                 // Optional configuration for capacity provisioning at genesis
                 num_capacity_partitions: None,
+                // Publish ledger never expires on mainnet
+                publish_ledger_epoch_length: None,
             },
             // Number of blocks between EMA price recalculations Lower values make prices more responsive, higher values provide more stability
             ema: EmaConfig {
@@ -649,7 +658,7 @@ impl ConsensusConfig {
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const CHUNK_SIZE: u64 = 32;
-        const SHA1_DIFFICULTY: u64 = 70_000;
+        const SHA1_DIFFICULTY: u64 = 1_000;
         const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
         const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
         const HALF_LIFE_YEARS: u128 = 4;
@@ -690,7 +699,8 @@ impl ConsensusConfig {
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
-                reset_frequency: 50 * 12,
+                // Reset VDF every ~100 blocks. This is not tied to real-world time due to the low sha1_difficulty for this testing config.
+                reset_frequency: 100 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
                 sha_1s_difficulty: SHA1_DIFFICULTY,
@@ -700,6 +710,8 @@ impl ConsensusConfig {
                 num_blocks_in_epoch: 100,
                 submit_ledger_epoch_length: 5,
                 num_capacity_partitions: None,
+                // Publish ledger never expires in testing config
+                publish_ledger_epoch_length: None,
             },
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
@@ -833,6 +845,8 @@ impl ConsensusConfig {
                 num_blocks_in_epoch: 360,
                 submit_ledger_epoch_length: 5,
                 num_capacity_partitions: None,
+                // 168 epochs * ~1hr/epoch = ~7 days
+                publish_ledger_epoch_length: Some(168),
             },
 
             difficulty_adjustment: DifficultyAdjustmentConfig {
@@ -882,15 +896,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_consensus_hash_deterministic() {
-        let config = ConsensusConfig::testing();
-        let hash1 = config.keccak256_hash();
-        let hash2 = config.keccak256_hash();
-        assert_eq!(hash1, hash2, "same config should hash to the same value");
-        assert_ne!(hash1, H256::zero(), "hash should not be zero");
-    }
-
-    #[test]
     fn test_consensus_hash_differs_on_change() {
         let config_a = ConsensusConfig::testing();
         let mut config_b = ConsensusConfig::testing();
@@ -935,17 +940,45 @@ mod tests {
 
     #[test]
     fn test_consensus_hash_regression() {
-        // This test verifies that the hash of the testing config remains stable.
-        // If this test fails, it indicates a breaking change in either:
-        // - The ConsensusConfig structure or field order
-        // - The canonical JSON serialization implementation
-        // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("JAvW3YLPGQhoDcR4xdGyh6fssC6usQh7gGkh5fC2JPTM");
+        let expected_hash = H256::from_base58("7ZP2qGoaJXtvPd3rkW1KPe5frazmDYyAr4nqX5vfNDvQ");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
             "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
         );
+    }
+
+    mod sort_json_keys_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use serde_json::{Map, Value};
+
+        fn arb_json() -> impl Strategy<Value = Value> {
+            let leaf = prop_oneof![
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::Number(n.into())),
+                ".*".prop_map(Value::String),
+                Just(Value::Null),
+            ];
+
+            leaf.prop_recursive(4, 64, 8, |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                    proptest::collection::btree_map("[a-z]{1,8}", inner, 0..8).prop_map(|m| {
+                        Value::Object(m.into_iter().collect::<Map<String, Value>>())
+                    }),
+                ]
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn sort_json_keys_is_idempotent(value in arb_json()) {
+                let sorted_once = sort_json_keys(value);
+                let sorted_twice = sort_json_keys(sorted_once.clone()); // clone: proptest comparison requires both values
+                prop_assert_eq!(sorted_once, sorted_twice);
+            }
+        }
     }
 }

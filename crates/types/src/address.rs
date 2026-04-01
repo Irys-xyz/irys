@@ -19,12 +19,12 @@ use std::{
 };
 
 use alloy_core::hex::FromHex;
-use alloy_primitives::{keccak256, Address as AlloyAddress};
+use alloy_primitives::{Address as AlloyAddress, keccak256};
 use base58::{FromBase58, ToBase58};
 use reth_codecs::Compact;
 use reth_db::{
-    table::{Decode, Encode},
     DatabaseError,
+    table::{Decode, Encode},
 };
 
 // TODO: we can probably just do an std::mem::transmute as the underlying memory layout & contents is identical
@@ -68,7 +68,7 @@ impl Encode for IrysAddress {
     type Encoded = [u8; 20];
 
     fn encode(self) -> Self::Encoded {
-        self.0 .0
+        self.0.0
     }
 }
 
@@ -145,6 +145,21 @@ mod tests {
     fn test_parse_address(#[case] input: &str, #[case] should_succeed: bool) {
         let result = IrysAddress::from_str(input);
         assert_eq!(result.is_ok(), should_succeed);
+    }
+
+    mod serde_roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn irys_address_json_roundtrip(bytes in proptest::array::uniform20(0u8..)) {
+                let addr = IrysAddress::from(bytes);
+                let json = serde_json::to_string(&addr).unwrap();
+                let decoded: IrysAddress = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(decoded, addr);
+            }
+        }
     }
 }
 
@@ -232,7 +247,7 @@ impl From<[u8; 20]> for IrysAddress {
 impl From<IrysAddress> for [u8; 20] {
     #[inline]
     fn from(value: IrysAddress) -> Self {
-        value.0 .0
+        value.0.0
     }
 }
 impl<'a> From<&'a [u8; 20]> for IrysAddress {
@@ -282,25 +297,25 @@ impl<'a> TryFrom<&'a mut [u8]> for &'a mut IrysAddress {
 impl AsRef<[u8; 20]> for IrysAddress {
     #[inline]
     fn as_ref(&self) -> &[u8; 20] {
-        &self.0 .0
+        &self.0.0
     }
 }
 impl AsMut<[u8; 20]> for IrysAddress {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8; 20] {
-        &mut self.0 .0
+        &mut self.0.0
     }
 }
 impl AsRef<[u8]> for IrysAddress {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.0 .0
+        &self.0.0
     }
 }
 impl AsMut<[u8]> for IrysAddress {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0 .0
+        &mut self.0.0
     }
 }
 
@@ -584,16 +599,7 @@ impl alloy_rlp::Encodable for IrysAddress {
         alloy_rlp::Encodable::encode(&self.0, out)
     }
 }
-unsafe impl
-    alloy_rlp::MaxEncodedLen<
-        {
-            {
-                20 + alloy_rlp::length_of_length(20)
-            }
-        },
-    > for IrysAddress
-{
-}
+unsafe impl alloy_rlp::MaxEncodedLen<{ 20 + alloy_rlp::length_of_length(20) }> for IrysAddress {}
 
 unsafe impl alloy_rlp::MaxEncodedLenAssoc for IrysAddress {
     const LEN: usize = { 20 + alloy_rlp::length_of_length(20) };
@@ -837,7 +843,7 @@ impl IrysAddress {
     #[doc = r" Returns the inner bytes array."]
     #[inline]
     pub const fn into_array(self) -> [u8; 20] {
-        self.0 .0
+        self.0.0
     }
     #[doc = r" Returns `true` if all bits set in `b` are also set in `self`."]
     #[inline]

@@ -2,8 +2,8 @@ use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, B256};
 use irys_database::reth_db::{
-    self, cursor::*, transaction::*, Bytecodes, PlainAccountState, PlainStorageState,
-    StageCheckpoints,
+    self, Bytecodes, PlainAccountState, PlainStorageState, StageCheckpoints, cursor::*,
+    transaction::*,
 };
 use reth_provider::HeaderProvider;
 use serde::{Deserialize, Serialize};
@@ -138,4 +138,20 @@ where
     info!("Accounts saved to {:?}", &dump_path);
 
     Ok(dump_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn state_root_json_roundtrip(bytes in any::<[u8; 32]>()) {
+            let root = StateRoot { root: B256::from(bytes) };
+            let json = serde_json::to_string(&root).unwrap();
+            let decoded: StateRoot = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(decoded, root);
+        }
+    }
 }

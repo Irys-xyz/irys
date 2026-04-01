@@ -1,9 +1,9 @@
-use actix_web::{web, HttpResponse, ResponseError as _};
+use actix_web::{HttpResponse, ResponseError as _, web};
 use awc::http::StatusCode;
-use irys_types::serialization::{string_u128, string_u64};
+use irys_types::serialization::{string_u64, string_u128};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, ApiState};
+use crate::{ApiState, error::ApiError};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,30 +57,30 @@ pub async fn get_block_tree_forks(state: web::Data<ApiState>) -> HttpResponse {
     let min_height = tip_height.saturating_sub(100);
 
     for height in min_height..=tip_height {
-        if let Some(blocks_at_height) = block_tree.get_hashes_for_height(height) {
-            if blocks_at_height.len() > 1 {
-                let mut blocks_info: Vec<BlockAtHeight> = Vec::new();
+        if let Some(blocks_at_height) = block_tree.get_hashes_for_height(height)
+            && blocks_at_height.len() > 1
+        {
+            let mut blocks_info: Vec<BlockAtHeight> = Vec::new();
 
-                for block_hash in blocks_at_height {
-                    if let Some(block) = block_tree.get_block(block_hash) {
-                        blocks_info.push(BlockAtHeight {
-                            block_hash: block_hash.to_string(),
-                            cumulative_diff: block.cumulative_diff.to_string(),
-                            timestamp: block.timestamp.as_millis(),
-                            solution_hash: block.solution_hash.to_string(),
-                            is_tip: *block_hash == tip_hash,
-                        });
-                    }
+            for block_hash in blocks_at_height {
+                if let Some(block) = block_tree.get_block(block_hash) {
+                    blocks_info.push(BlockAtHeight {
+                        block_hash: block_hash.to_string(),
+                        cumulative_diff: block.cumulative_diff.to_string(),
+                        timestamp: block.timestamp.as_millis(),
+                        solution_hash: block.solution_hash.to_string(),
+                        is_tip: *block_hash == tip_hash,
+                    });
                 }
-
-                blocks_info.sort_by(|a, b| b.cumulative_diff.cmp(&a.cumulative_diff));
-
-                forks.push(ForkInfo {
-                    height,
-                    block_count: blocks_at_height.len(),
-                    blocks: blocks_info,
-                });
             }
+
+            blocks_info.sort_by(|a, b| b.cumulative_diff.cmp(&a.cumulative_diff));
+
+            forks.push(ForkInfo {
+                height,
+                block_count: blocks_at_height.len(),
+                blocks: blocks_info,
+            });
         }
     }
 

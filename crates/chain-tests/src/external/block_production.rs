@@ -3,7 +3,7 @@ use alloy_genesis::GenesisAccount;
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, IrysAddress, NodeConfig, SendTraced as _,
+    IrysAddress, NodeConfig, SendTraced as _, block_production::SolutionContext, irys::IrysSigner,
 };
 use k256::ecdsa::SigningKey;
 use reth::transaction_pool::TransactionPool as _;

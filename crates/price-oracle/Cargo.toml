@@ -1,7 +1,7 @@
 [package]
 name = "irys-price-oracle"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 rust-version.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ ignored = ["rust_decimal"]
 [dependencies]
 irys-types.workspace = true
 eyre = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-with-float"] }
@@ -27,6 +28,8 @@ chrono.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 test-log = { workspace = true }
+proptest.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

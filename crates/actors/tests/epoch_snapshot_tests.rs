@@ -10,11 +10,11 @@ use irys_database::{
     db::IrysDatabaseExt as _,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::PartitionChunkRange;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
+    BlockTransactions, DataLedger, DbSyncMode, H256, IrysBlockHeader, SealedBlock,
     partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
@@ -32,7 +32,7 @@ use tracing::{debug, error};
 async fn genesis_test() {
     // setup temp dir
     let mut config = NodeConfig::testing();
-    let tmp_dir = setup_tracing_and_temp_dir(None, false);
+    let tmp_dir = TempDirBuilder::new().with_tracing().build();
     let base_path = tmp_dir.path().to_path_buf();
     config.base_directory = base_path;
     let config: Config = Config::new_with_random_peer_id(config);
@@ -167,7 +167,10 @@ async fn genesis_test() {
 
 #[tokio::test]
 async fn add_slots_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("add_slots_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
@@ -182,6 +185,7 @@ async fn add_slots_test() {
             num_blocks_in_epoch: 100,
             num_capacity_partitions: Some(123),
             submit_ledger_epoch_length: 5,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -260,7 +264,10 @@ async fn unique_addresses_per_slot_test() {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
 
-    let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("unique_addresses_per_slot_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
@@ -275,6 +282,7 @@ async fn unique_addresses_per_slot_test() {
             num_blocks_in_epoch: 100,
             num_capacity_partitions: Some(123),
             submit_ledger_epoch_length: 5,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -361,22 +369,6 @@ async fn unique_addresses_per_slot_test() {
 }
 
 #[tokio::test]
-async fn capacity_projection_tests() {
-    let max_data_parts = 1000;
-    let config = ConsensusConfig::testing();
-    for i in (0..max_data_parts).step_by(10) {
-        let data_partition_count = i;
-        let capacity_count =
-            EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config);
-        let total = data_partition_count + capacity_count;
-        println!(
-            "data:{}, capacity:{}, total:{}",
-            data_partition_count, capacity_count, total
-        );
-    }
-}
-
-#[tokio::test]
 /*
 Summary:
 Verify that when a Submit ledger slot expires at an epoch boundary,
@@ -406,7 +398,10 @@ High-level steps:
      consistent with the ledger state.
 */
 async fn partition_expiration_and_repacking_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("partition_expiration_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let chunk_count = 10;
@@ -421,6 +416,7 @@ async fn partition_expiration_and_repacking_test() {
             submit_ledger_epoch_length: 2,
             num_blocks_in_epoch: 5,
             num_capacity_partitions: Some(123),
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };
@@ -758,7 +754,10 @@ async fn partition_expiration_and_repacking_test() {
 
 #[tokio::test]
 async fn epoch_blocks_reinitialization_test() {
-    let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("epoch_block_reinitialization_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let consensus_config = ConsensusConfig {
@@ -772,9 +771,11 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let db_env =
-        irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
-            .expect("to create DB");
+    let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        &base_path,
+        DbSyncMode::UtterlyNoSync,
+    )
+    .expect("to create DB");
     let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
     let block_index = BlockIndex::new_for_testing(db);
 
@@ -940,7 +941,10 @@ async fn epoch_blocks_reinitialization_test() {
 async fn partitions_assignment_determinism_test() {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
-    let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("partitions_assignment_determinism_test")
+        .with_tracing()
+        .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let consensus_config = ConsensusConfig {
@@ -955,6 +959,7 @@ async fn partitions_assignment_determinism_test() {
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 2,
             num_capacity_partitions: None,
+            publish_ledger_epoch_length: None,
         },
         ..ConsensusConfig::testing()
     };

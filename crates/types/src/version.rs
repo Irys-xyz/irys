@@ -1,6 +1,7 @@
+pub use crate::versions::ProtocolVersion;
 use crate::{
-    decode_address, encode_address, serialization::string_u64, serialization::string_usize,
-    Arbitrary, IrysPeerId, IrysSignature, RethPeerInfo, H256,
+    Arbitrary, H256, IrysPeerId, IrysSignature, RethPeerInfo, decode_address, encode_address,
+    serialization::string_u64,
 };
 use crate::{IrysAddress, U256};
 use alloy_primitives::keccak256;
@@ -20,68 +21,6 @@ pub enum PeerResponse {
     Accepted(HandshakeResponse),
     #[serde(rename = "rejected")]
     Rejected(RejectedResponse),
-}
-
-// Explicit integer protocol versions
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
-)]
-#[repr(u32)]
-pub enum ProtocolVersion {
-    V1 = 1,
-    V2 = 2,
-}
-
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        Self::current()
-    }
-}
-
-impl From<u32> for ProtocolVersion {
-    fn from(v: u32) -> Self {
-        match v {
-            1 => Self::V1,
-            2 => Self::V2,
-            _ => Self::default(),
-        }
-    }
-}
-
-impl ProtocolVersion {
-    pub const fn current() -> Self {
-        Self::V2
-    }
-
-    pub fn supported_versions() -> &'static [Self] {
-        &[Self::V1, Self::V2]
-    }
-
-    pub fn supported_versions_u32() -> &'static [u32] {
-        &[Self::V1 as u32, Self::V2 as u32]
-    }
-}
-
-/// We can't derive these impls directly due to the RLP not supporting repr structs/enums
-impl alloy_rlp::Encodable for ProtocolVersion {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        (*self as u32).encode(out);
-    }
-
-    fn length(&self) -> usize {
-        (*self as u32).length()
-    }
-}
-
-impl alloy_rlp::Decodable for ProtocolVersion {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let value = u32::decode(buf)?;
-        match value {
-            1 => Ok(Self::V1),
-            2 => Ok(Self::V2),
-            _ => Err(alloy_rlp::Error::Custom("unknown protocol version")),
-        }
-    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.
@@ -169,7 +108,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 ///   "user_agent": "my-node/1.2.0"   // Optional identification string
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -182,7 +121,7 @@ pub struct HandshakeRequestV1 {
 }
 
 /// V2 HandshakeRequest - includes peer_id for P2P identification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeRequestV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -202,7 +141,7 @@ pub type HandshakeRequest = HandshakeRequestV1;
 impl Default for HandshakeRequestV1 {
     fn default() -> Self {
         Self {
-            version: Version::new(0, 1, 0),
+            version: crate::get_version().clone(),
             mining_address: IrysAddress::ZERO,
             protocol_version: ProtocolVersion::V1,
             timestamp: SystemTime::now()
@@ -220,7 +159,7 @@ impl Default for HandshakeRequestV1 {
 impl Default for HandshakeRequestV2 {
     fn default() -> Self {
         Self {
-            version: Version::new(0, 1, 0), // Default to 0.1.0
+            version: crate::get_version().clone(),
             mining_address: IrysAddress::ZERO,
             peer_id: IrysPeerId::ZERO,
             protocol_version: ProtocolVersion::current(),
@@ -269,7 +208,7 @@ impl HandshakeRequestV2 {
     /// Rely on RLP encoding for signing
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         // Manually encode using RLP, excluding the signature field
-        let payload_length = encode_version_rlp_length(&self.version)
+        let payload_length = encode_version_rlp_v2_length(&self.version)
             + encode_protocol_version_rlp_length(&self.protocol_version)
             + self.mining_address.length()
             + self.peer_id.length()
@@ -287,7 +226,7 @@ impl HandshakeRequestV2 {
             payload_length,
         }
         .encode(out);
-        encode_version_rlp(&self.version, out);
+        encode_version_rlp_v2(&self.version, out);
         encode_protocol_version_rlp(&self.protocol_version, out);
         self.mining_address.encode(out);
         self.peer_id.encode(out);
@@ -314,7 +253,11 @@ impl HandshakeRequestV2 {
     }
 }
 
-pub fn encode_version_for_signing<B>(version: &Version, buf: &mut B) -> usize
+/// V1-only: encodes only major.minor.patch for signing (Compact encoding).
+/// Pre-release and build metadata are excluded because V1 is already live
+/// and changing the preimage would break signature verification with existing peers.
+/// V2 signs the full version instead — see [`encode_version_rlp_v2`].
+pub(crate) fn encode_version_for_signing<B>(version: &Version, buf: &mut B) -> usize
 where
     B: bytes::BufMut + AsMut<[u8]>,
 {
@@ -322,8 +265,6 @@ where
     size += version.major.to_compact(buf);
     size += version.minor.to_compact(buf);
     size += version.patch.to_compact(buf);
-    // size += version.pre.to_string().to_compact(buf);
-    // size += version.build.to_string().to_compact(buf);
     size
 }
 
@@ -393,7 +334,7 @@ impl Compact for PeerAddress {
 ///   "message": "Welcome to the network"  // or null if None
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -406,7 +347,7 @@ pub struct HandshakeResponseV1 {
 impl Default for HandshakeResponseV1 {
     fn default() -> Self {
         Self {
-            version: Version::new(0, 1, 0), // Default to 0.1.0
+            version: crate::get_version().clone(),
             protocol_version: ProtocolVersion::V1,
             peers: Vec::new(),
             timestamp: SystemTime::now()
@@ -422,7 +363,7 @@ impl Default for HandshakeResponseV1 {
 /// ```json
 /// {
 ///   "status": "accepted",         // comes from PeerResponse Enum
-///   "version": "1.2.0",           // semver formatted
+///   "version": "3.0.0+irys-rs.a1b2c3d", // semver formatted
 ///   "protocol_version": "2",      // V2 protocol version
 ///   "peers": [
 ///     "203.0.113.1:8333",         // IPv4 address:port
@@ -435,7 +376,7 @@ impl Default for HandshakeResponseV1 {
 ///   "consensus_config_hash": "0x..."  // Hash of consensus config
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandshakeResponseV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
@@ -449,7 +390,7 @@ pub struct HandshakeResponseV2 {
 impl Default for HandshakeResponseV2 {
     fn default() -> Self {
         Self {
-            version: Version::new(0, 1, 0), // Default to 0.1.0
+            version: crate::get_version().clone(),
             protocol_version: ProtocolVersion::current(),
             peers: Vec::new(),
             timestamp: SystemTime::now()
@@ -510,11 +451,11 @@ pub enum RejectionReason {
     InternalError,      // Unable to complete request
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
-    pub peer_count: usize,
+    pub peer_count: u64,
     #[serde(with = "string_u64")]
     pub chain_id: u64,
     #[serde(with = "string_u64")]
@@ -526,8 +467,8 @@ pub struct NodeInfo {
     #[serde(with = "string_u64")]
     pub pending_blocks: u64,
     pub is_syncing: bool,
-    #[serde(with = "string_usize")]
-    pub current_sync_height: usize,
+    #[serde(with = "string_u64")]
+    pub current_sync_height: u64,
     #[serde(with = "string_u64")]
     pub uptime_secs: u64,
     // #[serde(with = "address_base58_stringify")]
@@ -538,20 +479,35 @@ pub struct NodeInfo {
 // RLP encoding implementations for HandshakeRequestV2 types
 
 // Helper functions for RLP encoding (avoiding orphan rule violations)
-fn encode_version_rlp(version: &Version, out: &mut dyn bytes::BufMut) {
+/// RLP-encodes the version as [major, minor, patch, pre, build].
+/// Unlike V1 (which only signs major.minor.patch), V2 includes the full
+/// version so that build metadata is authenticated in the handshake signature.
+fn encode_version_rlp_v2(version: &Version, out: &mut dyn bytes::BufMut) {
+    let payload_length = version_rlp_v2_payload_length(version);
     alloy_rlp::Header {
         list: true,
-        payload_length: version.major.length() + version.minor.length() + version.patch.length(),
+        payload_length,
     }
     .encode(out);
     version.major.encode(out);
     version.minor.encode(out);
     version.patch.encode(out);
+    version.pre.as_str().encode(out);
+    version.build.as_str().encode(out);
 }
 
-fn encode_version_rlp_length(version: &Version) -> usize {
-    let payload_length = version.major.length() + version.minor.length() + version.patch.length();
+fn encode_version_rlp_v2_length(version: &Version) -> usize {
+    let payload_length = version_rlp_v2_payload_length(version);
     payload_length + alloy_rlp::length_of_length(payload_length)
+}
+
+/// RLP payload length of the version list: [major, minor, patch, pre, build].
+fn version_rlp_v2_payload_length(version: &Version) -> usize {
+    version.major.length()
+        + version.minor.length()
+        + version.patch.length()
+        + version.pre.as_str().length()
+        + version.build.as_str().length()
 }
 
 fn encode_protocol_version_rlp(pv: &ProtocolVersion, out: &mut dyn bytes::BufMut) {
@@ -652,7 +608,7 @@ fn encode_reth_peer_info_rlp_length(info: &RethPeerInfo) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, HandshakeRequest, HandshakeRequestV2, IrysSignature, NodeConfig, H256};
+    use crate::{Config, H256, HandshakeRequest, HandshakeRequestV2, IrysSignature, NodeConfig};
     use crate::{IrysAddress, U256};
     use serde_json;
 
@@ -761,17 +717,45 @@ mod tests {
     }
 
     #[test]
+    fn test_node_info_numeric_json_deserialization() {
+        // Verify that string_u64 fields accept numeric JSON values (not just strings).
+        // This exercises the string_or_number_to_int compatibility branch.
+        let json = r#"{
+            "version": "1.0.0",
+            "peerCount": 5,
+            "chainId": 1270,
+            "height": 100,
+            "blockHash": "11111111111111111111111111111111",
+            "blockIndexHeight": 50,
+            "blockIndexHash": "11111111111111111111111111111111",
+            "pendingBlocks": 3,
+            "isSyncing": true,
+            "currentSyncHeight": 0,
+            "uptimeSecs": 9999,
+            "miningAddress": "11111111111111111111",
+            "cumulativeDifficulty": "0"
+        }"#;
+        let node_info: NodeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(node_info.current_sync_height, 0);
+        assert_eq!(node_info.chain_id, 1270);
+        assert_eq!(node_info.height, 100);
+        assert_eq!(node_info.block_index_height, 50);
+        assert_eq!(node_info.pending_blocks, 3);
+        assert_eq!(node_info.uptime_secs, 9999);
+    }
+
+    #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
-        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
-        // Test that we can still deserialize old numeric format for small values
-        // TODO: remove this at some point?
-        let node_info: NodeInfo = serde_json::from_str(old_json)?;
+        let canonical_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
+        let node_info: NodeInfo = serde_json::from_str(canonical_json)?;
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);
+        assert_eq!(node_info.peer_count, 10);
+        assert_eq!(node_info.current_sync_height, 0);
 
-        // this should ensure that we don't break U64 as string serialisation
+        // Ensure round-trip preserves all-strings format
         let reenc_node_info = serde_json::to_string(&node_info)?;
-        assert_eq!(old_json, reenc_node_info.as_str());
+        assert_eq!(canonical_json, reenc_node_info.as_str());
         Ok(())
     }
 
@@ -807,7 +791,7 @@ mod tests {
         );
 
         // Test 2: Verify length calculation matches actual payload
-        let calculated_length = encode_version_rlp_length(&handshake.version)
+        let calculated_length = encode_version_rlp_v2_length(&handshake.version)
             + encode_protocol_version_rlp_length(&handshake.protocol_version)
             + handshake.mining_address.length()
             + handshake.peer_id.length()
@@ -861,7 +845,7 @@ mod tests {
         let mut buf = &encoded[..];
         let _header = alloy_rlp::Header::decode(&mut buf).unwrap();
 
-        // Decode and verify each field in order
+        // Decode version RLP list: [major, minor, patch, pre, build]
         let version_header = alloy_rlp::Header::decode(&mut buf).unwrap();
         assert!(version_header.list, "Version should be encoded as a list");
 
@@ -869,9 +853,49 @@ mod tests {
         let minor = u64::decode(&mut buf).unwrap();
         let patch = u64::decode(&mut buf).unwrap();
         assert_eq!((major, minor, patch), (1, 2, 3), "Version should be 1.2.3");
+        let pre = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut buf).unwrap();
+        assert!(
+            pre.is_empty(),
+            "Pre-release should be empty for Version::new"
+        );
+        let build = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut buf).unwrap();
+        assert!(
+            build.is_empty(),
+            "Build metadata should be empty for Version::new"
+        );
 
         let protocol_version = u32::decode(&mut buf).unwrap();
-        assert_eq!(protocol_version, 2, "Protocol version should be 2");
+        assert_eq!(
+            protocol_version, 2,
+            "Protocol version should be 2 (plain version)"
+        );
+
+        // Test 6: Verify pre-release and build metadata are encoded when present
+        let handshake_full_ver = HandshakeRequestV2 {
+            version: Version::parse("3.0.0-rc.1+irys-rs.abc1234").unwrap(),
+            ..handshake.clone()
+        };
+        let mut encoded_full = Vec::new();
+        handshake_full_ver.encode_for_signing(&mut encoded_full);
+
+        let mut buf = &encoded_full[..];
+        let _outer = alloy_rlp::Header::decode(&mut buf).unwrap();
+        let _ver_header = alloy_rlp::Header::decode(&mut buf).unwrap();
+
+        let major = u64::decode(&mut buf).unwrap();
+        let minor = u64::decode(&mut buf).unwrap();
+        let patch = u64::decode(&mut buf).unwrap();
+        assert_eq!((major, minor, patch), (3, 0, 0));
+        let pre = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&pre).unwrap(), "rc.1");
+        let build = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&build).unwrap(), "irys-rs.abc1234");
+
+        let protocol_version = u32::decode(&mut buf).unwrap();
+        assert_eq!(
+            protocol_version, 2,
+            "Protocol version should be 2 (full version)"
+        );
 
         let mining_address = IrysAddress::decode(&mut buf).unwrap();
         assert_eq!(
@@ -1007,14 +1031,21 @@ mod tests {
         );
     }
 
-    /// A helper to generate a new raw JSON for the version endpoint test.
-    /// Run `cargo test -p irys-types -- generate_raw_handshake_json --nocapture --ignored`
-    /// to produce the raw JSON needed by the peer_discovery integration test.
+    /// Regenerates the hardcoded JSON fixture used by the `peer_discovery` integration test
+    /// in `crates/chain-tests/src/multi_node/peer_discovery.rs`.
+    ///
+    /// Run: `cargo test -p irys-types -- generate_raw_handshake_json --nocapture --ignored`
+    ///
+    /// After running, copy the printed JSON into the test's `version_json` literal.
+    /// The fixture must be re-generated whenever:
+    /// - The V2 signing format changes (e.g. new fields in `encode_for_signing`)
+    /// - The consensus config values or genesis setup in `peer_discovery` change
+    /// - The signing key (`0x1f2e…`) or its derived addresses change
     #[test]
     #[ignore]
     fn generate_raw_handshake_json() {
-        use crate::irys::IrysSigner;
         use crate::ConsensusConfig;
+        use crate::irys::IrysSigner;
 
         let mut config = ConsensusConfig::testing();
 
@@ -1032,7 +1063,7 @@ mod tests {
         config.genesis.miner_address = testing_signer.address();
         config.genesis.reward_address = testing_signer.address();
 
-        // Match the consensus config from the test
+        // Match the consensus config from the peer_discovery test
         config.chunk_size = 32;
         config.num_chunks_in_partition = 10;
         config.num_chunks_in_recall_range = 2;
@@ -1084,12 +1115,12 @@ mod tests {
         eprintln!("mining_address = {}", mining_addr);
         eprintln!("consensus_config_hash = {}", config.keccak256_hash());
 
-        let peer_id_addr: IrysAddress = "4JaNfJ1tQ2TCLREq6opq6pWGmCJW".parse().unwrap();
+        // Use mining address as peer_id (matches the fixture in peer_discovery)
         let mut req = HandshakeRequestV2 {
-            version: semver::Version::new(0, 1, 0),
+            version: semver::Version::parse("0.1.0+irys-rs").unwrap(),
             protocol_version: ProtocolVersion::V2,
             mining_address: mining_addr,
-            peer_id: peer_id_addr.into(),
+            peer_id: mining_addr.into(),
             chain_id: 1270,
             address: crate::PeerAddress {
                 gossip: "127.0.0.2:8080".parse().unwrap(),
@@ -1099,8 +1130,8 @@ mod tests {
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
                 },
             },
-            timestamp: 0,
-            user_agent: Some("miner2/0.1.0 (macos/aarch64)".to_string()),
+            timestamp: 1700000000000,
+            user_agent: Some("miner2/0.1.0 (linux/x86_64)".to_string()),
             consensus_config_hash: config.keccak256_hash(),
             signature: IrysSignature::default(),
         };
@@ -1109,5 +1140,125 @@ mod tests {
 
         eprintln!("=== Signed HandshakeRequestV2 JSON ===");
         eprintln!("{}", serde_json::to_string_pretty(&req).unwrap());
+    }
+
+    mod user_agent_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn valid_component() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9._-]{1,20}"
+        }
+
+        proptest! {
+            #[test]
+            fn parse_build_user_agent_roundtrip(
+                name in valid_component(),
+                version in valid_component(),
+            ) {
+                let ua = build_user_agent(&name, &version);
+                let parsed = parse_user_agent(&ua).expect("should parse a well-formed UA string");
+                prop_assert_eq!(parsed.0, name);
+                prop_assert_eq!(parsed.1, version);
+                prop_assert_eq!(parsed.2, std::env::consts::OS);
+                prop_assert_eq!(parsed.3, std::env::consts::ARCH);
+            }
+        }
+    }
+
+    #[test]
+    fn v1_build_metadata_does_not_affect_signature_hash() {
+        let a = HandshakeRequest {
+            version: Version::parse("3.0.0+irys-rs").unwrap(),
+            ..Default::default()
+        };
+        let b = HandshakeRequest {
+            version: Version::parse("3.0.0+irys-rs.abc1234").unwrap(),
+            timestamp: a.timestamp,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            a.signature_hash(),
+            b.signature_hash(),
+            "build metadata must not affect V1 signature hash"
+        );
+    }
+
+    #[test]
+    fn v2_build_metadata_affects_signature_hash() {
+        let a = HandshakeRequestV2 {
+            version: Version::parse("3.0.0+irys-rs").unwrap(),
+            ..Default::default()
+        };
+        let b = HandshakeRequestV2 {
+            version: Version::parse("3.0.0+irys-rs.abc1234").unwrap(),
+            timestamp: a.timestamp,
+            ..Default::default()
+        };
+
+        assert_ne!(
+            a.signature_hash(),
+            b.signature_hash(),
+            "V2 signs the full version string — build metadata must affect the hash"
+        );
+    }
+
+    #[test]
+    fn v2_pre_release_affects_signature_hash() {
+        let a = HandshakeRequestV2 {
+            version: Version::parse("3.0.0+irys-rs").unwrap(),
+            ..Default::default()
+        };
+        let b = HandshakeRequestV2 {
+            version: Version::parse("3.0.0-rc.1+irys-rs").unwrap(),
+            timestamp: a.timestamp,
+            ..Default::default()
+        };
+
+        assert_ne!(
+            a.signature_hash(),
+            b.signature_hash(),
+            "V2 signs the full version string — pre-release must affect the hash"
+        );
+    }
+
+    #[test]
+    fn v2_rlp_encodes_pre_and_build_as_bytes() {
+        use alloy_rlp::Decodable as _;
+
+        // Version with non-trivial pre-release and build metadata.
+        let version = Version::parse("3.0.0-rc.1+irys-rs.abc1234").unwrap();
+
+        let mut buf = Vec::new();
+        encode_version_rlp_v2(&version, &mut buf);
+
+        // Decode the outer list header, then each field.
+        let mut cursor = &buf[..];
+        let header = alloy_rlp::Header::decode(&mut cursor).unwrap();
+        assert!(header.list);
+
+        let major = u64::decode(&mut cursor).unwrap();
+        let minor = u64::decode(&mut cursor).unwrap();
+        let patch = u64::decode(&mut cursor).unwrap();
+        assert_eq!((major, minor, patch), (3, 0, 0));
+
+        // pre and build are encoded as byte strings — decode and verify they
+        // round-trip back to the original semver components.
+        let pre = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut cursor).unwrap();
+        let build = <alloy_rlp::Bytes as alloy_rlp::Decodable>::decode(&mut cursor).unwrap();
+        assert_eq!(std::str::from_utf8(&pre).unwrap(), "rc.1");
+        assert_eq!(std::str::from_utf8(&build).unwrap(), "irys-rs.abc1234");
+
+        // Verify length calculation matches actual encoded length.
+        assert_eq!(buf.len(), encode_version_rlp_v2_length(&version));
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0)]
+    #[case::three(3)]
+    #[case::max(u32::MAX)]
+    fn protocol_version_from_unknown_is_err(#[case] value: u32) {
+        assert!(ProtocolVersion::try_from(value).is_err());
     }
 }

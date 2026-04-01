@@ -2,8 +2,8 @@ use crate::{api::pd_fee_history_request, utils::IrysNodeTest};
 use irys_api_server::routes::pd_pricing::PdFeeHistoryResponse;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    storage_pricing::{Amount, PRECISION_SCALE},
     NodeConfig, U256,
+    storage_pricing::{Amount, PRECISION_SCALE},
 };
 
 /// Block specification for test chain setup
@@ -222,7 +222,7 @@ async fn setup_pd_fee_history_test_chain() -> eyre::Result<(
                             "Block {} 3rd tx is not PdBaseFeeUpdate: {:?}",
                             block_idx,
                             other
-                        ))
+                        ));
                     }
                 }
             }
@@ -231,7 +231,7 @@ async fn setup_pd_fee_history_test_chain() -> eyre::Result<(
                     "Block {} 2nd tx is not PdBaseFeeUpdate or TreasuryDeposit: {:?}",
                     block_idx,
                     other
-                ))
+                ));
             }
         };
 
@@ -490,7 +490,7 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
     // 2. Submit LOW-FEE transaction (below minimum) at first real offset
     let low_priority_fee = 100_u64; // 100 wei per chunk
     let low_base_fee = 100_u64; // 100 wei per chunk
-                                // Total for 1 chunk = 200 wei, far below min_cost_irys
+    // Total for 1 chunk = 200 wei, far below min_cost_irys
 
     let low_fee_tx_hash = node
         .inject_pd_tx_at_real_offsets(

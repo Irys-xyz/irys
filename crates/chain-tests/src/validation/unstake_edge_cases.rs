@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use crate::utils::{assert_validation_error, solution_context, IrysNodeTest};
+use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
 use crate::validation::send_block_and_read_state;
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_types::SendTraced as _;
 use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
@@ -49,7 +49,7 @@ async fn gossip_commitment_to_node(
 /// Expected behavior: Block validation must reject the block because unstake commitments
 /// are invalid when the account has pledge_count > 0.
 #[test_log::test(tokio::test)]
-async fn heavy3_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unstake: CommitmentTransaction,
@@ -65,7 +65,10 @@ async fn heavy3_block_unstake_with_active_pledges_gets_rejected() -> eyre::Resul
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unstake.clone()],
@@ -191,7 +194,7 @@ async fn heavy3_block_unstake_with_active_pledges_gets_rejected() -> eyre::Resul
 /// Expected behavior: Block validation must reject the block because unstake commitments
 /// are invalid when the account has no stake in the epoch snapshot.
 #[test_log::test(tokio::test)]
-async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
+async fn block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_unstake: CommitmentTransaction,
@@ -207,7 +210,10 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unstake.clone()],

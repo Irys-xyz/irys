@@ -1,6 +1,6 @@
 use irys_types::{
-    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    VersionDiscriminant as _, H256,
+    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256, IrysBlockHeader,
+    VersionDiscriminant as _,
 };
 
 #[test]

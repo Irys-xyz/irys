@@ -3,10 +3,10 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_packing::{unpack, PackingType, PACKING_TYPE};
+use irys_packing::{PACKING_TYPE, PackingType, unpack};
 use irys_types::{
-    irys::IrysSigner, Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
-    UnpackedChunk,
+    Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset, UnpackedChunk,
+    irys::IrysSigner,
 };
 use rand::Rng as _;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
-async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
+async fn spiky_heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await?;
     } else {
@@ -24,7 +24,7 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy3_api_end_to_end_test_256kb() -> eyre::Result<()> {
+async fn spiky_heavy3_api_end_to_end_test_256kb() -> eyre::Result<()> {
     api_end_to_end_test(256 * 1024).await?;
     Ok(())
 }

@@ -10,7 +10,8 @@ use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
-use irys_testing_utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::TempDirBuilder;
+use irys_testing_utils::tempfile::TempDir;
 use irys_types::{
     Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256,
     IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
@@ -26,7 +27,6 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tempfile::TempDir;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error};
 
@@ -35,7 +35,7 @@ use tracing::{debug, error};
 async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug,storage=off") };
-    let tmp_dir = setup_tracing_and_temp_dir(None, false);
+    let tmp_dir = TempDirBuilder::new().with_tracing().build();
 
     let setup = TestSetup::new(100, Duration::from_secs(5), &tmp_dir);
     let storage_modules = Arc::new(RwLock::new(vec![setup.storage_module.clone()]));

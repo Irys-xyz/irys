@@ -1,0 +1,39 @@
+node_mode = "Peer"
+sync_mode = "Full"
+mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
+reward_address = "0x0000000000000000000000000000000000000001"
+base_directory = "/tmp/irys-test"
+consensus = "Testing"
+trusted_peers = []
+
+[network_defaults]
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[gossip]
+public_port = 0
+bind_port = 0
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[http]
+public_port = 0
+bind_port = 0
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[reth.network]
+public_port = 0
+bind_port = 0
+use_random_ports = true
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+
+[[oracles]]
+type = "mock"
+initial_price = 1.0
+incremental_change = 0.00000000000001
+smoothing_interval = 15
+initial_direction_up = true
+poll_interval_ms = 10000
