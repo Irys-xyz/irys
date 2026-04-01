@@ -293,7 +293,29 @@ pub fn build_genesis_block_from_commitments(
     genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
     genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
-    // 5. Register all commitment txids in the commitment ledger and sum values
+    // 5. Validate that every miner with pledges also has a stake.
+    //    compute_commitment_state() stores stakes in a BTreeMap<IrysAddress, StakeEntry>;
+    //    a miner with pledges but no stake will fail during epoch processing.
+    {
+        use std::collections::BTreeSet;
+        let staked: BTreeSet<IrysAddress> = commitments
+            .iter()
+            .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Stake))
+            .map(CommitmentTransaction::signer)
+            .collect();
+        for c in &commitments {
+            if matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }) {
+                eyre::ensure!(
+                    staked.contains(&c.signer()),
+                    "miner {} has pledge commitments but no stake commitment. \
+                     Every miner with pledges must also have a stake.",
+                    c.signer(),
+                );
+            }
+        }
+    }
+
+    // 6. Register all commitment txids in the commitment ledger and sum values
     let ledger = get_or_create_commitment_ledger(&mut genesis_block);
     let mut initial_treasury = U256::zero();
     for commitment in &commitments {
@@ -301,22 +323,22 @@ pub fn build_genesis_block_from_commitments(
         initial_treasury = initial_treasury.saturating_add(commitment.value());
     }
 
-    // 6. Count pledges for difficulty
+    // 7. Count pledges for difficulty
     let total_pledges = commitments
         .iter()
         .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }))
         .count() as u64;
 
-    // 7. Calculate difficulty from pledge count
+    // 8. Calculate difficulty from pledge count
     let difficulty = calculate_initial_difficulty(&config.consensus, total_pledges as f64)
         .wrap_err("failed to calculate initial difficulty")?;
     genesis_block.diff = difficulty;
     genesis_block.treasury = initial_treasury;
 
-    // 8. Run VDF for genesis
+    // 9. Run VDF for genesis
     run_vdf_for_genesis_block(&mut genesis_block, &config.vdf);
 
-    // 9. Sign with provided key
+    // 10. Sign with provided key
     let block_signer = signer_from_key(block_signing_key, config);
     block_signer
         .sign_block_header(&mut genesis_block)
