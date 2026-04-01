@@ -1437,6 +1437,45 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Poll until PdService is waiting on at least `min_pending_blocks` block
+    /// validations for missing PD chunks.
+    ///
+    /// This is useful for tests that need to synchronize on the block-validation
+    /// reconciliation path without relying on fixed sleeps.
+    #[diag_slow(state = format!(
+        "min_pending_blocks={} timeout_secs={} {}",
+        min_pending_blocks,
+        timeout_secs,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_pd_pending_blocks(
+        &self,
+        min_pending_blocks: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            let pending_blocks = self
+                .node_ctx
+                .pd_pending_block_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if pending_blocks >= min_pending_blocks {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for PdService pending_blocks >= {}",
+            timeout_secs,
+            min_pending_blocks,
+        ))
+    }
+
     /// Poll until a specific chunk key is present in the PD `ChunkDataIndex` cache.
     ///
     /// This is useful for tests that need to wait for a P2P fetch to complete

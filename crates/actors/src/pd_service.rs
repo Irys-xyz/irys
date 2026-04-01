@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
 use tracing::{Instrument as _, debug, info, trace, warn};
@@ -86,6 +86,8 @@ pub struct PdService {
     chunk_pusher: Arc<dyn irys_types::chunk_provider::PdChunkPusher>,
     /// Number of peers to fan out each optimistic push to.
     pd_optimistic_push_fanout: u32,
+    /// Current number of block validations waiting on missing PD chunks.
+    pending_block_count: Arc<AtomicU64>,
 }
 
 impl PdService {
@@ -108,6 +110,7 @@ impl PdService {
         pd_optimistic_push_fanout: u32,
         push_cache_hit_count: Arc<AtomicU64>,
         push_reconciliation_count: Arc<AtomicU64>,
+        pending_block_count: Arc<AtomicU64>,
     ) -> TokioServiceHandle {
         let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
 
@@ -138,6 +141,7 @@ impl PdService {
             inbound_push_tracker: inbound_push_tracker::InboundPushTracker::new(),
             chunk_pusher,
             pd_optimistic_push_fanout,
+            pending_block_count,
         };
 
         let join_handle = runtime_handle.spawn(
@@ -184,6 +188,11 @@ impl PdService {
         }
 
         info!("PdService stopped");
+    }
+
+    fn sync_pending_block_count(&self) {
+        self.pending_block_count
+            .store(self.pending_blocks.len() as u64, Ordering::Relaxed);
     }
 
     fn on_fetch_done(&mut self, result: Result<fetch::PdChunkFetchResult, tokio::task::JoinError>) {
@@ -421,6 +430,8 @@ impl PdService {
             }
         }
 
+        self.sync_pending_block_count();
+
         trace!(
             ?key,
             waiting_blocks = waiting_blocks.len(),
@@ -525,6 +536,7 @@ impl PdService {
         }
 
         self.cache.try_shrink_to_fit();
+        self.sync_pending_block_count();
     }
 
     /// Derive chunk verification info (expected `data_root`, `data_size`, and
@@ -1389,6 +1401,7 @@ impl PdService {
             cached_chunks = self.cache.len(),
             "Block chunk provisioning complete"
         );
+        self.sync_pending_block_count();
     }
 
     /// Release chunks provisioned for a block after validation completes.
@@ -1436,6 +1449,8 @@ impl PdService {
             }
             self.cache.try_shrink_to_fit();
         }
+
+        self.sync_pending_block_count();
     }
 }
 
@@ -1588,6 +1603,7 @@ mod tests {
             inbound_push_tracker: inbound_push_tracker::InboundPushTracker::new(),
             chunk_pusher: Arc::new(MockPdChunkPusher),
             pd_optimistic_push_fanout: 0,
+            pending_block_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         (service, tmp_dir)
     }

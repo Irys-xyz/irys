@@ -1171,12 +1171,6 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
     ctx.genesis.gossip_block_to_peers(&block)?;
     ctx.genesis.gossip_eth_block_to_peers(eth_payload.block())?;
 
-    // Wait for Node B to validate the block first (it can fetch chunks from Genesis).
-    ctx.block_producer
-        .wait_until_height(block_height, 30)
-        .await?;
-    info!("Block Producer validated block at height {}", block_height);
-
     // Verify Observer does NOT know about Genesis — its peer list should contain only Node B.
     let genesis_peer_id = ctx.genesis.node_ctx.config.peer_id();
     assert!(
@@ -1188,9 +1182,10 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
         "Observer should NOT have Genesis in its peer list (TrustedOnly mode, trusted_peers = [Node B])",
     );
 
-    // Give Observer time to receive the block from Node B and start its fetch.
-    // The fetch will target Node B (Observer's only peer) and fail.
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Wait until Observer is actually blocked in PdService on this block's missing PD chunk.
+    // This removes the race from the old fixed sleep: sending the push too late lets
+    // block validation fail before the optimistic push can reconcile the waiter.
+    ctx.observer.wait_for_pd_pending_blocks(1, 30).await?;
 
     // --- Construct and send manual push directly to Observer's PdService ---
     //
@@ -1257,6 +1252,12 @@ async fn slow_heavy3_pd_chunk_optimistic_push_reconciles_pending_fetch() -> eyre
     // because Observer's fetch to Node B (its only peer) fails -- Node B doesn't have
     // the PD data at the test offset.
     ctx.observer.wait_until_height(block_height, 30).await?;
+
+    // Node B must also have validated the block before Observer could receive it.
+    ctx.block_producer
+        .wait_until_height(block_height, 30)
+        .await?;
+    info!("Block Producer validated block at height {}", block_height);
 
     // Assert Observer's canonical tip matches Genesis.
     let observer_height = ctx.observer.get_canonical_chain_height().await;

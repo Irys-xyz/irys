@@ -147,6 +147,9 @@ pub struct IrysNodeCtx {
     /// Counter incremented by PdService when an optimistic push reconciles a pending fetch.
     /// Used by integration tests to verify the reconciliation path fired.
     pub pd_push_reconciliation_count: Arc<AtomicU64>,
+    /// Current number of block validations waiting on PdService to provision missing chunks.
+    /// Used by integration tests to synchronize on the pending-block reconciliation path.
+    pub pd_pending_block_count: Arc<AtomicU64>,
 }
 
 impl IrysNodeCtx {
@@ -1874,6 +1877,7 @@ impl IrysNode {
             std::sync::Arc::new(gossip_data_handler.gossip_client.clone());
         let pd_push_cache_hit_count = Arc::new(AtomicU64::new(0));
         let pd_push_reconciliation_count = Arc::new(AtomicU64::new(0));
+        let pd_pending_block_count = Arc::new(AtomicU64::new(0));
         let pd_service_handle = irys_actors::pd_service::PdService::spawn_service(
             pd_chunk_rx,
             chunk_provider.clone(),
@@ -1891,6 +1895,7 @@ impl IrysNode {
             config.node_config.p2p_gossip.pd_optimistic_push_fanout,
             pd_push_cache_hit_count.clone(),
             pd_push_reconciliation_count.clone(),
+            pd_pending_block_count.clone(),
         );
         debug!("PD service initialized");
 
@@ -1990,6 +1995,7 @@ impl IrysNode {
             ready_pd_txs,
             pd_push_cache_hit_count,
             pd_push_reconciliation_count,
+            pd_pending_block_count,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
