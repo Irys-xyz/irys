@@ -487,23 +487,148 @@ async fn main() -> eyre::Result<()> {
         }
         Commands::DumpCommitments { output } => {
             use irys_database::reth_db::Database as _;
-            use irys_database::tables::IrysCommitments;
-            use irys_database::walk_all;
+            use irys_database::reth_db::transaction::DbTx as _;
+            use irys_database::tables::{IrysCommitments, MigratedBlockHashes};
+            use irys_database::{block_header_by_hash, block_index_latest_height, walk_all};
+            use irys_domain::EpochSnapshot;
+
+            let node_config: NodeConfig = load_config()?;
+            let config = Config::new_with_random_peer_id(node_config);
 
             let db_env = cli_init_irys_db(DatabaseEnvKind::RO)?;
             let read_tx = db_env.tx()?;
 
+            // Dump all commitments to JSON
             let entries = walk_all::<IrysCommitments, _>(&read_tx)?;
-            let commitments: Vec<_> = entries.into_iter().map(|(_txid, c)| c.0).collect();
+            let all_commitments: Vec<_> = entries.into_iter().map(|(_txid, c)| c.0).collect();
 
-            info!("Found {} commitments in database", commitments.len());
+            info!("Found {} commitments in database", all_commitments.len());
 
-            let json = serde_json::to_string_pretty(&commitments)
+            let json = serde_json::to_string_pretty(&all_commitments)
                 .map_err(|e| eyre::eyre!("Failed to serialize commitments: {e}"))?;
             std::fs::write(&output, json)
                 .map_err(|e| eyre::eyre!("Failed to write {}: {e}", output.display()))?;
 
             info!("Commitments written to {}", output.display());
+
+            // Replay all epoch blocks to derive the full partition assignment state
+            let latest_height = block_index_latest_height(&read_tx)?
+                .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
+            let epoch_len = config.consensus.epoch.num_blocks_in_epoch;
+            let num_epoch_blocks = (latest_height / epoch_len) + 1;
+
+            info!(
+                "Replaying {num_epoch_blocks} epoch blocks (epoch_len={epoch_len}, chain_height={latest_height})"
+            );
+
+            // Load genesis epoch block and its commitments
+            let genesis_hash = read_tx
+                .get::<MigratedBlockHashes>(0)?
+                .ok_or_else(|| eyre::eyre!("No genesis block found at height 0"))?;
+            let genesis_block = block_header_by_hash(&read_tx, &genesis_hash, false)?
+                .ok_or_else(|| eyre::eyre!("Genesis block header not found for {genesis_hash}"))?;
+
+            let genesis_commitments = load_block_commitments(&read_tx, &genesis_block)?;
+            info!(
+                "  Epoch 0 (height 0): {} commitments",
+                genesis_commitments.len()
+            );
+
+            // Count total pledges across all epochs for storage submodule placeholder paths
+            let total_pledges = all_commitments
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c.commitment_type(),
+                        irys_types::CommitmentTypeV2::Pledge { .. }
+                    )
+                })
+                .count();
+
+            let submodules = irys_config::StorageSubmodulesConfig {
+                is_using_hardcoded_paths: true,
+                submodule_paths: (0..total_pledges)
+                    .map(|i| PathBuf::from(format!("/tmp/dump-sm-{i}")))
+                    .collect(),
+            };
+
+            let mut snapshot = EpochSnapshot::new(
+                &submodules,
+                genesis_block.clone(),
+                genesis_commitments,
+                &config,
+            );
+
+            // Replay subsequent epoch blocks
+            let mut prev_epoch_block = genesis_block;
+            for i in 1..num_epoch_blocks {
+                let height = i * epoch_len;
+                let block_hash = read_tx
+                    .get::<MigratedBlockHashes>(height)?
+                    .ok_or_else(|| eyre::eyre!("No block found at epoch height {height}"))?;
+                let block =
+                    block_header_by_hash(&read_tx, &block_hash, false)?.ok_or_else(|| {
+                        eyre::eyre!("Block header not found for {block_hash} at height {height}")
+                    })?;
+
+                let epoch_commitments = load_block_commitments(&read_tx, &block)?;
+                info!(
+                    "  Epoch {i} (height {height}): {} commitments",
+                    epoch_commitments.len()
+                );
+
+                snapshot
+                    .perform_epoch_tasks(&Some(prev_epoch_block), &block, epoch_commitments)
+                    .map_err(|e| eyre::eyre!("Failed epoch tasks at height {height}: {e}"))?;
+
+                prev_epoch_block = block;
+            }
+
+            // Group partition assignments by miner address
+            let mut by_miner: BTreeMap<
+                irys_types::IrysAddress,
+                Vec<(H256, &str, Option<u32>, Option<usize>)>,
+            > = BTreeMap::new();
+
+            for (&hash, assignment) in &snapshot.partition_assignments.capacity_partitions {
+                by_miner
+                    .entry(assignment.miner_address)
+                    .or_default()
+                    .push((hash, "capacity", None, None));
+            }
+
+            for (&hash, assignment) in &snapshot.partition_assignments.data_partitions {
+                by_miner.entry(assignment.miner_address).or_default().push((
+                    hash,
+                    "data",
+                    assignment.ledger_id,
+                    assignment.slot_index,
+                ));
+            }
+
+            info!("Partition assignments by miner:");
+            for (miner, partitions) in &mut by_miner {
+                // Sort: data partitions first (by ledger_id, then slot_index), then capacity
+                partitions.sort_by(|a, b| {
+                    let order_a = if a.1 == "capacity" { 1 } else { 0 };
+                    let order_b = if b.1 == "capacity" { 1 } else { 0 };
+                    order_a
+                        .cmp(&order_b)
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| a.3.cmp(&b.3))
+                });
+                info!("  Miner {miner}");
+                for (hash, kind, ledger_id, slot_index) in partitions.iter() {
+                    if *kind == "capacity" {
+                        info!("    [capacity] {hash}");
+                    } else {
+                        let lid = ledger_id.unwrap_or(0);
+                        let sid = slot_index.unwrap_or(0);
+                        info!("    [data L{lid} S{sid}] {hash}");
+                    }
+                }
+            }
+
             Ok(())
         }
         Commands::Tui {
@@ -541,6 +666,33 @@ async fn main() -> eyre::Result<()> {
             app_result
         }
     }
+}
+
+/// Load the commitment transactions referenced by an epoch block's system ledger.
+fn load_block_commitments<T: irys_database::reth_db::transaction::DbTx>(
+    read_tx: &T,
+    block: &irys_types::IrysBlockHeader,
+) -> eyre::Result<Vec<irys_types::CommitmentTransaction>> {
+    use irys_database::commitment_tx_by_txid;
+    use irys_types::SystemLedger;
+
+    let commitment_ledger = block
+        .system_ledgers
+        .iter()
+        .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+    let Some(ledger) = commitment_ledger else {
+        return Ok(vec![]);
+    };
+
+    ledger
+        .tx_ids
+        .iter()
+        .map(|txid| {
+            commitment_tx_by_txid(read_tx, txid)?
+                .ok_or_else(|| eyre::eyre!("Commitment transaction not found: txid={txid}"))
+        })
+        .collect()
 }
 
 pub fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
