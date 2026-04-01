@@ -131,6 +131,85 @@ header. This does not need to be one of the miners' keys.
 
 ---
 
+## Dumping Commitments from an Existing Node
+
+Use `dump-commitments` to extract all commitment transactions from a running
+(or stopped) node's database. This is useful when migrating to a new genesis --
+the exported file is directly usable as input to Workflow B.
+
+### Usage
+
+Run from the node's working directory (where `config.toml` lives):
+
+```bash
+CONFIG=config.toml irys-cli dump-commitments
+```
+
+Or specify a custom output path:
+
+```bash
+CONFIG=config.toml irys-cli dump-commitments --output /tmp/commitments.json
+```
+
+The default output file is `.irys_genesis_commitments.json` in the current
+directory.
+
+### What it does
+
+1. **Exports commitments** -- walks the `IrysCommitments` database table and
+   writes all commitment transactions as pretty-printed JSON.
+
+2. **Replays all epoch blocks** -- reads every epoch block from the chain
+   (genesis through the latest) and feeds each epoch's commitments into the
+   `EpochSnapshot` to reconstruct the full ledger state. This captures
+   commitments that were included in later epochs, not just genesis.
+
+3. **Logs partition assignments** -- after replaying all epochs, prints the
+   current partition hash assignments grouped by miner address:
+
+   ```
+   Replaying 5 epoch blocks (epoch_len=100, chain_height=450)
+     Epoch 0 (height 0): 14 commitments
+     Epoch 1 (height 100): 3 commitments
+     Epoch 2 (height 200): 0 commitments
+     Epoch 3 (height 300): 1 commitments
+     Epoch 4 (height 400): 0 commitments
+   Partition assignments by miner:
+     Miner 2Z7NNbu2hgdx9qzoYbLX8YTAAJtR
+       [data L0 S0] 6mZBRJ...
+       [capacity] 3peqVp...
+       [capacity] 8xKm2Q...
+     Miner 4WpfDT3q9K2cNbvmrF8xYWJtR
+       [data L1 S0] 9fE3xp...
+       [capacity] 2Pgf5v...
+   ```
+
+### Notes
+
+- The database is opened **read-only**, so it is safe to run against a live node.
+- The `config.toml` must match the node's configuration (it provides the epoch
+  length, chain ID, and database paths needed for replay).
+- If no `CONFIG` env var is set and no `config.toml` exists in the current
+  directory, the CLI falls back to testnet defaults, which will not point at
+  your production database.
+
+### Using the output with `build-genesis`
+
+The exported JSON file can be fed directly into Workflow B:
+
+```bash
+# 1. Dump from the existing node
+CONFIG=config.toml irys-cli dump-commitments --output commitments.json
+
+# 2. Build a new genesis block from those commitments
+CONFIG=config.toml irys-cli build-genesis \
+  --commitments commitments.json \
+  --signing-key <hex-private-key> \
+  --output ./genesis-artifacts/
+```
+
+---
+
 ## Output Files
 
 Both workflows produce two files in the output directory:
