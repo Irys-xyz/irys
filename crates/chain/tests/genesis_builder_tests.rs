@@ -75,13 +75,13 @@ fn into_entries_canonicalizes_order() {
     let manifest_ab = make_manifest(vec![(KEY_A, 3), (KEY_B, 5)]);
     let entries_ab = manifest_ab.into_entries().expect("valid");
 
-    // Manifest with miners in B, A order
-    let manifest_ba = make_manifest(vec![(KEY_B, 5), (KEY_A, 3)]);
-    let entries_ba = manifest_ba.into_entries().expect("valid");
+    // Manifest with miners in reversed (B, A) order
+    let manifest_rev = make_manifest(vec![(KEY_B, 5), (KEY_A, 3)]);
+    let entries_rev = manifest_rev.into_entries().expect("valid");
 
     // Both should produce the same canonical order
-    assert_eq!(entries_ab.len(), entries_ba.len());
-    for (a, b) in entries_ab.iter().zip(entries_ba.iter()) {
+    assert_eq!(entries_ab.len(), entries_rev.len());
+    for (a, b) in entries_ab.iter().zip(entries_rev.iter()) {
         assert_eq!(
             a.signing_key.to_bytes(),
             b.signing_key.to_bytes(),
