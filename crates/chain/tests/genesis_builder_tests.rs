@@ -1,6 +1,10 @@
+use std::path::PathBuf;
+
 use irys_chain::genesis_builder::{
     GenesisMinerEntry, GenesisMinerManifest, GenesisMinerManifestEntry, build_signed_genesis_block,
 };
+use irys_config::StorageSubmodulesConfig;
+use irys_domain::EpochSnapshot;
 use irys_types::{Config, IrysAddress, NodeConfig};
 use k256::ecdsa::SigningKey;
 
@@ -118,6 +122,16 @@ fn test_miners() -> Vec<GenesisMinerEntry> {
     entries
 }
 
+/// Build a StorageSubmodulesConfig with enough paths for the total pledge count.
+fn test_storage_submodules(total_pledges: usize) -> StorageSubmodulesConfig {
+    StorageSubmodulesConfig {
+        is_using_hardcoded_paths: true,
+        submodule_paths: (0..total_pledges)
+            .map(|i| PathBuf::from(format!("/tmp/test-sm-{i}")))
+            .collect(),
+    }
+}
+
 #[tokio::test]
 async fn build_signed_genesis_block_is_deterministic() {
     let config = test_config();
@@ -143,4 +157,73 @@ async fn build_signed_genesis_block_is_deterministic() {
             "commitment IDs must be identical and in the same order"
         );
     }
+}
+
+#[tokio::test]
+async fn partition_assignments_are_deterministic() {
+    let config = test_config();
+    let miners = test_miners();
+    let total_pledges: usize = miners.iter().map(|m| m.pledge_count as usize).sum();
+
+    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+
+    let submodules = test_storage_submodules(total_pledges);
+
+    // Create two EpochSnapshots from the same genesis data
+    let snap_1 = EpochSnapshot::new(
+        &submodules,
+        output.block.clone(),
+        output.commitments.clone(),
+        &config,
+    );
+    let snap_2 = EpochSnapshot::new(
+        &submodules,
+        output.block.clone(),
+        output.commitments.clone(),
+        &config,
+    );
+
+    // Extract partition assignments from both snapshots.
+    // After genesis init, some pledged capacity partitions are moved to data partitions
+    // via backfill_missing_partitions, so we must check both maps.
+    let cap_1 = &snap_1.partition_assignments.capacity_partitions;
+    let cap_2 = &snap_2.partition_assignments.capacity_partitions;
+    let data_1 = &snap_1.partition_assignments.data_partitions;
+    let data_2 = &snap_2.partition_assignments.data_partitions;
+
+    // Capacity partition assignments must match
+    assert_eq!(
+        cap_1.len(),
+        cap_2.len(),
+        "capacity partition assignment count must match"
+    );
+    for ((hash_1, assign_1), (hash_2, assign_2)) in cap_1.iter().zip(cap_2.iter()) {
+        assert_eq!(hash_1, hash_2, "capacity partition hashes must match");
+        assert_eq!(
+            assign_1.miner_address, assign_2.miner_address,
+            "capacity miner assignments must match for partition {hash_1}"
+        );
+    }
+
+    // Data partition assignments must match
+    assert_eq!(
+        data_1.len(),
+        data_2.len(),
+        "data partition assignment count must match"
+    );
+    for ((hash_1, assign_1), (hash_2, assign_2)) in data_1.iter().zip(data_2.iter()) {
+        assert_eq!(hash_1, hash_2, "data partition hashes must match");
+        assert_eq!(
+            assign_1.miner_address, assign_2.miner_address,
+            "data miner assignments must match for partition {hash_1}"
+        );
+    }
+
+    // Verify we actually assigned partitions (not a vacuous pass).
+    // Total assigned (capacity + data) must equal the total pledge count.
+    let total_assigned = cap_1.len() + data_1.len();
+    assert_eq!(
+        total_assigned, total_pledges,
+        "every pledge should have a partition assignment (capacity + data)"
+    );
 }
