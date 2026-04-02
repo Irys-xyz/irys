@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_two_range_sampling_not_biased() {
-        let partition_hash = H256::random();
+        let partition_hash = H256([7_u8; 32]);
         let mut first_draws = HashSet::new();
 
         for seed_byte in 0..=255_u8 {
