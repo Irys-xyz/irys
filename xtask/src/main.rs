@@ -1,5 +1,6 @@
 use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -210,7 +211,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "rustup component add llvm-tools").run()?;
                 cmd!(
                     sh,
-                    "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                    "cargo install --locked --force --version {LLVM_COV_VERSION} cargo-llvm-cov"
                 )
                 .remove_and_run()?;
                 cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
@@ -479,7 +480,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     );
                 }
 
-                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
+                let scope_args_lcov = scope_args.clone(); // clone: needed for lcov cmd! invocation
+                let scope_args_mismatch = scope_args.clone(); // clone: needed for mismatch analysis
                 let html_result = cmd!(
                     sh,
                     "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
@@ -495,10 +497,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args_lcov...}"
                 )
                 .remove_and_run();
-
-                if let Err(e) = &lcov_result {
-                    eprintln!("Warning: LCOV coverage report generation failed: {e}");
-                }
 
                 if html_result.is_ok() {
                     println!("  HTML report: target/llvm-cov/html/index.html");
@@ -517,6 +515,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 if let Err(e) = lcov_result {
                     eprintln!("Warning: LCOV report generation failed: {e}");
+                }
+
+                // Log which functions have mismatched coverage data
+                if let Err(e) = log_coverage_mismatches(sh, &scope_args_mismatch) {
+                    eprintln!("Warning: coverage mismatch analysis failed: {e}");
                 }
             }
 
@@ -1022,37 +1025,232 @@ fn write_status_summary(run_dir: &std::path::Path) {
     }
 }
 
+/// Detect and log functions with mismatched coverage data.
+///
+/// When llvm-cov encounters a function whose profdata hash doesn't match the
+/// binary's coverage mapping hash, it silently drops that function's counters.
+/// This identifies those functions by cross-referencing: functions that were
+/// executed (non-zero `Function count` in profdata) but show zero coverage in
+/// the JSON export are the hash mismatches. Results are filtered to workspace
+/// crates to avoid noise from std/deps.
+fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()> {
+    // Run `cargo llvm-cov report --json` via std::process::Command so we can
+    // capture stderr, where llvm-cov emits "warning: N functions have
+    // mismatched data". xshell's Cmd::read() only captures stdout.
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["llvm-cov", "report", "--json"]);
+    cmd.args(scope_args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    for k in RING_ENV_VARS {
+        cmd.env_remove(k);
+    }
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("cargo llvm-cov report --json failed: {stderr}"));
+    }
+    let json_str = String::from_utf8(output.stdout)?;
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+    // Debug: show what stderr contains so we can verify the warning format
+    if !stderr_str.is_empty() {
+        eprintln!(
+            "  [debug] cargo llvm-cov report --json stderr ({} bytes):",
+            stderr_str.len()
+        );
+        for line in stderr_str.lines().take(10) {
+            eprintln!("  [debug]   {line}");
+        }
+    } else {
+        eprintln!("  [debug] cargo llvm-cov report --json produced no stderr");
+    }
+
+    // Parse the mismatch count from stderr
+    let mismatch_count: usize = stderr_str
+        .lines()
+        .find_map(|l| {
+            // e.g. "warning: 135 functions have mismatched data"
+            let n = l
+                .strip_prefix("warning: ")
+                .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
+            n.parse().ok()
+        })
+        .unwrap_or(0);
+
+    if mismatch_count == 0 {
+        println!("  No coverage data mismatches detected.");
+        return Ok(());
+    }
+
+    println!("  llvm-cov reports {mismatch_count} functions with mismatched coverage data.");
+    println!("  Identifying affected workspace functions...");
+
+    // Collect workspace crate names (hyphens → underscores) for filtering
+    let metadata = MetadataCommand::new().exec()?;
+    let crate_names: Vec<String> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|p| p.name.replace('-', "_"))
+        .collect();
+
+    // From the JSON export: workspace functions with zero execution count.
+    // Hash-mismatched functions appear in the export (from the binary's coverage
+    // mapping) but their profdata counters aren't applied, leaving count == 0.
+    let json: serde_json::Value = serde_json::from_str(&json_str)?;
+    let zero_coverage: HashSet<&str> = json
+        .pointer("/data/0/functions")
+        .and_then(|v| v.as_array())
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|f| {
+                    let name = f.get("name")?.as_str()?;
+                    let count = f.get("count")?.as_u64()?;
+                    if count == 0 && crate_names.iter().any(|c| name.contains(c.as_str())) {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // From profdata: workspace functions that were actually executed.
+    let profdata_dir = PathBuf::from("target/llvm-cov-target");
+    let profdata_path = fs::read_dir(&profdata_dir).ok().and_then(|entries| {
+        // read_dir order is filesystem-dependent; pick the newest .profdata
+        // so stale files from interrupted runs don't shadow the fresh merge.
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+            .max_by_key(|e| {
+                e.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+            .map(|e| e.path())
+    });
+
+    let Some(profdata_path) = profdata_path else {
+        println!("    (skipping function identification: no profdata file found)");
+        return Ok(());
+    };
+
+    // Locate llvm-profdata via rustc sysroot
+    let sysroot = cmd!(sh, "rustc --print sysroot").read()?;
+    let rustc_info = cmd!(sh, "rustc -vV").read()?;
+    let host_triple = rustc_info
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .ok_or_else(|| eyre::eyre!("could not determine host triple from rustc -vV"))?;
+    let llvm_profdata = format!("{sysroot}/lib/rustlib/{host_triple}/bin/llvm-profdata");
+
+    // Parse profdata for executed workspace functions.
+    // llvm-profdata show --all-functions output (tested LLVM 18/19):
+    //   <function_name>:        (2-space indent)
+    //     Hash: 0x...           (4-space indent)
+    //     Counters: N
+    //     Function count: M     ← M > 0 means the function was called
+    // Format not guaranteed stable; if parsing fails we get an empty set (safe).
+    let profdata_str = profdata_path.display().to_string();
+    let profdata_output = cmd!(sh, "{llvm_profdata} show --all-functions {profdata_str}").read()?;
+
+    let mut current_func: Option<&str> = None;
+    let mut executed: HashSet<&str> = HashSet::new();
+    for line in profdata_output.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+            let name = line.trim().trim_end_matches(':');
+            current_func = if crate_names.iter().any(|c| name.contains(c.as_str())) {
+                Some(name)
+            } else {
+                None
+            };
+        } else if let Some(func) = current_func
+            && let Some(count_str) = line.trim().strip_prefix("Function count: ")
+        {
+            if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
+                executed.insert(func);
+            }
+            current_func = None;
+        }
+    }
+
+    // Intersection: executed in profdata ∩ zero coverage in export = hash mismatch.
+    // Both sources use mangled symbol names from the coverage mapping.
+    let mut mismatched: Vec<&str> = executed.intersection(&zero_coverage).copied().collect();
+    mismatched.sort();
+
+    if mismatched.is_empty() {
+        println!("    No workspace functions affected (mismatches are in dependencies).");
+    } else {
+        println!(
+            "  Affected workspace functions ({} of {mismatch_count}):",
+            mismatched.len()
+        );
+        let log_path = PathBuf::from("target/llvm-cov/mismatched-functions.txt");
+        let mut file = fs::File::create(&log_path)?;
+        for (i, func) in mismatched.iter().enumerate() {
+            writeln!(file, "{func}")?;
+            if i < 30 {
+                println!("    {func}");
+            }
+        }
+        if mismatched.len() > 30 {
+            println!(
+                "    ... and {} more (see {})",
+                mismatched.len() - 30,
+                log_path.display()
+            );
+        }
+        println!("  Full list: {}", log_path.display());
+        println!("  Tip: pipe through `rustfilt` to demangle function names");
+    }
+
+    Ok(())
+}
+
+/// Env vars that Ring's build.rs emits rerun conditions for, many of which are
+/// absent under a regular `cargo check`, causing unnecessary rebuilds when
+/// alternating between `cargo check` and xtask commands.
+// TODO: once ring releases 0.17.15+, we should no longer need this
+const RING_ENV_VARS: &[&str] = &[
+    "CARGO_MANIFEST_DIR",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_MANIFEST_LINKS",
+    "RING_PREGENERATE_ASM",
+    // "OUT_DIR",
+    "CARGO_CFG_TARGET_ARCH",
+    "CARGO_CFG_TARGET_OS",
+    "CARGO_CFG_TARGET_ENV",
+    "CARGO_CFG_TARGET_ENDIAN",
+    // "DEBUG",
+];
+
+fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
+    let mut c = cmd;
+    for k in RING_ENV_VARS {
+        c = c.env_remove(k);
+    }
+    c
+}
+
 pub trait CmdExt {
     fn remove_and_run(self) -> Result<(), xshell::Error>;
+    fn remove_and_read(self) -> Result<String, xshell::Error>;
 }
 
 impl CmdExt for Cmd<'_> {
-    /// removes a set of problematic env vars set by xtask being a cargo subcommand
-    /// this is for ring, as their build.rs emits rerun conditions for the following env vars
-    /// many of which are not present if you use a regular `cargo check`,
-    /// which causes a re-run if you alternate between `cargo check` and an xtask command
     fn remove_and_run(self) -> Result<(), xshell::Error> {
-        let mut c = self;
-        // TODO: once ring releases  0.17.15+, we should no longer need this
-        // these were taken from Ring's build.rs
-        for k in [
-            "CARGO_MANIFEST_DIR",
-            "CARGO_PKG_NAME",
-            "CARGO_PKG_VERSION_MAJOR",
-            "CARGO_PKG_VERSION_MINOR",
-            "CARGO_PKG_VERSION_PATCH",
-            "CARGO_PKG_VERSION_PRE",
-            "CARGO_MANIFEST_LINKS",
-            "RING_PREGENERATE_ASM",
-            // "OUT_DIR",
-            "CARGO_CFG_TARGET_ARCH",
-            "CARGO_CFG_TARGET_OS",
-            "CARGO_CFG_TARGET_ENV",
-            "CARGO_CFG_TARGET_ENDIAN",
-            // "DEBUG",
-        ] {
-            c = c.env_remove(k);
-        }
-        c.run()
+        remove_ring_env_vars(self).run()
+    }
+
+    fn remove_and_read(self) -> Result<String, xshell::Error> {
+        remove_ring_env_vars(self).read()
     }
 }
