@@ -189,6 +189,10 @@ fn fixture_execution_payload() -> RethBlock {
     canonical_execution_payload()
 }
 
+fn fixture_chunk_format() -> irys_types::ChunkFormat {
+    irys_types::ChunkFormat::Unpacked(canonical_unpacked_chunk())
+}
+
 fn fixture_node_info() -> wire::NodeInfoV1 {
     canonical_node_info().into()
 }
@@ -367,6 +371,8 @@ fixture_tests! {
         wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
     v2_gossip_data_execution_payload =>
         wire::GossipDataV2::ExecutionPayload(fixture_execution_payload()),
+    v2_gossip_data_pd_chunk =>
+        wire::GossipDataV2::PdChunk(fixture_chunk_format()),
 
     // V2 Data Requests
     v2_data_request_execution_payload =>
@@ -379,6 +385,8 @@ fixture_tests! {
         wire::GossipDataRequestV2::Chunk(test_h256(0xCC)),
     v2_data_request_transaction =>
         wire::GossipDataRequestV2::Transaction(test_h256(0xDD)),
+    v2_data_request_pd_chunk =>
+        wire::GossipDataRequestV2::PdChunk(0, 42),
 
     // V2 Request Wrapper
     v2_gossip_request => wire::GossipRequestV2 {

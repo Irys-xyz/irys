@@ -773,6 +773,12 @@
   "v2_data_request_execution_payload": {
     "ExecutionPayload": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
   },
+  "v2_data_request_pd_chunk": {
+    "PdChunk": [
+      0,
+      42
+    ]
+  },
   "v2_data_request_transaction": {
     "Transaction": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE"
   },
@@ -1113,6 +1119,16 @@
       "proof": "FzzcmrPGHCwHy6XfqKQybLLMCFhgX7R33axfwNwzrxbw",
       "signature": "11111111111111111111111111111112K3n5t4wSaF5mj27Tw9vStXWLWyRjjiH5Cp3CFLpKVCrAv",
       "version": 1
+    }
+  },
+  "v2_gossip_data_pd_chunk": {
+    "PdChunk": {
+      "bytes": "yv66vg",
+      "dataPath": "3q2-7w",
+      "dataRoot": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
+      "dataSize": "262144",
+      "txOffset": 0,
+      "type": "unpacked"
     }
   },
   "v2_gossip_data_transaction": {

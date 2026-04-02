@@ -13,9 +13,7 @@
 
 use std::sync::Arc;
 
-use alloy_consensus::TxEip1559;
-use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{TxKind, U256};
+use alloy_primitives::TxKind;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -24,11 +22,7 @@ use reth::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         components::{ComponentsBuilder, ExecutorBuilder},
     },
-    payload::EthBuiltPayload,
-    primitives::SealedBlock,
-    providers::{EthStorage, StateProviderFactory, providers::ProviderFactoryBuilder},
-    rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
-    transaction_pool::TransactionValidationTaskExecutor,
+    providers::{EthStorage, providers::ProviderFactoryBuilder},
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
@@ -41,18 +35,8 @@ use reth_node_ethereum::{
     EthEngineTypes, EthEvmConfig,
     node::{EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder},
 };
-use reth_primitives_traits::{
-    BlockTy, constants::MINIMUM_GAS_LIMIT, transaction::error::InvalidTransactionError,
-};
 pub use reth_provider::{BlockReaderIdExt, providers::BlockchainProvider};
 use reth_tracing::tracing;
-use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
-use reth_transaction_pool::{
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
-    TransactionValidator, blobstore::DiskFileBlobStore,
-};
-use shadow_tx::ShadowTransaction;
-use tracing::{debug, info};
 
 use crate::{
     mempool::IrysPoolBuilder, payload_builder_builder::IrysPayloadBuilderBuilder,
@@ -303,7 +287,7 @@ mod tests {
     };
     use reth_payload_primitives::PayloadBuilderAttributes as _;
 
-    use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
+    use reth_transaction_pool::{EthPooledTransaction, PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
     use std::time::Duration;
 
