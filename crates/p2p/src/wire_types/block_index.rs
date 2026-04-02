@@ -126,27 +126,33 @@ where
             DataLedger::ALL.len(),
         )));
     }
-    raw.into_iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let ledger = match item.ledger {
-                Some(l) => l,
-                None => *DataLedger::ALL.get(idx).ok_or_else(|| {
-                    serde::de::Error::custom(format!(
-                        "legacy payload has {count} ledgers but DataLedger::ALL \
-                         only has {max} entries (index {idx} out of range)",
-                        count = idx + 1,
-                        max = DataLedger::ALL.len(),
-                    ))
-                })?,
-            };
-            Ok(LedgerIndexItem {
-                total_chunks: item.total_chunks,
-                tx_root: item.tx_root,
-                ledger,
-            })
-        })
-        .collect()
+    let mut seen = Vec::with_capacity(raw.len());
+    let mut ledgers = Vec::with_capacity(raw.len());
+    for (idx, item) in raw.into_iter().enumerate() {
+        let ledger = match item.ledger {
+            Some(l) => l,
+            None => *DataLedger::ALL.get(idx).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "legacy payload has {count} ledgers but DataLedger::ALL \
+                     only has {max} entries (index {idx} out of range)",
+                    count = idx + 1,
+                    max = DataLedger::ALL.len(),
+                ))
+            })?,
+        };
+        if seen.contains(&ledger) {
+            return Err(serde::de::Error::custom(format!(
+                "duplicate ledger entry: {ledger:?}"
+            )));
+        }
+        seen.push(ledger);
+        ledgers.push(LedgerIndexItem {
+            total_chunks: item.total_chunks,
+            tx_root: item.tx_root,
+            ledger,
+        });
+    }
+    Ok(ledgers)
 }
 
 // --- BlockIndexItemV2 conversions ---
@@ -183,5 +189,38 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: BlockIndexItemV2 = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
+    }
+
+    /// Legacy payloads omit the `ledger` field — the deserializer must infer
+    /// the variant from array position via `DataLedger::ALL[i]`.
+    #[test]
+    fn deserialize_legacy_payload_without_ledger_field() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
+            "ledgers": [
+                { "total_chunks": "100", "tx_root": H256::zero() },
+                { "total_chunks": "200", "tx_root": H256::zero() }
+            ]
+        });
+
+        let item: BlockIndexItemV2 = serde_json::from_value(json).unwrap();
+        assert_eq!(item.ledgers[0].ledger, DataLedger::ALL[0]);
+        assert_eq!(item.ledgers[1].ledger, DataLedger::ALL[1]);
+        assert_eq!(item.ledgers[0].total_chunks, 100);
+        assert_eq!(item.ledgers[1].total_chunks, 200);
+    }
+
+    #[test]
+    fn reject_duplicate_ledger_entries() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
+            "ledgers": [
+                { "total_chunks": "100", "tx_root": H256::zero(), "ledger": "Publish" },
+                { "total_chunks": "200", "tx_root": H256::zero(), "ledger": "Publish" }
+            ]
+        });
+
+        let err = serde_json::from_value::<BlockIndexItemV2>(json).unwrap_err();
+        assert!(err.to_string().contains("duplicate ledger entry"));
     }
 }
