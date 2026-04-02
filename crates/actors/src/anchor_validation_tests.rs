@@ -193,10 +193,20 @@ proptest! {
         let (min, max) = tx_inclusion_anchor_range(&consensus, height);
         let migration = u64::from(consensus.block_migration_depth);
         let expiry = u64::from(consensus.mempool.tx_anchor_expiry_depth);
-        // min <= max holds when effective window (expiry - migration) >= migration
-        if expiry >= 2 * migration {
-            prop_assert!(min <= max, "min {min} > max {max}");
-        }
+        prop_assume!(expiry >= 2 * migration);
+        prop_assert!(min <= max, "min {min} > max {max}");
+    }
+
+    #[test]
+    fn tx_inclusion_range_inverts_when_window_too_narrow(
+        consensus in arbitrary_consensus(),
+        height in 1_u64..=u64::MAX / 2,
+    ) {
+        let (min, max) = tx_inclusion_anchor_range(&consensus, height);
+        let migration = u64::from(consensus.block_migration_depth);
+        let expiry = u64::from(consensus.mempool.tx_anchor_expiry_depth);
+        prop_assume!(expiry < 2 * migration && height >= migration);
+        prop_assert!(min > max, "expected inverted range: min {min} <= max {max}");
     }
 
     #[test]
