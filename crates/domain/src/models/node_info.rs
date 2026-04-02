@@ -23,8 +23,9 @@ pub async fn get_node_info(
         )
     };
 
-    let (chain, blocks) = get_canonical_chain(block_tree.clone()).await?;
+    let chain = get_canonical_chain(block_tree.clone()).await?;
     let latest = chain
+        .entries
         .last()
         .ok_or_else(|| eyre::eyre!("canonical chain is empty"))?;
     let max_diff = block_tree.read().get_max_cumulative_difficulty_block();
@@ -37,11 +38,11 @@ pub async fn get_node_info(
         block_hash: latest.block_hash(),
         block_index_height,
         block_index_hash,
-        pending_blocks: u64::try_from(blocks)?,
+        pending_blocks: u64::try_from(chain.not_onchain_count)?,
         is_syncing: sync_state.is_syncing(),
         current_sync_height: u64::try_from(sync_state.sync_target_height())?,
         uptime_secs: started_at.elapsed().as_secs(),
-        cumulative_difficulty: max_diff.0,
+        cumulative_difficulty: max_diff.cumulative_diff,
         mining_address,
     })
 }
