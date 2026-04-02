@@ -14,7 +14,10 @@ use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
     tx_header_by_txid_canonical,
 };
-use irys_domain::{BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot};
+use irys_domain::{
+    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
+    HardforkConfigExt as _,
+};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
@@ -400,6 +403,8 @@ pub async fn select_best_txs(
 
     // Apply block size constraint and funding checks to data transactions
     let mut submit_tx = Vec::new();
+    let mut one_year_tx = Vec::new();
+    let mut thirty_day_tx = Vec::new();
     let max_data_txs: usize = ctx
         .config
         .node_config
@@ -536,12 +541,80 @@ pub async fn select_best_txs(
                 );
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
-                warn!(
-                    tx.id = ?tx.id,
-                    tx.ledger = ?ledger,
-                    "Skipping unsupported term ledger"
+                // Term-only ledgers: validate cascade is active, term fee, and fee structure
+                let consensus = ctx.config.node_config.consensus_config();
+                if !consensus
+                    .hardforks
+                    .is_cascade_active_for_epoch(&parent_epoch_snapshot)
+                {
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.ledger = ?ledger,
+                        "Skipping term ledger tx - Cascade hardfork not active"
+                    );
+                    continue;
+                }
+
+                // Term-only ledgers must not carry a perm_fee
+                if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.ledger = ?ledger,
+                        "Skipping term ledger tx: has perm_fee"
+                    );
+                    continue;
+                }
+
+                // Validate term fee structure
+                if TermFeeCharges::new(tx.term_fee, &consensus).is_err() {
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.term_fee = ?tx.term_fee,
+                        "Skipping term ledger tx: invalid term fee structure"
+                    );
+                    continue;
+                }
+
+                // Validate term fee amount against EMA pricing
+                let cascade = consensus
+                    .hardforks
+                    .cascade
+                    .as_ref()
+                    .expect("cascade config must exist when cascade is active");
+                let epoch_length = match ledger {
+                    DataLedger::OneYear => cascade.one_year_epoch_length,
+                    DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+                    _ => unreachable!(),
+                };
+                let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                    next_block_height,
+                    consensus.epoch.num_blocks_in_epoch,
+                    epoch_length,
                 );
-                continue;
+                let replica_count = consensus.num_partitions_per_term_ledger_slot;
+                let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
+                    tx.data_size,
+                    epochs_for_storage,
+                    &consensus,
+                    replica_count,
+                    parent_ema_snapshot.ema_for_public_pricing(),
+                    current_timestamp,
+                ) else {
+                    debug!(
+                        tx.id = ?tx.id,
+                        "Skipping term ledger tx: failed to calculate expected term fee"
+                    );
+                    continue;
+                };
+                if tx.term_fee < expected_term_fee {
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.actual_term_fee = ?tx.term_fee,
+                        tx.expected_term_fee = ?expected_term_fee,
+                        "Skipping term ledger tx: insufficient term_fee"
+                    );
+                    continue;
+                }
             }
         }
 
@@ -575,16 +648,21 @@ pub async fn select_best_txs(
             &mut unfunded_address,
             &mut fees_spent_per_address,
         ) {
+            let total_selected = submit_tx.len() + one_year_tx.len() + thirty_day_tx.len();
             trace!(
                 tx.id = ?tx.id,
                 tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
-                tx.selected_count = submit_tx.len() + 1,
+                tx.selected_count = total_selected + 1,
                 tx.max_data_txs = max_data_txs,
                 "Data transaction passed funding check"
             );
-            submit_tx.push(tx);
-            if submit_tx.len() >= max_data_txs {
+            match ledger {
+                DataLedger::Publish | DataLedger::Submit => submit_tx.push(tx),
+                DataLedger::OneYear => one_year_tx.push(tx),
+                DataLedger::ThirtyDay => thirty_day_tx.push(tx),
+            }
+            if submit_tx.len() + one_year_tx.len() + thirty_day_tx.len() >= max_data_txs {
                 break;
             }
         } else {
@@ -657,6 +735,8 @@ pub async fn select_best_txs(
     Ok(MempoolTxs {
         commitment_tx,
         submit_tx,
+        one_year_tx,
+        thirty_day_tx,
         publish_tx: publish_txs_and_proofs,
     })
 }
@@ -1040,12 +1120,17 @@ async fn get_pending_submit_ledger_txs(
     while block.height >= min_anchor_height {
         let block_data_tx_ids = block.get_data_ledger_tx_ids();
 
-        // Check if this block contains any Submit ledger transactions
-        if let Some(submit_txids) = block_data_tx_ids.get(&DataLedger::Submit) {
-            // Remove Submit transactions that already exist in this historical block
-            // This prevents double-inclusion and ensures we only return truly pending transactions
-            for txid in submit_txids.iter() {
-                pending_valid_submit_ledger_tx.remove(txid);
+        // Remove term ledger transactions that already exist in this historical block
+        // This prevents double-inclusion and ensures we only return truly pending transactions
+        for ledger in [
+            DataLedger::Submit,
+            DataLedger::OneYear,
+            DataLedger::ThirtyDay,
+        ] {
+            if let Some(txids) = block_data_tx_ids.get(&ledger) {
+                for txid in txids.iter() {
+                    pending_valid_submit_ledger_tx.remove(txid);
+                }
             }
         }
 

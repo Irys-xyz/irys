@@ -1945,6 +1945,8 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
+    pub one_year_tx: Vec<DataTransactionHeader>,
+    pub thirty_day_tx: Vec<DataTransactionHeader>,
     pub publish_tx: PublishLedgerWithTxs,
 }
 

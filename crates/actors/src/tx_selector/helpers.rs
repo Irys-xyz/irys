@@ -48,6 +48,7 @@ pub(crate) fn calculate_term_storage_fee(
         &config.consensus,
         number_of_ingress_proofs_total,
         ema.ema_for_public_pricing(),
+        timestamp,
     )
     .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
 }

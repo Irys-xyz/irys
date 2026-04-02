@@ -58,16 +58,16 @@ impl BlockMigrationService {
             // Phase 1: Clear orphaned metadata
             for block in blocks_to_clear {
                 let header = block.header();
-                let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
-                let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
+                let all_data_tx_ids: Vec<_> = header
+                    .data_ledgers
+                    .iter()
+                    .flat_map(|dl| dl.tx_ids.0.iter())
+                    .collect();
                 let commitment_ids = header.commitment_tx_ids();
 
-                if !submit_ids.is_empty() || !publish_ids.is_empty() {
-                    irys_database::batch_clear_data_tx_metadata(
-                        tx,
-                        submit_ids.iter().chain(publish_ids.iter()),
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                if !all_data_tx_ids.is_empty() {
+                    irys_database::batch_clear_data_tx_metadata(tx, all_data_tx_ids.into_iter())
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
                 if !commitment_ids.is_empty() {
                     irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
@@ -77,20 +77,22 @@ impl BlockMigrationService {
             // Phase 2: Write confirmed metadata
             for block in blocks_to_confirm {
                 let header = block.header();
-                let submit_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
-                let publish_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
                 let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
 
-                if !submit_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(tx, submit_ids, height)
+                for dl in &header.data_ledgers {
+                    let tx_ids = &dl.tx_ids.0;
+                    if tx_ids.is_empty() {
+                        continue;
+                    }
+                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
-                }
-                if !publish_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(tx, publish_ids, height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    irys_database::batch_set_data_tx_promoted_height(tx, publish_ids, height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+
+                    // Publish ledger txs also get promoted_height
+                    if dl.ledger_id == DataLedger::Publish as u32 {
+                        irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
                 }
                 if !commitment_ids.is_empty() {
                     irys_database::batch_set_commitment_tx_included_height(
@@ -244,13 +246,8 @@ impl BlockMigrationService {
         let transactions = sealed_block.transactions();
 
         let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
-        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
-        let mut publish_txs = transactions.get_ledger_txs(DataLedger::Publish).to_vec();
-
-        let block_height = header.height;
-        let submit_tx_ids = &header.data_ledgers[DataLedger::Submit].tx_ids.0;
-        let publish_tx_ids = &header.data_ledgers[DataLedger::Publish].tx_ids.0;
         let commitment_tx_ids = header.commitment_tx_ids();
+        let block_height = header.height;
 
         let migrated_block = (**header).clone();
 
@@ -259,26 +256,38 @@ impl BlockMigrationService {
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
             }
-            for header in submit_txs {
-                insert_tx_header(tx, header)?;
-            }
-            for header in &mut publish_txs {
-                if header.promoted_height().is_none() {
-                    header.metadata_mut().promoted_height = Some(block_height);
+
+            // Persist tx headers and metadata for all data ledgers in the block
+            for dl in &header.data_ledgers {
+                let ledger = DataLedger::try_from(dl.ledger_id)
+                    .map_err(|_| eyre::eyre!("Unknown ledger_id {}", dl.ledger_id))?;
+                let mut ledger_txs = transactions.get_ledger_txs(ledger).to_vec();
+                let tx_ids = &dl.tx_ids.0;
+
+                // Publish txs get promoted_height set on their headers
+                if ledger == DataLedger::Publish {
+                    for data_tx in &mut ledger_txs {
+                        if data_tx.promoted_height().is_none() {
+                            data_tx.metadata_mut().promoted_height = Some(block_height);
+                        }
+                    }
                 }
-                insert_tx_header(tx, header)?;
+
+                for data_tx in &ledger_txs {
+                    insert_tx_header(tx, data_tx)?;
+                }
+
+                if !tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+
+                    if ledger == DataLedger::Publish {
+                        irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                }
             }
 
-            if !submit_tx_ids.is_empty() {
-                irys_database::batch_set_data_tx_included_height(tx, submit_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-            }
-            if !publish_tx_ids.is_empty() {
-                irys_database::batch_set_data_tx_included_height(tx, publish_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-                irys_database::batch_set_data_tx_promoted_height(tx, publish_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
-            }
             if !commitment_tx_ids.is_empty() {
                 irys_database::batch_set_commitment_tx_included_height(
                     tx,
@@ -304,14 +313,11 @@ impl BlockMigrationService {
         let transactions = sealed_block.transactions();
 
         let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
-        all_txs_map.insert(
-            DataLedger::Submit,
-            transactions.get_ledger_txs(DataLedger::Submit).to_vec(),
-        );
-        all_txs_map.insert(
-            DataLedger::Publish,
-            transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
-        );
+        for dl in &header.data_ledgers {
+            if let Ok(ledger) = DataLedger::try_from(dl.ledger_id) {
+                all_txs_map.insert(ledger, transactions.get_ledger_txs(ledger).to_vec());
+            }
+        }
 
         self.chunk_migration_sender
             .send_traced(ChunkMigrationServiceMessage::BlockMigrated(
