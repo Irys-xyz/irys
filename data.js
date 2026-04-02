@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775033683017,
+  "lastUpdate": 1775140928065,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1830,6 +1830,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4e5e184b4d98f3995e586422a8540f3cfaca46da",
+          "message": "fix(oracle): add the json feature in for bundler (#1385)",
+          "timestamp": "2026-04-02T15:27:07+01:00",
+          "tree_id": "9cfee4c4cb1457254c9797037f56c7534fcff036",
+          "url": "https://github.com/Irys-xyz/irys/commit/4e5e184b4d98f3995e586422a8540f3cfaca46da"
+        },
+        "date": 1775140927006,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.081915,
+            "range": "± 0.003067",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 789.001037,
+            "range": "± 12.155207",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 993.026891,
+            "range": "± 20.195387",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.134484,
+            "range": "± 0.005366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1181.278173,
+            "range": "± 65.467791",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.088455,
+            "range": "± 17.28024",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.458383,
+            "range": "± 0.019749",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 214.607281,
+            "range": "± 2.30654",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.378449,
+            "range": "± 0.773554",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0",
             "unit": "ms/iter"
           }
