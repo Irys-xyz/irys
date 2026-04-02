@@ -126,26 +126,23 @@ where
             DataLedger::ALL.len(),
         )));
     }
-    let mut seen = Vec::with_capacity(raw.len());
     let mut ledgers = Vec::with_capacity(raw.len());
     for (idx, item) in raw.into_iter().enumerate() {
+        let expected = *DataLedger::ALL.get(idx).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "ledger index {idx} out of range (DataLedger::ALL has {} entries)",
+                DataLedger::ALL.len(),
+            ))
+        })?;
         let ledger = match item.ledger {
-            Some(l) => l,
-            None => *DataLedger::ALL.get(idx).ok_or_else(|| {
-                serde::de::Error::custom(format!(
-                    "legacy payload has {count} ledgers but DataLedger::ALL \
-                     only has {max} entries (index {idx} out of range)",
-                    count = idx + 1,
-                    max = DataLedger::ALL.len(),
-                ))
-            })?,
+            Some(l) if l == expected => l,
+            Some(l) => {
+                return Err(serde::de::Error::custom(format!(
+                    "ledger at index {idx} must be {expected:?}, got {l:?}"
+                )));
+            }
+            None => expected,
         };
-        if seen.contains(&ledger) {
-            return Err(serde::de::Error::custom(format!(
-                "duplicate ledger entry: {ledger:?}"
-            )));
-        }
-        seen.push(ledger);
         ledgers.push(LedgerIndexItem {
             total_chunks: item.total_chunks,
             tx_root: item.tx_root,
@@ -211,6 +208,20 @@ mod tests {
     }
 
     #[test]
+    fn reject_out_of_order_ledger_entries() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
+            "ledgers": [
+                { "total_chunks": "100", "tx_root": H256::zero(), "ledger": "Submit" },
+                { "total_chunks": "200", "tx_root": H256::zero(), "ledger": "Publish" }
+            ]
+        });
+
+        let err = serde_json::from_value::<BlockIndexItemV2>(json).unwrap_err();
+        assert!(err.to_string().contains("ledger at index 0 must be"));
+    }
+
+    #[test]
     fn reject_duplicate_ledger_entries() {
         let json = serde_json::json!({
             "block_hash": H256::zero(),
@@ -221,6 +232,6 @@ mod tests {
         });
 
         let err = serde_json::from_value::<BlockIndexItemV2>(json).unwrap_err();
-        assert!(err.to_string().contains("duplicate ledger entry"));
+        assert!(err.to_string().contains("ledger at index 1 must be"));
     }
 }

@@ -1061,8 +1061,9 @@ impl BlockIndexItem {
             .expect("BlockIndexItem: ledger count exceeds u8::MAX (255)");
         bytes.push(num_ledgers);
 
-        // Write each ledger item
-        for ledger_index_item in &self.ledgers {
+        let mut sorted: Vec<&LedgerIndexItem> = self.ledgers.iter().collect();
+        sorted.sort_by_key(|item| item.ledger as u32);
+        for ledger_index_item in sorted {
             bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 40 bytes each
         }
 
@@ -1078,7 +1079,12 @@ impl BlockIndexItem {
         for i in 0..num_ledgers {
             let start = 33 + (i * 40);
             let ledger_bytes = &bytes[start..start + 40];
-            ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
+            let mut item = LedgerIndexItem::from_bytes(ledger_bytes);
+            item.ledger = DataLedger::ALL
+                .get(i)
+                .copied()
+                .expect("block_index ledger position exceeds DataLedger::ALL");
+            ledgers.push(item);
         }
 
         Self {
