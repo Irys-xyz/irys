@@ -42,12 +42,11 @@ impl BlockValidationTracker {
             let tree = block_tree_guard.read();
             tree.get_max_block_info()
         };
-        let (target_hash, target_height) = (info.block_hash, info.height);
 
         Self {
             state: ValidationState::Tracking {
-                target_hash,
-                target_height,
+                target_hash: info.block_hash,
+                target_height: info.height,
             },
             block_tree_guard,
             block_state_rx,

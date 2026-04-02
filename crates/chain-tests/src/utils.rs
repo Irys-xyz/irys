@@ -450,7 +450,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             canonical_tip_hash,
             canonical_chain_len,
             not_onchain_count,
-            max_diff_height,
+            max_cumulative_diff,
             max_diff_hash,
         ) = {
             let tree = self.node_ctx.block_tree_guard.read();
@@ -553,7 +553,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             canonical_tip,
             canonical_chain_len,
             not_onchain_count,
-            max_diff_height,
+            max_cumulative_diff,
             max_diff_hash,
             block_index_tip,
             block_index_submit_total_chunks,
@@ -1189,7 +1189,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let latest_block = canonical_chain.entries.last().unwrap();
 
             let latest_height = latest_block.height();
-            let not_onchain_count = canonical_chain.not_onchain_count as u64;
+            let not_onchain_count = u64::try_from(canonical_chain.not_onchain_count).unwrap();
             if (latest_height - not_onchain_count) >= target_height {
                 info!(
                     "reached height {} after {} retries",

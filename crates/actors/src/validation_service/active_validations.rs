@@ -1413,7 +1413,7 @@ mod tests {
         // Add an extension block at height 4 (extends canonical tip)
         let (ext_header, ext_sealed) = {
             let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
+            let canonical_chain = tree.get_canonical_chain().entries;
             let tip = canonical_chain.last().unwrap();
 
             let mut header = IrysBlockHeader::new_mock_header();
@@ -1463,7 +1463,7 @@ mod tests {
         // Create a fork from height 2 that becomes the new canonical chain
         {
             let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
+            let canonical_chain = tree.get_canonical_chain().entries;
             let fork_parent = canonical_chain.iter().find(|e| e.height() == 2).unwrap();
 
             let mut last_hash = fork_parent.block_hash();
@@ -1607,7 +1607,7 @@ mod tests {
         // Add an extension block and set as current
         let ext_header = {
             let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
+            let canonical_chain = tree.get_canonical_chain().entries;
             let tip = canonical_chain.last().unwrap();
 
             let mut header = IrysBlockHeader::new_mock_header();
