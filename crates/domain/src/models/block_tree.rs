@@ -39,7 +39,7 @@ pub struct MaxDifficultyInfo {
 }
 
 /// Extended info about the max-difficulty block.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaxBlockInfo {
     pub block_hash: BlockHash,
     pub height: u64,
@@ -677,22 +677,12 @@ impl BlockTree {
 
     /// Returns the canonical chain as a cached sequence of block entries.
     ///
-    /// The canonical chain represents the longest valid chain from the earliest cached block
-    /// to the current tip. The chain is maintained as a cached tuple containing:
-    /// - **Block entries**: Ordered sequence from oldest to newest block in cache
-    /// - **Non-onchain count**: Number of blocks not yet fully validated
+    /// Returns the canonical chain as a [`CanonicalChain`].
     ///
-    /// ## Canonical Chain Structure
-    /// * **First element**: Genesis block or the oldest block within `block_tree_depth`
-    /// * **Last element**: Current chain tip (highest cumulative difficulty)
-    /// * **Ordering**: Chronological from oldest to newest block
-    ///
-    /// ## Returns
-    /// `(Vec<BlockTreeEntry>, usize)` - Tuple of (block entries, count of non-onchain blocks)
-    ///
-    /// ## Note
-    /// This returns a cloned copy of the cached chain for thread-safe access. The cache
-    /// is updated whenever the canonical chain changes due to new blocks or reorganizations.
+    /// Entries are ordered chronologically from the oldest cached block (genesis or
+    /// earliest within `block_tree_depth`) to the current tip (highest cumulative
+    /// difficulty). Returns a cloned copy for thread-safe access; the cache is
+    /// updated on new blocks or reorganisations.
     #[must_use]
     pub fn get_canonical_chain(&self) -> CanonicalChain {
         self.longest_chain_cache.clone()
