@@ -30,9 +30,7 @@ use tracing::{Instrument as _, debug, error, instrument, warn};
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
 
-/// Borrowing analog of `wire_types::GossipRequestV2` for zero-clone serialization.
-/// Used by `pre_serialize_for_broadcast` to serialize directly from canonical type
-/// references without cloning the inner data.
+/// Borrowing analog of [`wire_types::GossipRequestV2`] for zero-clone serialization.
 #[derive(Serialize)]
 struct GossipRequestV2Ref<'a, T> {
     peer_id: IrysPeerId,
@@ -1099,7 +1097,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::ExecutionPayload,
-                    execution_payload.clone(),
+                    execution_payload.clone(), // clone: Block not Arc-wrapped, send_data_internal takes ownership
                     ProtocolVersion::V2,
                 )
                 .await
@@ -3358,5 +3356,28 @@ mod tests {
 
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn gossip_request_v2_ref_envelope_matches_v2_owned() {
+        let peer_id = IrysPeerId::random();
+        let miner_address = IrysAddress::from([0xAB; 20]);
+        let data = 42_u64;
+
+        let borrowed = GossipRequestV2Ref {
+            peer_id,
+            miner_address,
+            data: &data,
+        };
+        let owned = wire_types::GossipRequestV2 {
+            peer_id,
+            miner_address,
+            data,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&borrowed).unwrap(),
+            serde_json::to_value(&owned).unwrap(),
+        );
     }
 }

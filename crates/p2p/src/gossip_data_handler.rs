@@ -451,6 +451,7 @@ where
         .await
     }
 
+    #[tracing::instrument(skip_all, fields(block.hash = ?block_header.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
         source_peer_id: IrysPeerId,
