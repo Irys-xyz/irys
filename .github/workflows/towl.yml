@@ -1,15 +1,17 @@
 name: towl
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [master]
 
 concurrency:
-  group: towl-${{ github.ref }}
+  group: towl-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   towl:
+    if: github.event.pull_request.merged == true
     runs-on: [self-hosted, misc-runner]
     timeout-minutes: 30
     permissions:
