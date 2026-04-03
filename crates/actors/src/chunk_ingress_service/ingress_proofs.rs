@@ -149,7 +149,6 @@ impl ChunkIngressServiceInner {
             block_tree_read_guard,
             irys_db,
             ingress_proof.anchor,
-            false, /* does not need to be canonical */
         )
         .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
         {
