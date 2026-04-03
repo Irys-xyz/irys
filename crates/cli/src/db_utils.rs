@@ -188,6 +188,8 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 }
 
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+
     let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
@@ -204,13 +206,23 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
 
     let db_path = config.irys_consensus_data_dir();
 
-    let reth_db = Arc::new(DatabaseEnv::open(
-        &db_path,
-        access,
-        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-            .with_log_level(None)
-            .with_exclusive(Some(false)),
-    )?);
+    let db_env = match access {
+        DatabaseEnvKind::RW => {
+            let db = open_or_create_irys_consensus_data_db(
+                &db_path,
+                config.database.sync_mode,
+            )?;
+            irys_database::migration::ensure_db_version_compatible(&db)?;
+            db
+        }
+        DatabaseEnvKind::RO => DatabaseEnv::open(
+            &db_path,
+            access,
+            irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+                .with_log_level(None)
+                .with_exclusive(Some(false)),
+        )?,
+    };
 
-    Ok(reth_db)
+    Ok(Arc::new(db_env))
 }
