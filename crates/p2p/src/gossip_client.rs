@@ -30,6 +30,14 @@ use tracing::{Instrument as _, debug, error, instrument, warn};
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
 
+/// Borrowing analog of [`wire_types::GossipRequestV2`] for zero-clone serialization.
+#[derive(Serialize)]
+struct GossipRequestV2Ref<'a, T> {
+    peer_id: IrysPeerId,
+    miner_address: IrysAddress,
+    data: &'a T,
+}
+
 /// Builds the base gossip URL for a given peer address and protocol version,
 /// e.g. `http://<addr>/gossip` for V1 or `http://<addr>/gossip/v2` for V2.
 fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
@@ -846,27 +854,18 @@ impl GossipClient {
         data: &GossipDataV2,
     ) -> Option<(GossipRoutes, bytes::Bytes)> {
         let (route, json_result) = match data {
-            GossipDataV2::Chunk(chunk) => {
-                let wire: wire_types::UnpackedChunk = chunk.as_ref().clone().into();
-                (
-                    GossipRoutes::Chunk,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
-                )
-            }
-            GossipDataV2::Transaction(header) => {
-                let wire: wire_types::DataTransactionHeader = header.clone().into();
-                (
-                    GossipRoutes::Transaction,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
-                )
-            }
-            GossipDataV2::CommitmentTransaction(tx) => {
-                let wire: wire_types::CommitmentTransaction = tx.clone().into();
-                (
-                    GossipRoutes::CommitmentTx,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
-                )
-            }
+            GossipDataV2::Chunk(chunk) => (
+                GossipRoutes::Chunk,
+                serde_json::to_vec(&self.create_request_v2_ref(chunk.as_ref())),
+            ),
+            GossipDataV2::Transaction(header) => (
+                GossipRoutes::Transaction,
+                serde_json::to_vec(&self.create_request_v2_ref(header)),
+            ),
+            GossipDataV2::CommitmentTransaction(tx) => (
+                GossipRoutes::CommitmentTx,
+                serde_json::to_vec(&self.create_request_v2_ref(tx)),
+            ),
             GossipDataV2::BlockHeader(header) => {
                 if header.poa.chunk.is_none() {
                     error!(
@@ -875,30 +874,23 @@ impl GossipClient {
                         "Pre-serializing a block header without the POA chunk"
                     );
                 }
-                let wire: wire_types::IrysBlockHeader = header.as_ref().clone().into();
                 (
                     GossipRoutes::Block,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
+                    serde_json::to_vec(&self.create_request_v2_ref(header.as_ref())),
                 )
             }
-            GossipDataV2::BlockBody(body) => {
-                let wire: wire_types::BlockBody = body.as_ref().clone().into();
-                (
-                    GossipRoutes::BlockBody,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
-                )
-            }
+            GossipDataV2::BlockBody(body) => (
+                GossipRoutes::BlockBody,
+                serde_json::to_vec(&self.create_request_v2_ref(body.as_ref())),
+            ),
             GossipDataV2::ExecutionPayload(payload) => (
                 GossipRoutes::ExecutionPayload,
-                serde_json::to_vec(&self.create_request_v2(payload.clone())),
+                serde_json::to_vec(&self.create_request_v2_ref(payload)),
             ),
-            GossipDataV2::IngressProof(proof) => {
-                let wire: wire_types::IngressProof = proof.clone().into();
-                (
-                    GossipRoutes::IngressProof,
-                    serde_json::to_vec(&self.create_request_v2(wire)),
-                )
-            }
+            GossipDataV2::IngressProof(proof) => (
+                GossipRoutes::IngressProof,
+                serde_json::to_vec(&self.create_request_v2_ref(proof)),
+            ),
         };
         match json_result {
             Ok(b) => Some((route, bytes::Bytes::from(b))),
@@ -1048,7 +1040,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Chunk,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1059,7 +1051,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Transaction,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1069,7 +1061,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::CommitmentTx,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1086,7 +1078,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::Block,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1096,7 +1088,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::BlockBody,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1105,7 +1097,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::ExecutionPayload,
-                    &execution_payload,
+                    execution_payload.clone(), // clone: Block not Arc-wrapped, send_data_internal takes ownership
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1115,7 +1107,7 @@ impl GossipClient {
                 self.send_data_internal(
                     &peer.address.gossip,
                     GossipRoutes::IngressProof,
-                    &wire,
+                    wire,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1205,11 +1197,11 @@ impl GossipClient {
         &self,
         gossip_address: &SocketAddr,
         route: GossipRoutes,
-        data: &T,
+        data: T,
         protocol_version: ProtocolVersion,
     ) -> GossipResult<GossipResponse<R>>
     where
-        T: Serialize + Clone,
+        T: Serialize,
         for<'de> R: Deserialize<'de>,
     {
         // Construct URL based on protocol version
@@ -1225,7 +1217,7 @@ impl GossipClient {
 
         let response = match protocol_version {
             ProtocolVersion::V1 => {
-                let req = self.create_request_v1(data.clone());
+                let req = self.create_request_v1(data);
                 self.client
                     .post(&url)
                     .headers(headers)
@@ -1234,7 +1226,7 @@ impl GossipClient {
                     .await
             }
             ProtocolVersion::V2 => {
-                let req = self.create_request_v2(data.clone());
+                let req = self.create_request_v2(data);
                 self.client
                     .post(&url)
                     .headers(headers)
@@ -1438,6 +1430,14 @@ impl GossipClient {
         }
     }
 
+    fn create_request_v2_ref<'a, T>(&self, data: &'a T) -> GossipRequestV2Ref<'a, T> {
+        GossipRequestV2Ref {
+            peer_id: self.peer_id,
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
     pub async fn pull_block_header_from_network(
         &self,
         block_hash: BlockHash,
@@ -1485,7 +1485,7 @@ impl GossipClient {
     /// Pull a block body from a specific peer, updating its score accordingly.
     pub async fn pull_block_body_from_peer(
         &self,
-        header: &IrysBlockHeader,
+        header: &Arc<IrysBlockHeader>,
         peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, SealedBlock), PeerNetworkError> {
@@ -1493,19 +1493,20 @@ impl GossipClient {
         let (peer_id, body) = self
             .pull_data_from_peer_with_retry(
                 data_request,
-                Some(header),
+                Some(header.as_ref()),
                 peer,
                 peer_list,
                 Self::block_body,
             )
             .await?;
 
-        let sealed = SealedBlock::new(header.clone(), Arc::unwrap_or_clone(body)).map_err(|e| {
-            PeerNetworkError::InvalidBlockBody {
-                peer_id,
-                reason: format!("{e:?}"),
-            }
-        })?;
+        let sealed =
+            SealedBlock::new(Arc::clone(header), Arc::unwrap_or_clone(body)).map_err(|e| {
+                PeerNetworkError::InvalidBlockBody {
+                    peer_id,
+                    reason: format!("{e:?}"),
+                }
+            })?;
         Ok((peer_id, sealed))
     }
 
@@ -3355,5 +3356,28 @@ mod tests {
 
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn gossip_request_v2_ref_envelope_matches_v2_owned() {
+        let peer_id = IrysPeerId::random();
+        let miner_address = IrysAddress::from([0xAB; 20]);
+        let data = 42_u64;
+
+        let borrowed = GossipRequestV2Ref {
+            peer_id,
+            miner_address,
+            data: &data,
+        };
+        let owned = wire_types::GossipRequestV2 {
+            peer_id,
+            miner_address,
+            data,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&borrowed).unwrap(),
+            serde_json::to_value(&owned).unwrap(),
+        );
     }
 }
