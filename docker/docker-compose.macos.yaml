@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # TODO: figure out how to templatize these service configs
+  # GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1342 : figure out how to templatize these service configs
   irys-1:
     build:
       context: ..

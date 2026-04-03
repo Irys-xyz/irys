@@ -204,7 +204,7 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
         .await?;
     let genesis_block = genesis_node.get_block_by_height(3).await?;
     //wait for genesis block index height 2
-    // FIXME: genesis_node.wait_until_height_on_chain(2) sometimes fails
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1371 : genesis_node.wait_until_height_on_chain(2) sometimes fails
     genesis_node
         .wait_until_block_index_height(2, seconds_to_wait)
         .await
@@ -599,8 +599,8 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 ///    - commitment txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
 ///    - commitment txs do not appear twice, or are missing from canonical chain
 ///    - all canonical blocks move to all peers
-///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
-///    - TODO: new balance changes are applied based on the new canonical branch
+///    - GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1276 : all the balance changes that were applied in one fork are reverted during the Reorg
+///    - GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1370 : new balance changes are applied based on the new canonical branch
 #[test_log::test(tokio::test)]
 async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     // config variables

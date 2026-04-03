@@ -17,7 +17,7 @@ tables! {
     SubmoduleTables;
     /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
-    /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1289 : use custom Compact impl for Vec<u8> so we don't have problems
     /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
     table ChunkPathHashesByOffset {
         type Key = PartitionChunkOffset;
@@ -25,7 +25,7 @@ tables! {
     }
 
     /// Maps a chunk's data path hash to the full data path
-    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indices)
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1352 : change how we store these to reduce duplication (use dupsort + tree traversal indices)
     table ChunkDataPathByPathHash {
         type Key = ChunkPathHash;
         type Value = ChunkDataPath;

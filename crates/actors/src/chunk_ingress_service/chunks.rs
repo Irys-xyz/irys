@@ -80,7 +80,7 @@ impl ChunkIngressServiceInner {
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
         let chunk = Arc::new(chunk);
-        // TODO: maintain a shared read transaction so we have read isolation
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1341 : maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
 
@@ -363,7 +363,7 @@ impl ChunkIngressServiceInner {
         let chunk_len = u64::try_from(chunk.bytes.len())
             .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
 
-        // TODO: Mark the data_root as invalid if the chunk is an incorrect size
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1301 : Mark the data_root as invalid if the chunk is an incorrect size
         // Someone may have created a data_root that seemed valid, but if the
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
@@ -779,7 +779,7 @@ pub fn generate_ingress_proof(
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
-    // TODO: for now we assume the chunks all all in the DB chunk cache
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1313 : for now we assume the chunks all all in the DB chunk cache
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
     // regardless of actual location
 
@@ -815,7 +815,7 @@ pub fn generate_ingress_proof(
             }
             set.insert(chunk_path_hash);
 
-            // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1306 : add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
             let chunk = tx
                 .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
                 .ok_or(eyre!(

@@ -39,7 +39,7 @@ impl PartitionAssignments {
             .or(self.capacity_partitions.get(&partition_hash).copied())
     }
 
-    // TODO: convert to Display impl for PartitionAssignments
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1354 : convert to Display impl for PartitionAssignments
     pub fn print_assignments(&self) {
         debug!(
             "Partition Assignments ({}):",

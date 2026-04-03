@@ -365,7 +365,7 @@ async fn peer_discovery() -> eyre::Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
-    // TODO: this test should:
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1295 : this test should:
     //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.
     //  2. Peer 2 launched. Peer 2 has Peer 1 as trusted peer.
     //  3. Peer 2 should handshake with Peer 1.

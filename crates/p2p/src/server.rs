@@ -1210,7 +1210,7 @@ where
             .canonical_epoch_snapshot()
             .is_staked(mining_addr);
 
-        // TODO: In future, use peer_id as the key instead of mining_addr
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1349 : In future, use peer_id as the key instead of mining_addr
         server
             .peer_list
             .add_or_update_peer(peer_list_entry, is_staked);

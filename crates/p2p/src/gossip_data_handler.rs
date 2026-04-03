@@ -266,7 +266,7 @@ where
             return Ok(());
         }
 
-        // TODO: Check to see if this proof is in the DB LRU Cache
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1275 : Check to see if this proof is in the DB LRU Cache
 
         match self
             .chunk_ingress

@@ -446,7 +446,7 @@ impl BlockTreeServiceInner {
 
             let event = BlockStateUpdated {
                 block_hash,
-                // todo: restructure the event so that `height` and `state` is not part of it
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1308 : restructure the event so that `height` and `state` is not part of it
                 height,
                 state,
                 discarded: true,

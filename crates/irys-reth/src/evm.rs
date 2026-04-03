@@ -730,7 +730,7 @@ where
 
         let beneficiary = self.block().beneficiary;
 
-        // TODO: temporary as TxEnv doesn't have tx hash right now
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1372 : temporary as TxEnv doesn't have tx hash right now
         // eventually we *should* be able to modify the associated type to allow for this.
         let tx_hash: &FixedBytes<32> = &[0; 32].into();
 
@@ -834,7 +834,7 @@ where
 
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.
     /// NOTE: you MUST commit an account change before calling `load_account` for the same account, otherwise you will not get the latest version.
-    /// TODO: improve this ^, and make this function responsible for account _creation_, i.e if an account doesn't exist, we use `Account::new_not_existing()`, instead of deferring this to the caller.
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1340 : improve this ^, and make this function responsible for account _creation_, i.e if an account doesn't exist, we use `Account::new_not_existing()`, instead of deferring this to the caller.
     pub fn load_account(
         &mut self,
         address: Address,

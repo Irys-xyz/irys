@@ -19,7 +19,7 @@ pub struct IrysCli {
 pub enum Commands {
     #[command(name = "start")]
     Start {},
-    // TODO: add a `Bench` subcommand
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1282 : add a `Bench` subcommand
 }
 
 #[tokio::main]

@@ -267,7 +267,6 @@ pub enum AddTxError {
     Mailbox(RecvError),
 }
 
-// TODO: add an "name" field for debug logging
 pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
     pub cfg: NodeConfig,

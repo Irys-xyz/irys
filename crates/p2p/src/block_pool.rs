@@ -839,7 +839,7 @@ where
             current_block_hash
         );
 
-        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1310 : validate this UNTRUSTED height against the parent block's height (as we have processed it)
         self.block_status_provider
             .wait_for_block_tree_can_process_height(block_height)
             .await;

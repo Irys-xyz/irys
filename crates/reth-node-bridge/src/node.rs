@@ -185,7 +185,7 @@ pub async fn run_node(
     };
 
     let db_args = DatabaseArgs::default();
-    // TODO: figure out if we shouldn't use smaller growth steps in production
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1277 : figure out if we shouldn't use smaller growth steps in production
     let db_arguments = db_args
         .database_args()
         .with_growth_step((10 * MEGABYTE).into())

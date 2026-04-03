@@ -372,7 +372,7 @@ impl StorageModule {
                 .map_err(|e| eyre::eyre!("Failed to insert submodule interval: {:?}", e))?;
         }
 
-        // TODO: if there are any gaps, or the range doesn't cover a full module range panic
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1283 : if there are any gaps, or the range doesn't cover a full module range panic
         let gaps = global_intervals
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
@@ -556,7 +556,7 @@ impl StorageModule {
     }
 
     fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
-        // TODO: rework this function
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1332 : rework this function
         // 1.) use batches for fsync, instead of the all the pending writes (reduces impact of write errors)
         // 2.) pending writes are per-sm, we should delegate flushing to the StorageSubmodule
         // doing this removes having to locate the correct submodule again in `write_chunk_internal`,
@@ -821,7 +821,7 @@ impl StorageModule {
         // this is here to prevent a deadlock with the later `pending_writes.read()` rwlock acquisition
         // this locking order (intervals -> pending_writes) is reversed in sync_pending_chunks (pending_writes -> intervals), which is the cause of the deadlock.
         drop(intervals);
-        // TODO: figure out how to only clone the overlap instead of the entire interval map (low prio as the intervals should be small generally speaking)
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1368 : figure out how to only clone the overlap instead of the entire interval map (low prio as the intervals should be small generally speaking)
         let overlapping = intervals2.overlapping(chunk_range);
 
         // Process each overlapping interval
@@ -1846,7 +1846,7 @@ pub const fn checked_add_i32_u64(a: i32, b: u64) -> Option<u64> {
     }
 }
 
-// TODO: expand this, right now it's very specific
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1369 : expand this, right now it's very specific
 pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunkOffset> {
     let mut invalid_starts = vec![];
     for range in sm.get_intervals(ChunkType::Entropy) {

@@ -331,7 +331,7 @@ impl Inner {
             let all_commitments = entry.get_epoch_commitments();
 
             // extract all the commitment txs
-            // TODO: change this so the above orphan code creates a block height/hash -> orphan tx list mapping
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1343 : change this so the above orphan code creates a block height/hash -> orphan tx list mapping
             // so this is more efficient & so we can do block-by-block asserts
             for orphan_commitment_tx_id in orphaned_commitment_tx_ids.iter() {
                 if let Some(commitment_tx) = all_commitments
@@ -506,7 +506,7 @@ impl Inner {
         // 3. Filter out any invalidated transactions
         for tx_id in submit_txs.iter() {
             if let Some(tx) = orphaned_submit_tx_map.remove(tx_id) {
-                // TODO: handle errors better
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1303 : handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
                 if let Err(e) = self
                     .handle_data_tx_ingress_message_gossip(tx)

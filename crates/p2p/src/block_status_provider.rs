@@ -12,7 +12,7 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-// TODO: expand these enum variants to account for all the actual states
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1314 : expand these enum variants to account for all the actual states
 pub enum BlockStatus {
     /// The block is not in the index or tree.
     NotProcessed,
@@ -75,7 +75,7 @@ impl BlockStatusProvider {
     /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
     ///   be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
-    /// TODO: this needs to handle migrated block reorgs, it does not currently :)
+    /// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1326 : this needs to handle migrated block reorgs, it does not currently :)
     /// NOTE: block height is UNTRUSTED here, we haven't validated it yet
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_anywhere_in_the_tree = self.is_block_in_the_tree(block_hash);

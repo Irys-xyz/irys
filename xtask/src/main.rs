@@ -1033,7 +1033,7 @@ impl CmdExt for Cmd<'_> {
     /// which causes a re-run if you alternate between `cargo check` and an xtask command
     fn remove_and_run(self) -> Result<(), xshell::Error> {
         let mut c = self;
-        // TODO: once ring releases  0.17.15+, we should no longer need this
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1318 : remove once the upstream ring/cargo rebuild issue is fixed
         // these were taken from Ring's build.rs
         for k in [
             "CARGO_MANIFEST_DIR",

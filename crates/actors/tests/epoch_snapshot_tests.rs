@@ -232,7 +232,7 @@ async fn add_slots_test() {
         let pub_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
         let sub_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Submit);
         assert_eq!(pub_slots.len(), 1);
-        assert_eq!(sub_slots.len(), 3); // TODO: check 1 expired, 2 new slots added
+        assert_eq!(sub_slots.len(), 3); // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1325 : check 1 expired, 2 new slots added
     }
 
     let previous_epoch_block = Some(new_epoch_block.clone());
@@ -450,7 +450,7 @@ async fn partition_expiration_and_repacking_test() {
     for info in storage_module_infos {
         let arc_module = Arc::new(
             StorageModule::new(&info, &config)
-                // TODO: remove this unwrap
+                // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1338 : remove this unwrap
                 .unwrap(),
         );
         storage_modules.push(arc_module.clone());
@@ -872,7 +872,7 @@ async fn epoch_blocks_reinitialization_test() {
         let pub_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Publish);
         let sub_slots = epoch_snapshot.ledgers.get_slots(DataLedger::Submit);
         assert_eq!(pub_slots.len(), 1);
-        assert_eq!(sub_slots.len(), 3); // TODO: check slot 1 expired, 2 new slots added
+        assert_eq!(sub_slots.len(), 3); // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1296 : check slot 1 expired, 2 new slots added
     }
 
     //            +---+

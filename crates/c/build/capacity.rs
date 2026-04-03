@@ -12,7 +12,7 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
         .flag("-fPIC")
         .flag("-g0");
 
-    // TODO: enable below for debug
+    // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1280 : enable below for debug
     // cc.flag("-O0").flag("-g");
 
     cc.flag("-std=c99")

@@ -97,7 +97,7 @@ impl From<(String, StatusCode)> for ApiError {
     }
 }
 
-// TODO: move this somewhere smarter
+// GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1334 : move this somewhere smarter
 
 pub struct ApiStatusResponse(pub String, pub StatusCode);
 

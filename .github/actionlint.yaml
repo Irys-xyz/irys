@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - misc-runner
+    - test-runner

@@ -1,0 +1,53 @@
+name: towl
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+concurrency:
+  group: towl-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  towl:
+    if: github.event.pull_request.merged == true
+    runs-on: [self-hosted, misc-runner]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Install towl
+        run: cargo install towl@0.3.7
+
+      - name: Run towl
+        env:
+          TOWL_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOWL_LLM_API_KEY: ${{ secrets.TOWL_LLM_API_KEY }}
+        run: towl scan --non-interactive --github --ai .
+
+      - name: Validate output
+        run: |
+          UNEXPECTED=$( {
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | grep -vE '\.(rs|toml|yml|yaml|sh|json)$' || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::Unexpected file changes: $UNEXPECTED"
+            exit 1
+          fi
+
+      - name: Commit TODO replacements
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.json'
+          git diff --cached --quiet || git commit -m "chore: replace TODOs with GitHub issue links #disable-ci"
+          git pull --rebase origin master
+          git push

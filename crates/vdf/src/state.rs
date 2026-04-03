@@ -100,7 +100,7 @@ impl VdfState {
         let last_global_step = self.global_step;
 
         // first available global step should be at least one.
-        // TODO: Should this instead panic! as something has gone very wrong?
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1291 : Should this instead panic! as something has gone very wrong?
         let first_global_step = last_global_step.saturating_sub(vdf_steps_len) + 1;
 
         if first_global_step > last_global_step {

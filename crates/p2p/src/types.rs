@@ -95,7 +95,7 @@ impl From<TxIngressError> for GossipError {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
             TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
-            // todo: `CommitmentValidationError` should  probably be made into an external error
+            // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1322 : `CommitmentValidationError` should  probably be made into an external error
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
