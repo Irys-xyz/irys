@@ -10,15 +10,19 @@ There are two workflows:
 
 ## Prerequisites
 
-- `irys-cli` binary built from the `irys-rs` repo
+- The `irys-rs` repo checked out with a working Rust toolchain
 - A `config.toml` with the desired consensus configuration
+
+All commands below use `cargo run -p irys-cli --` to build and run the CLI
+from source. If you have a pre-built `irys-cli` binary, replace that prefix
+with just `irys-cli`.
 
 ## Helper: Derive Addresses from a Mining Key
 
 Use `generate-miner-info` to derive a miner's Irys and EVM addresses:
 
 ```bash
-irys-cli generate-miner-info --key <hex-private-key>
+cargo run -p irys-cli -- generate-miner-info --key <hex-private-key>
 ```
 
 Output:
@@ -77,10 +81,13 @@ chain's smallest token unit.
 ### 3. Build the Genesis Block
 
 ```bash
-CONFIG=config.toml irys-cli build-genesis \
+CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
   --miners genesis_miners.toml \
   --output ./genesis-artifacts/
 ```
+
+Set the initial packed partitions used for genesis difficulty in
+`config.toml` under `consensus.<network>.genesis.initial_packed_partitions`.
 
 ---
 
@@ -120,7 +127,7 @@ address.
 ### 3. Build the Genesis Block
 
 ```bash
-CONFIG=config.toml irys-cli build-genesis \
+CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
   --commitments commitments.json \
   --signing-key <hex-private-key-for-block-signature> \
   --output ./genesis-artifacts/
@@ -142,13 +149,13 @@ the exported file is directly usable as input to Workflow B.
 Run from the node's working directory (where `config.toml` lives):
 
 ```bash
-CONFIG=config.toml irys-cli dump-commitments
+CONFIG=config.toml cargo run -p irys-cli -- dump-commitments
 ```
 
 Or specify a custom output path:
 
 ```bash
-CONFIG=config.toml irys-cli dump-commitments --output /tmp/commitments.json
+CONFIG=config.toml cargo run -p irys-cli -- dump-commitments --output /tmp/commitments.json
 ```
 
 The default output file is `.irys_genesis_commitments.json` in the current
@@ -199,10 +206,10 @@ The exported JSON file can be fed directly into Workflow B:
 
 ```bash
 # 1. Dump from the existing node
-CONFIG=config.toml irys-cli dump-commitments --output commitments.json
+CONFIG=config.toml cargo run -p irys-cli -- dump-commitments --output commitments.json
 
 # 2. Build a new genesis block from those commitments
-CONFIG=config.toml irys-cli build-genesis \
+CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
   --commitments commitments.json \
   --signing-key <hex-private-key> \
   --output ./genesis-artifacts/
@@ -224,7 +231,7 @@ The CLI prints the block hash. Record it for peer configuration.
 After building genesis, validate the partition assignments:
 
 ```bash
-CONFIG=config.toml irys-cli inspect-genesis --genesis-dir ./genesis-artifacts/
+CONFIG=config.toml cargo run -p irys-cli -- inspect-genesis --genesis-dir ./genesis-artifacts/
 ```
 
 Output:
@@ -256,6 +263,35 @@ Summary:
 This replays the genesis commitments through the `EpochSnapshot` to show exactly
 which miner is assigned to which partition hash, and which partitions are
 promoted to data partitions for ledger slots.
+
+## Compare Current Network vs Target Genesis
+
+Before resetting a network onto a newly built genesis, compare the current live
+partition state with the target genesis assignments:
+
+```bash
+CONFIG=config.toml cargo run -p irys-cli -- compare-genesis \
+  --genesis-dir ./genesis-artifacts/
+```
+
+To print the complete set of partition hashes that are retained globally
+between current network state and target genesis, add:
+
+```bash
+  --list-retained-partition-hashes
+```
+
+This command:
+
+1. Replays the current network's epoch history from the node database.
+2. Replays the target genesis commitments from disk.
+3. Computes a per-miner reset plan showing:
+   - `Wipe` partitions currently present on that miner but not assigned in the target genesis
+   - `Add` partitions the miner will need after the reset
+   - `Role change` partitions whose hash stays on the same miner but whose assignment changes between capacity and data (or to a different ledger slot)
+
+This is the report to use when deciding which miners need to wipe local
+partition data before restarting on the new genesis.
 
 ## Configure Peer Nodes
 

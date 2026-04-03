@@ -136,6 +136,28 @@ pub struct GenesisOutput {
     pub reth_chain_spec: Arc<ChainSpec>,
 }
 
+fn initial_packed_partitions_from_config(config: &Config, total_pledges: u64) -> eyre::Result<f64> {
+    if let Some(packed_partitions) = config.consensus.genesis.initial_packed_partitions {
+        eyre::ensure!(
+            packed_partitions.is_finite() && packed_partitions > 0.0,
+            "consensus.genesis.initial_packed_partitions must be a finite value > 0"
+        );
+        return Ok(packed_partitions);
+    }
+
+    if let Some(capacity_partitions) = config.consensus.epoch.num_capacity_partitions {
+        eyre::ensure!(
+            capacity_partitions > 0,
+            "consensus.epoch.num_capacity_partitions must be > 0 when used for genesis difficulty"
+        );
+        return Ok(capacity_partitions as f64);
+    }
+
+    // Fallback: use total pledges as packed partitions count, matching the
+    // pre-multi-miner behavior where all pledged partitions were assumed packed.
+    Ok(total_pledges as f64)
+}
+
 // ---------------------------------------------------------------------------
 // Core builder
 // ---------------------------------------------------------------------------
@@ -202,10 +224,10 @@ pub async fn build_signed_genesis_block(
     let (commitments, initial_treasury) =
         generate_multi_miner_commitments(&mut genesis_block, config, miners).await;
 
-    // 6. Calculate difficulty from total pledge count (total commitments minus
-    //    one stake per miner).
+    // 6. Calculate difficulty from packed partitions (config override or total pledges).
     let total_pledges: u64 = miners.iter().map(|m| m.pledge_count).sum();
-    let difficulty = calculate_initial_difficulty(&config.consensus, total_pledges as f64)
+    let packed_partitions = initial_packed_partitions_from_config(config, total_pledges)?;
+    let difficulty = calculate_initial_difficulty(&config.consensus, packed_partitions)
         .wrap_err("failed to calculate initial difficulty")?;
     genesis_block.diff = difficulty;
     genesis_block.treasury = initial_treasury;
@@ -224,6 +246,7 @@ pub async fn build_signed_genesis_block(
     info!("Hash: {}", genesis_block.block_hash);
     info!("Miners: {}", miners.len());
     info!("Total pledges: {}", total_pledges);
+    info!("Packed partitions (from config): {}", packed_partitions);
     info!(
         "consensus.expected_genesis_hash = \"{}\"",
         genesis_block.block_hash
@@ -284,6 +307,7 @@ pub fn build_genesis_block_from_commitments(
         &config.consensus.genesis,
         reth_chain_spec.genesis_hash(),
         number_of_ingress_proofs_total,
+        config.consensus.hardforks.cascade.as_ref(),
     )?;
 
     // 4. Set timestamp fields
@@ -329,8 +353,9 @@ pub fn build_genesis_block_from_commitments(
         .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }))
         .count() as u64;
 
-    // 8. Calculate difficulty from pledge count
-    let difficulty = calculate_initial_difficulty(&config.consensus, total_pledges as f64)
+    // 8. Calculate difficulty from packed partitions (config override or total pledges).
+    let packed_partitions = initial_packed_partitions_from_config(config, total_pledges)?;
+    let difficulty = calculate_initial_difficulty(&config.consensus, packed_partitions)
         .wrap_err("failed to calculate initial difficulty")?;
     genesis_block.diff = difficulty;
     genesis_block.treasury = initial_treasury;
@@ -349,6 +374,7 @@ pub fn build_genesis_block_from_commitments(
     info!("Hash: {}", genesis_block.block_hash);
     info!("Total commitments: {}", commitments.len());
     info!("Total pledges: {}", total_pledges);
+    info!("Packed partitions (from config): {}", packed_partitions);
     info!(
         "consensus.expected_genesis_hash = \"{}\"",
         genesis_block.block_hash
