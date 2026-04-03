@@ -1,12 +1,9 @@
-use std::fmt;
-
 use irys_types::{H256, block::DataLedger};
 use serde::{Deserialize, Serialize};
 
 /// V1 wire type for [`irys_types::block::BlockIndexItem`].
 ///
-/// Includes the redundant `num_ledgers` field for backwards compatibility
-/// with V1 gossip peers.
+/// Includes `num_ledgers` for backward compatibility with V1 gossip peers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockIndexItemV1 {
     pub block_hash: H256,
@@ -18,10 +15,30 @@ pub struct BlockIndexItemV1 {
     pub ledgers: Vec<LedgerIndexItem>,
 }
 
+// --- BlockIndexItemV1 conversions (derives num_ledgers from ledgers.len()) ---
+
+impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV1 {
+    fn from(src: irys_types::block::BlockIndexItem) -> Self {
+        Self {
+            block_hash: src.block_hash,
+            num_ledgers: u8::try_from(src.ledgers.len()).unwrap_or(u8::MAX),
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<BlockIndexItemV1> for irys_types::block::BlockIndexItem {
+    fn from(src: BlockIndexItemV1) -> Self {
+        Self {
+            block_hash: src.block_hash,
+            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// V2 wire type for [`irys_types::block::BlockIndexItem`].
 ///
-/// `num_ledgers` is omitted — it is redundant with `ledgers.len()` and only
-/// exists in the canonical type for compact binary encoding.
+/// `num_ledgers` is omitted — the count is derived from `ledgers.len()`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockIndexItemV2 {
     pub block_hash: H256,
@@ -102,176 +119,48 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw: Vec<LedgerIndexItemCompat> = Vec::deserialize(deserializer)?;
-    raw.into_iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let ledger = match item.ledger {
-                Some(l) => l,
-                None => *DataLedger::ALL.get(idx).ok_or_else(|| {
-                    serde::de::Error::custom(format!(
-                        "legacy payload has {count} ledgers but DataLedger::ALL \
-                         only has {max} entries (index {idx} out of range)",
-                        count = idx + 1,
-                        max = DataLedger::ALL.len(),
-                    ))
-                })?,
-            };
-            Ok(LedgerIndexItem {
-                total_chunks: item.total_chunks,
-                tx_root: item.tx_root,
-                ledger,
-            })
-        })
-        .collect()
+    if raw.len() > DataLedger::ALL.len() {
+        return Err(serde::de::Error::custom(format!(
+            "ledgers array too large: {} > {}",
+            raw.len(),
+            DataLedger::ALL.len(),
+        )));
+    }
+    let mut ledgers = Vec::with_capacity(raw.len());
+    for (idx, item) in raw.into_iter().enumerate() {
+        let expected = *DataLedger::ALL.get(idx).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "ledger index {idx} out of range (DataLedger::ALL has {} entries)",
+                DataLedger::ALL.len(),
+            ))
+        })?;
+        let ledger = match item.ledger {
+            Some(l) if l == expected => l,
+            Some(l) => {
+                return Err(serde::de::Error::custom(format!(
+                    "ledger at index {idx} must be {expected:?}, got {l:?}"
+                )));
+            }
+            None => expected,
+        };
+        ledgers.push(LedgerIndexItem {
+            total_chunks: item.total_chunks,
+            tx_root: item.tx_root,
+            ledger,
+        });
+    }
+    Ok(ledgers)
 }
 
-// --- BlockIndexItemV1 conversions (preserves num_ledgers) ---
+// --- BlockIndexItemV2 conversions ---
 
-super::impl_mirror_from!(irys_types::block::BlockIndexItem => BlockIndexItemV1 {
-    block_hash, num_ledgers,
+super::impl_mirror_from!(irys_types::block::BlockIndexItem => BlockIndexItemV2 {
+    block_hash,
 } convert_iter { ledgers });
-
-// --- BlockIndexItemV2 conversions (derives num_ledgers from ledgers.len()) ---
-
-impl From<irys_types::block::BlockIndexItem> for BlockIndexItemV2 {
-    fn from(src: irys_types::block::BlockIndexItem) -> Self {
-        Self {
-            block_hash: src.block_hash,
-            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-/// Error returned when a [`BlockIndexItemV2`] cannot be converted to
-/// the canonical [`irys_types::block::BlockIndexItem`].
-#[derive(Debug, Clone)]
-pub struct BlockIndexItemV2ConversionError {
-    pub ledger_count: usize,
-}
-
-impl fmt::Display for BlockIndexItemV2ConversionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ledger count {} exceeds u8::MAX; protocol supports at most 255 ledgers",
-            self.ledger_count
-        )
-    }
-}
-
-impl std::error::Error for BlockIndexItemV2ConversionError {}
-
-impl TryFrom<BlockIndexItemV2> for irys_types::block::BlockIndexItem {
-    type Error = BlockIndexItemV2ConversionError;
-
-    fn try_from(src: BlockIndexItemV2) -> Result<Self, Self::Error> {
-        let num_ledgers =
-            u8::try_from(src.ledgers.len()).map_err(|_| BlockIndexItemV2ConversionError {
-                ledger_count: src.ledgers.len(),
-            })?;
-        Ok(Self {
-            block_hash: src.block_hash,
-            num_ledgers,
-            ledgers: src.ledgers.into_iter().map(Into::into).collect(),
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Old nodes serialize LedgerIndexItem without the `ledger` field.
-    /// Position in the array determines the ledger type.
-    #[test]
-    fn deserialize_legacy_block_index_item_v1() {
-        // H256 is base58-encoded in JSON; these are the base58 representations of
-        // deterministic test hashes (the exact values don't matter for this test).
-        let json = r#"{
-            "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-            "num_ledgers": 2,
-            "ledgers": [
-                { "total_chunks": "100", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN" },
-                { "total_chunks": "200", "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45" }
-            ]
-        }"#;
-
-        let item: BlockIndexItemV1 = serde_json::from_str(json).unwrap();
-        assert_eq!(item.ledgers.len(), 2);
-        assert_eq!(item.ledgers[0].ledger, DataLedger::Publish);
-        assert_eq!(item.ledgers[0].total_chunks, 100);
-        assert_eq!(item.ledgers[1].ledger, DataLedger::Submit);
-        assert_eq!(item.ledgers[1].total_chunks, 200);
-    }
-
-    /// New nodes include the explicit `ledger` field — it must be respected.
-    /// Ledger order in the JSON is intentionally swapped relative to
-    /// `DataLedger::ALL` so that the test fails if the code infers ledger
-    /// from array position instead of honouring the explicit field.
-    #[test]
-    fn deserialize_new_block_index_item_v1() {
-        let json = r#"{
-            "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-            "num_ledgers": 2,
-            "ledgers": [
-                { "total_chunks": "100", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN", "ledger": "Submit" },
-                { "total_chunks": "200", "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45", "ledger": "Publish" }
-            ]
-        }"#;
-
-        let item: BlockIndexItemV1 = serde_json::from_str(json).unwrap();
-        assert_eq!(item.ledgers[0].ledger, DataLedger::Submit);
-        assert_eq!(item.ledgers[1].ledger, DataLedger::Publish);
-    }
-
-    /// Serialization always includes the `ledger` field (new format).
-    #[test]
-    fn serialize_includes_ledger_field() {
-        let item = BlockIndexItemV1 {
-            block_hash: H256::zero(),
-            num_ledgers: 1,
-            ledgers: vec![LedgerIndexItem {
-                total_chunks: 42,
-                tx_root: H256::zero(),
-                ledger: DataLedger::Submit,
-            }],
-        };
-        let json = serde_json::to_string(&item).unwrap();
-        assert!(json.contains("\"ledger\":\"Submit\""));
-    }
-
-    /// Ledgers are serialized in `DataLedger` positional order regardless of
-    /// the order they appear in the vec, so old nodes (which use array index
-    /// to determine ledger type) get the correct mapping.
-    #[test]
-    fn serialize_sorts_ledgers_by_position() {
-        let item = BlockIndexItemV1 {
-            block_hash: H256::zero(),
-            num_ledgers: 2,
-            ledgers: vec![
-                // Intentionally reversed: Submit first, Publish second.
-                LedgerIndexItem {
-                    total_chunks: 200,
-                    tx_root: H256::zero(),
-                    ledger: DataLedger::Submit,
-                },
-                LedgerIndexItem {
-                    total_chunks: 100,
-                    tx_root: H256::zero(),
-                    ledger: DataLedger::Publish,
-                },
-            ],
-        };
-
-        let json = serde_json::to_string(&item).unwrap();
-        // After serialization, Publish (position 0) must come before Submit (position 1).
-        let publish_pos = json.find("\"total_chunks\":\"100\"").unwrap();
-        let submit_pos = json.find("\"total_chunks\":\"200\"").unwrap();
-        assert!(
-            publish_pos < submit_pos,
-            "Publish entry must be serialized before Submit entry"
-        );
-    }
 
     /// V2 round-trip: serialize then deserialize preserves all fields.
     /// Exercises the `serialize_ledgers_positional` / `deserialize_ledgers_compat`
@@ -299,28 +188,50 @@ mod tests {
         assert_eq!(original, deserialized);
     }
 
-    /// A legacy payload (no `ledger` field) with more entries than
-    /// `DataLedger::ALL.len()` must produce a custom deserialization error.
+    /// Legacy payloads omit the `ledger` field — the deserializer must infer
+    /// the variant from array position via `DataLedger::ALL[i]`.
     #[test]
-    fn deserialize_oversized_legacy_payload_errors() {
-        // DataLedger::ALL has 2 entries. Build a legacy payload with 3 ledgers
-        // (no `ledger` field), so the third entry triggers the out-of-range error.
-        let json = r#"{
-            "block_hash": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
-            "num_ledgers": 3,
+    fn deserialize_legacy_payload_without_ledger_field() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
             "ledgers": [
-                { "total_chunks": "100", "tx_root": "HHTEVaETWsabcpHK7zcS7xzqqGhWKKTcfLd93boP4HjN" },
-                { "total_chunks": "200", "tx_root": "HMNXdshU7AspkuXpZHwMQqmc5RuhzP9SDkHo6yqyod45" },
-                { "total_chunks": "300", "tx_root": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC" }
+                { "total_chunks": "100", "tx_root": H256::zero() },
+                { "total_chunks": "200", "tx_root": H256::zero() }
             ]
-        }"#;
+        });
 
-        let err = serde_json::from_str::<BlockIndexItemV1>(json).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("legacy payload has 3 ledgers")
-                && msg.contains(&format!("only has {} entries", DataLedger::ALL.len())),
-            "expected malformed-legacy error, got: {msg}"
-        );
+        let item: BlockIndexItemV2 = serde_json::from_value(json).unwrap();
+        assert_eq!(item.ledgers[0].ledger, DataLedger::ALL[0]);
+        assert_eq!(item.ledgers[1].ledger, DataLedger::ALL[1]);
+        assert_eq!(item.ledgers[0].total_chunks, 100);
+        assert_eq!(item.ledgers[1].total_chunks, 200);
+    }
+
+    #[test]
+    fn reject_out_of_order_ledger_entries() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
+            "ledgers": [
+                { "total_chunks": "100", "tx_root": H256::zero(), "ledger": "Submit" },
+                { "total_chunks": "200", "tx_root": H256::zero(), "ledger": "Publish" }
+            ]
+        });
+
+        let err = serde_json::from_value::<BlockIndexItemV2>(json).unwrap_err();
+        assert!(err.to_string().contains("ledger at index 0 must be"));
+    }
+
+    #[test]
+    fn reject_duplicate_ledger_entries() {
+        let json = serde_json::json!({
+            "block_hash": H256::zero(),
+            "ledgers": [
+                { "total_chunks": "100", "tx_root": H256::zero(), "ledger": "Publish" },
+                { "total_chunks": "200", "tx_root": H256::zero(), "ledger": "Publish" }
+            ]
+        });
+
+        let err = serde_json::from_value::<BlockIndexItemV2>(json).unwrap_err();
+        assert!(err.to_string().contains("ledger at index 1 must be"));
     }
 }

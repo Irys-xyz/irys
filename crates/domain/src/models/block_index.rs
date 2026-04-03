@@ -188,7 +188,6 @@ impl BlockIndex {
 
         let block_index_item = BlockIndexItem {
             block_hash: block.block_hash,
-            num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
                     total_chunks: max_publish_chunks,
@@ -486,7 +485,6 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
 
         block_index_items.push(BlockIndexItem {
             block_hash,
-            num_ledgers: num_ledgers as u8,
             ledgers,
         });
     }
@@ -536,7 +534,6 @@ mod tests {
         vec![
             BlockIndexItem {
                 block_hash: H256::random(),
-                num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
                         total_chunks: 100,
@@ -552,7 +549,6 @@ mod tests {
             },
             BlockIndexItem {
                 block_hash: H256::random(),
-                num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
                         total_chunks: 200,
@@ -568,7 +564,6 @@ mod tests {
             },
             BlockIndexItem {
                 block_hash: H256::random(),
-                num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
                         total_chunks: 300,
@@ -654,7 +649,6 @@ mod tests {
     fn block_index_encoding_layout_matches_constants() {
         let item = BlockIndexItem {
             block_hash: H256::zero(),
-            num_ledgers: EXPECTED_NUM_LEDGERS,
             ledgers: vec![
                 LedgerIndexItem {
                     total_chunks: 0,
@@ -676,10 +670,10 @@ mod tests {
             "BlockIndexItem encoding does not match HEADER_SIZE and LEDGER_ITEM_SIZE constants"
         );
 
-        // Verify num_ledgers field is at the expected position
+        // Verify the ledger-count byte is at the expected position in the binary format
         assert_eq!(
             bytes[32], EXPECTED_NUM_LEDGERS,
-            "num_ledgers byte does not match EXPECTED_NUM_LEDGERS constant"
+            "ledger-count byte does not match EXPECTED_NUM_LEDGERS constant"
         );
     }
 

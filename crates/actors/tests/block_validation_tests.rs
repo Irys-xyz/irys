@@ -34,7 +34,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     let block_index_items = [
         BlockIndexItem {
             block_hash: H256::zero(),
-            num_ledgers: 2,
+
             ledgers: vec![
                 LedgerIndexItem {
                     total_chunks: 0,
@@ -50,7 +50,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
         BlockIndexItem {
             block_hash: H256::zero(),
-            num_ledgers: 2,
+
             ledgers: vec![
                 LedgerIndexItem {
                     total_chunks: 10,
@@ -66,7 +66,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
         BlockIndexItem {
             block_hash: H256::zero(),
-            num_ledgers: 2,
+
             ledgers: vec![
                 LedgerIndexItem {
                     total_chunks: 20,

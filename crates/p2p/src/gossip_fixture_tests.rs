@@ -809,10 +809,6 @@ fn all_wire_types_have_fixture_coverage() {
     // the fixture snapshot will break if their serialization changes.
     const EXCLUDED: &[(&str, &str)] = &[
         (
-            "BlockIndexItemV2ConversionError",
-            "error type, not a wire message",
-        ),
-        (
             "IrysBlockHeaderV1Inner",
             "tested via IrysBlockHeader version-tagged enum",
         ),
