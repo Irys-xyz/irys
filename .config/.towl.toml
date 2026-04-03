@@ -20,10 +20,10 @@ comment_prefixes = [
     '^\s*\*',
 ]
 todo_patterns = [
-    '(?i)\bTODO:\s*(.*)',
-    '(?i)\bFIXME:\s*(.*)',
-    '(?i)\bHACK:\s*(.*)',
-    '(?i)\bBUG:\s*(.*)',
+    '(?i)\bTODO\b:?\s*(.*)',
+    '(?i)\bFIXME\b:?\s*(.*)',
+    '(?i)\bHACK\b:?\s*(.*)',
+    '(?i)\bBUG\b:?\s*(.*)',
 ]
 function_patterns = [
     '^\s*(pub\s+)?fn\s+(\w+)',
