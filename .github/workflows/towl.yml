@@ -48,6 +48,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.json'
-          git diff --cached --quiet || git commit -m "chore: replace TODOs with GitHub issue links"
+          git diff --cached --quiet || git commit -m "chore: replace TODOs with GitHub issue links #disable-ci"
           git pull --rebase origin master
           git push

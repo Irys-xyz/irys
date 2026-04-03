@@ -463,7 +463,7 @@ impl InnerCacheTask {
         let local_addr = signer.address();
         let tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
-        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1309 : we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1309 : we can randomise the start of the cursor by providing a random key. MDBX will seek to the nearest key if it doesn't exist.
         // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();

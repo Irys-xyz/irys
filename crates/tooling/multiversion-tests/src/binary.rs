@@ -381,8 +381,8 @@ impl BinaryResolver {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1367 : once ring releases 0.17.15+ (current: 0.17.14), we should no
-        // longer need this workaround. See https://github.com/rust-lang/cargo/issues/16134
+        // GH_ISSUE: https://github.com/Irys-xyz/irys/issues/1367 : remove once the upstream ring/cargo rebuild issue is fixed.
+        // See https://github.com/rust-lang/cargo/issues/16134
         //
         // Strip env vars that ring's build.rs registers via
         // `cargo:rerun-if-env-changed`. When this inner `cargo build` is

@@ -11,6 +11,8 @@ file_extensions = [
 exclude_patterns = [
     "target/*",
     ".git/*",
+    ".cargo/*",
+    ".tmp/*",
 ]
 include_context_lines = 10
 comment_prefixes = [
