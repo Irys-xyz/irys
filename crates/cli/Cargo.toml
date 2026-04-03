@@ -25,6 +25,7 @@ irys-chain.workspace = true
 tokio.workspace = true
 irys-config.workspace = true
 irys-domain.workspace = true
+irys-storage.workspace = true
 irys-utils.workspace = true
 irys-tui.workspace = true
 reth-provider.workspace = true

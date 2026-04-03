@@ -5182,6 +5182,7 @@ dependencies = [
  "irys-domain",
  "irys-reth",
  "irys-reth-node-bridge",
+ "irys-storage",
  "irys-tui",
  "irys-types",
  "irys-utils",
