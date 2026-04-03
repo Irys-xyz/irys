@@ -97,6 +97,8 @@ fn test_config() -> Config {
         if c.genesis.timestamp_millis == 0 {
             c.genesis.timestamp_millis = 1_700_000_000_000;
         }
+        // Difficulty source for genesis builder is config-driven.
+        c.genesis.initial_packed_partitions = Some(5.0);
     });
     Config::new_with_random_peer_id(node_config)
 }

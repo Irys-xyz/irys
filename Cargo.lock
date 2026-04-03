@@ -5183,6 +5183,7 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-tui",
  "irys-types",
+ "irys-utils",
  "k256",
  "proptest",
  "reth-node-core",
