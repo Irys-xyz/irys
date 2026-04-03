@@ -30,10 +30,9 @@ use irys_actors::{
     validation_service::ValidationService,
 };
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
-use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::database;
 use irys_database::db::RethDbWrapper;
-use irys_database::{add_genesis_commitments, database};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -60,11 +59,9 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    app_state::DatabaseProvider, calculate_initial_difficulty,
+    SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
-use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     VdfStep,
     state::{AtomicVdfState, VdfStateReadonly},
@@ -80,7 +77,6 @@ use std::time::{Duration, Instant};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     sync::{Arc, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     runtime::Handle,
@@ -579,83 +575,22 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
-        // Create timestamp for genesis block (prefer configured value if provided)
-        let configured_ts = self.config.consensus.genesis.timestamp_millis;
-        let timestamp_millis = if configured_ts != 0 {
-            configured_ts
-        } else {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
+        use crate::genesis_builder::{GenesisMinerEntry, build_signed_genesis_block};
+
+        // Build a single-miner entry from the node's own config
+        let storage_submodule_config =
+            StorageSubmodulesConfig::load(self.config.node_config.base_directory.clone())
+                .expect("storage_submodules.toml must exist for genesis node");
+        let pledge_count = storage_submodule_config.submodule_paths.len() as u64;
+
+        let miner_entry = GenesisMinerEntry {
+            signing_key: self.config.node_config.mining_key.clone(),
+            pledge_count,
         };
 
-        // Convert to seconds for reth
-        let timestamp_secs = Duration::from_millis(timestamp_millis.try_into()?).as_secs();
+        let output = build_signed_genesis_block(&self.config, &[miner_entry]).await?;
 
-        let reth_chain_spec = irys_chain_spec(
-            self.config.consensus.chain_id,
-            &self.config.consensus.reth,
-            &self.config.consensus.hardforks,
-            timestamp_secs,
-        )?;
-
-        // Get hardfork params for genesis block using its timestamp
-        let number_of_ingress_proofs_total = self
-            .config
-            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
-        let mut genesis_block = build_unsigned_irys_genesis_block(
-            &self.config.consensus.genesis,
-            reth_chain_spec.genesis_hash(),
-            number_of_ingress_proofs_total,
-        )?;
-
-        // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
-        if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
-            genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
-        }
-        genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
-        genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
-
-        // Add commitment transactions to genesis block and get initial treasury
-        let (commitments, initial_treasury) =
-            add_genesis_commitments(&mut genesis_block, &self.config).await;
-
-        // Subtract 1 for stake commitment
-        let storage_module_count = commitments
-            .len()
-            .checked_sub(1)
-            .ok_or_else(|| eyre::eyre!("commitments must contain at least the stake commitment"))?;
-        let difficulty = calculate_initial_difficulty(
-            &self.config.consensus,
-            f64::from(u32::try_from(storage_module_count)?),
-        )?;
-        genesis_block.diff = difficulty;
-
-        // Set the genesis treasury to the total value of all commitments
-        genesis_block.treasury = initial_treasury;
-
-        // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
-
-        run_vdf_for_genesis_block(&mut genesis_block, &self.config.vdf);
-
-        // Sign the genesis block with the node's miner key
-        let signer = self.config.irys_signer();
-        signer
-            .sign_block_header(&mut genesis_block)
-            .expect("Failed to sign genesis block");
-
-        info!("=====================================");
-        info!("GENESIS BLOCK CREATED");
-        info!("Hash: {}", genesis_block.block_hash);
-        info!("Add this to consensus configs:");
-        info!(
-            "consensus.expected_genesis_hash = \"{}\"",
-            genesis_block.block_hash
-        );
-        info!("=====================================");
-
-        Ok((genesis_block, commitments, reth_chain_spec))
+        Ok((output.block, output.commitments, output.reth_chain_spec))
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(expected_genesis_hash))]
