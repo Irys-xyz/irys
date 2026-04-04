@@ -2083,7 +2083,7 @@ pub async fn data_txs_are_valid(
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
-        config.consensus.mempool.tx_anchor_expiry_depth as u64,
+        crate::anchor_validation::min_tx_anchor_height(&config.consensus, block.height),
         service_senders,
         db,
     )
@@ -2735,7 +2735,7 @@ enum TxInclusionState {
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,
-    anchor_expiry_depth: u64,
+    min_anchor_height: u64,
     service_senders: &ServiceSenders,
     db: &DatabaseProvider,
 ) -> eyre::Result<()> {
@@ -2751,10 +2751,6 @@ async fn get_previous_tx_inclusions(
         .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
-
-    let min_anchor_height = block_under_validation
-        .height
-        .saturating_sub(anchor_expiry_depth);
 
     let mut block = (
         block_under_validation.block_hash,

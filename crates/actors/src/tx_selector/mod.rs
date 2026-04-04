@@ -172,13 +172,8 @@ pub async fn select_best_txs(
     let next_block_height = parent_block_height + 1;
     // Use the new block's timestamp for hardfork params, matching what the validator uses
     let current_timestamp = new_block_timestamp;
-    let min_anchor_height = current_height.saturating_sub(
-        (ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64)
-            .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
-    );
-
-    let max_anchor_height =
-        current_height.saturating_sub(ctx.config.consensus.block_migration_depth as u64);
+    let (min_anchor_height, max_anchor_height) =
+        crate::anchor_validation::tx_inclusion_anchor_range(&ctx.config.consensus, current_height);
 
     let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 
@@ -675,12 +670,9 @@ async fn get_publish_txs_and_proofs(
     // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
     let next_block_height = current_height + 1;
 
-    // only max anchor age is constrained for ingress proofs
-    let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
-        ctx.config
-            .consensus
-            .mempool
-            .ingress_proof_anchor_expiry_depth as u64,
+    let min_ingress_proof_anchor_height = crate::anchor_validation::min_ingress_proof_anchor_height(
+        &ctx.config.consensus,
+        next_block_height,
     );
 
     {
@@ -1023,10 +1015,8 @@ async fn get_pending_submit_ledger_txs(
 
     let mut block = parent_entry;
 
-    // Calculate the minimum block height we need to check for transaction conflicts
-    // Only transactions anchored within this depth window are considered valid
-    let anchor_expiry_depth = ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64;
-    let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+    let min_anchor_height =
+        crate::anchor_validation::min_tx_anchor_height(&ctx.config.consensus, block_height);
 
     // Start with mempool-resident Submit candidates, but exclude anything that has already been
     // confirmed or promoted. Those transactions stay in mempool state for reorg handling, but
