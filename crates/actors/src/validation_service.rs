@@ -43,6 +43,7 @@ use tracing::{Instrument as _, debug, error, info, warn};
 
 mod active_validations;
 mod block_validation_task;
+pub(crate) mod pd_block_guard;
 
 #[derive(Debug)]
 pub enum VdfValidationResult {
@@ -99,6 +100,8 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// Chain sync state for recording diagnostic info
     pub(crate) chain_sync_state: ChainSyncState,
+    /// PD chunk sender for provisioning chunks during block validation
+    pub(crate) pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
 }
 
 impl ValidationService {
@@ -117,6 +120,7 @@ impl ValidationService {
         rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
         chain_sync_state: ChainSyncState,
+        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
         info!("Spawning validation service");
 
@@ -151,6 +155,7 @@ impl ValidationService {
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
                         chain_sync_state,
+                        pd_chunk_sender,
                     }),
                 };
 
@@ -300,6 +305,7 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
+                            coordinator.active_concurrent_hashes.remove(&validation.block_hash);
                             self.send_validation_result(
                                 validation.block_hash,
                                 validation.validation_result,
@@ -307,6 +313,9 @@ impl ValidationService {
                         }
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
+                            if let Some(hash) = &removed {
+                                coordinator.active_concurrent_hashes.remove(hash);
+                            }
                             let message = if e.is_cancelled() {
                                 "Concurrent validation task was cancelled"
                             } else {

@@ -31,6 +31,7 @@ pub enum GossipDataV2 {
     BlockBody(BlockBody),
     ExecutionPayload(RethBlock),
     IngressProof(IngressProof),
+    PdChunk(irys_types::ChunkFormat),
 }
 
 /// Adding a variant? Update the `impl_mirror_enum_from!` below AND add a
@@ -52,6 +53,7 @@ pub enum GossipDataRequestV2 {
     BlockBody(BlockHash),
     Chunk(ChunkPathHash),
     Transaction(H256),
+    PdChunk(u32, u64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +79,7 @@ super::impl_mirror_enum_from!(
 
 super::impl_mirror_enum_from!(
     irys_types::gossip::v2::GossipDataV2, GossipDataV2 mixed {
-        identity: ExecutionPayload;
+        identity: ExecutionPayload, PdChunk;
         convert: Transaction, CommitmentTransaction, IngressProof;
         arc_wrap: Chunk, BlockHeader, BlockBody;
     }
@@ -88,10 +90,32 @@ super::impl_mirror_enum_from!(
     GossipDataRequestV1(ExecutionPayload, Block, Chunk, Transaction,)
 );
 
-super::impl_mirror_enum_from!(
-    irys_types::gossip::v2::GossipDataRequestV2,
-    GossipDataRequestV2(ExecutionPayload, BlockHeader, BlockBody, Chunk, Transaction,)
-);
+// Manual From impls because PdChunk has two fields which the macro cannot handle.
+impl From<irys_types::gossip::v2::GossipDataRequestV2> for GossipDataRequestV2 {
+    fn from(src: irys_types::gossip::v2::GossipDataRequestV2) -> Self {
+        use irys_types::gossip::v2::GossipDataRequestV2 as C;
+        match src {
+            C::ExecutionPayload(v) => Self::ExecutionPayload(v),
+            C::BlockHeader(v) => Self::BlockHeader(v),
+            C::BlockBody(v) => Self::BlockBody(v),
+            C::Chunk(v) => Self::Chunk(v),
+            C::Transaction(v) => Self::Transaction(v),
+            C::PdChunk(a, b) => Self::PdChunk(a, b),
+        }
+    }
+}
+impl From<GossipDataRequestV2> for irys_types::gossip::v2::GossipDataRequestV2 {
+    fn from(src: GossipDataRequestV2) -> Self {
+        match src {
+            GossipDataRequestV2::ExecutionPayload(v) => Self::ExecutionPayload(v),
+            GossipDataRequestV2::BlockHeader(v) => Self::BlockHeader(v),
+            GossipDataRequestV2::BlockBody(v) => Self::BlockBody(v),
+            GossipDataRequestV2::Chunk(v) => Self::Chunk(v),
+            GossipDataRequestV2::Transaction(v) => Self::Transaction(v),
+            GossipDataRequestV2::PdChunk(a, b) => Self::PdChunk(a, b),
+        }
+    }
+}
 
 impl<T, U: From<T>> From<irys_types::GossipRequestV1<T>> for GossipRequestV1<U> {
     fn from(r: irys_types::GossipRequestV1<T>) -> Self {

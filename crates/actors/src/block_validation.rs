@@ -1,10 +1,13 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::pd_pricing::base_fee::compute_pd_base_fee_for_block;
 use crate::{
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
+    packing_service::{UnpackingPriority, UnpackingRequest},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
+use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
@@ -15,6 +18,7 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_reth::pd_tx::{PdParseResult, parse_pd_transaction};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -1311,18 +1315,26 @@ pub fn poa_is_valid(
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
-pub async fn shadow_transactions_are_valid(
+pub(crate) async fn shadow_transactions_are_valid(
     config: &Config,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
+    parent_block: &IrysBlockHeader,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
+    current_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<ExecutionData> {
+    pd_chunk_sender: &irys_types::chunk_provider::PdChunkSender,
+) -> eyre::Result<(
+    ExecutionData,
+    Option<crate::validation_service::pd_block_guard::PdBlockGuard>,
+)> {
+    let mut pd_guard: Option<crate::validation_service::pd_block_guard::PdBlockGuard> = None;
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
@@ -1421,6 +1433,100 @@ pub async fn shadow_transactions_are_valid(
         }
     }
 
+    // 2.5. Validate PD chunk budget and collect chunk specs (only if Sprite hardfork is active)
+    let block_timestamp = irys_types::UnixTimestamp::from_secs(block_timestamp_sec as u64);
+    let chunk_config = irys_types::chunk_provider::ChunkConfig::from_consensus(&config.consensus);
+    let mut pd_chunk_specs: Vec<irys_types::range_specifier::PdDataRead> = Vec::new();
+    if let Some(max_pd_chunks) = config
+        .consensus
+        .hardforks
+        .max_pd_chunks_per_block_at(block_timestamp)
+    {
+        let mut total_pd_chunks: u64 = 0;
+
+        for tx in evm_block.body.transactions.iter() {
+            if let Some(access_list) = tx.access_list() {
+                match parse_pd_transaction(access_list, &chunk_config) {
+                    PdParseResult::ValidPd(meta) => {
+                        total_pd_chunks = total_pd_chunks.saturating_add(meta.total_chunks);
+                        pd_chunk_specs.extend(meta.data_reads);
+                    }
+                    PdParseResult::InvalidPd(err) => {
+                        tracing::debug!(
+                            block_hash = %block.block_hash,
+                            evm_block_hash = %block.evm_block_hash,
+                            %err,
+                            "Rejecting block: contains invalid PD transaction",
+                        );
+                        eyre::bail!("Block contains invalid PD transaction: {err}");
+                    }
+                    PdParseResult::NotPd => {}
+                }
+            }
+        }
+
+        if total_pd_chunks > max_pd_chunks {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                total_pd_chunks,
+                max_pd_chunks,
+                "Rejecting block: exceeds maximum PD chunks per block",
+            );
+            eyre::bail!(
+                "Block exceeds maximum PD chunks per block: {} > {}",
+                total_pd_chunks,
+                max_pd_chunks
+            );
+        }
+    }
+
+    // 2.6. Provision PD chunks into PD service cache for block execution
+    if !pd_chunk_specs.is_empty() {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        pd_chunk_sender
+            .send(
+                irys_types::chunk_provider::PdChunkMessage::ProvisionBlockChunks {
+                    block_hash: block.block_hash.into(),
+                    chunk_specs: pd_chunk_specs,
+                    response: resp_tx,
+                },
+            )
+            .map_err(|_| eyre::eyre!("PD service channel closed"))?;
+
+        match resp_rx
+            .await
+            .map_err(|_| eyre::eyre!("PD service response channel dropped"))?
+        {
+            Ok(()) => {
+                tracing::debug!(
+                    block_hash = %block.block_hash,
+                    "PD chunks provisioned for block validation"
+                );
+                // Create RAII guard — will send ReleaseBlockChunks on drop
+                pd_guard = Some(
+                    crate::validation_service::pd_block_guard::PdBlockGuard::new(
+                        pd_chunk_sender.clone(),
+                        block.block_hash.into(),
+                    ),
+                );
+            }
+            Err(missing) => {
+                tracing::warn!(
+                    block_hash = %block.block_hash,
+                    missing_count = missing.len(),
+                    first_missing = ?missing.iter().take(5).collect::<Vec<_>>(),
+                    "PD chunks not available locally for block validation"
+                );
+                eyre::bail!(
+                    "Block {} references {} PD chunks not available locally",
+                    block.block_hash,
+                    missing.len()
+                );
+            }
+        }
+    }
+
     // 3. Extract shadow transactions from the beginning of the block lazily
     let txs_slice = &evm_block.body.transactions;
     let block_miner_address: Address = block.miner_address.into();
@@ -1436,14 +1542,30 @@ pub async fn shadow_transactions_are_valid(
     });
 
     // 3. Generate expected shadow transactions
+    // TODO: instead of re-querrying the parent evm block to re-compute the PD
+    // related fields, we should have a cache living on the block tree that way
+    // we only ever have to compute the PD chunk consumption once.
+    let parent_execution_data = payload_provider
+        .wait_for_payload(&parent_block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execution payload never arrived")?;
+    let ExecutionData {
+        payload,
+        sidecar: _,
+    } = parent_execution_data;
+    let parent_evm_block: Block = payload.try_into_block()?;
     let expected_txs = generate_expected_shadow_transactions(
         config,
         block_tree_guard,
         mempool_guard,
         block,
         db,
+        parent_block,
         parent_epoch_snapshot,
+        parent_ema_snapshot,
+        &current_ema_snapshot,
         parent_commitment_snapshot,
+        &parent_evm_block,
         block_index,
         transactions,
     )
@@ -1453,7 +1575,7 @@ pub async fn shadow_transactions_are_valid(
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
     // 5. Return the execution data for reuse
-    Ok(execution_data)
+    Ok((execution_data, pd_guard))
 }
 
 /// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
@@ -1566,13 +1688,17 @@ async fn generate_expected_shadow_transactions(
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
+    parent_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
+    current_ema_for_pricing: &EmaSnapshot,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
+    parent_evm_block: &Block,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
-    let prev_block = crate::block_tree_service::get_block_header(
+    let _prev_block = crate::block_tree_service::get_block_header(
         block_tree_guard,
         db,
         block.previous_block_hash,
@@ -1603,7 +1729,7 @@ async fn generate_expected_shadow_transactions(
     };
 
     // Get treasury balance from previous block
-    let initial_treasury_balance = prev_block.treasury;
+    let initial_treasury_balance = parent_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
     let expired_ledger_fees = if is_epoch_block {
@@ -1643,17 +1769,30 @@ async fn generate_expected_shadow_transactions(
         Vec::new()
     };
 
+    // Calculate PD base fee for this block
+    let pd_base_fee_per_chunk = compute_pd_base_fee_for_block(
+        config,
+        parent_block,
+        &parent_ema_snapshot,
+        &current_ema_for_pricing.ema_for_public_pricing(),
+        parent_evm_block,
+        block.timestamp_secs(),
+    )?;
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
-        &prev_block,
+        parent_block,
         &block.solution_hash,
         &config.consensus,
         commitment_txs,
         &data_txs,
         &publish_ledger_with_txs,
         initial_treasury_balance,
+        pd_base_fee_per_chunk,
+        current_ema_for_pricing.ema_for_public_pricing(),
+        block.timestamp_secs(),
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,
@@ -1670,14 +1809,26 @@ async fn generate_expected_shadow_transactions(
     // Get final treasury balance after processing all transactions
     let expected_treasury = shadow_tx_generator.treasury_balance();
 
+    // Check if Sprite hardfork is active for this block
+    let is_sprite_active = config
+        .consensus
+        .hardforks
+        .is_sprite_active(block.timestamp_secs());
+
     // Validate that the block's treasury matches the expected value
-    ensure!(
-        block.treasury == expected_treasury,
-        "Treasury mismatch: expected {} but found {} at block height {}",
-        expected_treasury,
-        block.treasury,
-        block.height
-    );
+    // Note: For post-Sprite blocks, ShadowTxGenerator doesn't track treasury changes because
+    // the EVM handles treasury accounting. Treasury validation for Sprite blocks is done via
+    // EVM state validation (shadow transactions execute correctly and update TREASURY_ACCOUNT).
+    // Pre-Sprite blocks use the generator's tracked balance.
+    if !is_sprite_active {
+        ensure!(
+            block.treasury == expected_treasury,
+            "Treasury mismatch: expected {} but found {} at block height {}",
+            expected_treasury,
+            block.treasury,
+            block.height
+        );
+    }
 
     Ok(shadow_txs_vec)
 }
@@ -2468,12 +2619,25 @@ pub async fn data_txs_are_valid(
 
                             let unpacked = match chunk_format {
                                 irys_types::ChunkFormat::Unpacked(u) => u,
-                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
-                                    &p,
-                                    config.consensus.entropy_packing_iterations,
-                                    config.consensus.chunk_size as usize,
-                                    config.consensus.chain_id,
-                                ),
+                                irys_types::ChunkFormat::Packed(p) => {
+                                    // Use unpacking service for packed chunks
+                                    let (request, response_rx) =
+                                        UnpackingRequest::from_chunk(p, UnpackingPriority::High);
+
+                                    if service_senders
+                                        .unpacking_sender()
+                                        .send(request)
+                                        .await
+                                        .is_err()
+                                    {
+                                        continue;
+                                    }
+
+                                    match response_rx.await {
+                                        Ok(Ok(unpacked)) => unpacked,
+                                        Ok(Err(_)) | Err(_) => continue,
+                                    }
+                                }
                             };
 
                             // Basic sanity checks before ingest
@@ -4052,6 +4216,7 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
+                sprite: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
@@ -4070,6 +4235,7 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
+                sprite: None,
                 aurora: None,
                 borealis: None,
             },

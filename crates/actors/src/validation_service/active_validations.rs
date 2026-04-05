@@ -16,7 +16,7 @@ use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::task::{JoinHandle, JoinSet};
@@ -366,6 +366,10 @@ pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn
     /// Maps task IDs to block hashes for panic diagnostics
     pub concurrent_task_blocks: HashMap<tokio::task::Id, BlockHash>,
 
+    /// Block hashes currently running in the concurrent JoinSet.
+    /// Defense-in-depth against duplicate provisioning of the same block_hash.
+    pub active_concurrent_hashes: HashSet<BlockHash>,
+
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
 }
@@ -379,6 +383,7 @@ impl ValidationCoordinator {
             vdf_scheduler: VdfScheduler::new(runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            active_concurrent_hashes: HashSet::new(),
             block_tree_guard,
         }
     }
@@ -394,6 +399,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             vdf_scheduler,
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            active_concurrent_hashes: HashSet::new(),
             block_tree_guard,
         }
     }
@@ -449,6 +455,15 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     /// Spawn a VDF-validated block into the concurrent validation JoinSet.
     pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
         let block_hash = task.sealed_block.header().block_hash;
+
+        // Dedup: skip if this block is already in the concurrent phase
+        if !self.active_concurrent_hashes.insert(block_hash) {
+            warn!(
+                block.hash = %block_hash,
+                "Block already in concurrent validation, skipping duplicate"
+            );
+            return;
+        }
 
         let abort_handle = self.concurrent_tasks.spawn(
             async move {

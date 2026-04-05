@@ -1,6 +1,6 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, H256, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk,
+    Base64, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, H256,
+    IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
@@ -180,8 +180,8 @@ pub mod v1 {
 
 pub mod v2 {
     use crate::{
-        BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
-        GossipCacheKey, H256, IngressProof, IrysBlockHeader, UnpackedChunk,
+        BlockBody, BlockHash, ChunkFormat, ChunkPathHash, CommitmentTransaction,
+        DataTransactionHeader, GossipCacheKey, H256, IngressProof, IrysBlockHeader, UnpackedChunk,
     };
     use alloy_primitives::B256;
     use reth_ethereum_primitives::Block;
@@ -269,6 +269,7 @@ pub mod v2 {
         BlockBody(Arc<BlockBody>),
         ExecutionPayload(Block),
         IngressProof(IngressProof),
+        PdChunk(ChunkFormat),
     }
 
     /// Compare two [`GossipDataV2`] values for equality.
@@ -333,6 +334,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataV1::IngressProof(ingress_proof.clone()))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
+                Self::PdChunk(_) => None,   // PdChunk does not exist in v1
             }
         }
 
@@ -366,6 +368,7 @@ pub mod v2 {
                         ingress_proof.recover_signer()
                     )
                 }
+                Self::PdChunk(_) => "pd chunk".to_string(),
             }
         }
     }
@@ -377,6 +380,7 @@ pub mod v2 {
         BlockBody(BlockHash),
         Chunk(ChunkPathHash),
         Transaction(H256),
+        PdChunk(u32, u64), // (ledger_id, ledger_offset)
     }
 
     impl GossipDataRequestV2 {
@@ -395,6 +399,7 @@ pub mod v2 {
                     Some(super::v1::GossipDataRequestV1::Transaction(*tx_id))
                 }
                 Self::BlockBody(_) => None, // BlockBody does not exist in v1
+                Self::PdChunk(..) => None,  // V1 peers cannot serve PD chunks
             }
         }
     }
@@ -427,6 +432,9 @@ pub mod v2 {
                 }
                 Self::Transaction(tx_id) => {
                     write!(f, "transaction {tx_id:?}")
+                }
+                Self::PdChunk(ledger_id, ledger_offset) => {
+                    write!(f, "pd chunk (ledger={ledger_id}, offset={ledger_offset})")
                 }
             }
         }
@@ -492,6 +500,20 @@ impl<T> GossipRequestV1<T> {
             data: self.data,
         }
     }
+}
+
+/// A single unpacked PD chunk pushed optimistically before block validation.
+/// The receiver derives all verification info from the block index using (ledger, offset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdChunkPush {
+    /// Ledger ID (0 = Publish). PD operates exclusively on the Publish ledger.
+    pub ledger: u32,
+    /// Absolute ledger chunk offset.
+    pub offset: u64,
+    /// Unpacked chunk bytes (up to 256 KiB).
+    pub chunk_bytes: Base64,
+    /// Merkle proof (data_path) for verification against the data_root.
+    pub data_path: Base64,
 }
 
 /// Legacy type alias for backward compatibility - maps to V1

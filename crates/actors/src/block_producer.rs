@@ -5,6 +5,7 @@ use crate::{
     mempool_service::MempoolTxs,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
+    pd_pricing::base_fee,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -24,8 +25,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
-    reth_node_ethereum::EthEngineTypes,
+    IrysBuiltPayload, IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
+    IrysPayloadTypes, reth_node_ethereum::EthEngineTypes,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::NodeProvider;
@@ -36,8 +37,14 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    calculate_difficulty, next_cumulative_diff, storage_pricing::Amount,
+    VDFLimiterInfo,
+    app_state::DatabaseProvider,
+    block_production::SolutionContext,
+    calculate_difficulty, next_cumulative_diff,
+    storage_pricing::{
+        Amount,
+        phantoms::{CostPerChunk, Irys},
+    },
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -46,7 +53,7 @@ use openssl::sha;
 use reth::{
     api::{ConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
-    payload::{EthBuiltPayload, PayloadBuilderHandle},
+    payload::PayloadBuilderHandle,
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
@@ -128,7 +135,7 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysSealedBlock>, EthBuiltPayload)>>>,
+        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -502,7 +509,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -525,14 +532,39 @@ pub trait BlockProdStrategy {
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
+        // Calculate the new EMA for block header (stored in block, used for next calculations)
+        let ema_calculation = self
+            .get_ema_price(&prev_block_header, &prev_block_ema_snapshot)
+            .await?;
+
+        // Get the EMA price that will be used for public pricing in this new block
+        // This accounts for interval boundary crossings
+        let current_ema_for_pricing = prev_block_ema_snapshot
+            .calculate_public_pricing_ema_for_height(
+                prev_block_header.height + 1,
+                self.inner().config.consensus.ema.price_adjustment_interval,
+            );
+
+        // Calculate PD base fee for the new block
+        let pd_base_fee = base_fee::compute_pd_base_fee_for_block(
+            &self.inner().config,
+            &prev_block_header,
+            &prev_block_ema_snapshot,
+            &current_ema_for_pricing,
+            &prev_evm_block,
+            current_timestamp.to_secs(),
+        )?;
+
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
                 &mempool_bundle,
                 block_reward,
+                pd_base_fee,
                 current_timestamp,
                 solution.solution_hash,
+                &current_ema_for_pricing,
             )
             .await?;
         let evm_block = eth_built_payload.block();
@@ -545,7 +577,7 @@ pub trait BlockProdStrategy {
                 current_timestamp,
                 block_reward,
                 evm_block,
-                &prev_block_ema_snapshot,
+                ema_calculation,
                 final_treasury,
             )
             .await?;
@@ -591,7 +623,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -680,7 +712,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysSealedBlock>,
             Option<AdjustmentStats>,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -800,7 +832,7 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, EthBuiltPayload)>> {
+    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>> {
         let Some((block, stats, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
@@ -815,16 +847,18 @@ pub trait BlockProdStrategy {
     }
 
     /// Extracts and collects all transactions that should be included in a block
-    /// Returns the EthBuiltPayload and the final treasury balance
+    /// Returns the IrysBuiltPayload and the final treasury balance
     async fn create_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+        pd_base_fee: Option<Amount<(CostPerChunk, Irys)>>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
-    ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
+        current_ema_for_pricing: &IrysTokenPrice,
+    ) -> Result<(IrysBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
 
@@ -843,6 +877,9 @@ pub trait BlockProdStrategy {
             &mempool.submit_txs,
             &mempool.publish_txs,
             initial_treasury_balance,
+            pd_base_fee,
+            *current_ema_for_pricing,
+            timestamp_ms.to_secs(),
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -866,9 +903,7 @@ pub trait BlockProdStrategy {
             shadow_txs.push(EthPooledTransaction::new(tx, 300));
         }
 
-        // Get the final treasury balance after all transactions
-        let final_treasury_balance = shadow_tx_generator.treasury_balance();
-
+        // Build and submit the EVM payload first
         let payload = self
             .build_and_submit_reth_payload(
                 prev_block_header,
@@ -877,6 +912,21 @@ pub trait BlockProdStrategy {
                 perv_evm_block.header.mix_hash,
             )
             .await?;
+
+        // Post-Sprite: get treasury from IrysBuiltPayload (extracted during payload building)
+        // Pre-Sprite: use shadow_tx_generator's tracked balance
+        let is_sprite_active = self
+            .inner()
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(timestamp_ms.to_secs());
+
+        let final_treasury_balance = if is_sprite_active {
+            U256::from_le_bytes(payload.treasury_balance().to_le_bytes())
+        } else {
+            shadow_tx_generator.treasury_balance()
+        };
 
         Ok((payload, final_treasury_balance))
     }
@@ -892,7 +942,7 @@ pub trait BlockProdStrategy {
         timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
-    ) -> Result<EthBuiltPayload, BlockProductionError> {
+    ) -> Result<IrysBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
         // generate payload attributes with shadow transactions
@@ -957,12 +1007,16 @@ pub trait BlockProdStrategy {
         let evm_block_hash = built_payload.block().hash();
         tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
-            panic!(
-                "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
-                evm_block_hash, e
-            )
-        });
+        let payload = built_payload
+            .inner()
+            .clone()
+            .try_into_v5()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
+                    evm_block_hash, e
+                )
+            });
         let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
@@ -997,7 +1051,7 @@ pub trait BlockProdStrategy {
         current_timestamp: UnixTimestampMs,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
-        perv_block_ema_snapshot: &EmaSnapshot,
+        ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
     ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
@@ -1055,10 +1109,6 @@ pub trait BlockProdStrategy {
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
         };
         steps.push(solution.seed.0);
-
-        let ema_calculation = self
-            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
-            .await?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary
         //
@@ -1203,7 +1253,7 @@ pub trait BlockProdStrategy {
         &self,
         block: Arc<IrysSealedBlock>,
         stats: Option<AdjustmentStats>,
-        eth_built_payload: &EthBuiltPayload,
+        eth_built_payload: &IrysBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysSealedBlock>>> {
         let mut is_difficulty_updated = false;
         let block_header = block.header();
@@ -1328,6 +1378,25 @@ pub trait BlockProdStrategy {
             .reward_curve
             .reward_between(previous_block_seconds, current_block_seconds)?;
         Ok(reward_amount)
+    }
+
+    /// Calculate the new PD base fee for a new block based on utilization.
+    fn calculate_pd_base_fee_for_new_block(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+        prev_evm_block: &reth_ethereum_primitives::Block,
+        prev_block_ema_snapshot: &EmaSnapshot,
+        current_ema_price: &irys_types::IrysTokenPrice,
+        block_timestamp: irys_types::UnixTimestamp,
+    ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+        base_fee::compute_base_fee_per_chunk(
+            &self.inner().config,
+            prev_block_header,
+            prev_block_ema_snapshot,
+            current_ema_price,
+            prev_evm_block,
+            block_timestamp,
+        )
     }
 
     async fn get_ema_price(

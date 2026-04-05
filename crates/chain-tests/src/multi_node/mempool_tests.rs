@@ -6,6 +6,7 @@ use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs;
+use irys_macros_diag_slow::diag_slow;
 use irys_reth_node_bridge::{
     IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _,
     reth_e2e_test_utils::transaction::TransactionTestContext,
@@ -25,7 +26,13 @@ use reth::rpc::{
 use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::{Receipt, Transaction};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+    time::Duration,
+};
 use tokio::time::sleep;
 use tracing::{debug, info};
 
@@ -35,6 +42,40 @@ async fn pending_chunks_test() -> eyre::Result<()> {
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
+    let phase = AtomicU8::new(0);
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    let block_migration_depth = genesis_config.consensus_config().block_migration_depth;
+
+    heavy_pending_chunks_test_inner(&phase, block_migration_depth.into()).await
+}
+
+fn heavy_pending_chunks_test_phase_name(phase: u8) -> &'static str {
+    match phase {
+        0 => "setup",
+        1 => "start_node",
+        2 => "post_chunks",
+        3 => "post_tx",
+        4 => "wait_chunk_cache",
+        5 => "mine_blocks",
+        6 => "wait_block_index",
+        7 => "wait_chunk_0",
+        8 => "wait_chunk_1",
+        9 => "wait_chunk_2",
+        10 => "teardown",
+        _ => "unknown",
+    }
+}
+
+#[diag_slow(state = format!(
+    "phase={} block_migration_depth={}",
+    heavy_pending_chunks_test_phase_name(phase.load(Ordering::Relaxed)),
+    block_migration_depth
+))]
+async fn heavy_pending_chunks_test_inner(
+    phase: &AtomicU8,
+    block_migration_depth: u64,
+) -> eyre::Result<()> {
     // Configure a test network
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
@@ -44,14 +85,11 @@ async fn pending_chunks_test() -> eyre::Result<()> {
     genesis_config.fund_genesis_accounts(vec![&signer]);
 
     // Start the genesis node
+    phase.store(1, Ordering::Relaxed);
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
     let app = genesis_node.start_public_api().await;
-
-    // retrieve block_migration_depth for use later
-    let mut consensus = genesis_node.cfg.consensus.clone();
-    let block_migration_depth = consensus.get_mut().block_migration_depth;
 
     // chunks
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
@@ -75,17 +113,21 @@ async fn pending_chunks_test() -> eyre::Result<()> {
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
+    phase.store(2, Ordering::Relaxed);
     post_chunk(&app, &tx, 0, &chunks).await;
     post_chunk(&app, &tx, 1, &chunks).await;
     post_chunk(&app, &tx, 2, &chunks).await;
 
     // Then post the tx (deliberately after the chunks)
+    phase.store(3, Ordering::Relaxed);
     post_data_tx(&app, &tx).await;
 
     // wait for chunks to be in CachedChunks table
+    phase.store(4, Ordering::Relaxed);
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
     // Wait for proofs before mining so the first inclusion path is stable.
+    phase.store(5, Ordering::Relaxed);
     genesis_node
         .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
         .await?;
@@ -101,20 +143,25 @@ async fn pending_chunks_test() -> eyre::Result<()> {
     genesis_node
         .mine_blocks(block_migration_depth.try_into()?)
         .await?;
+    phase.store(6, Ordering::Relaxed);
     genesis_node.wait_until_block_index_height(1, 5).await?;
 
-    // Finally verify the chunks didn't get dropped
+    // Finally verify the chunks didn't get dropped when the tx is promoted directly to Publish
+    phase.store(7, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 0, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 0, 5)
         .await?;
+    phase.store(8, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 1, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 1, 5)
         .await?;
+    phase.store(9, Ordering::Relaxed);
     genesis_node
-        .wait_for_chunk(&app, DataLedger::Submit, 2, 5)
+        .wait_for_chunk(&app, DataLedger::Publish, 2, 5)
         .await?;
 
     // teardown
+    phase.store(10, Ordering::Relaxed);
     genesis_node.stop().await;
 
     Ok(())
@@ -1682,18 +1729,8 @@ async fn heavy3_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 // 3.) re-connecting the peers and ensuring that the correct fork was selected, and the account cannot afford the storage transaction (the funding tx was on the shorter fork)
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
-    // Turn on tracing even before the nodes start
-    // SAFETY: test code; env var set before other threads spawn.
-    unsafe {
-        std::env::set_var(
-            "RUST_LOG",
-            "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
-        );
-    }
-    initialize_tracing();
-
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
@@ -1857,7 +1894,7 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // mine a block
     let (_block, reth_exec_env, _block_txs) = genesis.mine_block_with_payload().await?;
 
-    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
+    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 3); // +3 for block reward, PD base fee moving, & IrysUsdPriceUpdate
 
     let _block_hash = peer1.wait_until_height(3, seconds_to_wait).await?;
     let _block_hash = peer2.wait_until_height(3, seconds_to_wait).await?;
@@ -2219,7 +2256,7 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
     let evm_block2 = peer1.get_evm_block_by_hash2(evm_block_hash).await?;
     assert_eq!(evm_block, evm_block2.into());
 
-    assert_eq!(evm_block.body.transactions.len(), 2);
+    assert_eq!(evm_block.body.transactions.len(), 4); // 1 user tx + 3 shadow txs (block reward, PD base fee, IrysUsdPriceUpdate)
 
     tokio::join!(genesis.stop(), peer1.stop(), peer2.stop());
 

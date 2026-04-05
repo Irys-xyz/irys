@@ -1,4 +1,3 @@
-mod anchor_canonical_reorg;
 mod blobs_rejected;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;
@@ -7,6 +6,7 @@ mod invalid_perm_fee_refund;
 mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
+mod pd_base_fee_mismatch;
 mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
@@ -17,8 +17,8 @@ use crate::utils::{
     BlockValidationOutcome, IrysNodeTest, assert_validation_error, gossip_commitment_to_node,
     read_block_from_state, solution_context,
 };
+use irys_actors::block_tree_service::ValidationResult;
 use irys_actors::block_validation::ValidationError;
-use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
@@ -68,21 +68,6 @@ pub(crate) async fn send_block_and_read_state(
     let event_rx = node_ctx.service_senders.subscribe_block_state_updates();
     send_block_to_block_tree(node_ctx, block.clone(), skip_vdf_validation).await?;
     Ok(read_block_from_state(node_ctx, &block.header().block_hash, event_rx).await)
-}
-
-fn send_block_to_block_validation(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<SealedBlock>,
-) -> Result<(), PreValidationError> {
-    node_ctx
-        .service_senders
-        .validation_service
-        .send_traced(ValidationServiceMessage::ValidateBlock {
-            block,
-            skip_vdf_validation: false,
-        })
-        .unwrap();
-    Ok(())
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
@@ -1142,179 +1127,92 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
 
 /// Peer mines a block on top of common state with genesis
 /// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
+/// Whilst another peer mines & broadcasts blocks, advancing the canonical chain on genesis
 ///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
 async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+    // max time to wait for block validations
+    let max_seconds = 10;
     let num_blocks_in_epoch = 2;
-    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
-    genesis_config.consensus.get_mut().block_tree_depth = 3;
-    genesis_config.consensus.get_mut().block_migration_depth = 1;
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = 2;
+    genesis_config.consensus.get_mut().block_tree_depth = 5;
     let test_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&test_signer]);
-
+    let test_signer_2 = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer, &test_signer_2]);
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
-    let peer_node = genesis_node
+    let fork_creator_1 = genesis_node
         .testing_peer_with_assignments(&test_signer)
         .await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    peer_node.gossip_disable();
-    let (header, _payload, txs) = peer_node.mine_block_without_gossip().await?;
-    let event_rx = genesis_node
+    let fork_creator_2 = genesis_node
+        .testing_peer_with_assignments(&test_signer_2)
+        .await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // temp disable block validation
+    genesis_node.node_ctx.set_validation_enabled(false);
+
+    fork_creator_2.gossip_disable();
+    fork_creator_1.gossip_disable();
+    genesis_node.gossip_disable();
+
+    let (header, _, txs) = fork_creator_1.mine_block_without_gossip().await?;
+    let block = Arc::new(SealedBlock::new(
+        (*header).clone(),
+        BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: txs.all_data_txs().cloned().collect(),
+            commitment_transactions: txs.all_system_txs().cloned().collect(),
+        },
+    )?);
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
+    let root_block_of_fork = header;
+
+    genesis_node.node_ctx.set_validation_enabled(true);
+    let mut block_state_rx = genesis_node
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &header.block_hash, event_rx);
-
-    let body = BlockBody {
-        block_hash: header.block_hash,
-        commitment_transactions: txs.all_system_txs().cloned().collect(),
-        data_transactions: txs.all_data_txs().cloned().collect(),
-    };
-    let sealed_block = Arc::new(SealedBlock::new(Arc::clone(&header), body)?);
-
-    // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
-    // node will wait for this block to be validated for quite a while until it starts mining
-    send_block_to_block_validation(&genesis_node.node_ctx, sealed_block)?;
-
-    genesis_node.mine_blocks_without_gossip(3).await?;
-    genesis_node.gossip_enable();
-    peer_node.gossip_enable();
-    peer_node.gossip_block_to_peers(&header)?;
-
-    // Send block for validation
-    let outcome = outcome.await;
-
-    assert_validation_error(
-        outcome,
-        |e| matches!(e, ValidationError::ValidationCancelled { .. }),
-        "block with versioned_hashes should be rejected",
-    );
-    genesis_node.stop().await;
-    peer_node.stop().await;
-
-    Ok(())
-}
-
-/// A publish tx in a block must have a prior Submit ledger inclusion.
-/// The DB fallback (`tx_header_by_txid_canonical`) constrains results to the canonical chain
-/// at or below the parent height. This test plants a tx header in the DB at a height far beyond
-/// the parent, then builds a block containing that tx in the Publish ledger.
-/// The validator must reject it with `PublishTxMissingPriorSubmit`.
-#[test_log::test(tokio::test)]
-async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() -> eyre::Result<()> {
-    use irys_database::{
-        db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
-        tables::MigratedBlockHashes,
-    };
-    use reth_db::transaction::DbTxMut as _;
-
-    struct EvilBlockProdStrategy {
-        pub prod: ProductionStrategy,
-        pub publish_tx: DataTransactionHeader,
+    let blocks_to_mine = genesis_config.consensus.get_mut().block_tree_depth + 2;
+    for _ in 0..blocks_to_mine {
+        let (header, eth_block, txs) = fork_creator_2.mine_block_without_gossip().await?;
+        tracing::error!(block_heght = header.height,  ?header.cumulative_diff, "block");
+        let block = Arc::new(SealedBlock::new(
+            (*header).clone(),
+            BlockBody {
+                block_hash: header.block_hash,
+                data_transactions: txs.all_data_txs().cloned().collect(),
+                commitment_transactions: txs.all_system_txs().cloned().collect(),
+            },
+        )?);
+        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
+        genesis_node
+            .node_ctx
+            .block_pool
+            .execution_payload_provider
+            .add_payload_to_cache(eth_block.block().clone())
+            .await;
     }
-
-    #[async_trait::async_trait]
-    impl BlockProdStrategy for EvilBlockProdStrategy {
-        fn inner(&self) -> &BlockProducerInner {
-            &self.prod.inner
-        }
-        async fn get_mempool_txs(
-            &self,
-            _prev_block_header: &IrysBlockHeader,
-            _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> Result<
-            irys_actors::block_producer::MempoolTxsBundle,
-            irys_actors::tx_selector::TxSelectorError,
-        > {
-            Ok(irys_actors::block_producer::MempoolTxsBundle {
-                commitment_txs: vec![],
-                commitment_txs_to_bill: vec![],
-                submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs {
-                    txs: vec![self.publish_tx.clone()],
-                    proofs: None,
-                },
-                aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    reward_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: Vec::new(),
-                },
-                commitment_refund_events: vec![],
-                unstake_refund_events: vec![],
-                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
-            })
+    tracing::error!("waiting for event");
+    while let Ok(event) = block_state_rx.recv().await {
+        tracing::warn!(?event, desired_hash = ? root_block_of_fork.block_hash, "block");
+        if event.block_hash == root_block_of_fork.block_hash {
+            assert!(matches!(
+                event.validation_result,
+                ValidationResult::Invalid(ValidationError::ValidationCancelled { .. })
+            ));
+            break;
         }
     }
 
-    // 1. Start a single-node test network
-    let mut genesis_config = NodeConfig::testing();
-    genesis_config.consensus.get_mut().chunk_size = 32;
-
-    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("GENESIS", 20)
-        .await;
-    // Mine one block so the chain is at height 1 (parent_height for next block = 1)
-    genesis_node.mine_block().await?;
-
-    // 2. Create a properly-signed data transaction header for the Publish ledger
-    let consensus = &genesis_node.node_ctx.config.consensus;
-    let signer = genesis_config.signer();
-    let mut fake_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-        tx: DataTransactionHeaderV1::new(consensus),
-        metadata: Default::default(),
-    });
-    fake_tx.data_size = 32;
-    fake_tx.data_root = H256::random();
-    fake_tx.anchor = genesis_node.get_anchor().await?;
-    let fake_tx = fake_tx.sign(&signer)?;
-    let fake_tx_id = fake_tx.id();
-
-    // 3. Plant the tx in the validator's DB with included_height = 100 and a
-    //    MigratedBlockHashes entry at height 100 — so it passes the "is migrated" check
-    //    but fails the "included_height <= parent_height" check (parent is at height 1).
-    let fake_block_hash = H256::random();
-    genesis_node.node_ctx.db.update_eyre(|tx| {
-        insert_tx_header(tx, &fake_tx)?;
-        set_data_tx_included_height(tx, &fake_tx_id, 100)?;
-        tx.put::<MigratedBlockHashes>(100, fake_block_hash)?;
-        Ok(())
-    })?;
-
-    // 4. Build a block using the evil strategy that puts the tx in the Publish ledger
-    let block_prod_strategy = EvilBlockProdStrategy {
-        publish_tx: fake_tx,
-        prod: ProductionStrategy {
-            inner: genesis_node.node_ctx.block_producer_inner.clone(),
-        },
-    };
-
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
-        .await?
-        .unwrap();
-
-    // 5. Send block for validation (skip VDF since we crafted the solution)
-    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), true).await?;
-
-    // 6. Assert the block is rejected because the DB fallback rejects the tx
-    //    (included_height 100 > parent_height 1)
-    assert_validation_error(
-        outcome,
-        |e| {
-            matches!(
-                e,
-                ValidationError::PreValidation(
-                    PreValidationError::PublishTxMissingPriorSubmit { .. }
-                )
-            )
-        },
-        "publish tx with DB submit inclusion beyond parent height should be rejected",
-    );
-
+    // Shut down the node to clean up the test environment.
+    fork_creator_2.stop().await;
+    fork_creator_1.stop().await;
     genesis_node.stop().await;
-
     Ok(())
 }

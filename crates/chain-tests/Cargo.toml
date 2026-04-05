@@ -12,10 +12,14 @@ telemetry = ["irys-utils/telemetry", "irys-testing-utils/telemetry"]
 # so test modules can use them via `crate::utils`.
 actix-http.workspace = true
 actix-web.workspace = true
+alloy-consensus.workspace = true
 alloy-core.workspace = true
+bytes.workspace = true
 alloy-eips.workspace = true
+alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-signer-local.workspace = true
 eyre.workspace = true
 futures.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
@@ -27,6 +31,7 @@ irys-domain.workspace = true
 irys-macros-diag-slow.workspace = true
 irys-p2p.workspace = true
 irys-packing.workspace = true
+irys-reth.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-storage.workspace = true
 irys-testing-utils.workspace = true
@@ -45,12 +50,9 @@ tracing.workspace = true
 
 [dev-dependencies]
 # Only needed by test modules themselves (gated behind #[cfg(test)])
-alloy-consensus.workspace = true
 alloy-contract.workspace = true
 alloy-genesis.workspace = true
-alloy-network.workspace = true
 alloy-provider.workspace = true
-alloy-signer-local.workspace = true
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-rpc-types-trace.workspace = true
 alloy-sol-types.workspace = true

@@ -19,7 +19,6 @@ derive_more = { version = "2.0.1", features = [
     "into",
 ], default-features = true }
 eyre = "0.6.8"
-ruint.workspace = true
 fixed-hash = "0.8.0"
 rand = "0.8.5"
 serde = { version = "1.0", features = ["derive"] }
@@ -33,6 +32,7 @@ tracing.workspace = true
 arbitrary.workspace = true
 nodit.workspace = true
 bytes.workspace = true
+dashmap = { workspace = true }
 modular-bitfield.workspace = true
 alloy-rlp.workspace = true
 zerocopy = "0.8.9"

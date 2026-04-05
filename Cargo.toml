@@ -70,7 +70,7 @@ actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["time"] }
 rand = { version = "0.8", features = ["small_rng"] }
 hex = "0.4"
 base64-url = "2"
@@ -216,6 +216,9 @@ reth-basic-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", re
 reth-payload-builder-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
+reth-errors = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
+reth-consensus-common = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
+reth-revm = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 

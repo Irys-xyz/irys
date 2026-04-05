@@ -10,7 +10,8 @@
 //! 2. Valid solution reuse - parent changes but solution remains valid
 
 use irys_actors::{BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait};
-use irys_types::{NodeConfig, block_production::SolutionContext};
+use irys_reth::IrysBuiltPayload;
+use irys_types::{NodeConfig, SealedBlock as IrysSealedBlock, block_production::SolutionContext};
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
 use tracing::info;
@@ -35,7 +36,7 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<irys_types::SealedBlock>, reth::payload::EthBuiltPayload)>> {
+    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, IrysBuiltPayload)>> {
         // Signal that we're starting and wait for resume
         if let Some(pause_tx) = self.pause_signal.lock().await.take() {
             let _ = pause_tx.send(());

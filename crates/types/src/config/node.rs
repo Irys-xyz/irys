@@ -550,7 +550,8 @@ pub struct PackingConfig {
 pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
-
+    /// Number of CPU threads to use for data unpacking operations
+    pub cpu_unpacking_concurrency: u16,
     /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
 }
@@ -559,6 +560,7 @@ impl Default for LocalPackingConfig {
     fn default() -> Self {
         Self {
             cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
+            cpu_unpacking_concurrency: 4,
             gpu_packing_batch_size: 0,
         }
     }
@@ -669,6 +671,16 @@ pub struct P2PGossipConfig {
     /// Maximum concurrent chunk handler tasks on the gossip receiver.
     /// Limits memory and CPU pressure from inbound chunk processing.
     pub max_concurrent_gossip_chunks: usize,
+    /// Number of peers to push each PD chunk to.
+    /// Peers are selected as k/2 top-scored + k/2 random,
+    /// excluding known sources and partition assignees.
+    /// Set to 0 to disable optimistic push entirely.
+    #[serde(default = "default_pd_optimistic_push_fanout")]
+    pub pd_optimistic_push_fanout: u32,
+}
+
+fn default_pd_optimistic_push_fanout() -> u32 {
+    4
 }
 
 impl Default for P2PGossipConfig {
@@ -678,6 +690,7 @@ impl Default for P2PGossipConfig {
             broadcast_batch_throttle_interval: 100,
             enable_scoring: true,
             max_concurrent_gossip_chunks: 50,
+            pd_optimistic_push_fanout: default_pd_optimistic_push_fanout(),
         }
     }
 }
@@ -1019,6 +1032,7 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
+                    cpu_unpacking_concurrency: 4,
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),
@@ -1177,6 +1191,7 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
+                    cpu_unpacking_concurrency: 4,
                     gpu_packing_batch_size: 1024,
                 },
                 remote: Default::default(),

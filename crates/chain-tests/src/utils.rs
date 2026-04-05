@@ -8,8 +8,13 @@ use actix_web::{
     body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
 };
+use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
+use alloy_eips::Encodable2718 as _;
+use alloy_network::TxSignerSync as _;
+use alloy_primitives::Address;
+use alloy_signer_local::LocalSigner;
 use eyre::{OptionExt as _, eyre};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
@@ -40,18 +45,25 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
+use irys_reth::IrysBuiltPayload;
+use irys_reth::pd_tx::build_pd_access_list_with_fees;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::SendTraced as _;
+use irys_types::range_specifier::PdDataRead;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    storage_pricing::{
+        Amount,
+        phantoms::{CostPerChunk, Irys},
+    },
 };
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
@@ -67,7 +79,6 @@ use irys_vdf::state::VdfStateReadonly;
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
-    payload::EthBuiltPayload,
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
@@ -145,8 +156,16 @@ pub async fn capacity_chunk_solution(
             }
         };
 
-        let (_seed, checkpoints) =
+        let (computed_step_output, checkpoints) =
             compute_step_checkpoints(&config.vdf, current_step, steps[0], reset_seed);
+        let checkpoints = H256List(checkpoints);
+        if computed_step_output != steps[1] {
+            // The VDF thread may have crossed a reset boundary; if our recomputation does not
+            // land on the advertised step output, skip this candidate instead of building an
+            // invalid synthetic solution for the block producer.
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        }
 
         // Determine recall range for this step
         let recall_range_idx = block_validation::get_recall_range(
@@ -191,7 +210,7 @@ pub async fn capacity_chunk_solution(
                     mining_address: miner_addr,
                     chunk: entropy_chunk,
                     vdf_step: current_step,
-                    checkpoints: H256List(checkpoints),
+                    checkpoints,
                     seed: Seed(steps[1]),
                     solution_hash,
                     ..Default::default()
@@ -733,26 +752,51 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
-        self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
-            .await
-            .expect("stake tx to be in mempool");
-        self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
-            .await
-            .expect("pledge tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for stake commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            stake_tx.id(),
+            seconds_to_wait,
+            "stake_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("stake tx to be in mempool");
+        info!(
+            peer = %peer_address,
+            "Peer assignment setup: waiting for pledge commitment tx to enter mempool"
+        );
+        self.wait_for_mempool_tx_with_stage(
+            pledge_tx.id(),
+            seconds_to_wait,
+            "pledge_commitment_tx_in_mempool".to_string(),
+        )
+        .await
+        .expect("pledge tx to be in mempool");
 
         // Get height before mining the commitment block
         let height_before_commitment = self.get_canonical_chain_height().await;
 
         // Mine a block to get the commitments included
+        info!(
+            peer = %peer_address,
+            target_height = height_before_commitment + 1,
+            "Peer assignment setup: mining commitment block and waiting for peer sync"
+        );
         self.mine_block()
             .await
             .expect("to mine block with commitments");
 
         // Wait for peer to sync the commitment block
-        peer_node
-            .wait_for_block_at_height(height_before_commitment + 1, seconds_to_wait)
-            .await
-            .expect("peer to sync commitment block");
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            height_before_commitment + 1,
+            seconds_to_wait,
+            "peer_sync_after_commitment_block".to_string(),
+        )
+        .await
+        .expect("peer to sync commitment block");
 
         // Get epoch configuration to calculate when next epoch round occurs
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
@@ -763,7 +807,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             num_blocks_in_epoch - (current_height_after_commitment % num_blocks_in_epoch);
 
         // Mine blocks until we reach the next epoch round
-        for _ in 0..blocks_until_next_epoch {
+        info!(
+            peer = %peer_address,
+            current_height_after_commitment,
+            blocks_until_next_epoch,
+            "Peer assignment setup: mining blocks until next epoch"
+        );
+        for step in 0..blocks_until_next_epoch {
             let height_before_mining = self.get_canonical_chain_height().await;
 
             self.mine_block()
@@ -771,25 +821,47 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .expect("to mine block towards next epoch");
 
             // Wait for peer to sync after each block to prevent race conditions
-            peer_node
-                .wait_for_block_at_height(height_before_mining + 1, seconds_to_wait)
-                .await
-                .expect("peer to sync to current height");
+            self.wait_for_peer_height_with_stage(
+                &peer_node,
+                height_before_mining + 1,
+                seconds_to_wait,
+                format!(
+                    "peer_sync_during_epoch_alignment step={}/{}",
+                    step + 1,
+                    blocks_until_next_epoch
+                ),
+            )
+            .await
+            .expect("peer to sync to current height");
         }
 
         let final_height = self.get_canonical_chain_height().await;
 
         // Wait for the peer to receive & process the epoch block
-        peer_node
-            .wait_for_block_at_height(final_height, seconds_to_wait)
-            .await
-            .expect("peer to sync to epoch height");
+        info!(
+            peer = %peer_address,
+            final_height,
+            "Peer assignment setup: waiting for final epoch height and packing"
+        );
+        self.wait_for_peer_height_with_stage(
+            &peer_node,
+            final_height,
+            seconds_to_wait,
+            "peer_sync_to_final_epoch_height".to_string(),
+        )
+        .await
+        .expect("peer to sync to epoch height");
         self.wait_for_block_at_height(final_height, seconds_to_wait)
             .await
             .unwrap();
 
         // Wait for packing to complete on the peer (this indicates partition assignments are active)
-        peer_node.wait_for_packing(seconds_to_wait).await;
+        self.wait_for_peer_packing_with_stage(
+            &peer_node,
+            seconds_to_wait,
+            "peer_packing_for_partition_assignments".to_string(),
+        )
+        .await;
 
         // Verify that partition assignments were created
         let peer_assignments = peer_node.get_partition_assignments(peer_address);
@@ -803,8 +875,62 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(peer_node)
     }
 
+    #[diag_slow(state = format!(
+        "phase={} {}",
+        phase,
+        self.diag_wait_state().await
+    ))]
+    async fn wait_for_mempool_tx_with_stage(
+        &self,
+        tx_id: IrysTransactionId,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        self.wait_for_mempool(tx_id, seconds_to_wait).await
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} target_height={} genesis={} peer={}",
+        phase,
+        target_height,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_height_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        target_height: u64,
+        seconds_to_wait: usize,
+        phase: String,
+    ) -> eyre::Result<()> {
+        peer_node
+            .wait_for_block_at_height(target_height, seconds_to_wait)
+            .await
+            .map(|_| ())
+    }
+
+    #[diag_slow(state = format!(
+        "phase={} genesis={} peer={}",
+        phase,
+        self.diag_wait_state().await,
+        peer_node.diag_wait_state().await
+    ))]
+    async fn wait_for_peer_packing_with_stage(
+        &self,
+        peer_node: &IrysNodeTest<IrysNodeCtx>,
+        seconds_to_wait: usize,
+        phase: String,
+    ) {
+        peer_node.wait_for_packing(seconds_to_wait).await;
+    }
+
     /// get block height in block index
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_until_block_index_height(
         &self,
         target_height: u64,
@@ -1065,7 +1191,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// Wait for a canonical block at `target_height` using a hybrid strategy:
     /// short-interval canonical polling plus BlockStateUpdated subscription.
     #[tracing::instrument(level = "trace", skip_all)]
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "target_height={} max_seconds={} {}",
+        target_height,
+        max_seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1211,7 +1342,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "ledger={:?} offset={} seconds={} {}",
+        ledger,
+        offset,
+        seconds,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk<T, B>(
         &self,
         app: &T,
@@ -1261,7 +1398,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// check number of chunks in the CachedChunks table
     /// return Ok(()) once it matches the expected value
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "expected_value={} timeout_secs={} {}",
+        expected_value,
+        timeout_secs,
+        self.diag_wait_state().await
+    ))]
     pub async fn wait_for_chunk_cache_count(
         &self,
         expected_value: u64,
@@ -1293,6 +1435,230 @@ impl IrysNodeTest<IrysNodeCtx> {
             timeout_secs,
             expected_value
         ))
+    }
+
+    /// Poll until PdService is waiting on at least `min_pending_blocks` block
+    /// validations for missing PD chunks.
+    ///
+    /// This is useful for tests that need to synchronize on the block-validation
+    /// reconciliation path without relying on fixed sleeps.
+    #[diag_slow(state = format!(
+        "min_pending_blocks={} timeout_secs={} {}",
+        min_pending_blocks,
+        timeout_secs,
+        self.diag_wait_state().await
+    ))]
+    pub async fn wait_for_pd_pending_blocks(
+        &self,
+        min_pending_blocks: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            let pending_blocks = self
+                .node_ctx
+                .pd_pending_block_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if pending_blocks >= min_pending_blocks {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for PdService pending_blocks >= {}",
+            timeout_secs,
+            min_pending_blocks,
+        ))
+    }
+
+    /// Poll until a specific chunk key is present in the PD `ChunkDataIndex` cache.
+    ///
+    /// This is useful for tests that need to wait for a P2P fetch to complete
+    /// rather than using a fixed sleep.
+    pub async fn wait_for_pd_chunk_in_cache(
+        &self,
+        ledger: u32,
+        offset: u64,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self
+                .node_ctx
+                .chunk_data_index
+                .contains_key(&(ledger, offset))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk ({}, {}) in ChunkDataIndex",
+            timeout_secs,
+            ledger,
+            offset,
+        ))
+    }
+
+    /// Poll until a PD transaction hash appears in the `ready_pd_txs` set.
+    ///
+    /// This is useful for tests that need to wait for PdService to finish
+    /// fetching all chunks for a mempool PD transaction.
+    pub async fn wait_for_ready_pd_tx(
+        &self,
+        tx_hash: &alloy_core::primitives::B256,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if self.node_ctx.ready_pd_txs.contains(tx_hash) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for PD tx {:?} in ready_pd_txs",
+            timeout_secs,
+            tx_hash,
+        ))
+    }
+
+    /// Poll until a chunk is available in the storage modules (written by
+    /// `ChunkMigrationService` after block migration).
+    ///
+    /// This replaces fixed sleeps after `wait_for_migrated_txs`, which only
+    /// guarantees block index persistence — chunk data is written asynchronously.
+    pub async fn wait_for_chunk_in_storage(
+        &self,
+        ledger: irys_types::DataLedger,
+        offset: irys_types::LedgerChunkOffset,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        const CHECKS_PER_SECOND: usize = 10;
+        let delay = Duration::from_millis(1000 / CHECKS_PER_SECOND as u64);
+        let max_attempts = timeout_secs * CHECKS_PER_SECOND;
+
+        for _ in 0..max_attempts {
+            if matches!(
+                self.node_ctx
+                    .chunk_provider
+                    .get_chunk_by_ledger_offset(ledger, offset),
+                Ok(Some(_))
+            ) {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(eyre::eyre!(
+            "Timed out after {}s waiting for chunk at ({:?}, {:?}) in storage modules",
+            timeout_secs,
+            ledger,
+            offset,
+        ))
+    }
+
+    /// Upload data for PD tests and wait for migration into storage modules.
+    ///
+    /// Returns the global Publish ledger offset where the data starts. The signer
+    /// must be funded before node start via `fund_genesis_accounts`.
+    ///
+    /// Flow:
+    /// 1. Record current Publish ledger `total_chunks` → `data_start_offset`
+    /// 2. Post data transaction via mempool
+    /// 3. Upload chunks via HTTP POST to `/v1/chunk`
+    /// 4. Mine blocks until data tx appears in block index (migration depth)
+    /// 5. Wait for first and last chunk to appear in storage modules
+    pub async fn upload_data_for_pd(
+        &self,
+        signer: &IrysSigner,
+        data: &[u8],
+        timeout_secs: usize,
+    ) -> eyre::Result<u64> {
+        // 1. Record the Publish ledger total_chunks BEFORE posting.
+        let data_start_offset = {
+            let block_index = self.node_ctx.block_index_guard.read();
+            block_index
+                .get_latest_item()
+                .and_then(|item| {
+                    item.ledgers
+                        .iter()
+                        .find(|l| l.ledger == DataLedger::Publish)
+                        .map(|l| l.total_chunks)
+                })
+                .unwrap_or(0)
+        };
+
+        // 2. Post data tx via the mempool channel.
+        let tx = self
+            .post_publish_data_tx(signer, data.to_vec())
+            .await
+            .map_err(|e| eyre::eyre!("Failed to post data tx: {:?}", e))?;
+
+        let num_chunks = tx.chunks.len();
+
+        // 3. Upload chunks via HTTP so they're in the cache for migration.
+        let client = reqwest::Client::new();
+        let http_url = format!(
+            "http://127.0.0.1:{}",
+            self.node_ctx.config.node_config.http.bind_port
+        );
+        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+            let min = chunk_node.min_byte_range;
+            let max = chunk_node.max_byte_range;
+            let chunk = UnpackedChunk {
+                data_root: tx.header.data_root,
+                data_size: tx.header.data_size,
+                data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+                bytes: Base64(data[min..max].to_vec()),
+                tx_offset: TxChunkOffset::from(
+                    TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                ),
+            };
+            let resp = client
+                .post(format!("{}/v1/chunk", &http_url))
+                .json(&chunk)
+                .send()
+                .await?;
+            eyre::ensure!(
+                resp.status() == reqwest::StatusCode::OK,
+                "Chunk upload failed with status {}",
+                resp.status()
+            );
+        }
+
+        // 4. Mine blocks until the tx header appears in the block index.
+        self.wait_for_migrated_txs(vec![tx.header.clone()], timeout_secs)
+            .await?;
+
+        // 5. Wait for first and last chunk in storage modules.
+        let first_offset = LedgerChunkOffset::from(data_start_offset);
+        self.wait_for_chunk_in_storage(DataLedger::Publish, first_offset, timeout_secs)
+            .await?;
+        if num_chunks > 1 {
+            let last_offset = LedgerChunkOffset::from(data_start_offset + (num_chunks as u64) - 1);
+            self.wait_for_chunk_in_storage(DataLedger::Publish, last_offset, timeout_secs)
+                .await?;
+        }
+
+        info!(
+            "Data uploaded and migrated for PD, data_start_offset={}, num_chunks={}",
+            data_start_offset, num_chunks
+        );
+        Ok(data_start_offset)
     }
 
     /// mine blocks until the txs are found in the block index, i.e. mdbx
@@ -1579,7 +1945,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.get_block_by_hash(&hash)
     }
 
-    #[diag_slow(state = self.diag_wait_state().await)]
+    #[diag_slow(state = format!(
+        "num_blocks={} {}",
+        num_blocks,
+        self.diag_wait_state().await
+    ))]
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
@@ -1613,7 +1983,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_with_payload(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
         self.node_ctx
             .service_senders
@@ -1650,7 +2020,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     #[diag_slow(state = self.diag_wait_state().await)]
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         self.with_gossip_disabled(self.mine_block_with_payload())
             .await
     }
@@ -1659,7 +2029,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> eyre::Result<(
         Arc<IrysBlockHeader>,
-        EthBuiltPayload,
+        IrysBuiltPayload,
         BlockTransactions,
         BlockValidationOutcome,
     )> {
@@ -2480,6 +2850,413 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    /// Build synthetic `PdDataRead` entries that pass `PdDataRead::decode` validation.
+    ///
+    /// Splits `total_chunks` into one or more entries, each fitting within the partition
+    /// boundary (`start + chunks_needed <= num_chunks_in_partition`). Uses sequential
+    /// `partition_index` values (`0, 1, 2, ...`) so each entry targets a distinct
+    /// partition and avoids duplicate-key rejection.
+    ///
+    /// These entries reference valid partition offsets but the chunks don't exist in
+    /// storage. Callers must insert the tx hash into `ready_pd_txs` directly after
+    /// injection so the block producer treats the tx as ready.
+    pub fn build_synthetic_pd_data_reads(
+        total_chunks: u64,
+        offset_base: u32,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        eyre::ensure!(total_chunks > 0, "total_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        // Cap each read so `chunks_in_read * chunk_size` fits in u32 (PdDataRead.len).
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = total_chunks;
+        let mut global_offset = u64::from(offset_base);
+        let mut partition_ix = 0_u64;
+
+        while remaining > 0 {
+            let start = global_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index: partition_ix,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            global_offset += chunks_in_read;
+            partition_ix += 1;
+        }
+
+        Ok(reads)
+    }
+
+    /// Build PD data read entries from a real global Publish ledger offset.
+    ///
+    /// Unlike `build_synthetic_pd_data_reads` which uses sequential partition indices
+    /// from 0, this derives both `partition_index` and `start` from the actual global
+    /// offset within the Publish ledger. Handles partition boundary crossings.
+    pub fn build_pd_data_reads_at_global_offset(
+        global_start: u64,
+        num_chunks: u64,
+        chunk_size: u64,
+        num_chunks_in_partition: u64,
+    ) -> eyre::Result<Vec<PdDataRead>> {
+        eyre::ensure!(num_chunks > 0, "num_chunks must be > 0");
+        eyre::ensure!(chunk_size > 0, "chunk_size must be > 0");
+        eyre::ensure!(
+            chunk_size <= u64::from(u32::MAX),
+            "chunk_size {chunk_size} exceeds u32::MAX"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        eyre::ensure!(
+            num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition {num_chunks_in_partition} exceeds u32::MAX"
+        );
+
+        let max_chunks_per_read = u64::from(u32::MAX) / chunk_size;
+        eyre::ensure!(
+            max_chunks_per_read > 0,
+            "chunk_size {chunk_size} too large: max_chunks_per_read would be 0"
+        );
+
+        let mut reads = Vec::new();
+        let mut remaining = num_chunks;
+        let mut current_offset = global_start;
+
+        while remaining > 0 {
+            let partition_index = current_offset / num_chunks_in_partition;
+            let start = current_offset % num_chunks_in_partition;
+            let fit = num_chunks_in_partition - start;
+            let chunks_in_read = remaining.min(fit).min(max_chunks_per_read);
+            let len = chunks_in_read * chunk_size;
+
+            reads.push(PdDataRead {
+                partition_index,
+                start: start as u32,
+                len: len as u32,
+                byte_off: 0,
+            });
+
+            remaining -= chunks_in_read;
+            current_offset += chunks_in_read;
+        }
+
+        Ok(reads)
+    }
+
+    /// Inject a PD EVM transaction referencing real chunk offsets.
+    ///
+    /// Uses `build_pd_data_reads_at_global_offset` to compute correct partition
+    /// indices from the global offset. Does NOT insert into `chunk_data_index` or
+    /// `ready_pd_txs` — PdService provisions chunks from storage naturally.
+    pub async fn inject_pd_tx_at_real_offsets(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        global_offset: u64,
+        num_chunks: u64,
+        priority_fee_per_chunk: impl Into<U256>,
+        base_fee_cap_per_chunk: impl Into<U256>,
+        nonce: u64,
+    ) -> eyre::Result<alloy_core::primitives::B256> {
+        let priority_fee: U256 = priority_fee_per_chunk.into();
+        let base_fee_cap: U256 = base_fee_cap_per_chunk.into();
+
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
+
+        let data_reads = Self::build_pd_data_reads_at_global_offset(
+            global_offset,
+            num_chunks,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
+
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee_cap.into())?;
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: alloy_primitives::Bytes::new(),
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
+    }
+
+    /// Creates and injects a single PD transaction with a custom priority fee.
+    ///
+    /// # Returns
+    /// The transaction hash for the injected transaction
+    pub async fn create_and_inject_pd_transaction_with_priority_fee(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        priority_fee_per_chunk: u64,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        const LARGE_MAX_BASE_FEE: u64 = 1_000_000_000_000_000_u64;
+
+        self.create_and_inject_pd_transaction_with_custom_fees(
+            signer,
+            chunks_per_tx,
+            U256::from(priority_fee_per_chunk),
+            U256::from(LARGE_MAX_BASE_FEE),
+            nonce,
+            offset_base,
+        )
+        .await
+    }
+
+    /// Create and inject a PD transaction with fully customizable fees.
+    ///
+    /// This is similar to `create_and_inject_pd_transaction_with_priority_fee` but allows
+    /// setting both priority_fee and base_fee per chunk. Used for testing fee validation
+    /// scenarios like min_pd_transaction_cost enforcement.
+    ///
+    /// # Arguments
+    /// * `signer` - The IrysSigner to sign the transaction
+    /// * `chunks_per_tx` - Number of chunks for the PD transaction
+    /// * `priority_fee_per_chunk` - Priority fee per chunk in wei
+    /// * `base_fee_per_chunk` - Max base fee per chunk in wei
+    /// * `nonce` - Transaction nonce
+    /// * `offset_base` - Base offset for chunk range specifiers
+    pub async fn create_and_inject_pd_transaction_with_custom_fees(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        priority_fee_per_chunk: impl Into<U256>,
+        base_fee_per_chunk: impl Into<U256>,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        let priority_fee: U256 = priority_fee_per_chunk.into();
+        let base_fee: U256 = base_fee_per_chunk.into();
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let consensus = &self.node_ctx.config.consensus;
+        let chain_id = consensus.chain_id;
+        let chunk_size = consensus.chunk_size;
+        let num_chunks_in_partition = consensus.num_chunks_in_partition;
+
+        // Build PdDataRead entries covering the requested number of chunks.
+        // Uses sequential partition_index values (0, 1, 2, ...) pointing at valid
+        // but unpopulated chunk offsets. After injection we insert the tx hash into
+        // ready_pd_txs directly so the block producer treats it as ready without
+        // PdService needing to provision real chunk data.
+        let data_reads = Self::build_synthetic_pd_data_reads(
+            u64::from(chunks_per_tx),
+            offset_base,
+            chunk_size,
+            num_chunks_in_partition,
+        )?;
+
+        // Pre-populate chunk_data_index with zero-filled chunks so PdService's
+        // cache finds them during block validation (handle_provision_block_chunks).
+        let fake_chunk = std::sync::Arc::new(bytes::Bytes::from(vec![0_u8; chunk_size as usize]));
+        for spec in &data_reads {
+            let base = num_chunks_in_partition * spec.partition_index;
+            let chunks_needed = spec.chunks_needed(chunk_size);
+            for i in 0..chunks_needed {
+                self.node_ctx
+                    .chunk_data_index
+                    .insert((0_u32, base + spec.start as u64 + i), fake_chunk.clone());
+            }
+        }
+
+        let access_list =
+            build_pd_access_list_with_fees(&data_reads, priority_fee.into(), base_fee.into())?;
+
+        // Create and sign EIP-1559 transaction
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: alloy_primitives::Bytes::new(),
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        // Inject transaction into mempool
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        // Mark the tx as ready directly — the synthetic PdDataRead entries reference
+        // valid partition offsets but no real chunk data exists, so PdService would
+        // mark it as PartiallyReady. Inserting here bypasses that; PdService never
+        // removes from ready_pd_txs during provisioning.
+        self.node_ctx.ready_pd_txs.insert(tx_hash);
+
+        Ok(tx_hash)
+    }
+
+    /// Get current and predicted PD base fee per chunk in Irys tokens.
+    ///
+    /// Returns (current_block_fee, predicted_next_block_fee).
+    /// Uses the PdPricing service to query fee history and prediction.
+    pub fn get_pd_base_fee(
+        &self,
+    ) -> eyre::Result<(Amount<(CostPerChunk, Irys)>, Amount<(CostPerChunk, Irys)>)> {
+        let history = self.node_ctx.pd_pricing.get_fee_history(1, &[50])?;
+        let current = history.base_fee_per_chunk_irys[0];
+        let next = history.base_fee_per_chunk_irys[1];
+        Ok((current, next))
+    }
+
+    /// Create and inject a PD transaction using predicted network fees.
+    ///
+    /// This method queries the current network state to determine optimal fees:
+    /// - `max_base_fee`: predicted next block fee + 20% buffer
+    /// - `priority_fee`: 50th percentile (median) from recent blocks, or 10% of base fee as fallback
+    ///
+    /// # Returns
+    /// The transaction hash for the injected transaction
+    pub async fn create_and_inject_pd_transaction_with_optimal_fees(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        // Query fee history for base fee prediction and priority fee percentiles
+        let history = self.node_ctx.pd_pricing.get_fee_history(1, &[50])?;
+        let next_base_fee = history.base_fee_per_chunk_irys[1]; // Predicted next block fee
+
+        // Calculate optimal fees:
+        // - max_base_fee: predicted + 20% buffer to handle fee increases
+        // - priority_fee: 50th percentile from most recent block, or 10% of base fee as fallback
+        let max_base_fee = next_base_fee.amount * U256::from(120) / U256::from(100);
+        let priority_fee = history
+            .reward
+            .last()
+            .and_then(|r| r.percentiles.get(&50))
+            .map(|p| p.fee_irys.amount)
+            .unwrap_or_else(|| next_base_fee.amount / U256::from(10));
+
+        self.create_and_inject_pd_transaction_with_custom_fees(
+            signer,
+            chunks_per_tx,
+            priority_fee,
+            max_base_fee,
+            nonce,
+            offset_base,
+        )
+        .await
+    }
+
+    /// Build and inject a tx that calls a contract function with PD chunk access.
+    /// PD fees and data read specifiers are encoded in the access list; the `input`
+    /// field carries only the clean ABI calldata for the target contract.
+    pub async fn inject_pd_contract_call(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        contract_address: Address,
+        abi_calldata: alloy_primitives::Bytes,
+        data_reads: Vec<PdDataRead>,
+        priority_fee_per_chunk: u64,
+        nonce: u64,
+    ) -> eyre::Result<FixedBytes<32>> {
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let chain_id = self.node_ctx.config.consensus.chain_id;
+
+        // Build access list with data read specifiers and fee parameters
+        let access_list = build_pd_access_list_with_fees(
+            &data_reads,
+            alloy_primitives::U256::from(priority_fee_per_chunk),
+            alloy_primitives::U256::from(1_000_000_000_000_000_u64),
+        )?;
+
+        // Create and sign EIP-1559 transaction targeting the contract
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: abi_calldata,
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(contract_address),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
+    }
+
     #[diag_slow(state = "stop".to_string())]
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
@@ -2592,7 +3369,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
-        eth_payload: EthBuiltPayload,
+        eth_payload: IrysBuiltPayload,
         block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
         // Ingest data txs into peer's mempool
@@ -2900,7 +3677,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         None
     }
 
-    pub async fn wait_for_chunk_in_storage(
+    pub async fn wait_for_packed_chunk_in_storage(
         &self,
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
@@ -2927,7 +3704,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunk_offset: LedgerChunkOffset,
         timeout_secs: usize,
     ) -> eyre::Result<PackedChunk> {
-        self.wait_for_chunk_in_storage(ledger, chunk_offset, timeout_secs)
+        self.wait_for_packed_chunk_in_storage(ledger, chunk_offset, timeout_secs)
             .await
     }
 
@@ -2939,7 +3716,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_data_size: u64,
     ) {
         let packed_chunk = self
-            .wait_for_chunk_in_storage(ledger, chunk_offset, 10)
+            .wait_for_packed_chunk_in_storage(ledger, chunk_offset, 10)
             .await
             .unwrap_or_else(|e| {
                 panic!(
@@ -3664,6 +4441,15 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = {
+        let read = node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .cloned()
+            .ok_or_else(|| eyre!("Parent block header not found in block tree"))?
+    };
+    let reset_seed = prev_block.vdf_limiter_info.next_seed;
+
     let was_vdf_enabled = node_ctx
         .is_vdf_mining_enabled
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -3692,15 +4478,16 @@ pub async fn solution_context_with_poa_chunk(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
-        let reset_seed = {
-            let read = node_ctx.block_tree_guard.read();
-            let parent_hash = read.get_max_cumulative_difficulty_block().1;
-            read.get_block(&parent_hash)
-                .map(|b| b.vdf_limiter_info.next_seed)
-                .unwrap_or_default()
-        };
-        let (_seed, checkpoints) =
+        let (computed_step_output, checkpoints) =
             compute_step_checkpoints(&node_ctx.config.vdf, step, steps[0], reset_seed);
+        let checkpoints = H256List(checkpoints);
+        eyre::ensure!(
+            computed_step_output == steps[1],
+            "recomputed VDF output mismatch for step {}: expected {}, got {}",
+            step,
+            steps[1],
+            computed_step_output
+        );
 
         // For deterministic linkage without recall-range dependency, use offset 0
         let partition_hash = H256::zero();
@@ -3721,7 +4508,7 @@ pub async fn solution_context_with_poa_chunk(
             data_path: None,
             chunk: poa_chunk,
             vdf_step: step,
-            checkpoints: H256List(checkpoints),
+            checkpoints,
             seed: Seed(steps[1]),
             solution_hash,
         })
@@ -3765,6 +4552,38 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         node_ctx.stop_vdf();
     }
     Ok(poa_solution)
+}
+
+#[cfg(test)]
+mod tests {
+    use irys_types::{H256, VdfConfig};
+    use irys_vdf::compute_step_checkpoints;
+
+    #[test]
+    fn compute_step_checkpoints_applies_reset_seed_at_boundary() {
+        let config = VdfConfig {
+            reset_frequency: 3,
+            parallel_verification_thread_limit: 1,
+            num_checkpoints_in_vdf_step: 4,
+            max_allowed_vdf_fork_steps: 16,
+            sha_1s_difficulty: 40,
+            throttle: false,
+        };
+        let previous_step_output = H256::from_low_u64_be(11);
+        let reset_seed = H256::from_low_u64_be(29);
+
+        let (computed_output, with_reset) =
+            compute_step_checkpoints(&config, 4, previous_step_output, reset_seed);
+        let (without_reset_output, without_reset) =
+            compute_step_checkpoints(&config, 4, previous_step_output, H256::zero());
+
+        assert_eq!(with_reset.last(), Some(&computed_output));
+        assert_eq!(without_reset.last(), Some(&without_reset_output));
+        assert_ne!(
+            computed_output, without_reset_output,
+            "reset-boundary computation must change the VDF output"
+        );
+    }
 }
 
 /// Outcome of block validation for testing.

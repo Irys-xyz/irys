@@ -1,5 +1,4 @@
-use alloy_core::primitives::aliases::U200;
-use alloy_core::primitives::{Address, U256};
+use alloy_core::primitives::{Address, B256, U256};
 use alloy_eips::BlockNumberOrTag;
 use alloy_eips::eip2930::AccessListItem;
 use alloy_genesis::GenesisAccount;
@@ -15,8 +14,7 @@ use tracing::{debug, info};
 
 use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
-use irys_types::range_specifier::ChunkRangeSpecifier;
-use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
+use irys_types::range_specifier::PdDataRead;
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use irys_types::{IrysAddress, irys::IrysSigner};
 
@@ -249,10 +247,14 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = node
+    let start_offset = node
         .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
         .await?
         .unwrap();
+    assert_eq!(
+        start_offset.data_start_offset, 0,
+        "test assumes the uploaded tx is the first migrated publish tx"
+    );
 
     // let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
     //     irys_database::Ledger::Publish,
@@ -270,23 +272,15 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     invocation_builder = invocation_builder.access_list(
         vec![AccessListItem {
             address: precompile_address,
-            storage_keys: vec![
-                ChunkRangeSpecifier {
-                    partition_index: U200::from(0),
-                    offset: 0,
-                    chunk_count: 1_u16,
+            storage_keys: vec![B256::from(
+                PdDataRead {
+                    partition_index: 0,
+                    start: start_offset.data_start_offset as u32,
+                    len: data_bytes.len() as u32,
+                    byte_off: 0,
                 }
-                .encode()
-                .into(),
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::from(0),
-                    length: U34::from(data_bytes.len()),
-                }
-                .encode()
-                .into(),
-            ],
+                .encode(),
+            )],
         }]
         .into(),
     );

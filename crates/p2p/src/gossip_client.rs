@@ -11,10 +11,11 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, DATA_REQUEST_RETRIES, GossipCacheKey,
-    H256, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2,
-    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, ChunkFormat, DATA_REQUEST_RETRIES,
+    GossipCacheKey, H256, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1,
+    HandshakeResponseV2, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionResponse,
+    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion,
+    SealedBlock, chunk_provider::PdChunkPusher, gossip::PdChunkPush,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
@@ -234,9 +235,10 @@ impl GossipClient {
                 )
                 .await
             } else {
-                Ok(GossipResponse::Rejected(
+                // No V1 translation — return early to skip scoring (no network call was made)
+                return Ok(GossipResponse::Rejected(
                     RejectionReason::UnsupportedFeature,
-                ))
+                ));
             }
         } else {
             let wire_req: wire_types::GossipDataRequestV2 = requested_data.into();
@@ -360,9 +362,10 @@ impl GossipClient {
                         GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
                     })
                 } else {
-                    Ok(GossipResponse::Rejected(
+                    // No V1 translation — return early to skip scoring (no network call was made)
+                    return Ok(GossipResponse::Rejected(
                         RejectionReason::UnsupportedFeature,
-                    ))
+                    ));
                 }
             } else {
                 let wire_req: wire_types::GossipDataRequestV2 = requested_data.into();
@@ -899,6 +902,10 @@ impl GossipClient {
                     serde_json::to_vec(&self.create_request_v2(wire)),
                 )
             }
+            GossipDataV2::PdChunk(_) => {
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P.
+                return None;
+            }
         };
         match json_result {
             Ok(b) => Some((route, bytes::Bytes::from(b))),
@@ -1119,6 +1126,13 @@ impl GossipClient {
                     ProtocolVersion::V2,
                 )
                 .await
+            }
+            GossipDataV2::PdChunk(_) => {
+                // PdChunk is not broadcast via gossip push; it uses pull-based P2P.
+                // TODO: Re-evaluate if PdChunk gains push semantics.
+                Ok(GossipResponse::Rejected(
+                    RejectionReason::UnsupportedFeature,
+                ))
             }
         }
     }
@@ -1599,6 +1613,16 @@ impl GossipClient {
             GossipDataV2::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected Transaction or CommitmentTransaction, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    fn pd_chunk(gossip_data: GossipDataV2) -> Result<ChunkFormat, PeerNetworkError> {
+        match gossip_data {
+            GossipDataV2::PdChunk(chunk) => Ok(chunk),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected PdChunk, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
         }
@@ -2248,6 +2272,155 @@ impl GossipClient {
                 "Failed to fetch stake and pledge whitelist".to_string(),
             ),
         })
+    }
+
+    /// Pull a PD chunk from specific peers (by public HTTP API first, gossip fallback).
+    ///
+    /// For each peer in order:
+    /// 1. Try the public API: `GET http://{peer.api}/v1/chunk/ledger/{ledger}/{offset}`
+    /// 2. If that fails, try gossip pull via `GossipDataRequestV2::PdChunk`
+    /// 3. If both fail, move to the next peer
+    ///
+    /// Returns the first successful `ChunkFormat` response.
+    pub async fn pull_pd_chunk_from_peers(
+        &self,
+        peers: &[PeerAddress],
+        ledger: u32,
+        offset: u64,
+        peer_list: &PeerList,
+    ) -> Result<(ChunkFormat, std::net::SocketAddr), PeerNetworkError> {
+        if peers.is_empty() {
+            return Err(PeerNetworkError::NoPeersAvailable);
+        }
+
+        let gossip_request = GossipDataRequestV2::PdChunk(ledger, offset);
+
+        for peer in peers {
+            // --- Try public HTTP API first ---
+            let api_url = format!("http://{}/v1/chunk/ledger/{}/{}", peer.api, ledger, offset);
+
+            let headers = traced_headers();
+            match self.client.get(&api_url).headers(headers).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.json::<ChunkFormat>().await {
+                    Ok(chunk_format) => {
+                        debug!(
+                            "Successfully pulled PD chunk (ledger={}, offset={}) from API {}",
+                            ledger, offset, peer.api
+                        );
+                        return Ok((chunk_format, peer.api));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to parse PD chunk response from API {}: {}",
+                            peer.api, e
+                        );
+                    }
+                },
+                Ok(resp) => {
+                    warn!(
+                        "PD chunk API request to {} returned status {}, trying gossip fallback",
+                        peer.api,
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "PD chunk API request to {} failed: {}, trying gossip fallback",
+                        peer.api, e
+                    );
+                }
+            }
+
+            // --- Gossip fallback (with handshake retry) ---
+            // Look up the peer in the peer list to get their PeerId and PeerListItem
+            if let Some(peer_list_item) = peer_list.peer_by_gossip_address(peer.gossip) {
+                let peer_id = peer_list_item.peer_id;
+                let peer_tuple = (peer_id, peer_list_item);
+
+                match self
+                    .pull_primitive_data_from_peer_with_retry(
+                        gossip_request.clone(),
+                        &peer_tuple,
+                        peer_list,
+                        Self::pd_chunk,
+                    )
+                    .await
+                {
+                    Ok((_peer_id, chunk_format)) => {
+                        debug!(
+                            "Successfully pulled PD chunk (ledger={}, offset={}) via gossip from peer {}",
+                            ledger, offset, peer_id
+                        );
+                        return Ok((chunk_format, peer.api));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Gossip pull of PD chunk from peer {} failed: {}",
+                            peer_id, e
+                        );
+                    }
+                }
+            } else {
+                debug!(
+                    "Peer {} not found in peer list, skipping gossip fallback",
+                    peer.gossip
+                );
+            }
+        }
+
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to pull PD chunk (ledger={}, offset={}) after trying {} peers",
+            ledger,
+            offset,
+            peers.len()
+        )))
+    }
+}
+
+impl PdChunkPusher for GossipClient {
+    /// Push a single PD chunk to a peer. Fire-and-forget: spawns a detached tokio task.
+    /// Checks the circuit breaker before sending and records success/failure on it.
+    fn push_pd_chunk(&self, peer_id: IrysPeerId, peer_addr: &PeerAddress, push: &PdChunkPush) {
+        let req = self.create_request_v2(push.clone());
+        let body = match serde_json::to_vec(&req) {
+            Ok(b) => bytes::Bytes::from(b),
+            Err(e) => {
+                error!(
+                    "Failed to serialize PdChunkPush for peer {}: {:?}",
+                    peer_id, e
+                );
+                return;
+            }
+        };
+
+        let client = self.clone();
+        let gossip_addr = peer_addr.gossip;
+        let span = tracing::Span::current();
+
+        self.runtime_handle.spawn(
+            async move {
+                if let Err(e) = client.check_circuit_breaker(&peer_id) {
+                    record_gossip_outbound_error(gossip_error_type(&e));
+                    return;
+                }
+
+                let result = client
+                    .send_preserialized(&gossip_addr, GossipRoutes::PdChunkPush, body)
+                    .await;
+
+                match &result {
+                    Ok(_) => {
+                        client.circuit_breaker.record_success(&peer_id);
+                    }
+                    Err(e) => {
+                        record_gossip_outbound_error(gossip_error_type(e));
+                        client.circuit_breaker.record_failure(&peer_id);
+                        debug!("Failed to push PD chunk to peer {}: {:?}", peer_id, e);
+                    }
+                }
+            }
+            .instrument(span),
+        );
     }
 }
 

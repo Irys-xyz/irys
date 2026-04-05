@@ -1863,6 +1863,7 @@ mod tests {
                     GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
                     GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
                     GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
+                    GossipDataRequestV2::PdChunk(..) => GossipResponse::Accepted(None),
                 }
             });
 

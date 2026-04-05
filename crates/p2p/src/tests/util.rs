@@ -274,7 +274,7 @@ impl GossipServiceTestFixture {
         let db = DatabaseProvider(Arc::new(db_env));
 
         let (service_senders, service_receivers) =
-            irys_actors::test_helpers::build_test_service_senders();
+            crate::tests::test_helpers::build_test_service_senders();
         let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
         let gossip_broadcast_rx = service_receivers.gossip_broadcast;
         let block_tree_rx = service_receivers.block_tree;
@@ -444,6 +444,8 @@ impl GossipServiceTestFixture {
                         self.config.consensus.clone(),
                     )))),
                     std::time::Instant::now(),
+                    None,
+                    None, // pd_chunk_sender
                 )
                 .expect("failed to run the gossip service");
 
@@ -789,6 +791,15 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))
             }
+            GossipDataRequestV2::PdChunk(ledger_id, offset) => {
+                warn!(
+                    "PD chunk request for ledger={}, offset={}",
+                    ledger_id, offset
+                );
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(GossipResponse::Accepted(false))
+            }
         },
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);
@@ -980,7 +991,7 @@ pub(crate) fn data_handler_stub(
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
     let (service_senders, service_receivers) =
-        irys_actors::test_helpers::build_test_service_senders();
+        crate::tests::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
     let mempool_config = MempoolConfig::testing();
@@ -1043,6 +1054,8 @@ pub(crate) fn data_handler_stub(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        storage_provider: None,
+        pd_chunk_sender: None,
     })
 }
 
@@ -1098,6 +1111,8 @@ pub(crate) fn data_handler_with_stubbed_pool(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        storage_provider: None,
+        pd_chunk_sender: None,
     })
 }
 

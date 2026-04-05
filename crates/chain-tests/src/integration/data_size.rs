@@ -186,7 +186,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     // Get the first chunk from publish ledger to determine promotion order.
     // wait_for_chunk_in_storage handles async migration delay after mine_blocks.
     let first_chunk = genesis_node
-        .wait_for_chunk_in_storage(
+        .wait_for_packed_chunk_in_storage(
             DataLedger::Publish,
             LedgerChunkOffset::from(0),
             seconds_to_wait,
