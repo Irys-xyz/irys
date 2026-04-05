@@ -30,5 +30,6 @@ pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use gossip_service::spawn_p2p_server_watcher_task;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 pub use peer_network_service::{PeerListServiceError, spawn_peer_network_service};
+pub use rate_limiting::DataRequestTracker;
 pub use server::GossipServer;
 pub use types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
