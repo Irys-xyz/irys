@@ -65,7 +65,10 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unstake.clone()],
@@ -209,7 +212,10 @@ async fn block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unstake.clone()],

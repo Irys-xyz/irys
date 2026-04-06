@@ -31,7 +31,10 @@ async fn spiky_heavy4_block_unpledge_partition_not_owned_gets_rejected() -> eyre
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_unpledge = self.invalid_unpledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_unpledge.clone()],
@@ -170,7 +173,10 @@ async fn block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitment_txs = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitment_txs.clone(),
@@ -293,7 +299,10 @@ async fn block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitment = self.commitment.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![commitment.clone()],
@@ -391,7 +400,10 @@ async fn epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let mut commitments = self.commitments.clone();
             commitments.sort(); // mimic canonical ordering
             Ok(irys_actors::block_producer::MempoolTxsBundle {

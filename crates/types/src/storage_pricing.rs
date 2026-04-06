@@ -666,7 +666,10 @@ fn ln_fp18(x: U256) -> Result<U256> {
     if x.is_zero() {
         return Err(eyre!("ln(0) is undefined"));
     }
-    ensure!(x >= TOKEN_SCALE, "ln_fp18 only supports x >= 1.0");
+    ensure!(
+        x >= TOKEN_SCALE,
+        "ln_fp18 only supports x >= 1.0 (unsigned fixed-point cannot represent negative ln values)"
+    );
 
     const TWO_FP18: U256 = U256([2_000_000_000_000_000_000_u64, 0, 0, 0]);
 

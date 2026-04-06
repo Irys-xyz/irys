@@ -5,7 +5,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 on:
   pull_request:
@@ -16,6 +16,8 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# Note: sccache env vars (CARGO_BUILD_RUSTC_WRAPPER, SCCACHE_DIR, SCCACHE_CACHE_SIZE)
+# are set by the setup-repo composite action via GITHUB_ENV.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -37,11 +39,13 @@ jobs:
         run: |
           SHOULD_RUN=false
 
-          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "opened" ]]; then
+          # Fork PRs must not run on self-hosted runners that have write access
+          # to gh-pages and shared caches — require same-repo origin.
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "opened" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
             SHOULD_RUN=true
           fi
 
-          if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request_review" && "${{ github.event.review.state }}" == "approved" && "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
             SHOULD_RUN=true
           fi
 
@@ -211,3 +215,8 @@ jobs:
                 body,
               });
             }
+
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats

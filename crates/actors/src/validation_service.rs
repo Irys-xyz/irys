@@ -24,7 +24,7 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
+    BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
     app_state::DatabaseProvider,
 };
 use irys_vdf::rayon;
@@ -36,7 +36,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use tokio::{
-    sync::{Notify, broadcast, mpsc::UnboundedReceiver},
+    sync::{broadcast, mpsc::UnboundedReceiver},
     time::Duration,
 };
 use tracing::{Instrument as _, debug, error, info, warn};
@@ -69,8 +69,6 @@ pub struct ValidationService {
     msg_rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
-    /// VDF task completion notifier
-    vdf_notify: Arc<Notify>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -129,15 +127,14 @@ impl ValidationService {
         let reorg_rx = service_senders.subscribe_reorgs();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
-        let vdf_notify = Arc::new(Notify::new());
 
+        let rt_handle = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let validation_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    vdf_notify: vdf_notify.clone(),
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.vdf.parallel_verification_thread_limit)
@@ -158,7 +155,7 @@ impl ValidationService {
                 };
 
                 validation_service
-                    .start()
+                    .start(rt_handle)
                     .in_current_span()
                     .await
                     .expect("validation service encountered an irrecoverable error")
@@ -177,14 +174,12 @@ impl ValidationService {
 
     /// Main service loop
     #[tracing::instrument(name = "validation_service_start", level = "trace", skip_all)]
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         info!("starting validation service");
 
-        // Use the improved implementation
         let mut coordinator = active_validations::ValidationCoordinator::new(
             self.inner.block_tree_guard.clone(),
-            Arc::clone(&self.vdf_notify),
-            tokio::runtime::Handle::current(),
+            runtime_handle,
         );
 
         // Create a timer for periodic pipeline logging
@@ -242,12 +237,12 @@ impl ValidationService {
                     }
                 }
 
-                // Process VDF completions
-                _ = self.vdf_notify.notified() => {
-                    if let Some((hash, result)) = coordinator.process_vdf().await {
-                        match result {
+                // Process VDF task completion
+                (current, result) = coordinator.vdf_scheduler.poll_vdf() => {
+                    match result {
+                        Ok((hash, vdf_result, task)) => match vdf_result {
                             VdfValidationResult::Valid => {
-                                // Valid VDF - task continues to concurrent validation
+                                coordinator.spawn_concurrent(task);
                             }
                             VdfValidationResult::Invalid(vdf_error) => {
                                 error!(
@@ -255,24 +250,49 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
-                                // Send failure to block tree
-                                if let Err(e) = self.inner.service_senders.block_tree.send_traced(
-                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                                        block_hash: hash,
-                                        validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
-                                    }
-                                ) {
-                                    error!(
-                                        custom.error = ?e,
-                                        "Failed to send VDF failure to block tree service"
-                                    );
-                                }
+                                self.send_validation_result(hash, ValidationResult::Invalid(
+                                    ValidationError::VdfValidationFailed(vdf_error.to_string())
+                                ));
                             }
                             VdfValidationResult::Cancelled => {
-                                // Cancelled tasks are re-queued internally, no action needed
+                                // Preemption set the cancel signal, so the task
+                                // exited cooperatively. Resubmit — submit_task
+                                // recalculates priority (which may have changed
+                                // due to reorgs) before re-entering the queue.
+                                coordinator.submit_task(task);
+                            }
+                        }
+                        Err(join_error) => if join_error.is_panic() {
+                            error!(
+                                block.hash = %current.hash,
+                                custom.error = %join_error,
+                                "VDF validation task panicked"
+                            );
+                            self.send_validation_result(current.hash, ValidationResult::Invalid(
+                                ValidationError::TaskPanicked {
+                                    task: "vdf_validation".to_string(),
+                                    details: join_error.to_string(),
+                                },
+                            ));
+                        } else {
+                            // JoinError::Cancelled — the spawned future was aborted
+                            // without going through the cooperative cancel signal.
+                            // This shouldn't happen during normal operation: shutdown
+                            // runs after the loop exits, and preemption uses the
+                            // AtomicU8 signal. Requeue defensively to avoid silently
+                            // dropping a block.
+                            warn!(
+                                block.hash = %current.hash,
+                                custom.error = %join_error,
+                                "VDF task unexpectedly cancelled, requeuing"
+                            );
+                            if let Some(task) = current.requeue_task {
+                                coordinator.submit_task(task);
                             }
                         }
                     }
+                    // Start next pending VDF task
+                    coordinator.vdf_scheduler.start_next();
                 }
 
                 // Process concurrent task completions (only if there are tasks)
@@ -280,19 +300,10 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
-
-                            if let Err(e) = self.inner.service_senders.block_tree.send_traced(
-                                crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                                    block_hash: validation.block_hash,
-                                    validation_result: validation.validation_result,
-                                }
-                            ) {
-                                error!(
-                                    block.hash = %validation.block_hash,
-                                    custom.error = ?e,
-                                    "Failed to send validation result to block tree service"
-                                );
-                            }
+                            self.send_validation_result(
+                                validation.block_hash,
+                                validation.validation_result,
+                            );
                         }
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
@@ -307,22 +318,12 @@ impl ValidationService {
                                 message
                             );
                             if let Some(hash) = removed
-                                && let Err(send_err) = self.inner.service_senders.block_tree.send_traced(
-                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                                        block_hash: hash,
-                                        validation_result: ValidationResult::Invalid(
-                                            ValidationError::TaskPanicked {
-                                                task: "concurrent_validation".to_string(),
-                                                details: e.to_string(),
-                                            },
-                                        ),
-                                    }
-                                ) {
-                                    error!(
-                                        block.hash = %hash,
-                                        custom.error = ?send_err,
-                                        "Failed to send panic result to block tree service"
-                                    );
+                                && !self.send_validation_result(hash, ValidationResult::Invalid(
+                                    ValidationError::TaskPanicked {
+                                        task: "concurrent_validation".to_string(),
+                                        details: e.to_string(),
+                                    },
+                                )) {
                                     // Block tree won't handle diagnostics since send failed,
                                     // so record directly as a fallback.
                                     self.inner.chain_sync_state.record_validation_finished(&hash);
@@ -342,9 +343,6 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
-
-                    // TODO: this notify_one() is a quick and dirty fix for an issue this system has with it's usage of notify that we haven't been able to figure out (it causes stalls in the VDF validation)
-                    self.vdf_notify.notify_one();
 
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
@@ -371,7 +369,31 @@ impl ValidationService {
         }
 
         info!("shutting down validation service");
+        coordinator.shutdown();
         Ok(())
+    }
+
+    /// Report a block's validation result to the block tree service.
+    /// Returns `true` on success. On send failure, logs an error and returns `false`.
+    fn send_validation_result(
+        &self,
+        block_hash: BlockHash,
+        validation_result: ValidationResult,
+    ) -> bool {
+        if let Err(e) = self.inner.service_senders.block_tree.send_traced(
+            crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                block_hash,
+                validation_result,
+            },
+        ) {
+            error!(
+                block.hash = %block_hash,
+                custom.error = ?e,
+                "Failed to send validation result to block tree service"
+            );
+            return false;
+        }
+        true
     }
 }
 

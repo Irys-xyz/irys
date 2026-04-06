@@ -55,6 +55,19 @@ pub(crate) fn bind_capacity(c_src: &Path) {
 
 pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
+
+    // Temporarily unset RUSTC_WRAPPER to prevent sccache from wrapping nvcc.
+    // Cargo translates CARGO_BUILD_RUSTC_WRAPPER → RUSTC_WRAPPER when spawning
+    // build-script subprocesses. cc-rs reads RUSTC_WRAPPER and prepends it to
+    // all compiler invocations, including nvcc, which sccache cannot handle.
+
+    let _guard = RestoreEnv {
+        key: "RUSTC_WRAPPER",
+        val: env::var_os("RUSTC_WRAPPER"),
+    };
+    // SAFETY: build scripts are single-threaded; no other threads observe this env var.
+    unsafe { env::remove_var("RUSTC_WRAPPER") };
+
     cc.cuda(true)
         .cudart("static")
         .opt_level(3)
@@ -87,6 +100,7 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     }
 
     cc.file(c_src.join("capacity_cuda.cu"));
+
     cc.compile("capacity_cuda");
 }
 
@@ -103,4 +117,19 @@ pub(crate) fn bind_capacity_cuda(c_src: &Path) {
     bindings
         .write_to_file(out_path.join("capacity_bindings_cuda.rs"))
         .expect("Couldn't write bindings!");
+}
+
+/// RAII guard that restores an env var on drop (including panic unwind).
+struct RestoreEnv {
+    key: &'static str,
+    val: Option<std::ffi::OsString>,
+}
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        // SAFETY: build scripts are single-threaded; no other threads observe this env var.
+        match self.val.take() {
+            Some(v) => unsafe { env::set_var(self.key, v) },
+            None => unsafe { env::remove_var(self.key) },
+        }
+    }
 }

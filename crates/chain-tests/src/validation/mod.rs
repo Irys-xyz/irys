@@ -111,7 +111,10 @@ async fn block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_stake = self.invalid_stake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_stake.clone()],
@@ -211,7 +214,10 @@ async fn block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let invalid_pledge = self.invalid_pledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![invalid_pledge.clone()],
@@ -310,7 +316,10 @@ async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitments.clone(),
@@ -431,7 +440,10 @@ async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: commitments.clone(),
@@ -593,7 +605,10 @@ async fn block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![self.wrong_commitment.clone()],
                 commitment_txs_to_bill: vec![],
@@ -846,7 +861,10 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             // Create publish ledger with duplicate proofs from the same signer for one transaction
             // This tests that each transaction must have unique signers
             let proofs = IngressProofsList(
@@ -1058,7 +1076,10 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
@@ -1223,7 +1244,10 @@ async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() ->
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],

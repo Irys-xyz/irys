@@ -448,7 +448,7 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
             &self,
             _prev_block_header: &IrysBlockHeader,
             _block_timestamp: irys_types::UnixTimestampMs,
-        ) -> eyre::Result<MempoolTxs> {
+        ) -> Result<MempoolTxs, irys_actors::tx_selector::TxSelectorError> {
             Ok(self.txs.lock().unwrap().clone())
         }
     }

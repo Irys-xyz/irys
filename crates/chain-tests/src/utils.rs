@@ -2148,6 +2148,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         irys_actors::tx_selector::select_best_txs(parent_block_hash, new_block_timestamp, &ctx)
             .await
+            .map_err(Into::into)
     }
 
     // get account reth balance at specific block
