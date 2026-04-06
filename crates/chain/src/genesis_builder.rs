@@ -18,8 +18,8 @@ use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
     CommitmentTransaction, CommitmentTypeV2, Config, H256, H256List, IrysAddress, IrysBlockHeader,
-    SystemLedger, SystemTransactionLedger, U256, UnixTimestamp, UnixTimestampMs,
-    calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
+    IrysTransactionCommon as _, SystemLedger, SystemTransactionLedger, U256, UnixTimestamp,
+    UnixTimestampMs, calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -82,7 +82,7 @@ impl GenesisMinerManifest {
     /// are sorted by `IrysAddress` so the manifest ordering is canonical and
     /// does not affect the resulting block hash.
     pub fn into_entries(self) -> eyre::Result<Vec<GenesisMinerEntry>> {
-        let mut entries: Vec<GenesisMinerEntry> = self
+        let entries: Vec<GenesisMinerEntry> = self
             .miners
             .into_iter()
             .enumerate()
@@ -103,26 +103,27 @@ impl GenesisMinerManifest {
             })
             .collect::<eyre::Result<Vec<_>>>()?;
 
-        // Sort by derived IrysAddress for canonical ordering.
-        // Use sort_by_cached_key to avoid redundant EC derivations (O(n log n) calls).
-        entries.sort_by_cached_key(|e| signer_from_key_address(&e.signing_key));
+        // Compute addresses once for both canonical sorting and duplicate detection.
+        let mut entries_with_addrs: Vec<(GenesisMinerEntry, IrysAddress)> = entries
+            .into_iter()
+            .map(|e| {
+                let addr = signer_from_key_address(&e.signing_key);
+                (e, addr)
+            })
+            .collect();
+        entries_with_addrs.sort_by_key(|(_, addr)| *addr);
 
         // Detect duplicate keys by checking adjacent entries after sorting.
-        // Compute addresses once rather than twice per window element.
-        let addrs: Vec<IrysAddress> = entries
-            .iter()
-            .map(|e| signer_from_key_address(&e.signing_key))
-            .collect();
-        for pair in addrs.windows(2) {
+        for pair in entries_with_addrs.windows(2) {
             eyre::ensure!(
-                pair[0] != pair[1],
+                pair[0].1 != pair[1].1,
                 "duplicate mining key detected: two miners resolve to the same \
                  IrysAddress {}. Each miner must have a unique key.",
-                pair[0],
+                pair[0].1,
             );
         }
 
-        Ok(entries)
+        Ok(entries_with_addrs.into_iter().map(|(e, _)| e).collect())
     }
 }
 
@@ -136,6 +137,12 @@ pub struct GenesisOutput {
     pub reth_chain_spec: Arc<ChainSpec>,
 }
 
+/// Determine the initial packed partitions count for difficulty calculation.
+///
+/// Precedence (consensus-affecting for genesis difficulty):
+/// 1. `genesis.initial_packed_partitions` — explicit override
+/// 2. `epoch.num_capacity_partitions` — if set in the epoch config
+/// 3. `total_pledges` — fallback matching pre-multi-miner behavior
 fn initial_packed_partitions_from_config(config: &Config, total_pledges: u64) -> eyre::Result<f64> {
     if let Some(packed_partitions) = config.consensus.genesis.initial_packed_partitions {
         eyre::ensure!(
@@ -159,26 +166,20 @@ fn initial_packed_partitions_from_config(config: &Config, total_pledges: u64) ->
 }
 
 // ---------------------------------------------------------------------------
-// Core builder
+// Shared genesis block preparation
 // ---------------------------------------------------------------------------
 
-/// Build a fully-signed genesis block that includes commitments from multiple
-/// miners.
-///
-/// The first miner in `miners` is treated as the block producer and signs the
-/// block header. Every miner receives one stake commitment followed by
-/// `pledge_count` pledge commitments. Anchors rotate globally across all
-/// commitments so that every transaction has a unique ID.
-///
-/// # Errors
-///
-/// Returns an error if the reth chain spec cannot be built, difficulty
-/// calculation fails, or block signing fails.
-pub async fn build_signed_genesis_block(
-    config: &Config,
-    miners: &[GenesisMinerEntry],
-) -> eyre::Result<GenesisOutput> {
-    // 1. Determine timestamp (prefer configured value, else now())
+/// Intermediate state after building the unsigned genesis block and chain spec.
+/// Shared between `build_signed_genesis_block` and `build_genesis_block_from_commitments`.
+struct GenesisPrelude {
+    genesis_block: IrysBlockHeader,
+    reth_chain_spec: Arc<ChainSpec>,
+}
+
+/// Build the unsigned genesis block, reth chain spec, and set timestamp fields.
+/// This is the shared prelude for both genesis builder paths.
+fn prepare_unsigned_genesis(config: &Config) -> eyre::Result<GenesisPrelude> {
+    // Determine timestamp (prefer configured value, else now())
     let configured_ts = config.consensus.genesis.timestamp_millis;
     let timestamp_millis = if configured_ts != 0 {
         configured_ts
@@ -195,7 +196,7 @@ pub async fn build_signed_genesis_block(
     )
     .as_secs();
 
-    // 2. Build reth chain spec
+    // Build reth chain spec
     let reth_chain_spec = irys_chain_spec(
         config.consensus.chain_id,
         &config.consensus.reth,
@@ -203,7 +204,7 @@ pub async fn build_signed_genesis_block(
         timestamp_secs,
     )?;
 
-    // 3. Build unsigned genesis block
+    // Build unsigned genesis block
     let number_of_ingress_proofs_total =
         config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
     let mut genesis_block = build_unsigned_irys_genesis_block(
@@ -213,38 +214,44 @@ pub async fn build_signed_genesis_block(
         config.consensus.hardforks.cascade.as_ref(),
     )?;
 
-    // 4. Set timestamp fields
+    // Set timestamp fields
     if config.consensus.genesis.last_epoch_hash != H256::zero() {
         genesis_block.last_epoch_hash = config.consensus.genesis.last_epoch_hash;
     }
     genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
     genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
-    // 5. Generate multi-miner commitments
-    let (commitments, initial_treasury) =
-        generate_multi_miner_commitments(&mut genesis_block, config, miners).await;
+    Ok(GenesisPrelude {
+        genesis_block,
+        reth_chain_spec,
+    })
+}
 
-    // 6. Calculate difficulty from packed partitions (config override or total pledges).
-    let total_pledges: u64 = miners.iter().map(|m| m.pledge_count).sum();
+/// Finalize a genesis block: set difficulty, run VDF, sign, and log.
+fn finalize_genesis_block(
+    genesis_block: &mut IrysBlockHeader,
+    config: &Config,
+    initial_treasury: U256,
+    total_pledges: u64,
+    signing_key: &SigningKey,
+    label: &str,
+) -> eyre::Result<()> {
     let packed_partitions = initial_packed_partitions_from_config(config, total_pledges)?;
     let difficulty = calculate_initial_difficulty(&config.consensus, packed_partitions)
         .wrap_err("failed to calculate initial difficulty")?;
     genesis_block.diff = difficulty;
     genesis_block.treasury = initial_treasury;
 
-    // 7. Run VDF for genesis
-    run_vdf_for_genesis_block(&mut genesis_block, &config.vdf);
+    run_vdf_for_genesis_block(genesis_block, &config.vdf);
 
-    // 8. Sign block with first miner's key
-    let block_signer = signer_from_key(&miners[0].signing_key, config);
+    let block_signer = signer_from_key(signing_key, config);
     block_signer
-        .sign_block_header(&mut genesis_block)
+        .sign_block_header(genesis_block)
         .wrap_err("failed to sign genesis block header")?;
 
     info!("=====================================");
-    info!("GENESIS BLOCK CREATED (multi-miner)");
+    info!("GENESIS BLOCK CREATED ({label})");
     info!("Hash: {}", genesis_block.block_hash);
-    info!("Miners: {}", miners.len());
     info!("Total pledges: {}", total_pledges);
     info!("Packed partitions (from config): {}", packed_partitions);
     info!(
@@ -252,6 +259,62 @@ pub async fn build_signed_genesis_block(
         genesis_block.block_hash
     );
     info!("=====================================");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Core builder
+// ---------------------------------------------------------------------------
+
+/// Build a fully-signed genesis block that includes commitments from multiple
+/// miners.
+///
+/// The first miner in `miners` is treated as the block producer and signs the
+/// block header. Every miner receives one stake commitment followed by
+/// `pledge_count` pledge commitments. Anchors rotate globally across all
+/// commitments so that every transaction has a unique ID.
+///
+/// **Miner ordering is consensus-relevant.** The CLI manifest (`GenesisMinerManifest`)
+/// canonicalizes order via [`GenesisMinerManifest::into_entries`]; direct callers
+/// must ensure canonical ordering themselves.
+///
+/// **No minimum pledge count is enforced here.** The old single-miner path
+/// required >= 3 storage submodules; this builder delegates that policy to the
+/// caller (e.g. the CLI's manifest validation or the node's submodule config).
+///
+/// # Errors
+///
+/// Returns an error if `miners` is empty, the reth chain spec cannot be built,
+/// difficulty calculation fails, or block signing fails.
+pub async fn build_signed_genesis_block(
+    config: &Config,
+    miners: &[GenesisMinerEntry],
+) -> eyre::Result<GenesisOutput> {
+    eyre::ensure!(
+        !miners.is_empty(),
+        "at least one miner entry is required to build a genesis block"
+    );
+
+    let GenesisPrelude {
+        mut genesis_block,
+        reth_chain_spec,
+        ..
+    } = prepare_unsigned_genesis(config)?;
+
+    // Generate multi-miner commitments
+    let (commitments, initial_treasury) =
+        generate_multi_miner_commitments(&mut genesis_block, config, miners).await;
+
+    let total_pledges: u64 = miners.iter().map(|m| m.pledge_count).sum();
+    finalize_genesis_block(
+        &mut genesis_block,
+        config,
+        initial_treasury,
+        total_pledges,
+        &miners[0].signing_key,
+        "multi-miner",
+    )?;
 
     Ok(GenesisOutput {
         block: genesis_block,
@@ -268,58 +331,36 @@ pub async fn build_signed_genesis_block(
 ///
 /// # Errors
 ///
-/// Returns an error if difficulty calculation fails, VDF execution fails,
-/// or block signing fails.
+/// Returns an error if any commitment signature is invalid, difficulty
+/// calculation fails, VDF execution fails, or block signing fails.
 pub fn build_genesis_block_from_commitments(
     config: &Config,
     commitments: Vec<CommitmentTransaction>,
     block_signing_key: &SigningKey,
 ) -> eyre::Result<GenesisOutput> {
-    // 1. Determine timestamp (prefer configured value, else now())
-    let configured_ts = config.consensus.genesis.timestamp_millis;
-    let timestamp_millis = if configured_ts != 0 {
-        configured_ts
-    } else {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_millis()
-    };
-    let timestamp_secs = Duration::from_millis(
-        timestamp_millis
-            .try_into()
-            .wrap_err("timestamp_millis overflow")?,
-    )
-    .as_secs();
+    let GenesisPrelude {
+        mut genesis_block,
+        reth_chain_spec,
+        ..
+    } = prepare_unsigned_genesis(config)?;
 
-    // 2. Build reth chain spec
-    let reth_chain_spec = irys_chain_spec(
-        config.consensus.chain_id,
-        &config.consensus.reth,
-        &config.consensus.hardforks,
-        timestamp_secs,
-    )?;
-
-    // 3. Build unsigned genesis block
-    let number_of_ingress_proofs_total =
-        config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
-    let mut genesis_block = build_unsigned_irys_genesis_block(
-        &config.consensus.genesis,
-        reth_chain_spec.genesis_hash(),
-        number_of_ingress_proofs_total,
-        config.consensus.hardforks.cascade.as_ref(),
-    )?;
-
-    // 4. Set timestamp fields
-    if config.consensus.genesis.last_epoch_hash != H256::zero() {
-        genesis_block.last_epoch_hash = config.consensus.genesis.last_epoch_hash;
+    // Validate all commitment signatures before building the block.
+    // A corrupted/tampered JSON file should fail here rather than producing
+    // a genesis block that peers will reject later.
+    for (i, c) in commitments.iter().enumerate() {
+        eyre::ensure!(
+            c.is_signature_valid(),
+            "commitment {} (txid={}) has an invalid signature",
+            i,
+            c.id(),
+        );
     }
-    genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
-    genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
-    // 5. Validate that every miner with pledges also has a stake.
-    //    compute_commitment_state() stores stakes in a BTreeMap<IrysAddress, StakeEntry>;
-    //    a miner with pledges but no stake will fail during epoch processing.
+    // Validate that every miner with pledges also has a stake.
+    // This checks existence only — ordering (stake before pledges per miner)
+    // is enforced by the epoch service during `compute_commitment_state()`,
+    // which processes commitments sequentially and expects a stake entry
+    // before any pledges for a given address.
     {
         use std::collections::BTreeSet;
         let staked: BTreeSet<IrysAddress> = commitments
@@ -339,7 +380,7 @@ pub fn build_genesis_block_from_commitments(
         }
     }
 
-    // 6. Register all commitment txids in the commitment ledger and sum values
+    // Register all commitment txids in the commitment ledger and sum values
     let ledger = get_or_create_commitment_ledger(&mut genesis_block);
     let mut initial_treasury = U256::zero();
     for commitment in &commitments {
@@ -347,39 +388,19 @@ pub fn build_genesis_block_from_commitments(
         initial_treasury = initial_treasury.saturating_add(commitment.value());
     }
 
-    // 7. Count pledges for difficulty
     let total_pledges = commitments
         .iter()
         .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }))
         .count() as u64;
 
-    // 8. Calculate difficulty from packed partitions (config override or total pledges).
-    let packed_partitions = initial_packed_partitions_from_config(config, total_pledges)?;
-    let difficulty = calculate_initial_difficulty(&config.consensus, packed_partitions)
-        .wrap_err("failed to calculate initial difficulty")?;
-    genesis_block.diff = difficulty;
-    genesis_block.treasury = initial_treasury;
-
-    // 9. Run VDF for genesis
-    run_vdf_for_genesis_block(&mut genesis_block, &config.vdf);
-
-    // 10. Sign with provided key
-    let block_signer = signer_from_key(block_signing_key, config);
-    block_signer
-        .sign_block_header(&mut genesis_block)
-        .wrap_err("failed to sign genesis block header")?;
-
-    info!("=====================================");
-    info!("GENESIS BLOCK CREATED (from commitments)");
-    info!("Hash: {}", genesis_block.block_hash);
-    info!("Total commitments: {}", commitments.len());
-    info!("Total pledges: {}", total_pledges);
-    info!("Packed partitions (from config): {}", packed_partitions);
-    info!(
-        "consensus.expected_genesis_hash = \"{}\"",
-        genesis_block.block_hash
-    );
-    info!("=====================================");
+    finalize_genesis_block(
+        &mut genesis_block,
+        config,
+        initial_treasury,
+        total_pledges,
+        block_signing_key,
+        "from commitments",
+    )?;
 
     Ok(GenesisOutput {
         block: genesis_block,
@@ -397,6 +418,11 @@ pub fn build_genesis_block_from_commitments(
 ///
 /// For each miner: 1 stake + N pledges. Anchors rotate globally across ALL
 /// commitments so that every txid is unique.
+///
+/// Pledge fees are calculated **per-miner**: the `&i` passed to `new_pledge` is
+/// the miner-local pledge index (0, 1, 2, ...), NOT a global count across all
+/// miners. This means each miner's pledge cost curve starts from their own first
+/// pledge, matching the single-miner behavior from `get_genesis_commitments`.
 async fn generate_multi_miner_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
@@ -419,14 +445,12 @@ async fn generate_multi_miner_commitments(
         all_commitments.push(stake);
 
         // -- Pledge commitments --
+        // `i` is the per-miner pledge index used for fee calculation via
+        // PledgeDataProvider. Each miner's fee curve starts independently.
         for i in 0..miner.pledge_count {
-            let mut pledge = CommitmentTransaction::new_pledge(
-                &config.consensus,
-                anchor,
-                &i, // u64 implements PledgeDataProvider — returns itself as pledge count
-                signer.address(),
-            )
-            .await;
+            let mut pledge =
+                CommitmentTransaction::new_pledge(&config.consensus, anchor, &i, signer.address())
+                    .await;
             signer
                 .sign_commitment(&mut pledge)
                 .expect("pledge commitment should be signable");

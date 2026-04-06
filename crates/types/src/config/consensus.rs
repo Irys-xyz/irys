@@ -310,10 +310,15 @@ pub struct GenesisConfig {
     pub genesis_price: Amount<(IrysPrice, Usd)>,
 
     /// Number of fully packed partitions to use for initial difficulty
-    /// calculation at genesis.
+    /// calculation at genesis. Used by [`genesis_builder::initial_packed_partitions_from_config`]
+    /// with fallback chain: this field > `epoch.num_capacity_partitions` > total pledges.
     ///
-    /// If unset, callers may fall back to other consensus values.
-    #[serde(default)]
+    /// Set this explicitly for custom networks or tests requiring exact genesis difficulty.
+    /// If unset, the builder falls back to other consensus values.
+    ///
+    /// `skip_serializing_if` ensures `None` is omitted from canonical JSON,
+    /// keeping the consensus config hash unchanged for nodes that don't set this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_packed_partitions: Option<f64>,
 }
 
@@ -1136,7 +1141,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("CZCM35BPbUpiw9i7e3TEZWZcV3g8iYRE1tEqwCCzsTpz");
+        let expected_hash = H256::from_base58("PGh7Dunjx4xjNTLbx48G8DdKuozbsZ3nYCLm6AvRjUN");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

@@ -223,11 +223,8 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
                 bail!("Either --miners or --commitments must be provided");
             };
 
-            save_genesis_block_to_disk(Arc::new(genesis_output.block.clone()), &output)
-                .map_err(|e| eyre::eyre!("Failed to write genesis block: {}", e))?;
-
-            save_genesis_commitments_to_disk(&genesis_output.commitments, &output)
-                .map_err(|e| eyre::eyre!("Failed to write genesis commitments: {}", e))?;
+            save_genesis_block_to_disk(Arc::new(genesis_output.block.clone()), &output)?;
+            save_genesis_commitments_to_disk(&genesis_output.commitments, &output)?;
 
             info!("Genesis block written to {:?}", &output);
             info!("  Block hash: {}", genesis_output.block.block_hash);
@@ -248,8 +245,6 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             let evm_address = secret_key_to_address(&signing_key);
             let irys_address = IrysAddress::from(evm_address);
 
-            let key_hex = hex::encode(signing_key.to_bytes());
-            println!("Mining key:   {}...", &key_hex[..16]);
             println!("Irys address: {irys_address}");
             println!("EVM address:  {evm_address}");
 

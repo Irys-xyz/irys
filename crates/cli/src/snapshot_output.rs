@@ -450,6 +450,9 @@ fn count_pledge_commitments(commitments: &[irys_types::CommitmentTransaction]) -
         .count()
 }
 
+/// Create placeholder submodule paths for partition assignment computation.
+/// These paths are never accessed on disk — `EpochSnapshot::new` only uses
+/// the path count and `is_using_hardcoded_paths` flag to derive partition hashes.
 fn hardcoded_submodules(prefix: &str, count: usize) -> irys_config::StorageSubmodulesConfig {
     irys_config::StorageSubmodulesConfig {
         is_using_hardcoded_paths: true,
@@ -503,14 +506,10 @@ pub(crate) fn snapshot_from_genesis_dir(
     use irys_domain::EpochSnapshot;
 
     let genesis_block = load_genesis_block_from_disk(genesis_dir)
-        .map_err(|e| eyre::eyre!("Failed to load genesis block from {:?}: {e}", genesis_dir))?;
+        .map_err(|e| eyre::eyre!("loading genesis block from {:?}: {e}", genesis_dir))?;
 
-    let commitments = load_genesis_commitments_from_disk(genesis_dir).map_err(|e| {
-        eyre::eyre!(
-            "Failed to load genesis commitments from {:?}: {e}",
-            genesis_dir
-        )
-    })?;
+    let commitments = load_genesis_commitments_from_disk(genesis_dir)
+        .map_err(|e| eyre::eyre!("loading genesis commitments from {:?}: {e}", genesis_dir))?;
 
     let submodules = hardcoded_submodules(submodule_prefix, count_pledge_commitments(&commitments));
     let snapshot = EpochSnapshot::new(

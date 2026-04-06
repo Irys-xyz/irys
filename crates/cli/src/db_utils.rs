@@ -1,5 +1,5 @@
 use crate::cli_args::timestamp_millis_to_secs;
-use eyre::bail;
+use eyre::{Context as _, bail};
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, NodeConfig};
 use reth_node_core::version::default_client_version;
@@ -8,6 +8,25 @@ use reth_provider::{ProviderFactory, providers::StaticFileProvider};
 use std::{path::PathBuf, sync::Arc};
 
 use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
+
+/// Load NodeConfig from the CONFIG env var (default "config.toml"), falling
+/// back to testnet defaults if the file is missing.
+fn load_node_config_from_env() -> NodeConfig {
+    let config_path = std::env::var("CONFIG")
+        .unwrap_or_else(|_| "config.toml".to_owned())
+        .parse::<PathBuf>()
+        .expect("file path to be valid");
+
+    std::fs::read_to_string(config_path)
+        .map(|content| toml::from_str::<NodeConfig>(&content).expect("invalid config file"))
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                custom.error = ?err,
+                "config file not provided, defaulting to testnet config"
+            );
+            NodeConfig::testnet()
+        })
+}
 
 pub(crate) fn import_genesis_to_db(genesis_dir: &PathBuf, config: &Config) -> eyre::Result<()> {
     use irys_chain::genesis_utilities::{
@@ -20,13 +39,9 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &PathBuf, config: &Config) -> ey
     use irys_types::{BlockBody, DatabaseProvider, SealedBlock};
 
     let genesis_block = load_genesis_block_from_disk(genesis_dir)
-        .map_err(|e| eyre::eyre!("Failed to load genesis block from {:?}: {e}", genesis_dir))?;
-    let commitments = load_genesis_commitments_from_disk(genesis_dir).map_err(|e| {
-        eyre::eyre!(
-            "Failed to load genesis commitments from {:?}: {e}",
-            genesis_dir
-        )
-    })?;
+        .wrap_err_with(|| format!("loading genesis block from {:?}", genesis_dir))?;
+    let commitments = load_genesis_commitments_from_disk(genesis_dir)
+        .wrap_err_with(|| format!("loading genesis commitments from {:?}", genesis_dir))?;
 
     if !genesis_block.is_signature_valid() {
         bail!(
@@ -63,10 +78,9 @@ Use an empty/reset database before importing.",
     write_tx.commit()?;
 
     save_genesis_block_to_disk(genesis_block, &config.node_config.base_directory)
-        .map_err(|e| eyre::eyre!("Failed to write genesis block to node base_directory: {e}"))?;
-    save_genesis_commitments_to_disk(&commitments, &config.node_config.base_directory).map_err(
-        |e| eyre::eyre!("Failed to write genesis commitments to node base_directory: {e}"),
-    )?;
+        .wrap_err("writing genesis block to node base_directory")?;
+    save_genesis_commitments_to_disk(&commitments, &config.node_config.base_directory)
+        .wrap_err("writing genesis commitments to node base_directory")?;
 
     Ok(())
 }
@@ -97,53 +111,12 @@ pub(crate) fn load_block_commitments<T: irys_database::reth_db::transaction::DbT
         .collect()
 }
 
-#[expect(dead_code)]
-pub(crate) fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
-    let config = std::env::var("CONFIG")
-        .unwrap_or_else(|_| "config.toml".to_owned())
-        .parse::<PathBuf>()
-        .expect("file path to be valid");
-    let config = std::fs::read_to_string(config)
-        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                custom.error = ?err,
-                "config file not provided, defaulting to testnet config"
-            );
-            NodeConfig::testnet()
-        });
-
-    let db_path = config.reth_data_dir().join("db");
-
-    let reth_db = Arc::new(DatabaseEnv::open(
-        &db_path,
-        access,
-        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-            .with_log_level(None)
-            .with_exclusive(Some(false)),
-    )?);
-
-    Ok(reth_db)
-}
-
 /// Initialize reth database and provider factory for commands that need header access
 pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
     Arc<DatabaseEnv>,
     ProviderFactory<NodeTypesWithDBAdapter<irys_reth::IrysEthereumNode, Arc<DatabaseEnv>>>,
 )> {
-    let config = std::env::var("CONFIG")
-        .unwrap_or_else(|_| "config.toml".to_owned())
-        .parse::<PathBuf>()
-        .expect("file path to be valid");
-    let node_config = std::fs::read_to_string(config)
-        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                custom.error = ?err,
-                "config file not provided, defaulting to testnet config"
-            );
-            NodeConfig::testnet()
-        });
+    let node_config = load_node_config_from_env();
     let config = Config::new_with_random_peer_id(node_config.clone());
 
     let db_path = node_config.reth_data_dir().join("db");
@@ -190,20 +163,7 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 
-    let config = std::env::var("CONFIG")
-        .unwrap_or_else(|_| "config.toml".to_owned())
-        .parse::<PathBuf>()
-        .expect("file path to be valid");
-    let config = std::fs::read_to_string(config)
-        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                custom.error = ?err,
-                "config file not provided, defaulting to testnet config"
-            );
-            NodeConfig::testnet()
-        });
-
+    let config = load_node_config_from_env();
     let db_path = config.irys_consensus_data_dir();
 
     let db_env = match access {
