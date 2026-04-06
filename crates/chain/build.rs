@@ -1,6 +1,19 @@
 use std::process::Command;
 
 fn main() {
+    // When building outside a git repo (e.g. Docker), accept git metadata via env
+    // vars and skip all git detection. build_image.sh captures these from the host.
+    if let (Ok(sha), Ok(has_tag), Ok(dirty)) = (
+        std::env::var("GIT_SHA"),
+        std::env::var("GIT_HAS_TAG"),
+        std::env::var("GIT_DIRTY"),
+    ) {
+        println!("cargo:rustc-env=GIT_SHA={sha}");
+        println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
+        println!("cargo:rustc-env=GIT_DIRTY={dirty}");
+        return;
+    }
+
     // In worktrees, HEAD lives in the worktree's own git dir, but refs/tags and
     // packed-refs live in the common (main repo) git dir. Track both.
 

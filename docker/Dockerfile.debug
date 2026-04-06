@@ -32,6 +32,12 @@ COPY . .
 
 # Build the release binary with portable CPU target
 ARG CARGO_FEATURES=""
+ARG GIT_SHA=unknown
+ARG GIT_HAS_TAG=false
+ARG GIT_DIRTY=false
+ENV GIT_SHA=${GIT_SHA}
+ENV GIT_HAS_TAG=${GIT_HAS_TAG}
+ENV GIT_DIRTY=${GIT_DIRTY}
 ENV RUSTFLAGS="-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold"
 RUN if [ -n "$CARGO_FEATURES" ]; then \
       cargo build --release --bin irys -p irys-chain --locked --features "$CARGO_FEATURES"; \
