@@ -20,6 +20,52 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{info, warn};
 
+fn signing_key_from_hex(hex_str: &str) -> eyre::Result<k256::ecdsa::SigningKey> {
+    let key_bytes = hex::decode(hex_str.trim_start_matches("0x"))
+        .map_err(|e| eyre::eyre!("Invalid hex for signing key: {e}"))?;
+    k256::ecdsa::SigningKey::from_slice(&key_bytes)
+        .map_err(|e| eyre::eyre!("Invalid signing key: {e}"))
+}
+
+/// Resolve a signing key from, in order:
+/// 1. Explicit hex string (CLI arg or `IRYS_SIGNING_KEY` env var)
+/// 2. Key file path (CLI arg or `IRYS_SIGNING_KEY_FILE` env var)
+/// 3. `mining_key` in config.toml
+fn resolve_signing_key(
+    explicit_hex: Option<String>,
+    key_file: Option<std::path::PathBuf>,
+) -> eyre::Result<k256::ecdsa::SigningKey> {
+    // 1. Direct hex value (from --signing-key / --key or IRYS_SIGNING_KEY)
+    if let Some(hex_str) = explicit_hex {
+        return signing_key_from_hex(&hex_str);
+    }
+
+    // 2. Read hex from a file (--signing-key-file / --key-file or IRYS_SIGNING_KEY_FILE)
+    if let Some(path) = key_file {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| eyre::eyre!("Failed to read key file {}: {e}", path.display()))?;
+        info!("Loaded signing key from {}", path.display());
+        return signing_key_from_hex(contents.trim());
+    }
+
+    // 3. Fall back to config.toml mining_key
+    match load_config() {
+        Ok(node_config) => {
+            info!("Using mining_key from config.toml as signing key");
+            Ok(node_config.mining_key)
+        }
+        Err(_) => {
+            bail!(
+                "No signing key provided. Supply one via:\n  \
+                 --signing-key <hex>\n  \
+                 IRYS_SIGNING_KEY env var\n  \
+                 --signing-key-file <path> / IRYS_SIGNING_KEY_FILE env var\n  \
+                 mining_key in config.toml"
+            )
+        }
+    }
+}
+
 pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
     match args.command {
         Commands::DumpState { .. } => {
@@ -128,6 +174,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             miners,
             commitments,
             signing_key,
+            signing_key_file,
             output,
         } => {
             use irys_chain::genesis_builder::{
@@ -153,13 +200,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
                 build_signed_genesis_block(&config, &miner_entries).await?
             } else if let Some(commitments_path) = commitments {
-                let signing_key_hex = signing_key.ok_or_else(|| {
-                    eyre::eyre!("--signing-key is required when using --commitments")
-                })?;
-                let key_bytes = hex::decode(signing_key_hex.trim_start_matches("0x"))
-                    .map_err(|e| eyre::eyre!("Invalid hex for --signing-key: {e}"))?;
-                let block_signer = k256::ecdsa::SigningKey::from_slice(&key_bytes)
-                    .map_err(|e| eyre::eyre!("Invalid signing key: {e}"))?;
+                let block_signer = resolve_signing_key(signing_key, signing_key_file)?;
 
                 let file = std::fs::File::open(&commitments_path).map_err(|e| {
                     eyre::eyre!(
@@ -198,20 +239,17 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
             Ok(())
         }
-        Commands::GenerateMinerInfo { key } => {
+        Commands::GenerateMinerInfo { key, key_file } => {
             use alloy_signer::utils::secret_key_to_address;
             use irys_types::IrysAddress;
-            use k256::ecdsa::SigningKey;
 
-            let key_bytes = hex::decode(key.trim_start_matches("0x"))
-                .map_err(|e| eyre::eyre!("Invalid hex: {e}"))?;
-            let signing_key = SigningKey::from_slice(&key_bytes)
-                .map_err(|e| eyre::eyre!("Invalid secp256k1 key: {e}"))?;
+            let signing_key = resolve_signing_key(key, key_file)?;
 
             let evm_address = secret_key_to_address(&signing_key);
             let irys_address = IrysAddress::from(evm_address);
 
-            println!("Mining key:   {}...", &key[..16]);
+            let key_hex = hex::encode(signing_key.to_bytes());
+            println!("Mining key:   {}...", &key_hex[..16]);
             println!("Irys address: {irys_address}");
             println!("EVM address:  {evm_address}");
 

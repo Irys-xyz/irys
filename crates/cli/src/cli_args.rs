@@ -37,8 +37,16 @@ pub(crate) enum Commands {
 
         /// Hex-encoded secp256k1 private key for signing the genesis block header.
         /// Required when using --commitments. With --miners, the first miner signs.
-        #[arg(long)]
+        ///
+        /// Resolution order: --signing-key flag, IRYS_SIGNING_KEY env var,
+        /// --signing-key-file / IRYS_SIGNING_KEY_FILE, then mining_key in config.toml.
+        #[arg(long, env = "IRYS_SIGNING_KEY")]
         signing_key: Option<String>,
+
+        /// Path to a file containing the hex-encoded signing key.
+        /// The file should contain only the key (whitespace is trimmed).
+        #[arg(long, env = "IRYS_SIGNING_KEY_FILE")]
+        signing_key_file: Option<PathBuf>,
 
         /// Output directory for genesis block and commitments JSON files.
         /// Defaults to current directory.
@@ -50,9 +58,17 @@ pub(crate) enum Commands {
         about = "Derive Irys and EVM addresses from a mining key"
     )]
     GenerateMinerInfo {
-        /// Hex-encoded secp256k1 private key (with or without 0x prefix)
-        #[arg(long)]
-        key: String,
+        /// Hex-encoded secp256k1 private key (with or without 0x prefix).
+        ///
+        /// Resolution order: --key flag, IRYS_SIGNING_KEY env var,
+        /// --key-file / IRYS_SIGNING_KEY_FILE, then mining_key in config.toml.
+        #[arg(long, env = "IRYS_SIGNING_KEY")]
+        key: Option<String>,
+
+        /// Path to a file containing the hex-encoded key.
+        /// The file should contain only the key (whitespace is trimmed).
+        #[arg(long, env = "IRYS_SIGNING_KEY_FILE")]
+        key_file: Option<PathBuf>,
     },
     #[command(
         name = "configured-miner-info",

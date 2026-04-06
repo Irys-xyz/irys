@@ -1,4 +1,3 @@
-
 use crate::cli_args::{
     Commands, IrysCli, RollbackMode, RollbackTarget, parse_rollback_target,
     timestamp_millis_to_secs,
@@ -196,8 +195,9 @@ fn test_timestamp_millis_to_secs_max_valid_millis() {
 fn test_generate_miner_info_parsing(#[case] args: &[&str], #[case] expected_key: &str) {
     let cli = IrysCli::try_parse_from(args).expect("valid CLI args");
     match cli.command {
-        Commands::GenerateMinerInfo { key } => {
-            assert_eq!(key, expected_key);
+        Commands::GenerateMinerInfo { key, key_file } => {
+            assert_eq!(key.as_deref(), Some(expected_key));
+            assert!(key_file.is_none());
         }
         other => panic!("expected GenerateMinerInfo, got {:?}", other),
     }

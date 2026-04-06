@@ -208,10 +208,7 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
 
     let db_env = match access {
         DatabaseEnvKind::RW => {
-            let db = open_or_create_irys_consensus_data_db(
-                &db_path,
-                config.database.sync_mode,
-            )?;
+            let db = open_or_create_irys_consensus_data_db(&db_path, config.database.sync_mode)?;
             irys_database::migration::ensure_db_version_compatible(&db)?;
             db
         }
