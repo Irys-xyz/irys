@@ -1,14 +1,15 @@
 use alloy_primitives::B256;
 use irys_types::{
     DataLedger, DataTransactionLedger, GenesisConfig, H256, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestampMs, VDFLimiterInfo,
-    partition::PartitionHash,
+    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestamp, UnixTimestampMs,
+    VDFLimiterInfo, hardfork_config::Cascade, partition::PartitionHash,
 };
 
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
+    cascade: Option<&Cascade>,
 ) -> eyre::Result<IrysBlockHeader> {
     let proof_count = u8::try_from(number_of_ingress_proofs_total).map_err(|_| {
         eyre::eyre!(
@@ -17,6 +18,48 @@ pub fn build_unsigned_irys_genesis_block(
         )
     })?;
 
+    let mut data_ledgers = vec![
+        DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List::new(),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: Some(proof_count),
+        },
+        DataTransactionLedger {
+            ledger_id: DataLedger::Submit.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List::new(),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        },
+    ];
+    // Only include OneYear/ThirtyDay ledgers if Cascade activates at genesis (timestamp 0)
+    if let Some(cascade) = cascade.filter(|c| c.activation_timestamp == UnixTimestamp::from_secs(0))
+    {
+        data_ledgers.push(DataTransactionLedger {
+            ledger_id: DataLedger::OneYear.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List::new(),
+            total_chunks: 0,
+            expires: Some(cascade.one_year_epoch_length),
+            proofs: None,
+            required_proof_count: None,
+        });
+        data_ledgers.push(DataTransactionLedger {
+            ledger_id: DataLedger::ThirtyDay.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List::new(),
+            total_chunks: 0,
+            expires: Some(cascade.thirty_day_epoch_length),
+            proofs: None,
+            required_proof_count: None,
+        });
+    }
     Ok(IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: H256::zero(),
         signature: IrysSignature::default(),
@@ -43,26 +86,7 @@ pub fn build_unsigned_irys_genesis_block(
         miner_address: config.miner_address,
         timestamp: UnixTimestampMs::from_millis(config.timestamp_millis),
         system_ledgers: vec![],
-        data_ledgers: vec![
-            DataTransactionLedger {
-                ledger_id: DataLedger::Publish.into(),
-                tx_root: H256::zero(),
-                tx_ids: H256List::new(),
-                total_chunks: 0,
-                expires: None,
-                proofs: None,
-                required_proof_count: Some(proof_count),
-            },
-            DataTransactionLedger {
-                ledger_id: DataLedger::Submit.into(),
-                tx_root: H256::zero(),
-                tx_ids: H256List::new(),
-                total_chunks: 0,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-        ],
+        data_ledgers,
         evm_block_hash,
         vdf_limiter_info: VDFLimiterInfo {
             output: H256::zero(),
@@ -107,6 +131,7 @@ mod tests {
                 &config,
                 B256::ZERO,
                 count,
+                None,
             ).map_err(|e| TestCaseError::fail(e.to_string()))?;
             let publish_ledger = block
                 .data_ledgers
@@ -123,7 +148,7 @@ mod tests {
     #[test]
     fn rejects_ingress_proof_count_over_255() {
         let config = test_genesis_config();
-        let result = build_unsigned_irys_genesis_block(&config, B256::ZERO, 256);
+        let result = build_unsigned_irys_genesis_block(&config, B256::ZERO, 256, None);
         let err_msg = result
             .expect_err("expected overflow for ingress proof count > 255")
             .to_string();
@@ -136,7 +161,7 @@ mod tests {
     #[test]
     fn genesis_block_has_two_data_ledgers() -> eyre::Result<()> {
         let config = test_genesis_config();
-        let block = build_unsigned_irys_genesis_block(&config, B256::ZERO, 5)?;
+        let block = build_unsigned_irys_genesis_block(&config, B256::ZERO, 5, None)?;
         assert_eq!(block.data_ledgers.len(), 2);
         let submit_ledger = block
             .data_ledgers
@@ -145,5 +170,58 @@ mod tests {
             .expect("submit ledger should exist");
         assert_eq!(submit_ledger.required_proof_count, None);
         Ok(())
+    }
+
+    fn genesis_config() -> GenesisConfig {
+        use irys_types::config::consensus::ConsensusConfig;
+        ConsensusConfig::testing().genesis
+    }
+
+    #[test]
+    fn test_genesis_block_with_cascade_at_genesis_has_four_ledgers() {
+        let cascade = Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        };
+        let block =
+            build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, Some(&cascade))
+                .unwrap();
+        assert_eq!(block.data_ledgers.len(), 4);
+        assert_eq!(block.data_ledgers[0].ledger_id, DataLedger::Publish as u32);
+        assert_eq!(block.data_ledgers[1].ledger_id, DataLedger::Submit as u32);
+        assert_eq!(block.data_ledgers[2].ledger_id, DataLedger::OneYear as u32);
+        assert_eq!(
+            block.data_ledgers[3].ledger_id,
+            DataLedger::ThirtyDay as u32
+        );
+        assert_eq!(block.data_ledgers[2].expires, Some(365));
+        assert_eq!(block.data_ledgers[3].expires, Some(30));
+        assert!(block.data_ledgers[2].proofs.is_none());
+        assert!(block.data_ledgers[3].required_proof_count.is_none());
+    }
+
+    #[test]
+    fn test_genesis_block_with_cascade_not_at_genesis_has_two_ledgers() {
+        let cascade = Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(1000),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        };
+        let block =
+            build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, Some(&cascade))
+                .unwrap();
+        assert_eq!(block.data_ledgers.len(), 2);
+    }
+
+    #[test]
+    fn test_genesis_block_without_cascade_has_two_ledgers() {
+        let block =
+            build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, None).unwrap();
+        assert_eq!(block.data_ledgers.len(), 2);
+        assert_eq!(block.data_ledgers[0].ledger_id, DataLedger::Publish as u32);
+        assert_eq!(block.data_ledgers[1].ledger_id, DataLedger::Submit as u32);
     }
 }

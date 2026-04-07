@@ -50,6 +50,8 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -172,6 +174,8 @@ async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -392,6 +396,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
+        UnixTimestamp::from_secs(0),
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
@@ -400,6 +405,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(
@@ -517,6 +523,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
+        UnixTimestamp::from_secs(0),
     )?
     .checked_div(U256::from(2))
     .unwrap();
@@ -527,6 +534,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(
@@ -590,6 +598,8 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(self.proofs.clone()),

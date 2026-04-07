@@ -74,6 +74,8 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
                 commitment_txs: vec![invalid_unstake.clone()],
                 commitment_txs_to_bill: vec![invalid_unstake],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -219,6 +221,8 @@ async fn block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![invalid_unstake.clone()],
                 commitment_txs_to_bill: vec![invalid_unstake],
                 submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
