@@ -39,8 +39,8 @@ runs:
     - name: Start sccache
       shell: bash
       env:
-        SCCACHE_DIR: /shared/sccache
-        SCCACHE_CACHE_SIZE: 40G
+        SCCACHE_DIR: ${{ env.SCCACHE_DIR }}
+        SCCACHE_CACHE_SIZE: ${{ env.SCCACHE_CACHE_SIZE }}
       run: |
         sccache --start-server
         sccache --zero-stats
