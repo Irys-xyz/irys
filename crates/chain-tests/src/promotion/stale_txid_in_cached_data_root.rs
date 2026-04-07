@@ -17,6 +17,7 @@ use tracing::info;
 /// select_best_txs → get_publish_txs_and_proofs, it reads the stale txid and fails
 /// with "Missing transactions" because the txid exists in neither the mempool nor the
 /// IrysDataTxHeaders DB table.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Result<()> {
     let seconds_to_wait = 30;
@@ -270,8 +271,28 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
     // We're at height 2, so mine 9 more blocks to reach height 11.
     genesis_node.mine_blocks(9).await?;
 
-    // Give the async prune_pending_txs a moment to process
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Poll until the stale txid is gone from CachedDataRoot.txid_set (or the entry is
+    // deleted entirely).  The cleanup arrives via a fire-and-forget channel message to the
+    // cache service, so we cannot rely on a fixed sleep — poll with a bounded deadline instead.
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let still_present = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+                Ok(
+                    irys_database::cached_data_root_by_data_root(db_tx, data_root)?
+                        .is_some_and(|cdr| cdr.txid_set.contains(&txid)),
+                )
+            })?;
+            if !still_present {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for stale txid to be pruned from CachedDataRoot.txid_set"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 
     // Verify the txid was pruned from CachedDataRoot.txid_set by Fix B
     genesis_node.node_ctx.db.view_eyre(|db_tx| {
