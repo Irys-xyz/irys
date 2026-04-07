@@ -7,6 +7,7 @@ use irys_types::{
     CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
     SystemLedger, get_ingress_proofs,
 };
+use reth_db::transaction::DbTxMut as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -227,9 +228,14 @@ impl Inner {
 
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
+        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));
+                expired_by_data_root
+                    .entry(tx.data_root)
+                    .or_default()
+                    .push(tx.id);
             }
         }
 
@@ -250,6 +256,48 @@ impl Inner {
             self.mempool_state
                 .batch_prune_commitment_txs(&expired_commits)
                 .await;
+        }
+
+        // Phase 4: Remove pruned txids from CachedDataRoot.txid_set
+        // This prevents stale txid references from blocking publish candidate selection.
+        if !expired_by_data_root.is_empty() {
+            self.prune_cached_data_root_txids(&expired_by_data_root);
+        }
+    }
+
+    /// Removes pruned txids from `CachedDataRoot.txid_set` entries.
+    ///
+    /// When a tx is pruned from the mempool without ever being included in a block,
+    /// its txid becomes a dangling reference in `CachedDataRoot.txid_set`. This method
+    /// cleans those references to prevent stale txids from blocking publish candidate
+    /// selection during block production.
+    fn prune_cached_data_root_txids(&self, by_data_root: &HashMap<H256, Vec<H256>>) {
+        let result = self.irys_db.update_eyre(|db_tx| {
+            for (data_root, txids_to_remove) in by_data_root {
+                let Some(mut cached) =
+                    irys_database::cached_data_root_by_data_root(db_tx, *data_root)?
+                else {
+                    continue;
+                };
+
+                let before_len = cached.txid_set.len();
+                cached.txid_set.retain(|id| !txids_to_remove.contains(id));
+
+                if cached.txid_set.len() < before_len {
+                    debug!(
+                        data_root = %data_root,
+                        removed = before_len - cached.txid_set.len(),
+                        remaining = cached.txid_set.len(),
+                        "Pruned stale txids from CachedDataRoot.txid_set"
+                    );
+                    db_tx.put::<irys_database::tables::CachedDataRoots>(*data_root, cached)?;
+                }
+            }
+            Ok(())
+        });
+
+        if let Err(e) = result {
+            warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
         }
     }
 

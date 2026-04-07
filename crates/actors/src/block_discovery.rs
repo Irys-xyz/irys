@@ -1029,9 +1029,20 @@ where
         }
     }
 
-    if missing.is_empty() {
-        Ok(headers)
-    } else {
-        Err(eyre::eyre!("Missing transactions: {:?}", missing))
+    if !missing.is_empty() {
+        warn!(
+            missing.count = missing.len(),
+            missing.txids = ?missing,
+            "Skipping txids not found in mempool or DB (stale CachedDataRoot references)"
+        );
+        // this debug assert is here so that test that cause this behaviour hard-fail
+        debug_assert!(
+            missing.is_empty(),
+            "Stale txids found in publish candidate lookup — \
+             CachedDataRoot.txid_set contains txids not in mempool or DB: {:?}",
+            missing
+        );
     }
+
+    Ok(headers)
 }
