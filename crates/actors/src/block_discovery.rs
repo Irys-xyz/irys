@@ -961,7 +961,11 @@ pub async fn build_block_body_for_processed_block_header(
 /// Get all data transactions from the mempool and database
 /// with a custom get_data_txs function (this is used by the mempool)
 ///
-/// Returns a tuple of (found headers, missing txids). Callers decide how to handle missing txids.
+/// Returns a [`TxLookupResult`] containing:
+/// - `found`: tx headers located in either the mempool or the DB
+/// - `missing`: ids absent from both sources
+///
+/// Callers own the policy for missing txids (e.g. warn-and-skip or hard error).
 #[tracing::instrument(level = "trace", skip_all, fields(tx.count = data_tx_ids.len()))]
 pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,

@@ -1,9 +1,11 @@
 # Stale TxID Promotion Candidate Pruning
 
 ## Status
+
 Accepted
 
 ## Context
+
 `CachedDataRoot.txid_set` is an append-only collection: txids are added when a data tx enters the mempool, but individual txids are never removed. When a tx is pruned from the mempool (anchor expired or fee-evicted) without ever being included in a block, its txid becomes a dangling reference. The `IngressProof` and `CachedDataRoot` entries persist because the cache service's `prune_data_root_cache` exempts entries with locally-generated ingress proofs.
 
 During block production, `get_publish_txs_and_proofs` iterates all `IngressProofs`, reads each `CachedDataRoot.txid_set`, and calls `get_data_tx_in_parallel_inner` to fetch the tx headers. That function queries both the mempool and `IrysDataTxHeaders` DB table. For a txid that exists in neither, it returned a hard error (`Err("Missing transactions: [...]")`), which propagated up and blocked block production entirely.
@@ -11,10 +13,11 @@ During block production, `get_publish_txs_and_proofs` iterates all `IngressProof
 The root cause is a lifecycle mismatch: the mempool prunes txs by anchor depth, `CachedDataRoot` prunes by expiry height or block inclusion, and `IngressProof` prunes by proof anchor depth. These three lifecycles don't align, creating a window where a txid is gone from the mempool but still referenced in `CachedDataRoot.txid_set`.
 
 ## Decision
+
 A two-layer fix was chosen over either layer alone:
 
 **Layer A (resilience): Tolerate missing txids in `get_data_tx_in_parallel_inner`.**
-The function now warns and skips txids found in neither the mempool nor the DB, instead of returning a hard error. A `debug_assert!` is placed on the missing-txid path so that test builds (which compile with debug assertions) panic if this safeguard fires. This makes the condition immediately visible during development while keeping release builds resilient.
+The function now returns a `TxLookupResult { found, missing }` instead of a hard error when txids are absent from both the mempool and the DB. The caller (the tx-selector path in `get_publish_txs_and_proofs`) owns the error policy: it warns on any non-empty `missing` set and places a `debug_assert!` on that path so that test builds (which compile with debug assertions) panic if this safeguard fires. This makes the condition immediately visible during development while keeping release builds resilient.
 
 The `debug_assert!` was chosen over a pure warn-and-skip because:
 - The stale txid condition should never happen once Layer B is active.
@@ -31,6 +34,7 @@ Design choices for Layer B:
 - **Non-fatal errors.** DB write failures during cleanup are logged as warnings but not propagated. Cache cleanup is best-effort; Layer A provides the safety net.
 
 ## Consequences
+
 - Block production no longer crashes when stale txids exist in `CachedDataRoot.txid_set` (Layer A).
 - Stale txid references are cleaned up at the source, preventing unbounded accumulation (Layer B).
 - The `debug_assert` acts as a regression canary: any future code path that creates stale txid references will fail tests.
@@ -38,4 +42,5 @@ Design choices for Layer B:
 - Ownership of `CachedDataRoots` remains with the cache service. The mempool service's role is limited to detecting which txids to prune and sending a message — it does not write to the table directly.
 
 ## Source
+
 Branch `fix/promotion-candidate-pruning` — fix: stale txid in CachedDataRoot.txid_set blocks block production
