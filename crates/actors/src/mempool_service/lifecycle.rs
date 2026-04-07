@@ -5,9 +5,8 @@ use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
     CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
-    SystemLedger, get_ingress_proofs,
+    SendTraced as _, SystemLedger, get_ingress_proofs,
 };
-use reth_db::transaction::DbTxMut as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -134,18 +133,40 @@ impl Inner {
             )
         };
 
-        // Hold write lock for the entire revalidation
-        let mut state = self.mempool_state.write_for_reorg().await;
+        // Hold write lock only for the revalidation itself, then release before
+        // sending the cache-service message (avoids holding the lock across a channel send).
+        let expired_by_data_root = {
+            let mut state = self.mempool_state.write_for_reorg().await;
 
-        // Revalidate data txs — uses same prune method as prune_pending_txs
-        state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+            // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
+            let expired_by_data_root =
+                state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
 
-        // Revalidate commitment txs — uses same prune + cache methods as ingress
-        state.revalidate_commitment_txs(
-            |tx| self.should_prune_tx(current_height, tx),
-            |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
-            self.config.node_config.mempool.max_pending_pledge_items,
-        );
+            // Revalidate commitment txs — uses same prune + cache methods as ingress
+            state.revalidate_commitment_txs(
+                |tx| self.should_prune_tx(current_height, tx),
+                |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
+                self.config.node_config.mempool.max_pending_pledge_items,
+            );
+
+            expired_by_data_root
+            // write lock (`state`) is released here
+        };
+
+        // Ask the cache service to remove reorg-pruned txids from CachedDataRoot.txid_set.
+        // Same cleanup as prune_pending_txs Phase 4, covering the reorg-driven removal path.
+        if !expired_by_data_root.is_empty() {
+            if let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            ) {
+                warn!(
+                    "Failed to send PruneTxidsFromCachedDataRoots after reorg: {}",
+                    e
+                );
+            }
+        }
 
         Ok(())
     }
@@ -258,46 +279,19 @@ impl Inner {
                 .await;
         }
 
-        // Phase 4: Remove pruned txids from CachedDataRoot.txid_set
+        // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
         // This prevents stale txid references from blocking publish candidate selection.
         if !expired_by_data_root.is_empty() {
-            self.prune_cached_data_root_txids(&expired_by_data_root);
-        }
-    }
-
-    /// Removes pruned txids from `CachedDataRoot.txid_set` entries.
-    ///
-    /// When a tx is pruned from the mempool without ever being included in a block,
-    /// its txid becomes a dangling reference in `CachedDataRoot.txid_set`. This method
-    /// cleans those references to prevent stale txids from blocking publish candidate
-    /// selection during block production.
-    fn prune_cached_data_root_txids(&self, by_data_root: &HashMap<H256, Vec<H256>>) {
-        let result = self.irys_db.update_eyre(|db_tx| {
-            for (data_root, txids_to_remove) in by_data_root {
-                let Some(mut cached) =
-                    irys_database::cached_data_root_by_data_root(db_tx, *data_root)?
-                else {
-                    continue;
-                };
-
-                let before_len = cached.txid_set.len();
-                cached.txid_set.retain(|id| !txids_to_remove.contains(id));
-
-                if cached.txid_set.len() < before_len {
-                    debug!(
-                        data_root = %data_root,
-                        removed = before_len - cached.txid_set.len(),
-                        remaining = cached.txid_set.len(),
-                        "Pruned stale txids from CachedDataRoot.txid_set"
-                    );
-                    db_tx.put::<irys_database::tables::CachedDataRoots>(*data_root, cached)?;
-                }
+            if let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            ) {
+                warn!(
+                    "Failed to send PruneTxidsFromCachedDataRoots to cache service: {}",
+                    e
+                );
             }
-            Ok(())
-        });
-
-        if let Err(e) = result {
-            warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
         }
     }
 
