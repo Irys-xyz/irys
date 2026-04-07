@@ -12,6 +12,10 @@ fn main() {
         std::env::var("GIT_HAS_TAG"),
         std::env::var("GIT_DIRTY"),
     ) {
+        let has_tag: bool = has_tag
+            .parse()
+            .expect("GIT_HAS_TAG must be 'true' or 'false'");
+        let dirty: bool = dirty.parse().expect("GIT_DIRTY must be 'true' or 'false'");
         println!("cargo:rustc-env=GIT_SHA={sha}");
         println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
         println!("cargo:rustc-env=GIT_DIRTY={dirty}");
