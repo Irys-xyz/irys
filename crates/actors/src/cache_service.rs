@@ -1050,6 +1050,8 @@ mod tests {
             pruning_queue: VecDeque::new(),
             epoch_running: false,
             epoch_queue: VecDeque::new(),
+            txid_prune_running: false,
+            txid_prune_queue: VecDeque::new(),
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -1134,6 +1136,8 @@ mod tests {
             pruning_queue: VecDeque::new(),
             epoch_running: false,
             epoch_queue: VecDeque::new(),
+            txid_prune_running: false,
+            txid_prune_queue: VecDeque::new(),
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
