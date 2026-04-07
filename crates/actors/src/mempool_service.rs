@@ -1766,24 +1766,32 @@ impl MempoolState {
         Ok(())
     }
 
-    /// Revalidates data txs in-place. Removes those with expired/invalid anchors.
-    /// Uses batch_prune_data_txs for the actual removal (same method used by prune_pending_txs).
+    /// Revalidates data txs in-place against the current canonical chain.
+    /// Removes those that fail `should_prune` and returns a map of
+    /// `data_root → [pruned txids]` so the caller can send a
+    /// `PruneTxidsFromCachedDataRoots` message to clean up stale references.
     pub fn revalidate_data_txs(
         &mut self,
         mut should_prune: impl FnMut(&DataTransactionHeader) -> bool,
-    ) {
-        // Collect txs to prune
-        let expired: Vec<(H256, H256)> = self
-            .valid_submit_ledger_tx
-            .values()
-            .filter(|tx| should_prune(tx))
-            .map(|tx| (tx.id, tx.anchor))
-            .collect();
+    ) -> HashMap<H256, Vec<H256>> {
+        let mut expired: Vec<(H256, H256)> = Vec::new();
+        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+
+        for tx in self.valid_submit_ledger_tx.values() {
+            if should_prune(tx) {
+                expired.push((tx.id, tx.anchor));
+                expired_by_data_root
+                    .entry(tx.data_root)
+                    .or_default()
+                    .push(tx.id);
+            }
+        }
 
         if !expired.is_empty() {
-            // Reuse the same prune method that prune_pending_txs uses
             self.batch_prune_data_txs(&expired);
         }
+
+        expired_by_data_root
     }
 
     /// Revalidates commitment txs in-place. Removes those with expired anchors.

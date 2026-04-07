@@ -1,6 +1,6 @@
 pub(crate) mod helpers;
 
-use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
@@ -806,7 +806,10 @@ async fn get_publish_txs_and_proofs(
         //       db as publishing can happen to a tx that is no longer in the mempool
         // TODO: improve this
         let publish_txids_for_lookup = publish_txids.clone();
-        let mut tx_headers = get_data_tx_in_parallel_inner(
+        let TxLookupResult {
+            found: mut tx_headers,
+            missing,
+        } = get_data_tx_in_parallel_inner(
             publish_txids,
             |tx_ids| {
                 let txs = txs.clone();
@@ -824,6 +827,21 @@ async fn get_publish_txs_and_proofs(
         )
         .await
         .map_err(|e| eyre!("Failed to fetch publish tx headers: {}", e))?;
+
+        if !missing.is_empty() {
+            warn!(
+                missing.count = missing.len(),
+                missing.txids = ?missing,
+                "Skipping txids not found in mempool or DB (stale CachedDataRoot references)"
+            );
+            // this debug assert is here so that tests that cause this behaviour hard-fail
+            debug_assert!(
+                missing.is_empty(),
+                "Stale txids found in publish candidate lookup — \
+                 CachedDataRoot.txid_set contains txids not in mempool or DB: {:?}",
+                missing
+            );
+        }
 
         // Sort the resulting publish_txs & proofs
         tx_headers.sort_by(|a, b| a.id.cmp(&b.id));

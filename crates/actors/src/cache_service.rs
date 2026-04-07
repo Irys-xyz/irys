@@ -15,15 +15,15 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, IngressProof, LedgerChunkOffset,
-    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
+    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{
@@ -51,6 +51,8 @@ pub enum CacheServiceAction {
     PruneCompleted(eyre::Result<()>),
     /// Internal signal: epoch processing task completed
     EpochProcessingCompleted(eyre::Result<()>),
+    /// Internal signal: txid pruning task completed
+    PruneTxidsCompleted(eyre::Result<()>),
     /// Marks the start of ingress proof generation for the specified data root. Chunks that are
     /// related to this data root should not be pruned if the ingress proof is still being generated.
     NotifyProofGenerationStarted(DataRoot),
@@ -62,6 +64,10 @@ pub enum CacheServiceAction {
         data_root: DataRoot,
         response_sender: Sender<bool>,
     },
+    /// Remove specific txids from `CachedDataRoot.txid_set` entries.
+    /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
+    /// txid references from blocking publish candidate selection.
+    PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -453,6 +459,56 @@ impl InnerCacheTask {
         Ok(())
     }
 
+    /// Spawns a background thread to remove specific txids from `CachedDataRoot.txid_set` entries.
+    ///
+    /// Called when the mempool prunes expired txs. If a tx was never included in a
+    /// block, its txid becomes a dangling reference in `CachedDataRoot.txid_set`.
+    /// Cleaning it here prevents stale txids from blocking publish candidate selection.
+    ///
+    /// Uses a background thread (matching `spawn_pruning_task`) to avoid blocking the actor loop.
+    /// Sends `PruneTxidsCompleted` when done so the service can drive the queue.
+    fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let result = clone.db.update_eyre(|db_tx| {
+                for (data_root, txids_to_remove) in &by_data_root {
+                    let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                        continue;
+                    };
+
+                    let removal_set: HashSet<H256> = txids_to_remove.iter().copied().collect();
+                    let before_len = cached.txid_set.len();
+                    cached.txid_set.retain(|id| !removal_set.contains(id));
+
+                    if cached.txid_set.len() < before_len {
+                        debug!(
+                            data_root = %data_root,
+                            removed = before_len - cached.txid_set.len(),
+                            remaining = cached.txid_set.len(),
+                            "Pruned stale txids from CachedDataRoot.txid_set"
+                        );
+                        db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                    }
+                }
+                Ok(())
+            });
+
+            let completion = match &result {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
+            };
+            if let Err(e) = result {
+                warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
+            }
+            if let Err(e) = clone
+                .cache_sender
+                .send_traced(CacheServiceAction::PruneTxidsCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify PruneTxidsCompleted");
+            }
+        });
+    }
+
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
     /// - (a) Promoted + expired: delete
     /// - (b) Unpromoted + expired + at capacity: delete
@@ -702,6 +758,8 @@ pub struct ChunkCacheService {
         Arc<EpochSnapshot>,
         Option<oneshot::Sender<eyre::Result<()>>>,
     )>,
+    txid_prune_running: bool,
+    txid_prune_queue: VecDeque<HashMap<H256, Vec<H256>>>,
 }
 
 impl ChunkCacheService {
@@ -755,6 +813,8 @@ impl ChunkCacheService {
                 pruning_queue: VecDeque::new(),
                 epoch_running: false,
                 epoch_queue: VecDeque::new(),
+                txid_prune_running: false,
+                txid_prune_queue: VecDeque::new(),
             };
             cache_service
                 .start()
@@ -879,6 +939,24 @@ impl ChunkCacheService {
                     warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState");
                 }
             }
+            CacheServiceAction::PruneTxidsFromCachedDataRoots(by_data_root) => {
+                // Enqueue txid pruning; start if idle
+                self.txid_prune_queue.push_back(by_data_root);
+                if !self.txid_prune_running
+                    && let Some(work) = self.txid_prune_queue.pop_front()
+                {
+                    self.txid_prune_running = true;
+                    self.cache_task.spawn_prune_txids_task(work);
+                }
+            }
+            CacheServiceAction::PruneTxidsCompleted(_res) => {
+                // Mark txid pruning idle and kick next if queued
+                self.txid_prune_running = false;
+                if let Some(work) = self.txid_prune_queue.pop_front() {
+                    self.txid_prune_running = true;
+                    self.cache_task.spawn_prune_txids_task(work);
+                }
+            }
         }
     }
 }
@@ -972,6 +1050,8 @@ mod tests {
             pruning_queue: VecDeque::new(),
             epoch_running: false,
             epoch_queue: VecDeque::new(),
+            txid_prune_running: false,
+            txid_prune_queue: VecDeque::new(),
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -1056,6 +1136,8 @@ mod tests {
             pruning_queue: VecDeque::new(),
             epoch_running: false,
             epoch_queue: VecDeque::new(),
+            txid_prune_running: false,
+            txid_prune_queue: VecDeque::new(),
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete

@@ -5,7 +5,7 @@ use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
     CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
-    SystemLedger, get_ingress_proofs,
+    SendTraced as _, SystemLedger, get_ingress_proofs,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -133,18 +133,40 @@ impl Inner {
             )
         };
 
-        // Hold write lock for the entire revalidation
-        let mut state = self.mempool_state.write_for_reorg().await;
+        // Hold write lock only for the revalidation itself, then release before
+        // sending the cache-service message (avoids holding the lock across a channel send).
+        let expired_by_data_root = {
+            let mut state = self.mempool_state.write_for_reorg().await;
 
-        // Revalidate data txs — uses same prune method as prune_pending_txs
-        state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+            // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
+            let expired_by_data_root =
+                state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
 
-        // Revalidate commitment txs — uses same prune + cache methods as ingress
-        state.revalidate_commitment_txs(
-            |tx| self.should_prune_tx(current_height, tx),
-            |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
-            self.config.node_config.mempool.max_pending_pledge_items,
-        );
+            // Revalidate commitment txs — uses same prune + cache methods as ingress
+            state.revalidate_commitment_txs(
+                |tx| self.should_prune_tx(current_height, tx),
+                |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
+                self.config.node_config.mempool.max_pending_pledge_items,
+            );
+
+            expired_by_data_root
+            // write lock (`state`) is released here
+        };
+
+        // Ask the cache service to remove reorg-pruned txids from CachedDataRoot.txid_set.
+        // Same cleanup as prune_pending_txs Phase 4, covering the reorg-driven removal path.
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots after reorg: {}",
+                e
+            );
+        }
 
         Ok(())
     }
@@ -227,9 +249,14 @@ impl Inner {
 
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
+        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));
+                expired_by_data_root
+                    .entry(tx.data_root)
+                    .or_default()
+                    .push(tx.id);
             }
         }
 
@@ -250,6 +277,21 @@ impl Inner {
             self.mempool_state
                 .batch_prune_commitment_txs(&expired_commits)
                 .await;
+        }
+
+        // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
+        // This prevents stale txid references from blocking publish candidate selection.
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots to cache service: {}",
+                e
+            );
         }
     }
 
