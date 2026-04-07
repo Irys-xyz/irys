@@ -884,6 +884,7 @@ pub async fn get_commitment_tx_in_parallel(
 }
 
 /// Result of a parallel tx lookup across mempool and DB.
+#[derive(Debug)]
 pub struct TxLookupResult {
     /// Tx headers found in the mempool or DB, in the same order as the input ids
     /// (missing ids are absent, not represented as gaps).
@@ -1045,5 +1046,8 @@ where
         }
     }
 
-    Ok(TxLookupResult { found: headers, missing })
+    Ok(TxLookupResult {
+        found: headers,
+        missing,
+    })
 }
