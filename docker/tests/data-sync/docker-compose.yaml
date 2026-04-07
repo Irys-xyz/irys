@@ -4,9 +4,9 @@
 # Override with IMAGE_NAME env var if needed.
 # Sends telemetry to remote observability stack.
 #
-# OTEL_REMOTE_HOST: defaults to 51.38.53.126 (external OVH collector).
-# Override for local/isolated environments:
-#   OTEL_REMOTE_HOST=host.docker.internal docker compose up
+# OTEL_HOST: defaults to host.docker.internal (local observation stack).
+# Override for remote environments:
+#   OTEL_HOST=51.38.53.126 docker compose up
 
 services:
   # ==========================================================================
@@ -26,8 +26,8 @@ services:
       - RUST_LOG=debug
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-1
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
-      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4318/v1/logs
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
@@ -56,8 +56,8 @@ services:
       - GENESIS_URL=http://test-irys-1:8080
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-2
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
-      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4318/v1/logs
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
@@ -88,8 +88,8 @@ services:
       - GENESIS_URL=http://test-irys-1:8080
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-3
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
-      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4318/v1/logs
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
@@ -116,7 +116,7 @@ services:
     environment:
       - OTEL_SERVICE_NAME=irys-node-1
       - RETH_METRICS_HOST=172.24.0.2
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
@@ -133,7 +133,7 @@ services:
     environment:
       - OTEL_SERVICE_NAME=irys-node-2
       - RETH_METRICS_HOST=172.24.0.3
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
@@ -150,7 +150,7 @@ services:
     environment:
       - OTEL_SERVICE_NAME=irys-node-3
       - RETH_METRICS_HOST=172.24.0.4
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_HOST:-host.docker.internal}:4317
     volumes:
       - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
