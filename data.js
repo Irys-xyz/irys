@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775534014827,
+  "lastUpdate": 1775586860088,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1998,6 +1998,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "26fc9bfd88b2b5b8484279c83a8d46109109ca9a",
+          "message": "fix: promotion candidate pruning (#1387)\n\n* fix: stale promotion candidate\n\n* fix: scope lenient missing-txid handling to tx-selector path only\n\n* fix: clean CachedDataRoot.txid_set after reorg-driven mempool pruning\n\n* test: gate debug-mode regression test and replace sleep with poll loop\n\n* chore: cargo fmt\n\n* fix: clippy collapsible_if in PruneTxidsFromCachedDataRoots send sites\n\n* refactor: return TxLookupResult struct from get_data_tx_in_parallel_inner; callers own error policy\n\n- Remove TxLookupMode enum entirely\n- get_data_tx_in_parallel_inner now returns TxLookupResult { found, missing }\n- Callers handle missing txids according to their own policy:\n  get_data_tx_in_parallel: Err if any missing (strict, used by block-body serving path)\n  tx_selector: warn + debug_assert, returns partial result (lenient, stale CachedDataRoot path)\n\n* chore: fmt & docs\n\n* chore: fmt\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* fix: tests",
+          "timestamp": "2026-04-07T19:14:57+01:00",
+          "tree_id": "b4ad951b99625db97a679845936eabed9dce6b2b",
+          "url": "https://github.com/Irys-xyz/irys/commit/26fc9bfd88b2b5b8484279c83a8d46109109ca9a"
+        },
+        "date": 1775586858275,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074749,
+            "range": "± 0.000669",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.025629,
+            "range": "± 2.439555",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 973.563936,
+            "range": "± 8.229682",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120673,
+            "range": "± 0.002626",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1216.636536,
+            "range": "± 16.327133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1560.349316,
+            "range": "± 0.979331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.496334,
+            "range": "± 0.047149",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.630852,
+            "range": "± 1.731418",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.941033,
+            "range": "± 1.718087",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0",
             "unit": "ms/iter"
           }
