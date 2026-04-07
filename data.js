@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775140928065,
+  "lastUpdate": 1775534014827,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -1914,6 +1914,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8d95afad5d3a16c7f43689bc9d8c0ec3c8248a41",
+          "message": "feat: Cascade hardfork — term ledgers (OneYear/ThirtyDay) and height-aware pricing (#1166)\n\n* feat: add annual_cost_per_gb to Cascade hardfork config\n\nThread block height through pricing functions so term/perm fees use the\nCascade-overridden annual cost ($0.028/GB/year) when active, instead of\nthe base rate ($0.01/GB/year). Includes unit and integration tests.\n\n* fix: address PR #1166 review feedback for Cascade hardfork\n\n- Switch Cascade activation from block height to timestamp (matching Borealis pattern)\n- Validate OneYear/ThirtyDay fees in block validation (add term_txs to data_txs_are_valid)\n- Remove silent unwrap_or defaults in block validation and pricing, return errors instead\n- Add term fee & EMA balance checks for OneYear/ThirtyDay in mempool selection\n- Add full validation in gossip path for term ledger txs\n- Add validate_term_ledger_expiry() for expires field validation\n- Reject Submit from pricing endpoint, consolidate shared pricing logic\n\n* refactor: clean up data_txs_are_valid mixed responsibilities\n\nExtract validate_price/validate_term_price closures into standalone\nfunctions, take &BlockTransactions instead of 3 slices, add structural\npre-pass for submit/term txs, include term txs in the inclusion-checking\npipeline with cross-ledger collision guards, and remove redundant\nSteps 5 & 6.\n\n* refactor: use epoch-aligned cascade activation checks\n\nReplace all is_cascade_active_at(timestamp) calls with\nis_cascade_active_for_epoch(epoch_snapshot), consistent with how\nborealis activation is checked. Remove the now-unused method to\nprevent accidental timestamp-based activation checks.\n\n* fix: use single block_tree lock for term ledger pricing\n\nMerge two separate block_tree.read() calls into one lock scope so\ncascade gating and fee/pricing inputs observe the same canonical tip.\n\n* Update crates/types/src/config/mod.rs\n\nCo-authored-by: Roberts Pumpurs <33699735+roberts-pumpurs@users.noreply.github.com>\n\n* fix: use epoch-aligned cascade activation in block producer\n\nReplace raw timestamp comparison against cascade.activation_timestamp\nwith is_cascade_active_for_epoch(epoch_snapshot) when building block\ndata ledgers, consistent with all other activation checks.\n\n* fix: reject term-ledger txs with any perm_fee, not just non-zero\n\nThe previous check `perm_fee.is_some_and(|f| f > zero())` allowed\n`Some(0)` through. Term-ledger txs must not carry a perm_fee at all.\n\n* fix: replace unreachable! with error for Submit ledger in mempool ingress\n\nSubmit is not user-targetable — a malicious peer could still attempt\nto gossip submit-level txs. Return TxIngressError::InvalidLedger\ninstead of panicking.\n\n* fix: return errors instead of panicking in validate_term_ledger_expiry\n\nReplace `continue` on invalid ledger ID with LedgerIdInvalid error,\nand replace `.expect()` on cascade config with proper error propagation.\n\n* fix: correct misleading comment about genesis block submit data\n\n* fix: reject Submit txs with promoted_height instead of just logging\n\nConvert the tracing::error! for Submit ledger transactions that have a\npromoted_height tag into a proper PreValidationError, making it a block\nrejection rather than a silent log.\n\n* fix: strip mempool metadata from txs before building block body\n\nClear promoted_height and included_height metadata from data transaction\nheaders before including them in the block body. This metadata is\nmempool-internal state and must not leak into produced blocks, where it\nwould cause false SubmitTxHasPromotedHeight validation failures on\nself-produced blocks (particularly after node restart when the mempool\nreconstructs metadata from DB).\n\n* fix: skip already-promoted txs during mempool block selection\n\nAfter node restart, the mempool reconstructs promoted_height metadata\nfrom the DB. Previously these txs were re-selected as submit txs\n(just not re-promoted), wasting block space and causing validation\nfailures from the SubmitTxHasPromotedHeight check. Now the mempool\nskips them entirely during block tx selection.\n\n* feat: generate shadow txs for OneYear/ThirtyDay term ledger txs\n\nTerm-only ledger transactions had their fees validated but no shadow\ntransactions were generated to actually debit user balances and credit\nthe treasury on the EVM layer. This adds a TermLedger phase to the\nshadow tx generator that processes one_year and thirty_day txs with\nthe same 5% block-producer / 95% treasury split as submit txs.\n\nAlso adds integration tests verifying wallet balance decrements after\nterm ledger tx inclusion and treasury non-negativity through expiry.\n\n* fix: deterministic tx ordering, miner dedup, and ledger_id validation\n\nM1: Replace HashSet with BTreeSet for miner deduplication in fee\ndistribution so the remainder is assigned deterministically across nodes.\n\nM2: Sort one_year_tx and thirty_day_tx before block inclusion so all\nnodes compute identical merkle roots for the same tx set.\n\nM3: Add ledger_id validation for Publish, OneYear, and ThirtyDay tx\nsets in the structural pre-pass, matching the existing Submit check.\n\n* feat: add configurable num_partitions_per_term_ledger_slot\n\nAdd independent partition count for term ledger slots (OneYear/ThirtyDay),\nreplacing hardcoded replica count of 1. Defaults to same value as\nnum_partitions_per_slot in all configs.\n\n* fix: update config tests for Cascade fields\n\nAdd num_partitions_per_term_ledger_slot to TOML deserialization test\nand testnet config template. Update consensus hash regression test.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\n\n* fix: update oversized legacy payload test for Cascade ledger variants\n\nDataLedger::ALL now has 4 entries (added OneYear, ThirtyDay), so the\ntest dynamically builds ALL.len()+1 entries to trigger the overflow.\n\n* remove unreachable oversized legacy payload test\n\nThe overflow error path can never be hit: old nodes only send 2 ledgers\n(Publish, Submit) and new nodes include the explicit ledger field.\n\n* fix: apply rustfmt to chainspec\n\n* fix: collapse nested if for clippy\n\n* docs: add commented-out cascade hardfork example to testnet config template\n\n---------\n\nCo-authored-by: Roberts Pumpurs <33699735+roberts-pumpurs@users.noreply.github.com>\nCo-authored-by: Claude Opus 4.6 <noreply@anthropic.com>\nCo-authored-by: Jesse Cruz Wright <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-04-06T20:34:58-07:00",
+          "tree_id": "cf0176818dd68ca6dbcdf43554679ef2acaf5a35",
+          "url": "https://github.com/Irys-xyz/irys/commit/8d95afad5d3a16c7f43689bc9d8c0ec3c8248a41"
+        },
+        "date": 1775534013503,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078368,
+            "range": "± 0.001766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 760.347565,
+            "range": "± 16.251313",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.194275,
+            "range": "± 24.610766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117569,
+            "range": "± 0.002286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1178.654867,
+            "range": "± 23.438589",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1520.301957,
+            "range": "± 3.004874",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.466402,
+            "range": "± 0.026634",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.735552,
+            "range": "± 2.213207",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 279.447068,
+            "range": "± 2.306003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
             "range": "± 0",
             "unit": "ms/iter"
           }
