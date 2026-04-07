@@ -860,6 +860,19 @@ fn merge_commitment_tx_results(
     }
 }
 
+/// Controls how `get_data_tx_in_parallel_inner` handles txids that are absent
+/// from both the mempool and the DB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxLookupMode {
+    /// Return `Err` if any requested txid is missing (default for all callers
+    /// except the tx-selector publish-candidate path).
+    Strict,
+    /// Warn, fire a `debug_assert!`, and return the partial result. Used by
+    /// the tx-selector path where stale `CachedDataRoot` txid references are
+    /// possible before Layer B has cleaned them up.
+    Lenient,
+}
+
 /// Get all commitment transactions from the mempool and database using direct read guard access.
 pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
@@ -906,7 +919,7 @@ pub async fn get_data_tx_in_parallel(
         })
     };
 
-    get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
+    get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db, TxLookupMode::Strict).await
 }
 
 pub async fn build_block_body_for_processed_block_header(
@@ -945,11 +958,14 @@ pub async fn build_block_body_for_processed_block_header(
 
 /// Get all data transactions from the mempool and database
 /// with a custom get_data_txs function (this is used by the mempool)
+///
+/// The `mode` parameter controls how missing txids are handled. See `TxLookupMode`.
 #[tracing::instrument(level = "trace", skip_all, fields(tx.count = data_tx_ids.len()))]
 pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
     db: &DatabaseProvider,
+    mode: TxLookupMode,
 ) -> eyre::Result<Vec<DataTransactionHeader>>
 where
     F: Fn(
@@ -1030,12 +1046,15 @@ where
     }
 
     if !missing.is_empty() {
+        if mode == TxLookupMode::Strict {
+            return Err(eyre::eyre!("Missing transactions: {:?}", missing));
+        }
         warn!(
             missing.count = missing.len(),
             missing.txids = ?missing,
             "Skipping txids not found in mempool or DB (stale CachedDataRoot references)"
         );
-        // this debug assert is here so that test that cause this behaviour hard-fail
+        // this debug assert is here so that tests that cause this behaviour hard-fail
         debug_assert!(
             missing.is_empty(),
             "Stale txids found in publish candidate lookup — \

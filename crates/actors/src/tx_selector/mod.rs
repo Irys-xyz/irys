@@ -1,6 +1,6 @@
 pub(crate) mod helpers;
 
-use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_discovery::{get_data_tx_in_parallel_inner, TxLookupMode};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
@@ -821,6 +821,7 @@ async fn get_publish_txs_and_proofs(
                 .boxed()
             },
             ctx.db,
+            TxLookupMode::Lenient, // stale CachedDataRoot txids are expected here until Layer B cleans up
         )
         .await
         .map_err(|e| eyre!("Failed to fetch publish tx headers: {}", e))?;
