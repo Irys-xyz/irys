@@ -155,17 +155,17 @@ impl Inner {
 
         // Ask the cache service to remove reorg-pruned txids from CachedDataRoot.txid_set.
         // Same cleanup as prune_pending_txs Phase 4, covering the reorg-driven removal path.
-        if !expired_by_data_root.is_empty() {
-            if let Err(e) = self.service_senders.chunk_cache.send_traced(
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
                 crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
                     expired_by_data_root,
                 ),
-            ) {
-                warn!(
-                    "Failed to send PruneTxidsFromCachedDataRoots after reorg: {}",
-                    e
-                );
-            }
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots after reorg: {}",
+                e
+            );
         }
 
         Ok(())
@@ -281,17 +281,17 @@ impl Inner {
 
         // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
         // This prevents stale txid references from blocking publish candidate selection.
-        if !expired_by_data_root.is_empty() {
-            if let Err(e) = self.service_senders.chunk_cache.send_traced(
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
                 crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
                     expired_by_data_root,
                 ),
-            ) {
-                warn!(
-                    "Failed to send PruneTxidsFromCachedDataRoots to cache service: {}",
-                    e
-                );
-            }
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots to cache service: {}",
+                e
+            );
         }
     }
 
