@@ -209,11 +209,29 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             if coverage {
                 println!("Installing llvm-tools and cargo-llvm-cov...");
                 cmd!(sh, "rustup component add llvm-tools").run()?;
-                cmd!(
-                    sh,
-                    "cargo install --locked --force --version {LLVM_COV_VERSION} cargo-llvm-cov"
-                )
-                .remove_and_run()?;
+
+                // Check if the correct version is already installed
+                let installed_version = std::process::Command::new("cargo")
+                    .args(["llvm-cov", "--version"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .and_then(|s| {
+                        // output is "cargo-llvm-cov 0.6.16"
+                        s.split_whitespace().nth(1).map(str::to_owned)
+                    });
+                let needs_force = installed_version.as_deref() != Some(LLVM_COV_VERSION);
+                if needs_force {
+                    cmd!(
+                        sh,
+                        "cargo install --locked --force --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                    )
+                    .remove_and_run()?;
+                } else {
+                    println!(
+                        "cargo-llvm-cov {LLVM_COV_VERSION} already installed, skipping install"
+                    );
+                }
                 cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
             }
 
