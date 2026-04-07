@@ -15,15 +15,15 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, IngressProof, LedgerChunkOffset,
-    SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
+    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{
@@ -62,6 +62,10 @@ pub enum CacheServiceAction {
         data_root: DataRoot,
         response_sender: Sender<bool>,
     },
+    /// Remove specific txids from `CachedDataRoot.txid_set` entries.
+    /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
+    /// txid references from blocking publish candidate selection.
+    PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -451,6 +455,39 @@ impl InnerCacheTask {
         write_tx.commit()?;
 
         Ok(())
+    }
+
+    /// Removes specific txids from `CachedDataRoot.txid_set` entries.
+    ///
+    /// Called when the mempool prunes expired txs. If a tx was never included in a
+    /// block, its txid becomes a dangling reference in `CachedDataRoot.txid_set`.
+    /// Cleaning it here prevents stale txids from blocking publish candidate selection.
+    fn prune_txids_from_cached_data_roots(&self, by_data_root: &HashMap<H256, Vec<H256>>) {
+        let result = self.db.update_eyre(|db_tx| {
+            for (data_root, txids_to_remove) in by_data_root {
+                let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                    continue;
+                };
+
+                let before_len = cached.txid_set.len();
+                cached.txid_set.retain(|id| !txids_to_remove.contains(id));
+
+                if cached.txid_set.len() < before_len {
+                    debug!(
+                        data_root = %data_root,
+                        removed = before_len - cached.txid_set.len(),
+                        remaining = cached.txid_set.len(),
+                        "Pruned stale txids from CachedDataRoot.txid_set"
+                    );
+                    db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                }
+            }
+            Ok(())
+        });
+
+        if let Err(e) = result {
+            warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
+        }
     }
 
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
@@ -878,6 +915,10 @@ impl ChunkCacheService {
                 if let Err(e) = response_sender.send(is_generating) {
                     warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState");
                 }
+            }
+            CacheServiceAction::PruneTxidsFromCachedDataRoots(by_data_root) => {
+                self.cache_task
+                    .prune_txids_from_cached_data_roots(&by_data_root);
             }
         }
     }

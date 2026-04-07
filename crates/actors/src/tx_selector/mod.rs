@@ -1,6 +1,6 @@
 pub(crate) mod helpers;
 
-use crate::block_discovery::{get_data_tx_in_parallel_inner, TxLookupMode};
+use crate::block_discovery::{TxLookupMode, get_data_tx_in_parallel_inner};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
