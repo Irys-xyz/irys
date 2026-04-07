@@ -23,9 +23,11 @@ runs:
     - name: Configure sccache env
       shell: bash
       run: |
-        # Stop any leftover sccache daemon from a previous job so it restarts
-        # with the env vars below (persistent runners keep daemons alive).
+        # Kill any leftover sccache daemon from a previous job (persistent
+        # runners keep daemons alive). Use both the graceful stop and pkill so
+        # the daemon is definitely gone before we restart with new settings.
         sccache --stop-server 2>/dev/null || true
+        pkill -x sccache 2>/dev/null || true
 
         # Create the sccache-wrap alias (see scripts/setup-sccache.sh for why)
         scripts/setup-sccache.sh
@@ -36,4 +38,9 @@ runs:
 
     - name: Start sccache
       shell: bash
-      run: sccache --zero-stats
+      env:
+        SCCACHE_DIR: /shared/sccache
+        SCCACHE_CACHE_SIZE: 40G
+      run: |
+        sccache --start-server
+        sccache --zero-stats
