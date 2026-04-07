@@ -961,7 +961,8 @@ fn spawn_test_chunk_ingress_consumer(
                 ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
                     let _ = reply.send(Ok(()));
                 }
-                ChunkIngressMessage::ProcessPendingChunks(_) => {}
+                ChunkIngressMessage::ProcessPendingChunks(_)
+                | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
             }
         }
     });

@@ -1,4 +1,5 @@
 use crate::block_tree_service::ReorgEvent;
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
@@ -81,6 +82,23 @@ impl Inner {
                     );
                 }
             };
+        }
+
+        // After block_set is populated for each confirmed data_root, notify the
+        // chunk ingress service to try generating ingress proofs. These will now
+        // pass the block_set gate since the block hash was just recorded above.
+        let confirmed_data_roots: Vec<_> = sealed_block
+            .transactions()
+            .get_ledger_txs(DataLedger::Submit)
+            .iter()
+            .map(|tx| tx.data_root)
+            .collect();
+        if !confirmed_data_roots.is_empty()
+            && let Err(e) = self.service_senders.chunk_ingress.send_traced(
+                ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
+            )
+        {
+            warn!("Failed to send TryGenerateProofsForConfirmedRoots: {:?}", e);
         }
 
         self.prune_pending_txs().await;

@@ -680,7 +680,6 @@ pub async fn select_best_txs(
     let publish_txs_and_proofs = get_publish_txs_and_proofs(
         ctx,
         &canonical,
-        &submit_tx,
         current_height,
         current_timestamp,
         &parent_epoch_snapshot,
@@ -741,11 +740,10 @@ pub async fn select_best_txs(
     })
 }
 
-#[tracing::instrument(level = "trace", skip_all, fields(canonical.len = canonical.len(), submit_tx.count = submit_tx.len()))]
+#[tracing::instrument(level = "trace", skip_all, fields(canonical.len = canonical.len()))]
 async fn get_publish_txs_and_proofs(
     ctx: &TxSelectionContext<'_>,
     canonical: &[BlockTreeEntry],
-    submit_tx: &[DataTransactionHeader],
     current_height: u64,
     current_timestamp: UnixTimestamp,
     epoch_snapshot: &Arc<EpochSnapshot>,
@@ -875,29 +873,23 @@ async fn get_publish_txs_and_proofs(
                 );
                 continue;
             }
-            // check for previous submit inclusion
+            // check for previous submit inclusion in a parent block
             // we do this by checking if the tx is in the block tree or database.
             // if it is, we know it could've only gotten there by being included in the submit ledger.
-            // if it's not, we also check if the submit ledger for this block contains the tx (single-block promotion). if it does, we also promote it.
             if !submit_txs_from_canonical.contains(&tx_header.id) {
-                // check for single-block promotion
-                if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
-                    // check database — constrained to canonical chain at or before parent
-                    if ctx
-                        .db
-                        .view_eyre(|tx| {
-                            tx_header_by_txid_canonical(tx, &tx_header.id, current_height)
-                        })?
-                        .is_none()
-                    {
-                        // no previous inclusion
-                        warn!(
-                            tx.id = ?tx_header.id,
-                            tx.data_root = ?tx_header.data_root,
-                            "Unable to find previous submit inclusion for publish candidate"
-                        );
-                        continue;
-                    }
+                // check database — constrained to canonical chain at or before parent
+                if ctx
+                    .db
+                    .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_header.id, current_height))?
+                    .is_none()
+                {
+                    // no previous inclusion
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.data_root = ?tx_header.data_root,
+                        "Unable to find previous submit inclusion for publish candidate"
+                    );
+                    continue;
                 }
             }
 
