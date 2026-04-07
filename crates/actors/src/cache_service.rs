@@ -51,6 +51,8 @@ pub enum CacheServiceAction {
     PruneCompleted(eyre::Result<()>),
     /// Internal signal: epoch processing task completed
     EpochProcessingCompleted(eyre::Result<()>),
+    /// Internal signal: txid pruning task completed
+    PruneTxidsCompleted(eyre::Result<()>),
     /// Marks the start of ingress proof generation for the specified data root. Chunks that are
     /// related to this data root should not be pruned if the ingress proof is still being generated.
     NotifyProofGenerationStarted(DataRoot),
@@ -464,6 +466,7 @@ impl InnerCacheTask {
     /// Cleaning it here prevents stale txids from blocking publish candidate selection.
     ///
     /// Uses a background thread (matching `spawn_pruning_task`) to avoid blocking the actor loop.
+    /// Sends `PruneTxidsCompleted` when done so the service can drive the queue.
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
@@ -490,8 +493,18 @@ impl InnerCacheTask {
                 Ok(())
             });
 
+            let completion = match &result {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
+            };
             if let Err(e) = result {
                 warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
+            }
+            if let Err(e) = clone
+                .cache_sender
+                .send_traced(CacheServiceAction::PruneTxidsCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify PruneTxidsCompleted");
             }
         });
     }
@@ -745,6 +758,8 @@ pub struct ChunkCacheService {
         Arc<EpochSnapshot>,
         Option<oneshot::Sender<eyre::Result<()>>>,
     )>,
+    txid_prune_running: bool,
+    txid_prune_queue: VecDeque<HashMap<H256, Vec<H256>>>,
 }
 
 impl ChunkCacheService {
@@ -798,6 +813,8 @@ impl ChunkCacheService {
                 pruning_queue: VecDeque::new(),
                 epoch_running: false,
                 epoch_queue: VecDeque::new(),
+                txid_prune_running: false,
+                txid_prune_queue: VecDeque::new(),
             };
             cache_service
                 .start()
@@ -923,7 +940,22 @@ impl ChunkCacheService {
                 }
             }
             CacheServiceAction::PruneTxidsFromCachedDataRoots(by_data_root) => {
-                self.cache_task.spawn_prune_txids_task(by_data_root);
+                // Enqueue txid pruning; start if idle
+                self.txid_prune_queue.push_back(by_data_root);
+                if !self.txid_prune_running
+                    && let Some(work) = self.txid_prune_queue.pop_front()
+                {
+                    self.txid_prune_running = true;
+                    self.cache_task.spawn_prune_txids_task(work);
+                }
+            }
+            CacheServiceAction::PruneTxidsCompleted(_res) => {
+                // Mark txid pruning idle and kick next if queued
+                self.txid_prune_running = false;
+                if let Some(work) = self.txid_prune_queue.pop_front() {
+                    self.txid_prune_running = true;
+                    self.cache_task.spawn_prune_txids_task(work);
+                }
             }
         }
     }

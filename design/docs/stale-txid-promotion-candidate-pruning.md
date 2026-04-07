@@ -28,18 +28,18 @@ The `debug_assert!` was chosen over a pure warn-and-skip because:
 When `prune_pending_txs` (the mempool's anchor-expiry pruner) removes expired txs, it sends a `PruneTxidsFromCachedDataRoots` message to the cache service via the existing `CacheServiceAction` channel. The cache service — which owns `CachedDataRoots` — performs the actual DB writes, removing the specified txids from each entry's `txid_set`.
 
 Design choices for Layer B:
-- **Detect in the mempool, execute in the cache service.** The mempool knows exactly which txids are being pruned and their `data_root`s — information the cache service cannot derive on its own (it lacks mempool access and cannot distinguish "txid in mempool but not yet in DB" from "txid gone from both"). But `CachedDataRoots` is owned by the cache service, so the actual DB mutation belongs there. The mempool sends a fire-and-forget message with the grouped txid-to-data_root mapping.
+- **Detect in the mempool, execute in the cache service.** The mempool knows exactly which txids are being pruned and their `data_root`s — information the cache service cannot derive on its own (it lacks mempool access and cannot distinguish "txid in mempool but not yet in DB" from "txid gone from both"). For this fix, `txid_set` pruning belongs to the cache service; the mempool sends a fire-and-forget message with the grouped txid-to-data_root mapping. Note: the mempool does perform one other controlled, limited write to `CachedDataRoots` — it sets `expiry_height` when a data tx is first accepted, which is a targeted update unrelated to `txid_set` ownership.
 - **Group by `data_root` before sending.** Multiple txids may share the same `data_root`; `prune_pending_txs` groups them into a `HashMap<H256, Vec<H256>>` before sending, so the cache service can batch-update each `CachedDataRoot` entry once.
 - **`retain` instead of delete-if-empty.** When `txid_set` becomes empty, the `CachedDataRoot` entry is left in place rather than deleted. The cache service's existing `prune_data_root_cache` handles full entry deletion on its own schedule, and an empty `txid_set` is harmless (no txids means no publish candidates means no lookup failure).
 - **Non-fatal errors.** DB write failures during cleanup are logged as warnings but not propagated. Cache cleanup is best-effort; Layer A provides the safety net.
 
 ## Consequences
 
-- Block production no longer crashes when stale txids exist in `CachedDataRoot.txid_set` (Layer A).
+- Block production no longer crashes in release builds when stale txids exist in `CachedDataRoot.txid_set` (Layer A); debug/test builds still panic via `debug_assert!` as a regression canary.
 - Stale txid references are cleaned up at the source, preventing unbounded accumulation (Layer B).
 - The `debug_assert` acts as a regression canary: any future code path that creates stale txid references will fail tests.
 - Tests that intentionally inject stale state must catch the `debug_assert` panic (via `tokio::task::spawn` + `JoinError` check) rather than asserting on an `Err` return.
-- Ownership of `CachedDataRoots` remains with the cache service. The mempool service's role is limited to detecting which txids to prune and sending a message — it does not write to the table directly.
+- `txid_set` mutations in `CachedDataRoots` remain with the cache service. The mempool's role in this fix is limited to detecting which txids to prune and sending a message. The mempool does perform one separate, targeted write (`expiry_height`) when accepting a data tx, but does not perform general ownership of the table.
 
 ## Source
 
