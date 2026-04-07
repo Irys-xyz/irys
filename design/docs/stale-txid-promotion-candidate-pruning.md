@@ -20,7 +20,7 @@ A two-layer fix was chosen over either layer alone:
 The function now returns a `TxLookupResult { found, missing }` instead of a hard error when txids are absent from both the mempool and the DB. The caller (the tx-selector path in `get_publish_txs_and_proofs`) owns the error policy: it warns on any non-empty `missing` set and places a `debug_assert!` on that path so that test builds (which compile with debug assertions) panic if this safeguard fires. This makes the condition immediately visible during development while keeping release builds resilient.
 
 The `debug_assert!` was chosen over a pure warn-and-skip because:
-- The stale txid condition should never happen once Layer B is active.
+- Layer B eliminates the known path that caused stale txids, reducing the likelihood of this condition; however, pre-existing stale rows or uncovered removal paths may still trigger the assert until a forthcoming cache-integrity validation pass lands.
 - If it does happen, it indicates a new code path creating stale references — a regression that should fail tests, not pass silently.
 - Release builds must not crash on stale data; the `debug_assert` compiles out in release mode.
 

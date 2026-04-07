@@ -457,37 +457,43 @@ impl InnerCacheTask {
         Ok(())
     }
 
-    /// Removes specific txids from `CachedDataRoot.txid_set` entries.
+    /// Spawns a background thread to remove specific txids from `CachedDataRoot.txid_set` entries.
     ///
     /// Called when the mempool prunes expired txs. If a tx was never included in a
     /// block, its txid becomes a dangling reference in `CachedDataRoot.txid_set`.
     /// Cleaning it here prevents stale txids from blocking publish candidate selection.
-    fn prune_txids_from_cached_data_roots(&self, by_data_root: &HashMap<H256, Vec<H256>>) {
-        let result = self.db.update_eyre(|db_tx| {
-            for (data_root, txids_to_remove) in by_data_root {
-                let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
-                    continue;
-                };
+    ///
+    /// Uses a background thread (matching `spawn_pruning_task`) to avoid blocking the actor loop.
+    fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let result = clone.db.update_eyre(|db_tx| {
+                for (data_root, txids_to_remove) in &by_data_root {
+                    let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                        continue;
+                    };
 
-                let before_len = cached.txid_set.len();
-                cached.txid_set.retain(|id| !txids_to_remove.contains(id));
+                    let removal_set: HashSet<H256> = txids_to_remove.iter().copied().collect();
+                    let before_len = cached.txid_set.len();
+                    cached.txid_set.retain(|id| !removal_set.contains(id));
 
-                if cached.txid_set.len() < before_len {
-                    debug!(
-                        data_root = %data_root,
-                        removed = before_len - cached.txid_set.len(),
-                        remaining = cached.txid_set.len(),
-                        "Pruned stale txids from CachedDataRoot.txid_set"
-                    );
-                    db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                    if cached.txid_set.len() < before_len {
+                        debug!(
+                            data_root = %data_root,
+                            removed = before_len - cached.txid_set.len(),
+                            remaining = cached.txid_set.len(),
+                            "Pruned stale txids from CachedDataRoot.txid_set"
+                        );
+                        db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            });
 
-        if let Err(e) = result {
-            warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
-        }
+            if let Err(e) = result {
+                warn!("Failed to prune stale txids from CachedDataRoots: {}", e);
+            }
+        });
     }
 
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
@@ -917,8 +923,7 @@ impl ChunkCacheService {
                 }
             }
             CacheServiceAction::PruneTxidsFromCachedDataRoots(by_data_root) => {
-                self.cache_task
-                    .prune_txids_from_cached_data_roots(&by_data_root);
+                self.cache_task.spawn_prune_txids_task(by_data_root);
             }
         }
     }
