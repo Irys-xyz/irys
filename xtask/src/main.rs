@@ -1091,14 +1091,14 @@ fn collect_zero_coverage_from_json(
 fn find_latest_profdata(dir: PathBuf) -> Option<PathBuf> {
     let entries = fs::read_dir(&dir).ok()?;
     entries
-                .filter_map(std::result::Result::ok)
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
-                .max_by_key(|e| {
-                    e.metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                })
-                .map(|e| e.path())
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+        .max_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        })
+        .map(|e| e.path())
 }
 
 /// Parse `llvm-profdata show --all-functions` output and return the set of
@@ -1304,6 +1304,7 @@ impl CmdExt for Cmd<'_> {
 #[cfg(test)]
 mod coverage_mismatch_tests {
     use super::*;
+    use irys_testing_utils::TempDirBuilder;
 
     #[test]
     fn test_parse_mismatch_count_present() {
@@ -1371,14 +1372,14 @@ mod coverage_mismatch_tests {
 
     #[test]
     fn test_find_latest_profdata_empty_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = TempDirBuilder::new().build();
         let result = find_latest_profdata(tmp.path().to_path_buf());
         assert!(result.is_none());
     }
 
     #[test]
     fn test_find_latest_profdata_picks_newest() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = TempDirBuilder::new().build();
         let old = tmp.path().join("old.profdata");
         let new = tmp.path().join("new.profdata");
         std::fs::write(&old, b"").unwrap();
@@ -1391,7 +1392,7 @@ mod coverage_mismatch_tests {
 
     #[test]
     fn test_find_latest_profdata_ignores_non_profdata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = TempDirBuilder::new().build();
         std::fs::write(tmp.path().join("coverage.txt"), b"").unwrap();
         std::fs::write(tmp.path().join("data.json"), b"").unwrap();
         let result = find_latest_profdata(tmp.path().to_path_buf());

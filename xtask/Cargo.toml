@@ -23,5 +23,8 @@ serde_json.workspace = true
 tempfile = "3"
 nextest-monitor = { path = "../crates/utils/nextest-monitor" }
 
+[dev-dependencies]
+irys-testing-utils.workspace = true
+
 [lints]
 workspace = true
