@@ -1204,7 +1204,11 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     let zero_coverage = collect_zero_coverage_from_json(&json_str, &crate_names)?;
 
     // From profdata: workspace functions that were actually executed.
-    let Some(profdata_path) = find_latest_profdata(PathBuf::from("target/llvm-cov-target")) else {
+    let llvm_cov_target_dir = metadata
+        .target_directory
+        .as_std_path()
+        .join("llvm-cov-target");
+    let Some(profdata_path) = find_latest_profdata(llvm_cov_target_dir) else {
         println!("    (skipping function identification: no profdata file found)");
         return Ok(());
     };
@@ -1383,9 +1387,22 @@ mod coverage_mismatch_tests {
         let old = tmp.path().join("old.profdata");
         let new = tmp.path().join("new.profdata");
         std::fs::write(&old, b"").unwrap();
-        // Ensure different modification times
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(&new, b"").unwrap();
+        let old_mtime = std::fs::metadata(&old).unwrap().modified().unwrap();
+        // Poll until new's mtime is strictly newer than old's — filesystem timestamp
+        // granularity varies and a fixed sleep is unreliable.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::fs::write(&new, b"").unwrap();
+            let new_mtime = std::fs::metadata(&new).unwrap().modified().unwrap();
+            if new_mtime > old_mtime {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for filesystem mtime to advance"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let result = find_latest_profdata(tmp.path().to_path_buf()).unwrap();
         assert_eq!(result, new);
     }
