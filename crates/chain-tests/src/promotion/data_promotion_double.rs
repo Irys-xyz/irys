@@ -329,13 +329,23 @@ async fn spiky_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
         .await;
     assert!(result.is_ok());
 
-    // wait for the second set of chunks to appear in the publish ledger
-    let result = node.wait_for_chunk(&app, DataLedger::Publish, 3, 20).await;
-    assert!(result.is_ok());
+    // Mine a block to promote from submit to publish ledger
+    node.mine_block().await?;
+
+    // Promotion and storage migration are asynchronous; CI can need extra blocks
+    // before publish chunks and parent headers become visible.
+    node.future_or_mine_on_timeout(
+        node.wait_for_chunk(&app, DataLedger::Publish, 3, 60),
+        Duration::from_secs(5),
+    )
+    .await??;
 
     let block_tx1 = node
-        .wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60)
-        .await?;
+        .future_or_mine_on_timeout(
+            node.wait_for_block_containing_tx(txs[0].header.id, DataLedger::Publish, 60),
+            Duration::from_secs(5),
+        )
+        .await??;
     // let block_tx2 = get_block_containing_tx(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
