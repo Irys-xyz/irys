@@ -19,7 +19,7 @@ cd "$REPO_ROOT"
 
 # Capture git metadata from the host — .git is excluded from Docker context
 GIT_SHA="$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
-GIT_HAS_TAG="$(git describe --exact-match --tags HEAD 2>/dev/null && echo true || echo false)"
+GIT_HAS_TAG="$(git describe --exact-match --tags HEAD >/dev/null 2>&1 && echo true || echo false)"
 GIT_DIRTY="$(git diff-index --quiet HEAD -- 2>/dev/null && echo false || echo true)"
 GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 

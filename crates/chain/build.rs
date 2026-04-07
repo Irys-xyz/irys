@@ -1,6 +1,10 @@
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GIT_HAS_TAG");
+    println!("cargo:rerun-if-env-changed=GIT_DIRTY");
+
     // When building outside a git repo (e.g. Docker), accept git metadata via env
     // vars and skip all git detection. build_image.sh captures these from the host.
     if let (Ok(sha), Ok(has_tag), Ok(dirty)) = (
