@@ -1043,6 +1043,102 @@ fn write_status_summary(run_dir: &std::path::Path) {
     }
 }
 
+/// Parse `"warning: N functions have mismatched data"` from llvm-cov stderr.
+/// Returns 0 if the line is absent.
+fn parse_mismatch_count_from_stderr(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .find_map(|l| {
+            let n = l
+                .strip_prefix("warning: ")
+                .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
+            n.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
+/// Parse `cargo llvm-cov report --json` output and return mangled symbol names
+/// whose `count` field is zero, filtered to names that belong to workspace
+/// crates (i.e. contain one of `crate_names` as a substring).
+fn collect_zero_coverage_from_json(
+    json_str: &str,
+    crate_names: &[String],
+) -> eyre::Result<HashSet<String>> {
+    let json: serde_json::Value = serde_json::from_str(json_str)?;
+    let set = json
+        .pointer("/data/0/functions")
+        .and_then(|v| v.as_array())
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|f| {
+                    let name = f.get("name")?.as_str()?;
+                    let count = f.get("count")?.as_u64()?;
+                    if count == 0 && crate_names.iter().any(|c| name.contains(c.as_str())) {
+                        Some(name.to_owned())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(set)
+}
+
+/// Return the path to the most-recently-modified `.profdata` file inside
+/// `dir`, or `None` if the directory is missing or contains no `.profdata`.
+fn find_latest_profdata(dir: PathBuf) -> Option<PathBuf> {
+    let entries = fs::read_dir(&dir).ok()?;
+    entries
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+                .max_by_key(|e| {
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                })
+                .map(|e| e.path())
+}
+
+/// Parse `llvm-profdata show --all-functions` output and return the set of
+/// mangled symbol names whose `Function count` is greater than zero, filtered
+/// to names belonging to workspace crates.
+///
+/// llvm-profdata show --all-functions output format (tested LLVM 18/19):
+/// ```text
+///   <function_name>:        (2-space indent)
+///     Hash: 0x...           (4-space indent)
+///     Counters: N
+///     Function count: M     ← M > 0 means the function was called
+/// ```
+/// Format is not guaranteed stable; if parsing fails we return an empty set.
+fn collect_executed_from_profdata(
+    profdata_output: &str,
+    crate_names: &[String],
+) -> HashSet<String> {
+    let mut current_func: Option<String> = None;
+    let mut executed: HashSet<String> = HashSet::new();
+    for line in profdata_output.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+            let name = line.trim().trim_end_matches(':');
+            current_func = if crate_names.iter().any(|c| name.contains(c.as_str())) {
+                Some(name.to_owned())
+            } else {
+                None
+            };
+        } else if let Some(ref func) = current_func
+            && let Some(count_str) = line.trim().strip_prefix("Function count: ")
+        {
+            if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
+                executed.insert(func.clone());
+            }
+            current_func = None;
+        }
+    }
+    executed
+}
+
 /// Detect and log functions with mismatched coverage data.
 ///
 /// When llvm-cov encounters a function whose profdata hash doesn't match the
@@ -1084,17 +1180,7 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
         eprintln!("  [debug] cargo llvm-cov report --json produced no stderr");
     }
 
-    // Parse the mismatch count from stderr
-    let mismatch_count: usize = stderr_str
-        .lines()
-        .find_map(|l| {
-            // e.g. "warning: 135 functions have mismatched data"
-            let n = l
-                .strip_prefix("warning: ")
-                .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
-            n.parse().ok()
-        })
-        .unwrap_or(0);
+    let mismatch_count = parse_mismatch_count_from_stderr(&stderr_str);
 
     if mismatch_count == 0 {
         println!("  No coverage data mismatches detected.");
@@ -1115,43 +1201,10 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     // From the JSON export: workspace functions with zero execution count.
     // Hash-mismatched functions appear in the export (from the binary's coverage
     // mapping) but their profdata counters aren't applied, leaving count == 0.
-    let json: serde_json::Value = serde_json::from_str(&json_str)?;
-    let zero_coverage: HashSet<&str> = json
-        .pointer("/data/0/functions")
-        .and_then(|v| v.as_array())
-        .map(|funcs| {
-            funcs
-                .iter()
-                .filter_map(|f| {
-                    let name = f.get("name")?.as_str()?;
-                    let count = f.get("count")?.as_u64()?;
-                    if count == 0 && crate_names.iter().any(|c| name.contains(c.as_str())) {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let zero_coverage = collect_zero_coverage_from_json(&json_str, &crate_names)?;
 
     // From profdata: workspace functions that were actually executed.
-    let profdata_dir = PathBuf::from("target/llvm-cov-target");
-    let profdata_path = fs::read_dir(&profdata_dir).ok().and_then(|entries| {
-        // read_dir order is filesystem-dependent; pick the newest .profdata
-        // so stale files from interrupted runs don't shadow the fresh merge.
-        entries
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
-            .max_by_key(|e| {
-                e.metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-            })
-            .map(|e| e.path())
-    });
-
-    let Some(profdata_path) = profdata_path else {
+    let Some(profdata_path) = find_latest_profdata(PathBuf::from("target/llvm-cov-target")) else {
         println!("    (skipping function identification: no profdata file found)");
         return Ok(());
     };
@@ -1165,39 +1218,14 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
         .ok_or_else(|| eyre::eyre!("could not determine host triple from rustc -vV"))?;
     let llvm_profdata = format!("{sysroot}/lib/rustlib/{host_triple}/bin/llvm-profdata");
 
-    // Parse profdata for executed workspace functions.
-    // llvm-profdata show --all-functions output (tested LLVM 18/19):
-    //   <function_name>:        (2-space indent)
-    //     Hash: 0x...           (4-space indent)
-    //     Counters: N
-    //     Function count: M     ← M > 0 means the function was called
-    // Format not guaranteed stable; if parsing fails we get an empty set (safe).
     let profdata_str = profdata_path.display().to_string();
     let profdata_output = cmd!(sh, "{llvm_profdata} show --all-functions {profdata_str}").read()?;
 
-    let mut current_func: Option<&str> = None;
-    let mut executed: HashSet<&str> = HashSet::new();
-    for line in profdata_output.lines() {
-        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
-            let name = line.trim().trim_end_matches(':');
-            current_func = if crate_names.iter().any(|c| name.contains(c.as_str())) {
-                Some(name)
-            } else {
-                None
-            };
-        } else if let Some(func) = current_func
-            && let Some(count_str) = line.trim().strip_prefix("Function count: ")
-        {
-            if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
-                executed.insert(func);
-            }
-            current_func = None;
-        }
-    }
+    let executed = collect_executed_from_profdata(&profdata_output, &crate_names);
 
     // Intersection: executed in profdata ∩ zero coverage in export = hash mismatch.
     // Both sources use mangled symbol names from the coverage mapping.
-    let mut mismatched: Vec<&str> = executed.intersection(&zero_coverage).copied().collect();
+    let mut mismatched: Vec<&String> = executed.intersection(&zero_coverage).collect();
     mismatched.sort();
 
     if mismatched.is_empty() {
@@ -1270,5 +1298,142 @@ impl CmdExt for Cmd<'_> {
 
     fn remove_and_read(self) -> Result<String, xshell::Error> {
         remove_ring_env_vars(self).read()
+    }
+}
+
+#[cfg(test)]
+mod coverage_mismatch_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_mismatch_count_present() {
+        let stderr = "some preamble\nwarning: 135 functions have mismatched data\nother line\n";
+        assert_eq!(parse_mismatch_count_from_stderr(stderr), 135);
+    }
+
+    #[test]
+    fn test_parse_mismatch_count_absent() {
+        assert_eq!(
+            parse_mismatch_count_from_stderr("no relevant lines here"),
+            0
+        );
+        assert_eq!(parse_mismatch_count_from_stderr(""), 0);
+    }
+
+    #[test]
+    fn test_parse_mismatch_count_zero() {
+        let stderr = "warning: 0 functions have mismatched data\n";
+        assert_eq!(parse_mismatch_count_from_stderr(stderr), 0);
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_basic() {
+        let json = r#"{
+            "data": [{
+                "functions": [
+                    {"name": "my_crate::foo", "count": 0},
+                    {"name": "my_crate::bar", "count": 5},
+                    {"name": "other_crate::baz", "count": 0},
+                    {"name": "my_crate::qux", "count": 0}
+                ]
+            }]
+        }"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains("my_crate::foo"));
+        assert!(result.contains("my_crate::qux"));
+        assert!(!result.contains("my_crate::bar")); // count > 0
+        assert!(!result.contains("other_crate::baz")); // not in workspace
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_empty_functions() {
+        let json = r#"{"data": [{"functions": []}]}"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_missing_path() {
+        let json = r#"{"data": []}"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_missing_dir() {
+        let result = find_latest_profdata(PathBuf::from("/nonexistent/path/xyz"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = find_latest_profdata(tmp.path().to_path_buf());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_picks_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("old.profdata");
+        let new = tmp.path().join("new.profdata");
+        std::fs::write(&old, b"").unwrap();
+        // Ensure different modification times
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&new, b"").unwrap();
+        let result = find_latest_profdata(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(result, new);
+    }
+
+    #[test]
+    fn test_find_latest_profdata_ignores_non_profdata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("coverage.txt"), b"").unwrap();
+        std::fs::write(tmp.path().join("data.json"), b"").unwrap();
+        let result = find_latest_profdata(tmp.path().to_path_buf());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_basic() {
+        let output = "  my_crate::foo:
+    Hash: 0xabc
+    Counters: 3
+    Function count: 7
+  my_crate::bar:
+    Hash: 0xdef
+    Counters: 1
+    Function count: 0
+  other_crate::baz:
+    Hash: 0x111
+    Counters: 2
+    Function count: 4
+";
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_executed_from_profdata(output, &crate_names);
+        assert!(result.contains("my_crate::foo"));
+        assert!(!result.contains("my_crate::bar")); // count == 0
+        assert!(!result.contains("other_crate::baz")); // not in workspace
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_empty() {
+        let result = collect_executed_from_profdata("", &["my_crate".to_owned()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_no_workspace_funcs() {
+        let output = "\
+  std::foo:\n\
+    Hash: 0xabc\n\
+    Function count: 10\n";
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_executed_from_profdata(output, &crate_names);
+        assert!(result.is_empty());
     }
 }
