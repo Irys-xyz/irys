@@ -1,5 +1,6 @@
 use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -208,11 +209,29 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             if coverage {
                 println!("Installing llvm-tools and cargo-llvm-cov...");
                 cmd!(sh, "rustup component add llvm-tools").run()?;
-                cmd!(
-                    sh,
-                    "cargo install --locked --version {LLVM_COV_VERSION} cargo-llvm-cov"
-                )
-                .remove_and_run()?;
+
+                // Check if the correct version is already installed
+                let installed_version = std::process::Command::new("cargo")
+                    .args(["llvm-cov", "--version"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .and_then(|s| {
+                        // output is "cargo-llvm-cov 0.6.16"
+                        s.split_whitespace().nth(1).map(str::to_owned)
+                    });
+                let needs_force = installed_version.as_deref() != Some(LLVM_COV_VERSION);
+                if needs_force {
+                    cmd!(
+                        sh,
+                        "cargo install --locked --force --version {LLVM_COV_VERSION} cargo-llvm-cov"
+                    )
+                    .remove_and_run()?;
+                } else {
+                    println!(
+                        "cargo-llvm-cov {LLVM_COV_VERSION} already installed, skipping install"
+                    );
+                }
                 cmd!(sh, "cargo llvm-cov clean --workspace").remove_and_run()?;
             }
 
@@ -479,7 +498,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     );
                 }
 
-                let scope_args_lcov = scope_args.clone(); // clone: needed for second cmd! invocation
+                let scope_args_lcov = scope_args.clone(); // clone: needed for lcov cmd! invocation
+                let scope_args_mismatch = scope_args.clone(); // clone: needed for mismatch analysis
                 let html_result = cmd!(
                     sh,
                     "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
@@ -495,10 +515,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     "cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info {scope_args_lcov...}"
                 )
                 .remove_and_run();
-
-                if let Err(e) = &lcov_result {
-                    eprintln!("Warning: LCOV coverage report generation failed: {e}");
-                }
 
                 if html_result.is_ok() {
                     println!("  HTML report: target/llvm-cov/html/index.html");
@@ -516,7 +532,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
 
                 if let Err(e) = lcov_result {
-                    eprintln!("Warning: LCOV report generation failed: {e}");
+                    eprintln!("LCOV report generation failed: {e}");
+                }
+
+                // Log which functions have mismatched coverage data
+                if let Err(e) = log_coverage_mismatches(sh, &scope_args_mismatch) {
+                    eprintln!("Warning: coverage mismatch analysis failed: {e}");
                 }
             }
 
@@ -1022,37 +1043,415 @@ fn write_status_summary(run_dir: &std::path::Path) {
     }
 }
 
+/// Parse `"warning: N functions have mismatched data"` from llvm-cov stderr.
+/// Returns 0 if the line is absent.
+fn parse_mismatch_count_from_stderr(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .find_map(|l| {
+            let n = l
+                .strip_prefix("warning: ")
+                .and_then(|r| r.strip_suffix(" functions have mismatched data"))?;
+            n.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
+/// Parse `cargo llvm-cov report --json` output and return mangled symbol names
+/// whose `count` field is zero, filtered to names that belong to workspace
+/// crates (i.e. contain one of `crate_names` as a substring).
+fn collect_zero_coverage_from_json(
+    json_str: &str,
+    crate_names: &[String],
+) -> eyre::Result<HashSet<String>> {
+    let json: serde_json::Value = serde_json::from_str(json_str)?;
+    let set = json
+        .pointer("/data/0/functions")
+        .and_then(|v| v.as_array())
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|f| {
+                    let name = f.get("name")?.as_str()?;
+                    let count = f.get("count")?.as_u64()?;
+                    if count == 0 && crate_names.iter().any(|c| name.contains(c.as_str())) {
+                        Some(name.to_owned())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(set)
+}
+
+/// Return the path to the most-recently-modified `.profdata` file inside
+/// `dir`, or `None` if the directory is missing or contains no `.profdata`.
+fn find_latest_profdata(dir: PathBuf) -> Option<PathBuf> {
+    let entries = fs::read_dir(&dir).ok()?;
+    entries
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "profdata"))
+        .max_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        })
+        .map(|e| e.path())
+}
+
+/// Parse `llvm-profdata show --all-functions` output and return the set of
+/// mangled symbol names whose `Function count` is greater than zero, filtered
+/// to names belonging to workspace crates.
+///
+/// llvm-profdata show --all-functions output format (tested LLVM 18/19):
+/// ```text
+///   <function_name>:        (2-space indent)
+///     Hash: 0x...           (4-space indent)
+///     Counters: N
+///     Function count: M     ← M > 0 means the function was called
+/// ```
+/// Format is not guaranteed stable; if parsing fails we return an empty set.
+fn collect_executed_from_profdata(
+    profdata_output: &str,
+    crate_names: &[String],
+) -> HashSet<String> {
+    let mut current_func: Option<String> = None;
+    let mut executed: HashSet<String> = HashSet::new();
+    for line in profdata_output.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") && line.ends_with(':') {
+            let name = line.trim().trim_end_matches(':');
+            current_func = if crate_names.iter().any(|c| name.contains(c.as_str())) {
+                Some(name.to_owned())
+            } else {
+                None
+            };
+        } else if let Some(ref func) = current_func
+            && let Some(count_str) = line.trim().strip_prefix("Function count: ")
+        {
+            if count_str.parse::<u64>().is_ok_and(|c| c > 0) {
+                executed.insert(func.clone());
+            }
+            current_func = None;
+        }
+    }
+    executed
+}
+
+/// Detect and log functions with mismatched coverage data.
+///
+/// When llvm-cov encounters a function whose profdata hash doesn't match the
+/// binary's coverage mapping hash, it silently drops that function's counters.
+/// This identifies those functions by cross-referencing: functions that were
+/// executed (non-zero `Function count` in profdata) but show zero coverage in
+/// the JSON export are the hash mismatches. Results are filtered to workspace
+/// crates to avoid noise from std/deps.
+fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()> {
+    // Run `cargo llvm-cov report --json` via std::process::Command so we can
+    // capture stderr, where llvm-cov emits "warning: N functions have
+    // mismatched data". xshell's Cmd::read() only captures stdout.
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["llvm-cov", "report", "--json"]);
+    cmd.args(scope_args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    for k in RING_ENV_VARS {
+        cmd.env_remove(k);
+    }
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!("cargo llvm-cov report --json failed: {stderr}"));
+    }
+    let json_str = String::from_utf8(output.stdout)?;
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+    if !stderr_str.is_empty() {
+        eprintln!(
+            "  [debug] cargo llvm-cov report --json stderr ({} bytes):",
+            stderr_str.len()
+        );
+        for line in stderr_str.lines().take(10) {
+            eprintln!("  [debug]   {line}");
+        }
+    } else {
+        eprintln!("  [debug] cargo llvm-cov report --json produced no stderr");
+    }
+
+    let mismatch_count = parse_mismatch_count_from_stderr(&stderr_str);
+
+    if mismatch_count == 0 {
+        println!("  No coverage data mismatches detected.");
+        return Ok(());
+    }
+
+    println!("  llvm-cov reports {mismatch_count} functions with mismatched coverage data.");
+    println!("  Identifying affected workspace functions...");
+
+    // Collect workspace crate names (hyphens → underscores) for filtering
+    let metadata = MetadataCommand::new().exec()?;
+    let crate_names: Vec<String> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|p| p.name.replace('-', "_"))
+        .collect();
+
+    // From the JSON export: workspace functions with zero execution count.
+    // Hash-mismatched functions appear in the export (from the binary's coverage
+    // mapping) but their profdata counters aren't applied, leaving count == 0.
+    let zero_coverage = collect_zero_coverage_from_json(&json_str, &crate_names)?;
+
+    // From profdata: workspace functions that were actually executed.
+    let llvm_cov_target_dir = metadata
+        .target_directory
+        .as_std_path()
+        .join("llvm-cov-target");
+    let Some(profdata_path) = find_latest_profdata(llvm_cov_target_dir) else {
+        println!("    (skipping function identification: no profdata file found)");
+        return Ok(());
+    };
+
+    // Locate llvm-profdata via rustc sysroot
+    let sysroot = cmd!(sh, "rustc --print sysroot").read()?;
+    let rustc_info = cmd!(sh, "rustc -vV").read()?;
+    let host_triple = rustc_info
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .ok_or_else(|| eyre::eyre!("could not determine host triple from rustc -vV"))?;
+    let llvm_profdata = format!("{sysroot}/lib/rustlib/{host_triple}/bin/llvm-profdata");
+
+    let profdata_str = profdata_path.display().to_string();
+    let profdata_output = cmd!(sh, "{llvm_profdata} show --all-functions {profdata_str}").read()?;
+
+    let executed = collect_executed_from_profdata(&profdata_output, &crate_names);
+
+    // Intersection: executed in profdata ∩ zero coverage in export = hash mismatch.
+    // Both sources use mangled symbol names from the coverage mapping.
+    let mut mismatched: Vec<&String> = executed.intersection(&zero_coverage).collect();
+    mismatched.sort();
+
+    if mismatched.is_empty() {
+        println!("    No workspace functions affected (mismatches are in dependencies).");
+    } else {
+        println!(
+            "  Affected workspace functions ({} of {mismatch_count}):",
+            mismatched.len()
+        );
+        let log_path = PathBuf::from("target/llvm-cov/mismatched-functions.txt");
+        let mut file = fs::File::create(&log_path)?;
+        for (i, func) in mismatched.iter().enumerate() {
+            writeln!(file, "{func}")?;
+            if i < 30 {
+                println!("    {func}");
+            }
+        }
+        if mismatched.len() > 30 {
+            println!(
+                "    ... and {} more (see {})",
+                mismatched.len() - 30,
+                log_path.display()
+            );
+        }
+        println!("  Full list: {}", log_path.display());
+        println!("  Tip: pipe through `rustfilt` to demangle function names");
+    }
+
+    Ok(())
+}
+
+/// Env vars that Ring's build.rs emits rerun conditions for, many of which are
+/// absent under a regular `cargo check`, causing unnecessary rebuilds when
+/// alternating between `cargo check` and xtask commands.
+// TODO: remove once briansmith/ring#2454 is resolved and released; that issue
+// tracks spurious rebuilds caused by ring's build.rs rerun conditions
+const RING_ENV_VARS: &[&str] = &[
+    "CARGO_MANIFEST_DIR",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_MANIFEST_LINKS",
+    "RING_PREGENERATE_ASM",
+    // "OUT_DIR",
+    "CARGO_CFG_TARGET_ARCH",
+    "CARGO_CFG_TARGET_OS",
+    "CARGO_CFG_TARGET_ENV",
+    "CARGO_CFG_TARGET_ENDIAN",
+    // "DEBUG",
+];
+
+fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
+    let mut c = cmd;
+    for k in RING_ENV_VARS {
+        c = c.env_remove(k);
+    }
+    c
+}
+
 pub trait CmdExt {
     fn remove_and_run(self) -> Result<(), xshell::Error>;
+    fn remove_and_read(self) -> Result<String, xshell::Error>;
 }
 
 impl CmdExt for Cmd<'_> {
-    /// removes a set of problematic env vars set by xtask being a cargo subcommand
-    /// this is for ring, as their build.rs emits rerun conditions for the following env vars
-    /// many of which are not present if you use a regular `cargo check`,
-    /// which causes a re-run if you alternate between `cargo check` and an xtask command
     fn remove_and_run(self) -> Result<(), xshell::Error> {
-        let mut c = self;
-        // TODO: once ring releases  0.17.15+, we should no longer need this
-        // these were taken from Ring's build.rs
-        for k in [
-            "CARGO_MANIFEST_DIR",
-            "CARGO_PKG_NAME",
-            "CARGO_PKG_VERSION_MAJOR",
-            "CARGO_PKG_VERSION_MINOR",
-            "CARGO_PKG_VERSION_PATCH",
-            "CARGO_PKG_VERSION_PRE",
-            "CARGO_MANIFEST_LINKS",
-            "RING_PREGENERATE_ASM",
-            // "OUT_DIR",
-            "CARGO_CFG_TARGET_ARCH",
-            "CARGO_CFG_TARGET_OS",
-            "CARGO_CFG_TARGET_ENV",
-            "CARGO_CFG_TARGET_ENDIAN",
-            // "DEBUG",
-        ] {
-            c = c.env_remove(k);
+        remove_ring_env_vars(self).run()
+    }
+
+    fn remove_and_read(self) -> Result<String, xshell::Error> {
+        remove_ring_env_vars(self).read()
+    }
+}
+
+#[cfg(test)]
+mod coverage_mismatch_tests {
+    use super::*;
+    use irys_testing_utils::TempDirBuilder;
+
+    #[test]
+    fn test_parse_mismatch_count_present() {
+        let stderr = "some preamble\nwarning: 135 functions have mismatched data\nother line\n";
+        assert_eq!(parse_mismatch_count_from_stderr(stderr), 135);
+    }
+
+    #[test]
+    fn test_parse_mismatch_count_absent() {
+        assert_eq!(
+            parse_mismatch_count_from_stderr("no relevant lines here"),
+            0
+        );
+        assert_eq!(parse_mismatch_count_from_stderr(""), 0);
+    }
+
+    #[test]
+    fn test_parse_mismatch_count_zero() {
+        let stderr = "warning: 0 functions have mismatched data\n";
+        assert_eq!(parse_mismatch_count_from_stderr(stderr), 0);
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_basic() {
+        let json = r#"{
+            "data": [{
+                "functions": [
+                    {"name": "my_crate::foo", "count": 0},
+                    {"name": "my_crate::bar", "count": 5},
+                    {"name": "other_crate::baz", "count": 0},
+                    {"name": "my_crate::qux", "count": 0}
+                ]
+            }]
+        }"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains("my_crate::foo"));
+        assert!(result.contains("my_crate::qux"));
+        assert!(!result.contains("my_crate::bar")); // count > 0
+        assert!(!result.contains("other_crate::baz")); // not in workspace
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_empty_functions() {
+        let json = r#"{"data": [{"functions": []}]}"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collect_zero_coverage_from_json_missing_path() {
+        let json = r#"{"data": []}"#;
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_zero_coverage_from_json(json, &crate_names).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_missing_dir() {
+        let result = find_latest_profdata(PathBuf::from("/nonexistent/path/xyz"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_empty_dir() {
+        let tmp = TempDirBuilder::new().build();
+        let result = find_latest_profdata(tmp.path().to_path_buf());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_latest_profdata_picks_newest() {
+        let tmp = TempDirBuilder::new().build();
+        let old = tmp.path().join("old.profdata");
+        let new = tmp.path().join("new.profdata");
+        std::fs::write(&old, b"").unwrap();
+        let old_mtime = std::fs::metadata(&old).unwrap().modified().unwrap();
+        // Poll until new's mtime is strictly newer than old's — filesystem timestamp
+        // granularity varies and a fixed sleep is unreliable.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::fs::write(&new, b"").unwrap();
+            let new_mtime = std::fs::metadata(&new).unwrap().modified().unwrap();
+            if new_mtime > old_mtime {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for filesystem mtime to advance"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        c.run()
+        let result = find_latest_profdata(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(result, new);
+    }
+
+    #[test]
+    fn test_find_latest_profdata_ignores_non_profdata() {
+        let tmp = TempDirBuilder::new().build();
+        std::fs::write(tmp.path().join("coverage.txt"), b"").unwrap();
+        std::fs::write(tmp.path().join("data.json"), b"").unwrap();
+        let result = find_latest_profdata(tmp.path().to_path_buf());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_basic() {
+        let output = "  my_crate::foo:
+    Hash: 0xabc
+    Counters: 3
+    Function count: 7
+  my_crate::bar:
+    Hash: 0xdef
+    Counters: 1
+    Function count: 0
+  other_crate::baz:
+    Hash: 0x111
+    Counters: 2
+    Function count: 4
+";
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_executed_from_profdata(output, &crate_names);
+        assert!(result.contains("my_crate::foo"));
+        assert!(!result.contains("my_crate::bar")); // count == 0
+        assert!(!result.contains("other_crate::baz")); // not in workspace
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_empty() {
+        let result = collect_executed_from_profdata("", &["my_crate".to_owned()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collect_executed_from_profdata_no_workspace_funcs() {
+        let output = "\
+  std::foo:\n\
+    Hash: 0xabc\n\
+    Function count: 10\n";
+        let crate_names = vec!["my_crate".to_owned()];
+        let result = collect_executed_from_profdata(output, &crate_names);
+        assert!(result.is_empty());
     }
 }
