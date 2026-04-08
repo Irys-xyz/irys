@@ -28,6 +28,14 @@ WORKDIR /workspace
 
 COPY . .
 
+# Git metadata — .git is excluded from context, so pass via build args
+ARG GIT_SHA=unknown
+ARG GIT_HAS_TAG=false
+ARG GIT_DIRTY=false
+ENV GIT_SHA=${GIT_SHA}
+ENV GIT_HAS_TAG=${GIT_HAS_TAG}
+ENV GIT_DIRTY=${GIT_DIRTY}
+
 # Reproducible build: deterministic timestamps, no incremental, mold linker
 ENV SOURCE_DATE_EPOCH=0 \
     CARGO_INCREMENTAL=0 \
