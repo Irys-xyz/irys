@@ -531,7 +531,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     println!("  LCOV report: target/llvm-cov/lcov.info");
                 }
 
-                lcov_result.inspect_err(|e| eprintln!("LCOV report generation failed: {e}"))?;
+                if let Err(e) = lcov_result {
+                    eprintln!("LCOV report generation failed: {e}");
+                }
 
                 // Log which functions have mismatched coverage data
                 if let Err(e) = log_coverage_mismatches(sh, &scope_args_mismatch) {
