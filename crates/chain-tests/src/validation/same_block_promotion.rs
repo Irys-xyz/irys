@@ -136,8 +136,7 @@ async fn heavy_same_block_promotion_accepted_by_peer() -> eyre::Result<()> {
 
     // 8. Send block to peer node for full validation — this is the core assertion.
     //    The peer has never seen this tx before; it validates entirely from the block.
-    let peer_outcome =
-        send_block_and_read_state(&peer_node.node_ctx, block.clone(), false).await?;
+    let peer_outcome = send_block_and_read_state(&peer_node.node_ctx, block.clone(), false).await?;
     assert!(
         matches!(peer_outcome, BlockValidationOutcome::StoredOnNode(_)),
         "Peer should accept block with same-block promotion, got: {:?}",
