@@ -323,26 +323,28 @@ impl IrysBlockHeader {
     ///
     /// # Panics
     ///
-    /// Panics if the commitment ledger already exists and is non-empty. Commitments
-    /// must only be registered once; double-registration would inflate the treasury.
+    /// Panics if any of the commitment txids being added already exist in the ledger.
+    /// Duplicate registration would inflate the treasury.
     pub fn append_commitments(&mut self, commitments: &[CommitmentTransaction]) -> U256 {
         if commitments.is_empty() {
             return U256::zero();
         }
 
-        // Guard: if the commitment ledger already exists and has entries, bail.
-        // This prevents accidental double-registration which would inflate the treasury.
+        // Guard: check for duplicate txids to prevent double-registration which
+        // would inflate the treasury. Multiple calls are fine as long as no txid repeats.
         if let Some(existing) = self
             .system_ledgers
             .iter()
             .find(|e| e.ledger_id == SystemLedger::Commitment)
         {
-            assert!(
-                existing.tx_ids.is_empty(),
-                "append_commitments called on a block that already has {} commitment ledger entries. \
-                 This is a programming error — commitments should only be registered once.",
-                existing.tx_ids.len(),
-            );
+            for commitment in commitments {
+                let id = commitment.id();
+                assert!(
+                    !existing.tx_ids.iter().any(|x| x == &id),
+                    "append_commitments: commitment txid {id:?} already exists in the ledger. \
+                     This is a programming error — duplicates are not allowed.",
+                );
+            }
         }
 
         // Find or create the Commitment system ledger.
