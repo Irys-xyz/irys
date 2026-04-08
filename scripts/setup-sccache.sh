@@ -29,11 +29,6 @@ if ! command -v sccache >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ -x "$WRAPPER" ] && "$WRAPPER" --version >/dev/null 2>&1; then
-  echo "setup-sccache: $WRAPPER already exists"
-  exit 0
-fi
-
 mkdir -p "$(dirname "$WRAPPER")"
 printf '#!/bin/sh\nexec sccache "$@"\n' > "$WRAPPER"
 chmod +x "$WRAPPER"

@@ -1167,7 +1167,6 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     let json_str = String::from_utf8(output.stdout)?;
     let stderr_str = String::from_utf8_lossy(&output.stderr);
 
-    // Debug: show what stderr contains so we can verify the warning format
     if !stderr_str.is_empty() {
         eprintln!(
             "  [debug] cargo llvm-cov report --json stderr ({} bytes):",
@@ -1264,7 +1263,8 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
 /// Env vars that Ring's build.rs emits rerun conditions for, many of which are
 /// absent under a regular `cargo check`, causing unnecessary rebuilds when
 /// alternating between `cargo check` and xtask commands.
-// TODO: once ring releases 0.17.15+, we should no longer need this
+// TODO: remove once briansmith/ring#2454 is resolved and released; that issue
+// tracks spurious rebuilds caused by ring's build.rs rerun conditions
 const RING_ENV_VARS: &[&str] = &[
     "CARGO_MANIFEST_DIR",
     "CARGO_PKG_NAME",
