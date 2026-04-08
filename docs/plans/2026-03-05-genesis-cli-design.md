@@ -501,7 +501,10 @@ async fn create_new_genesis_block(
 
     // Build a single-miner entry from the node's own config
     let storage_submodule_config =
-        StorageSubmodulesConfig::load(self.config.node_config.base_directory.clone())
+        StorageSubmodulesConfig::load(
+            self.config.node_config.base_directory.clone(),
+            self.config.node_config.node_mode,
+        )
             .expect("storage_submodules.toml must exist for genesis node");
     let pledge_count = storage_submodule_config.submodule_paths.len() as u64;
 
