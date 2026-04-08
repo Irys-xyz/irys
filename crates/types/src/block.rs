@@ -323,12 +323,11 @@ impl IrysBlockHeader {
     ///
     /// # Errors
     ///
-    /// Returns an error if the sum of treasury deltas overflows `U256::MAX`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any of the commitment txids being added already exist in the ledger.
-    /// Duplicate registration would inflate the treasury.
+    /// Returns an error if the sum of treasury deltas overflows `U256::MAX`, or if
+    /// any commitment txid is a duplicate — either appearing more than once in the
+    /// incoming slice or already present in the ledger. Duplicate registration would
+    /// inflate the treasury. Note: this method does not assume that
+    /// `validate_genesis_commitments` pre-validation has been run.
     pub fn append_commitments(
         &mut self,
         commitments: &[CommitmentTransaction],
@@ -337,34 +336,24 @@ impl IrysBlockHeader {
             return Ok(U256::zero());
         }
 
-        // Guard: check for duplicates within the incoming slice itself.
+        // Guard: seed a HashSet with txids already in the ledger, then extend it with
+        // incoming commitments. A failed insert means a duplicate — either intra-slice
+        // or against the existing ledger — which would inflate the treasury.
         {
             use std::collections::HashSet;
-            let mut seen = HashSet::new();
+            let mut seen: HashSet<_> = self
+                .system_ledgers
+                .iter()
+                .find(|e| e.ledger_id == SystemLedger::Commitment)
+                .map(|existing| existing.tx_ids.iter().copied().collect())
+                .unwrap_or_default();
             for commitment in commitments {
                 let id = commitment.id();
-                assert!(
+                eyre::ensure!(
                     seen.insert(id),
-                    "append_commitments: commitment txid {id:?} appears more than once in the \
-                     incoming commitments slice. This is a programming error — intra-slice \
-                     duplicates are not allowed.",
-                );
-            }
-        }
-
-        // Guard: check for duplicate txids to prevent double-registration which
-        // would inflate the treasury. Multiple calls are fine as long as no txid repeats.
-        if let Some(existing) = self
-            .system_ledgers
-            .iter()
-            .find(|e| e.ledger_id == SystemLedger::Commitment)
-        {
-            for commitment in commitments {
-                let id = commitment.id();
-                assert!(
-                    !existing.tx_ids.iter().any(|x| x == &id),
-                    "append_commitments: commitment txid {id:?} already exists in the ledger. \
-                     This is a programming error — duplicates are not allowed.",
+                    "append_commitments: commitment txid {id:?} is a duplicate \
+                     (already present in the ledger or appears more than once in the \
+                     incoming commitments slice)"
                 );
             }
         }
