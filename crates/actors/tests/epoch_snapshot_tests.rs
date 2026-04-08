@@ -44,8 +44,11 @@ async fn genesis_test() {
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -204,8 +207,11 @@ async fn add_slots_test() {
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -311,8 +317,11 @@ async fn unique_addresses_per_slot_test() {
     commitments.append(&mut comm1);
     commitments.append(&mut comm2);
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -456,7 +465,8 @@ async fn partition_expiration_and_repacking_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
 
     // Create epoch service
-    let storage_submodules_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
+    let storage_submodules_config =
+        StorageSubmodulesConfig::load(base_path.clone(), config.node_config.node_mode).unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -799,8 +809,11 @@ async fn epoch_blocks_reinitialization_test() {
         add_test_commitments(&mut genesis_block, pledge_count, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,

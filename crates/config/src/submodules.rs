@@ -1,4 +1,5 @@
 use eyre::bail;
+use irys_types::NodeMode;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -34,17 +35,23 @@ pub struct StorageSubmodulesConfig {
 pub const SUBMODULES_CONFIG_FILE_NAME: &str = ".irys_submodules.toml";
 
 impl StorageSubmodulesConfig {
-    /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path
-    pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
+    /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path.
+    ///
+    /// Genesis nodes require at least 3 submodules to ensure minimum network
+    /// capacity. Peer nodes have no minimum.
+    pub fn from_toml(path: impl AsRef<Path>, node_mode: NodeMode) -> eyre::Result<Self> {
         let contents = fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
 
-        let submodule_count = config.submodule_paths.len();
-        if submodule_count < 3 {
-            bail!(
-                "Insufficient submodules: found {}, but minimum of 3 required in .irys_submodules.toml for chain initialization",
-                submodule_count
-            );
+        if matches!(node_mode, NodeMode::Genesis) {
+            let submodule_count = config.submodule_paths.len();
+            if submodule_count < 3 {
+                bail!(
+                    "Insufficient submodules: found {}, but genesis nodes require at least 3 \
+                     in .irys_submodules.toml for chain initialization",
+                    submodule_count
+                );
+            }
         }
 
         Ok(config)
@@ -80,10 +87,11 @@ impl StorageSubmodulesConfig {
             fs::create_dir_all(path).expect("to create submodule dir");
         }
 
-        Self::from_toml(config_path_local)
+        // Tests don't enforce genesis minimum — pass Peer to skip the check.
+        Self::from_toml(config_path_local, NodeMode::Peer)
     }
 
-    pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
+    pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
         let base_path = instance_dir.join("storage_modules");
@@ -99,7 +107,7 @@ impl StorageSubmodulesConfig {
             });
 
         if config_path_local.exists() {
-            let config = Self::from_toml(config_path_local)?;
+            let config = Self::from_toml(config_path_local, node_mode)?;
             if config.is_using_hardcoded_paths {
                 return Ok(config);
             };
@@ -148,7 +156,7 @@ impl StorageSubmodulesConfig {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
 
-            Self::from_toml(config_path_local)
+            Self::from_toml(config_path_local, node_mode)
         }
     }
 }
@@ -188,7 +196,7 @@ mod tests {
             let dir = TempDirBuilder::new().build();
             let path = dir.path().join("test.toml");
             fs::write(&path, &input)?;
-            let _result = StorageSubmodulesConfig::from_toml(&path);
+            let _result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Genesis);
         }
     }
 
@@ -216,7 +224,7 @@ mod tests {
     ) -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();
         let path = write_config_toml(dir.path(), count)?;
-        let result = StorageSubmodulesConfig::from_toml(&path);
+        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Genesis);
         assert_eq!(result.is_err(), should_err);
         if should_err {
             let err_msg = result.unwrap_err().to_string();
@@ -231,7 +239,7 @@ mod tests {
     #[test]
     fn load_creates_default_config_when_none_exists() -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();
-        let config = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
+        let config = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Genesis)?;
         assert_eq!(config.submodule_paths.len(), 3);
         assert!(config.is_using_hardcoded_paths);
         let config_path = dir.path().join(SUBMODULES_CONFIG_FILE_NAME);
@@ -242,8 +250,8 @@ mod tests {
     #[test]
     fn load_reads_existing_config() -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();
-        let first = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
-        let second = StorageSubmodulesConfig::load(dir.path().to_path_buf())?;
+        let first = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Genesis)?;
+        let second = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Genesis)?;
         assert_eq!(first, second);
         assert_eq!(second.submodule_paths.len(), 3);
         Ok(())

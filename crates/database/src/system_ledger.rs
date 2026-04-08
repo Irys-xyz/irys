@@ -60,7 +60,9 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
-    let storage_submodule_config = StorageSubmodulesConfig::load(base_dir).unwrap();
+    // Genesis mode: StorageSubmodulesConfig::load enforces the >= 3 minimum.
+    let storage_submodule_config =
+        StorageSubmodulesConfig::load(base_dir, irys_types::NodeMode::Genesis).unwrap();
     let num_submodules = storage_submodule_config.submodule_paths.len();
 
     if num_submodules < 3 {

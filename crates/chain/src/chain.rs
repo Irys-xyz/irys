@@ -577,20 +577,14 @@ impl IrysNode {
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
         use crate::genesis_builder::{GenesisMinerEntry, build_signed_genesis_block};
 
-        // Build a single-miner entry from the node's own config
-        let storage_submodule_config =
-            StorageSubmodulesConfig::load(self.config.node_config.base_directory.clone())
-                .expect("storage_submodules.toml must exist for genesis node");
+        // Build a single-miner entry from the node's own config.
+        // StorageSubmodulesConfig::load enforces >= 3 submodules for Genesis mode.
+        let storage_submodule_config = StorageSubmodulesConfig::load(
+            self.config.node_config.base_directory.clone(),
+            self.config.node_config.node_mode,
+        )
+        .expect("storage_submodules.toml must exist for genesis node");
         let pledge_count = storage_submodule_config.submodule_paths.len() as u64;
-
-        // Genesis nodes must have at least 3 storage submodules to ensure minimum
-        // network capacity. This matches the pre-refactor invariant from
-        // get_genesis_commitments.
-        eyre::ensure!(
-            pledge_count >= 3,
-            "genesis node requires at least 3 storage submodules (found {pledge_count}). \
-             Add more paths to storage_submodules.toml."
-        );
 
         let miner_entry = GenesisMinerEntry {
             signing_key: self.config.node_config.mining_key.clone(),
@@ -1399,8 +1393,10 @@ impl IrysNode {
         let replay_data =
             EpochReplayData::query_replay_data(&irys_db, &block_index_guard, config).await?;
 
-        let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
+        let storage_submodules_config = StorageSubmodulesConfig::load(
+            config.node_config.base_directory.clone(),
+            config.node_config.node_mode,
+        )?;
 
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
