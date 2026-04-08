@@ -337,6 +337,21 @@ impl IrysBlockHeader {
             return Ok(U256::zero());
         }
 
+        // Guard: check for duplicates within the incoming slice itself.
+        {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            for commitment in commitments {
+                let id = commitment.id();
+                assert!(
+                    seen.insert(id),
+                    "append_commitments: commitment txid {id:?} appears more than once in the \
+                     incoming commitments slice. This is a programming error — intra-slice \
+                     duplicates are not allowed.",
+                );
+            }
+        }
+
         // Guard: check for duplicate txids to prevent double-registration which
         // would inflate the treasury. Multiple calls are fine as long as no txid repeats.
         if let Some(existing) = self
