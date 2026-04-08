@@ -112,7 +112,7 @@ pub(crate) enum Commands {
         genesis_dir: PathBuf,
 
         /// Print all partition hashes present in both current network and target genesis
-        #[arg(long, default_value_t = false)]
+        #[arg(long)]
         list_retained_partition_hashes: bool,
     },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]

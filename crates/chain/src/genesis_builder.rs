@@ -338,6 +338,21 @@ pub fn build_genesis_block_from_commitments(
     commitments: Vec<CommitmentTransaction>,
     block_signing_key: &SigningKey,
 ) -> eyre::Result<GenesisOutput> {
+    let has_stake = commitments
+        .iter()
+        .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Stake));
+    let has_pledge = commitments
+        .iter()
+        .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }));
+    eyre::ensure!(
+        has_stake,
+        "commitments must contain at least one stake (required to register a miner)"
+    );
+    eyre::ensure!(
+        has_pledge,
+        "commitments must contain at least one pledge (required for mining)"
+    );
+
     let GenesisPrelude {
         mut genesis_block,
         reth_chain_spec,
@@ -357,10 +372,9 @@ pub fn build_genesis_block_from_commitments(
     }
 
     // Validate that every miner with pledges also has a stake.
-    // This checks existence only — ordering (stake before pledges per miner)
-    // is enforced by the epoch service during `compute_commitment_state()`,
-    // which processes commitments sequentially and expects a stake entry
-    // before any pledges for a given address.
+    // We check existence only, not ordering — `compute_commitment_state()`
+    // categorizes commitments by type first, then processes all stakes before
+    // all pledges, so input ordering is irrelevant.
     {
         use std::collections::BTreeSet;
         let staked: BTreeSet<IrysAddress> = commitments
@@ -383,9 +397,11 @@ pub fn build_genesis_block_from_commitments(
     // Register all commitment txids in the commitment ledger and sum values
     let ledger = get_or_create_commitment_ledger(&mut genesis_block);
     let mut initial_treasury = U256::zero();
-    for commitment in &commitments {
+    for (i, commitment) in commitments.iter().enumerate() {
         ledger.tx_ids.push(commitment.id());
-        initial_treasury = initial_treasury.saturating_add(commitment.value());
+        initial_treasury = initial_treasury
+            .checked_add(commitment.value())
+            .ok_or_else(|| eyre::eyre!("treasury overflow at commitment {i}"))?;
     }
 
     let total_pledges = commitments
@@ -429,8 +445,10 @@ async fn generate_multi_miner_commitments(
     miners: &[GenesisMinerEntry],
 ) -> (Vec<CommitmentTransaction>, U256) {
     let mut all_commitments: Vec<CommitmentTransaction> = Vec::new();
-    // The very first stake uses H256::default() as anchor (matching existing
-    // behaviour in `get_genesis_commitments`). Subsequent anchors rotate.
+    // Anchor chaining: each commitment's txid becomes the anchor for the next,
+    // creating a dependency chain that ensures unique transaction IDs even when
+    // multiple miners submit identical commitment parameters. The very first
+    // stake uses H256::default() (matching `get_genesis_commitments`).
     let mut anchor = H256::default();
 
     for miner in miners {
@@ -464,7 +482,9 @@ async fn generate_multi_miner_commitments(
     let mut total_value = U256::zero();
     for commitment in &all_commitments {
         ledger.tx_ids.push(commitment.id());
-        total_value = total_value.saturating_add(commitment.value());
+        total_value = total_value
+            .checked_add(commitment.value())
+            .expect("treasury overflow from config-derived commitment values");
     }
 
     (all_commitments, total_value)
@@ -474,23 +494,20 @@ async fn generate_multi_miner_commitments(
 fn get_or_create_commitment_ledger(
     genesis_block: &mut IrysBlockHeader,
 ) -> &mut SystemTransactionLedger {
-    let exists = genesis_block
+    let pos = genesis_block
         .system_ledgers
         .iter()
-        .any(|e| e.ledger_id == SystemLedger::Commitment);
-
-    if !exists {
-        genesis_block.system_ledgers.push(SystemTransactionLedger {
-            ledger_id: SystemLedger::Commitment.into(),
-            tx_ids: H256List::new(),
-        });
+        .position(|e| e.ledger_id == SystemLedger::Commitment);
+    match pos {
+        Some(i) => &mut genesis_block.system_ledgers[i],
+        None => {
+            genesis_block.system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List::new(),
+            });
+            genesis_block.system_ledgers.last_mut().unwrap()
+        }
     }
-
-    genesis_block
-        .system_ledgers
-        .iter_mut()
-        .find(|e| e.ledger_id == SystemLedger::Commitment)
-        .expect("commitment ledger should exist after creation")
 }
 
 /// Construct an [`IrysSigner`] from a raw [`SigningKey`] and the node

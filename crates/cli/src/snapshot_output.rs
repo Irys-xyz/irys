@@ -85,24 +85,17 @@ impl SnapshotPartitionState {
         }
 
         for partitions in by_miner.values_mut() {
+            // Sort: data partitions first (by ledger/slot), then capacity, then by hash.
+            let sort_key = |p: &PartitionAssignmentOutput| match p.kind {
+                PartitionAssignmentKindOutput::Data {
+                    ledger_id,
+                    slot_index,
+                } => (0_u8, ledger_id, slot_index),
+                PartitionAssignmentKindOutput::Capacity => (1_u8, 0, 0),
+            };
             partitions.sort_by(|a, b| {
-                let order_a = match a.kind {
-                    PartitionAssignmentKindOutput::Capacity => (1_u8, None, None),
-                    PartitionAssignmentKindOutput::Data {
-                        ledger_id,
-                        slot_index,
-                    } => (0_u8, Some(ledger_id), Some(slot_index)),
-                };
-                let order_b = match b.kind {
-                    PartitionAssignmentKindOutput::Capacity => (1_u8, None, None),
-                    PartitionAssignmentKindOutput::Data {
-                        ledger_id,
-                        slot_index,
-                    } => (0_u8, Some(ledger_id), Some(slot_index)),
-                };
-
-                order_a
-                    .cmp(&order_b)
+                sort_key(a)
+                    .cmp(&sort_key(b))
                     .then_with(|| a.partition_hash.cmp(&b.partition_hash))
             });
         }
@@ -522,16 +515,6 @@ pub(crate) fn snapshot_from_genesis_dir(
     Ok((snapshot, commitments))
 }
 
-fn load_all_commitments<T: irys_database::reth_db::transaction::DbTx>(
-    read_tx: &T,
-) -> eyre::Result<Vec<irys_types::CommitmentTransaction>> {
-    use irys_database::tables::IrysCommitments;
-    use irys_database::walk_all;
-
-    let entries = walk_all::<IrysCommitments, _>(read_tx)?;
-    Ok(entries.into_iter().map(|(_txid, c)| c.0).collect())
-}
-
 pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transaction::DbTx>(
     read_tx: &T,
     config: &Config,
@@ -540,12 +523,23 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
     irys_domain::EpochSnapshot,
     Vec<irys_types::CommitmentTransaction>,
 )> {
-    use irys_database::tables::MigratedBlockHashes;
-    use irys_database::{block_header_by_hash, block_index_latest_height};
+    use irys_database::tables::{IrysCommitments, MigratedBlockHashes};
+    use irys_database::{block_header_by_hash, block_index_latest_height, walk_all};
     use irys_domain::EpochSnapshot;
 
-    let all_commitments = load_all_commitments(read_tx)?;
-    info!("Found {} commitments in database", all_commitments.len());
+    // Count total pledge commitments upfront for submodule sizing. This uses DB
+    // key order (fine — we only need the count, not the ordering).
+    let total_pledge_count = {
+        let all: Vec<_> = walk_all::<IrysCommitments, _>(read_tx)?;
+        all.iter()
+            .filter(|(_, c)| {
+                matches!(
+                    c.0.commitment_type(),
+                    irys_types::CommitmentTypeV2::Pledge { .. }
+                )
+            })
+            .count()
+    };
 
     let latest_height =
         block_index_latest_height(read_tx)?.ok_or_else(|| eyre::eyre!("Block index is empty"))?;
@@ -568,8 +562,13 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
         genesis_commitments.len()
     );
 
-    let submodules =
-        hardcoded_submodules(submodule_prefix, count_pledge_commitments(&all_commitments));
+    // Accumulate commitments in ledger order (the order they appear in each
+    // epoch block's system_ledgers) rather than DB table key order. This
+    // ensures dump-commitments → build-genesis --commitments round-trips
+    // produce deterministic genesis hashes matching the original ledger order.
+    let mut ordered_commitments = genesis_commitments.clone();
+
+    let submodules = hardcoded_submodules(submodule_prefix, total_pledge_count);
     let mut snapshot = EpochSnapshot::new(
         &submodules,
         genesis_block.clone(),
@@ -592,6 +591,7 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
             "  Epoch {i} (height {height}): {} commitments",
             epoch_commitments.len()
         );
+        ordered_commitments.extend(epoch_commitments.iter().cloned());
 
         snapshot
             .perform_epoch_tasks(&Some(prev_epoch_block), &block, epoch_commitments)
@@ -600,5 +600,7 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
         prev_epoch_block = block;
     }
 
-    Ok((snapshot, all_commitments))
+    info!("Found {} commitments total", ordered_commitments.len());
+
+    Ok((snapshot, ordered_commitments))
 }

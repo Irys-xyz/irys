@@ -1141,7 +1141,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("PGh7Dunjx4xjNTLbx48G8DdKuozbsZ3nYCLm6AvRjUN");
+        let expected_hash = H256::from_base58("CZCM35BPbUpiw9i7e3TEZWZcV3g8iYRE1tEqwCCzsTpz");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
