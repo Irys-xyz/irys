@@ -368,6 +368,16 @@ impl fmt::Display for SnapshotComparisonOutput {
         writeln!(f, "  Partitions:  {}", self.target.total_partitions())?;
         writeln!(f)?;
 
+        if self.current.epoch_block.block_hash == self.target.epoch_block.block_hash {
+            writeln!(f, "Block hash: MATCH")?;
+        } else {
+            writeln!(
+                f,
+                "\x1b[1;31m⚠ Block hash: MISMATCH — current and target genesis blocks differ\x1b[0m"
+            )?;
+        }
+        writeln!(f)?;
+
         writeln!(f, "Reset Diff:")?;
         writeln!(f, "  Affected miners:      {}", self.affected_miners())?;
         writeln!(f, "  Partitions to wipe:   {}", self.wipe_count())?;
