@@ -137,11 +137,12 @@ fn test_storage_submodules(total_pledges: usize) -> StorageSubmodulesConfig {
 
 #[tokio::test]
 async fn build_signed_genesis_block_is_deterministic() {
-    let config = test_config();
+    let cfg1 = test_config();
+    let cfg2 = test_config();
     let miners = test_miners();
 
-    let output_1 = build_signed_genesis_block(&config, &miners).await.unwrap();
-    let output_2 = build_signed_genesis_block(&config, &miners).await.unwrap();
+    let output_1 = build_signed_genesis_block(&cfg1, &miners).await.unwrap();
+    let output_2 = build_signed_genesis_block(&cfg2, &miners).await.unwrap();
 
     // Block hashes must match
     assert_eq!(
@@ -164,22 +165,19 @@ async fn build_signed_genesis_block_is_deterministic() {
 
 #[tokio::test]
 async fn partition_assignments_are_deterministic() {
-    let config = test_config();
+    let cfg1 = test_config();
+    let cfg2 = test_config();
     let miners = test_miners();
     let total_pledges: usize = miners.iter().map(|m| m.pledge_count as usize).sum();
 
-    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+    let output_1 = build_signed_genesis_block(&cfg1, &miners).await.unwrap();
+    let output_2 = build_signed_genesis_block(&cfg2, &miners).await.unwrap();
 
     let submodules = test_storage_submodules(total_pledges);
 
-    // Create two EpochSnapshots from the same genesis data
-    let snap_1 = EpochSnapshot::new(
-        &submodules,
-        output.block.clone(),
-        output.commitments.clone(),
-        &config,
-    );
-    let snap_2 = EpochSnapshot::new(&submodules, output.block, output.commitments, &config);
+    // Create two EpochSnapshots from separate genesis builds to test cross-node determinism
+    let snap_1 = EpochSnapshot::new(&submodules, output_1.block, output_1.commitments, &cfg1);
+    let snap_2 = EpochSnapshot::new(&submodules, output_2.block, output_2.commitments, &cfg2);
 
     // Extract partition assignments from both snapshots.
     // After genesis init, some pledged capacity partitions are moved to data partitions

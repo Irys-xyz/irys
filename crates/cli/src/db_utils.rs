@@ -238,13 +238,18 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
             irys_database::migration::ensure_db_version_compatible(&db)?;
             db
         }
-        DatabaseEnvKind::RO => DatabaseEnv::open(
-            &db_path,
-            access,
-            irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-                .with_log_level(None)
-                .with_exclusive(Some(false)),
-        )?,
+        DatabaseEnvKind::RO => {
+            let db = DatabaseEnv::open(
+                &db_path,
+                access,
+                irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+                    .with_log_level(None)
+                    .with_exclusive(Some(false)),
+            )?;
+            //note: any migrations will fail, as this is RO env, but if they needed to run the database was out of date and you should open it as RW and migrate it first before continuing.
+            irys_database::migration::ensure_db_version_compatible(&db)?;
+            db
+        }
     };
 
     Ok(Arc::new(db_env))
