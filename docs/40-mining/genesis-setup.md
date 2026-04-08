@@ -79,8 +79,9 @@ balance = "10000000000000000000000000"
 
 Every miner with pledges must also have a stake -- the genesis builder creates
 one stake commitment per miner automatically. The alloc balance must cover
-both the stake commitment value and any pledge fees (which increase with
-pledge count per miner), denominated in the chain's smallest token unit.
+the stake commitment value, each pledge's locked value, and the per-pledge
+fees (which increase with pledge count per miner), all denominated in the
+chain's smallest token unit.
 
 ### 3. Build the Genesis Block
 

@@ -45,8 +45,10 @@ fn resolve_signing_key(
 
     // 2. Read hex from a file (--signing-key-file / --key-file or IRYS_SIGNING_KEY_FILE)
     if let Some(path) = key_file {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| eyre::eyre!("Failed to read key file {}: {e}", path.display()))?;
+        let contents = Zeroizing::new(
+            std::fs::read_to_string(&path)
+                .map_err(|e| eyre::eyre!("Failed to read key file {}: {e}", path.display()))?,
+        );
         info!("Loaded signing key from {}", path.display());
         return signing_key_from_hex(Zeroizing::new(contents.trim().to_owned()));
     }

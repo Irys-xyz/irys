@@ -17,7 +17,7 @@ use crate::cli_args::IrysCli;
 fn init_tracing() -> eyre::Result<()> {
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
-        .from_env()?;
+        .from_env_lossy();
 
     Registry::default()
         .with(filter)

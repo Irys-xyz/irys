@@ -248,9 +248,9 @@ fn test_generate_miner_info_address_derivation() {
     let evm_str = format!("{evm_address}");
     assert_eq!(evm_str, "0x64f1a2829e0E698c18E7792D6E74f67d89AA0a32");
 
-    // Irys address should be non-empty base58.
+    // Pin the exact Irys (base58) address for this key.
     let irys_str = format!("{irys_address}");
-    assert!(!irys_str.is_empty(), "Irys address should not be empty");
+    assert_eq!(irys_str, "2QZrWyPPi4XukwiJQrVmUvuPQ57F");
 }
 
 #[rstest]

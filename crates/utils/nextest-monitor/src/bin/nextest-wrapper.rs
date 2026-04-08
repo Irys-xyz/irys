@@ -431,8 +431,13 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         Ok(_) => {
             // Final entry written — remove the eager timeout entry so downstream
             // analysis doesn't see two records for the same test run.
-            if let Some(ref p) = eager_timeout_path {
-                let _ = fs::remove_file(p);
+            if let Some(ref p) = eager_timeout_path
+                && let Err(e) = fs::remove_file(p)
+            {
+                eprintln!(
+                    "warning: failed to remove eager timeout file {}: {e}",
+                    p.display()
+                );
             }
         }
         Err(e) => eprintln!("Warning: failed to append telemetry stats: {e}"),

@@ -816,7 +816,7 @@ mod tests {
                 chain_id: 1,
                 fee: 0,
                 value,
-                signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
+                signature: IrysSignature::default(),
             },
             metadata: CommitmentTransactionMetadata::new(),
         })

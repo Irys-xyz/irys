@@ -26,6 +26,7 @@ use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
 use reth::chainspec::ChainSpec;
 use tracing::info;
+use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -85,8 +86,10 @@ impl fmt::Debug for GenesisMinerManifestEntry {
 impl GenesisMinerManifest {
     /// Load from a TOML file path.
     pub fn load(path: &Path) -> eyre::Result<Self> {
-        let contents = std::fs::read_to_string(path)
-            .wrap_err_with(|| format!("failed to read genesis miners file {:?}", path))?;
+        let contents = Zeroizing::new(
+            std::fs::read_to_string(path)
+                .wrap_err_with(|| format!("failed to read genesis miners file {:?}", path))?,
+        );
         let manifest: Self = toml::from_str(&contents)
             .wrap_err_with(|| format!("failed to parse genesis miners file {:?}", path))?;
         eyre::ensure!(
