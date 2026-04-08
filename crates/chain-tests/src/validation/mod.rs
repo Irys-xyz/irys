@@ -12,6 +12,7 @@ mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
 mod poa_cases;
+mod same_block_promotion;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
