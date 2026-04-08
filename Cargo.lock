@@ -5104,6 +5104,7 @@ dependencies = [
  "tracing",
  "tracing-error",
  "tracing-subscriber 0.3.23",
+ "zeroize",
 ]
 
 [[package]]
@@ -6671,6 +6672,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "toml 0.8.23",
 ]

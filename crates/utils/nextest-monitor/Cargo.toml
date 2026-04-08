@@ -34,3 +34,6 @@ proptest.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
