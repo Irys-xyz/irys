@@ -115,8 +115,11 @@ impl GenesisMinerManifest {
                 );
                 // Hex→key parsing duplicated from commands::signing_key_from_hex for
                 // per-miner error context (includes index `i`).
-                let key_bytes = hex::decode(entry.mining_key.trim_start_matches("0x"))
-                    .map_err(|e| eyre::eyre!("Invalid hex for miner[{}] mining_key: {}", i, e))?;
+                // Wrapped in Zeroizing so the raw key bytes are zeroed on drop.
+                let key_bytes = zeroize::Zeroizing::new(
+                    hex::decode(entry.mining_key.trim_start_matches("0x"))
+                        .map_err(|e| eyre::eyre!("Invalid hex for miner[{}] mining_key: {}", i, e))?,
+                );
                 let signing_key = SigningKey::from_slice(&key_bytes)
                     .map_err(|e| eyre::eyre!("Invalid signing key for miner[{}]: {}", i, e))?;
                 Ok(GenesisMinerEntry {
@@ -362,21 +365,51 @@ pub async fn build_signed_genesis_block(
     })
 }
 
-/// Build a signed genesis block from pre-existing commitment transactions.
+/// Validate that a set of commitment transactions is suitable for a genesis block.
 ///
-/// Unlike [`build_signed_genesis_block`] which generates commitments from mining
-/// keys, this function packages already-signed commitments into a genesis block.
-/// The caller provides a signing key for the block header signature.
-///
-/// # Errors
-///
-/// Returns an error if any commitment signature is invalid, difficulty
-/// calculation fails, VDF execution fails, or block signing fails.
-pub fn build_genesis_block_from_commitments(
-    config: &Config,
-    mut commitments: Vec<CommitmentTransaction>,
-    block_signing_key: &SigningKey,
-) -> eyre::Result<GenesisOutput> {
+/// Checks performed:
+/// - All signatures are valid.
+/// - No duplicate txids (which would inflate the treasury).
+/// - Only Stake and Pledge commitment types are present.
+/// - At least one stake and at least one pledge exist.
+/// - Every miner with pledge commitments also has a stake commitment.
+pub fn validate_genesis_commitments(commitments: &[CommitmentTransaction]) -> eyre::Result<()> {
+    // Validate all commitment signatures.
+    // A corrupted/tampered file should fail here rather than producing
+    // a genesis block that peers will reject later.
+    for (i, c) in commitments.iter().enumerate() {
+        eyre::ensure!(
+            c.is_signature_valid(),
+            "commitment {} (txid={}) has an invalid signature",
+            i,
+            c.id(),
+        );
+    }
+
+    // Reject duplicate commitment IDs — duplicates would inflate the treasury.
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, c) in commitments.iter().enumerate() {
+            eyre::ensure!(
+                seen.insert(c.id()),
+                "duplicate commitment txid at index {i}: {}",
+                c.id(),
+            );
+        }
+    }
+
+    // Reject commitment types that are not valid in a genesis block.
+    for (i, c) in commitments.iter().enumerate() {
+        match c.commitment_type() {
+            CommitmentTypeV2::Stake | CommitmentTypeV2::Pledge { .. } => {}
+            other => eyre::bail!(
+                "commitment {i} (txid={}) has type {other:?}, but only Stake and Pledge \
+                 are valid in a genesis block",
+                c.id(),
+            ),
+        }
+    }
+
     let has_stake = commitments
         .iter()
         .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Stake));
@@ -392,23 +425,6 @@ pub fn build_genesis_block_from_commitments(
         "commitments must contain at least one pledge (required for mining)"
     );
 
-    let GenesisPrelude {
-        mut genesis_block,
-        reth_chain_spec,
-    } = prepare_unsigned_genesis(config)?;
-
-    // Validate all commitment signatures before building the block.
-    // A corrupted/tampered JSON file should fail here rather than producing
-    // a genesis block that peers will reject later.
-    for (i, c) in commitments.iter().enumerate() {
-        eyre::ensure!(
-            c.is_signature_valid(),
-            "commitment {} (txid={}) has an invalid signature",
-            i,
-            c.id(),
-        );
-    }
-
     // Validate that every miner with pledges also has a stake.
     // We check existence only, not ordering — `compute_commitment_state()`
     // categorizes commitments by type first, then processes all stakes before
@@ -420,7 +436,7 @@ pub fn build_genesis_block_from_commitments(
             .filter(|c| matches!(c.commitment_type(), CommitmentTypeV2::Stake))
             .map(CommitmentTransaction::signer)
             .collect();
-        for c in &commitments {
+        for c in commitments {
             if matches!(c.commitment_type(), CommitmentTypeV2::Pledge { .. }) {
                 eyre::ensure!(
                     staked.contains(&c.signer()),
@@ -432,25 +448,37 @@ pub fn build_genesis_block_from_commitments(
         }
     }
 
-    // Reject duplicate commitment IDs — duplicates would inflate the treasury.
-    {
-        let mut seen = std::collections::BTreeSet::new();
-        for (i, c) in commitments.iter().enumerate() {
-            eyre::ensure!(
-                seen.insert(c.id()),
-                "duplicate commitment txid at index {i}: {}",
-                c.id(),
-            );
-        }
-    }
+    Ok(())
+}
 
-    // Sort commitments by their transaction ID for deterministic genesis hash.
-    // The caller may provide commitments in arbitrary JSON order; sorting by ID
-    // bytes ensures the ledger tx_ids list — and thus the block hash — is
-    // independent of input ordering.
-    commitments.sort_by(|a, b| a.id().as_bytes().cmp(b.id().as_bytes()));
+/// Build a signed genesis block from pre-existing commitment transactions.
+///
+/// Unlike [`build_signed_genesis_block`] which generates commitments from mining
+/// keys, this function packages already-signed commitments into a genesis block.
+/// The caller provides a signing key for the block header signature.
+///
+/// # Errors
+///
+/// Returns an error if any commitment signature is invalid, difficulty
+/// calculation fails, VDF execution fails, or block signing fails.
+pub fn build_genesis_block_from_commitments(
+    config: &Config,
+    mut commitments: Vec<CommitmentTransaction>,
+    block_signing_key: &SigningKey,
+) -> eyre::Result<GenesisOutput> {
+    validate_genesis_commitments(&commitments)?;
 
-    let initial_treasury = genesis_block.register_commitments(&commitments);
+    let GenesisPrelude {
+        mut genesis_block,
+        reth_chain_spec,
+    } = prepare_unsigned_genesis(config)?;
+
+    // Sort commitments using the same Ord impl used by block production and
+    // enforced by block validation (type priority → fee → txid). This ensures
+    // genesis blocks use identical ordering logic to regular blocks.
+    commitments.sort();
+
+    let initial_treasury = genesis_block.append_commitments(&commitments);
 
     let total_pledges = commitments
         .iter()
@@ -506,7 +534,7 @@ async fn generate_multi_miner_commitments(
         let mut stake = CommitmentTransaction::new_stake(&config.consensus, anchor);
         signer
             .sign_commitment(&mut stake)
-            .expect("stake commitment should be signable");
+            .wrap_err("failed to sign stake commitment")?;
         anchor = stake.id();
         all_commitments.push(stake);
 
@@ -519,17 +547,19 @@ async fn generate_multi_miner_commitments(
                     .await;
             signer
                 .sign_commitment(&mut pledge)
-                .expect("pledge commitment should be signable");
+                .wrap_err("failed to sign pledge commitment")?;
             anchor = pledge.id();
             all_commitments.push(pledge);
         }
     }
 
-    // Sort commitments by txid for a canonical ledger order that matches
-    // build_genesis_block_from_commitments (which also sorts by txid).
-    all_commitments.sort_by(|a, b| a.id().as_bytes().cmp(b.id().as_bytes()));
+    // Sort using CommitmentTransaction::Ord (type priority → fee → txid),
+    // matching the ordering used by block production and enforced by block
+    // validation. Miner ordering is already canonical (sorted by IrysAddress),
+    // so the anchor chain and generated txids are deterministic.
+    all_commitments.sort();
 
-    let total_value = genesis_block.register_commitments(&all_commitments);
+    let total_value = genesis_block.append_commitments(&all_commitments);
 
     Ok((all_commitments, total_value))
 }

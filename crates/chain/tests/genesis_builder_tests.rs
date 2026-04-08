@@ -249,14 +249,13 @@ async fn build_genesis_from_existing_commitments_matches_generated() {
     assert_eq!(generated.commitments.len(), from_existing.commitments.len());
 }
 
-#[test]
-fn build_genesis_from_commitments_rejects_duplicate_txids() {
+#[tokio::test]
+async fn build_genesis_from_commitments_rejects_duplicate_txids() {
     let config = test_config();
 
     // Create a valid commitment, then duplicate it
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let generated = rt
-        .block_on(build_signed_genesis_block(&config, &test_miners()))
+    let generated = build_signed_genesis_block(&config, &test_miners())
+        .await
         .unwrap();
 
     let mut duped = generated.commitments;
@@ -301,14 +300,13 @@ async fn build_signed_genesis_rejects_non_canonical_miner_order() {
     );
 }
 
-#[test]
-fn build_genesis_from_commitments_rejects_missing_stake() {
+#[tokio::test]
+async fn build_genesis_from_commitments_rejects_missing_stake() {
     let config = test_config();
 
     // Create valid commitments, then remove all stakes
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let generated = rt
-        .block_on(build_signed_genesis_block(&config, &test_miners()))
+    let generated = build_signed_genesis_block(&config, &test_miners())
+        .await
         .unwrap();
 
     let pledges_only: Vec<_> = generated

@@ -312,7 +312,7 @@ impl IrysBlockHeader {
         self.timestamp.to_secs()
     }
 
-    /// Register commitment transactions in this block's commitment system ledger.
+    /// Append commitment transactions to this block's commitment system ledger.
     ///
     /// Creates the `Commitment` ledger if it doesn't already exist, appends each
     /// commitment's txid, and returns the total treasury delta (the sum of
@@ -320,7 +320,31 @@ impl IrysBlockHeader {
     ///
     /// This is the single source of truth for "commitments → ledger + treasury"
     /// logic, used by both genesis block builders and test helpers.
-    pub fn register_commitments(&mut self, commitments: &[CommitmentTransaction]) -> U256 {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the commitment ledger already exists and is non-empty. Commitments
+    /// must only be registered once; double-registration would inflate the treasury.
+    pub fn append_commitments(&mut self, commitments: &[CommitmentTransaction]) -> U256 {
+        if commitments.is_empty() {
+            return U256::zero();
+        }
+
+        // Guard: if the commitment ledger already exists and has entries, bail.
+        // This prevents accidental double-registration which would inflate the treasury.
+        if let Some(existing) = self
+            .system_ledgers
+            .iter()
+            .find(|e| e.ledger_id == SystemLedger::Commitment)
+        {
+            assert!(
+                existing.tx_ids.is_empty(),
+                "append_commitments called on a block that already has {} commitment ledger entries. \
+                 This is a programming error — commitments should only be registered once.",
+                existing.tx_ids.len(),
+            );
+        }
+
         // Find or create the Commitment system ledger.
         let ledger_idx = self
             .system_ledgers

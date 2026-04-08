@@ -18,10 +18,9 @@ use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
 /// database utilities (reth provider, irys DB init) need only the NodeConfig
 /// and cannot depend on the full irys_chain config loading pipeline.
 fn load_node_config_from_env() -> eyre::Result<NodeConfig> {
-    let config_path = std::env::var("CONFIG")
+    let config_path: PathBuf = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
-        .parse::<PathBuf>()
-        .expect("file path to be valid");
+        .into();
 
     let content = std::fs::read_to_string(&config_path).map_err(|e| {
         eyre::eyre!(
@@ -35,6 +34,7 @@ fn load_node_config_from_env() -> eyre::Result<NodeConfig> {
 }
 
 pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre::Result<()> {
+    use irys_chain::genesis_builder::validate_genesis_commitments;
     use irys_chain::genesis_utilities::{
         load_genesis_block_from_disk, load_genesis_commitments_from_disk,
         save_genesis_block_to_disk, save_genesis_commitments_to_disk,
@@ -56,27 +56,9 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
         );
     }
 
-    // Validate all commitment signatures before importing.
-    for (i, c) in commitments.iter().enumerate() {
-        use irys_types::IrysTransactionCommon as _;
-        eyre::ensure!(
-            c.is_signature_valid(),
-            "commitment {i} (txid={}) has an invalid signature",
-            c.id(),
-        );
-    }
-
-    // Reject duplicate commitment txids.
-    {
-        let mut seen = std::collections::BTreeSet::new();
-        for (i, c) in commitments.iter().enumerate() {
-            eyre::ensure!(
-                seen.insert(c.id()),
-                "duplicate commitment txid at index {i}: {}",
-                c.id(),
-            );
-        }
-    }
+    // Validate commitment signatures, no duplicates, only Stake/Pledge types,
+    // at least one of each, and every pledger has a stake.
+    validate_genesis_commitments(&commitments)?;
 
     // Verify the block header's commitment ledger txids match the supplied commitments.
     {

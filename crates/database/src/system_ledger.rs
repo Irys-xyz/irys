@@ -110,7 +110,7 @@ pub async fn add_genesis_commitments(
     config: &Config,
 ) -> (Vec<CommitmentTransaction>, U256) {
     let commitments = get_genesis_commitments(config).await;
-    let total_value = genesis_block.register_commitments(&commitments);
+    let total_value = genesis_block.append_commitments(&commitments);
     (commitments, total_value)
 }
 
@@ -177,6 +177,6 @@ pub async fn add_test_commitments_for_signer(
         commitments.push(pledge_tx);
     }
 
-    let total_value = block_header.register_commitments(&commitments);
+    let total_value = block_header.append_commitments(&commitments);
     (commitments, total_value)
 }
