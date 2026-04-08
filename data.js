@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775586860088,
+  "lastUpdate": 1775639141812,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2082,6 +2082,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "88fea5fe2f274c60d7ef6ea38d5d84e1a4e50d88",
+          "message": "fix(ci): cargo-llvm-cov install (#1379)\n\n* fix(ci): force install cargo-llvm-cov to avoid cached version conflict\n\nThe coverage CI job fails with \"binary already exists in destination\"\nwhen a different version of cargo-llvm-cov is cached. Adding --force\nensures the pinned version is always installed.\n\n* fix: split out sccache env setting and stat reset\n\n* feat(xtask): log functions with mismatched coverage data\n\nAfter generating coverage reports, compares function names in the merged\nprofdata against the JSON export to identify functions with hash\nmismatches. Filters to workspace crates to reduce noise. Writes full\nlist to target/llvm-cov/mismatched-functions.txt.\n\nAlso refactors CmdExt to share env-var removal logic between\nremove_and_run and the new remove_and_read method.\n\n* fix: prevent sccache from being used for problematic C compilation\n\n* feat: improvements\n\n* chore: fmt\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* ci: tweak runner config\n\n* chore: unify sccache env vars\n\n* feat: address feedback\n\n* fix: propagate lcov errors\n\n* fix: make LCOV failures non-fatal",
+          "timestamp": "2026-04-08T09:47:04+01:00",
+          "tree_id": "7a3ea4baa75841fcde90a572ba5b51cc573c4aeb",
+          "url": "https://github.com/Irys-xyz/irys/commit/88fea5fe2f274c60d7ef6ea38d5d84e1a4e50d88"
+        },
+        "date": 1775639139830,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074742,
+            "range": "± 0.000634",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 758.433182,
+            "range": "± 29.856518",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 983.404359,
+            "range": "± 50.58232",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117723,
+            "range": "± 0.000269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1177.920457,
+            "range": "± 8.234822",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1549.567388,
+            "range": "± 20.76798",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.47181,
+            "range": "± 0.017324",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.52786,
+            "range": "± 2.42054",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.217479,
+            "range": "± 1.719014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
             "range": "± 0",
             "unit": "ms/iter"
           }
