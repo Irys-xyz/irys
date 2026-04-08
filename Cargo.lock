@@ -5201,6 +5201,7 @@ dependencies = [
  "tracing",
  "tracing-error",
  "tracing-subscriber 0.3.23",
+ "zeroize",
 ]
 
 [[package]]

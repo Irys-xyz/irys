@@ -35,6 +35,7 @@ hex.workspace = true
 serde_json.workspace = true
 alloy-signer.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+zeroize = "1.8"
 
 [dev-dependencies]
 proptest.workspace = true

@@ -250,3 +250,90 @@ async fn build_genesis_from_existing_commitments_matches_generated() {
     );
     assert_eq!(generated.commitments.len(), from_existing.commitments.len());
 }
+
+#[test]
+fn build_genesis_from_commitments_rejects_duplicate_txids() {
+    let config = test_config();
+
+    // Create a valid commitment, then duplicate it
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let generated = rt
+        .block_on(build_signed_genesis_block(&config, &test_miners()))
+        .unwrap();
+
+    let mut duped = generated.commitments;
+    // Duplicate the first commitment
+    duped.push(duped[0].clone());
+
+    let result =
+        build_genesis_block_from_commitments(&config, duped, &test_miners()[0].signing_key);
+    assert!(result.is_err(), "should reject duplicate commitment txids");
+    let msg = result
+        .err()
+        .expect("expected Err")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        msg.contains("duplicate"),
+        "error should mention 'duplicate', got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn build_signed_genesis_rejects_non_canonical_miner_order() {
+    let config = test_config();
+    let mut miners = test_miners();
+
+    // Reverse the canonical order
+    miners.reverse();
+
+    let result = build_signed_genesis_block(&config, &miners).await;
+    assert!(
+        result.is_err(),
+        "should reject non-canonical miner ordering"
+    );
+    let msg = result
+        .err()
+        .expect("expected Err")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        msg.contains("sorted"),
+        "error should mention sorting, got: {msg}"
+    );
+}
+
+#[test]
+fn build_genesis_from_commitments_rejects_missing_stake() {
+    let config = test_config();
+
+    // Create valid commitments, then remove all stakes
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let generated = rt
+        .block_on(build_signed_genesis_block(&config, &test_miners()))
+        .unwrap();
+
+    let pledges_only: Vec<_> = generated
+        .commitments
+        .into_iter()
+        .filter(|c| {
+            matches!(
+                c.commitment_type(),
+                irys_types::CommitmentTypeV2::Pledge { .. }
+            )
+        })
+        .collect();
+
+    let result =
+        build_genesis_block_from_commitments(&config, pledges_only, &test_miners()[0].signing_key);
+    assert!(result.is_err(), "should reject commitments without a stake");
+    let msg = result
+        .err()
+        .expect("expected Err")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        msg.contains("stake"),
+        "error should mention 'stake', got: {msg}"
+    );
+}

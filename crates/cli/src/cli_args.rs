@@ -168,6 +168,6 @@ pub(crate) fn parse_rollback_target(target: &str) -> eyre::Result<RollbackTarget
 }
 
 pub(crate) fn timestamp_millis_to_secs(millis: u128) -> eyre::Result<u64> {
-    let secs = millis / 1000;
-    u64::try_from(secs).map_err(|_| eyre::eyre!("timestamp_secs {} overflows u64", secs))
+    u64::try_from(millis / 1000)
+        .map_err(|_| eyre::eyre!("timestamp seconds {} overflows u64", millis / 1000))
 }

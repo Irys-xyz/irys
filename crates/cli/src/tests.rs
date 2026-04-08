@@ -204,6 +204,42 @@ fn test_generate_miner_info_parsing(#[case] args: &[&str], #[case] expected_key:
 }
 
 #[test]
+fn test_build_genesis_rejects_conflicting_args() {
+    // --miners and --commitments are mutually exclusive
+    let args = &[
+        "irys-cli",
+        "build-genesis",
+        "--miners",
+        "manifest.toml",
+        "--commitments",
+        "commitments.json",
+    ];
+    assert!(
+        IrysCli::try_parse_from(args).is_err(),
+        "should reject --miners and --commitments together"
+    );
+}
+
+#[test]
+fn test_build_genesis_no_input_parses_but_has_neither() {
+    // build-genesis with no --miners or --commitments parses successfully
+    // (the runtime check in commands.rs catches this with bail!)
+    let args = &["irys-cli", "build-genesis"];
+    let cli = IrysCli::try_parse_from(args).expect("should parse with no input flags");
+    match cli.command {
+        Commands::BuildGenesis {
+            miners,
+            commitments,
+            ..
+        } => {
+            assert!(miners.is_none());
+            assert!(commitments.is_none());
+        }
+        other => panic!("expected BuildGenesis, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_generate_miner_info_address_derivation() {
     use alloy_signer::utils::secret_key_to_address;
     use irys_types::IrysAddress;

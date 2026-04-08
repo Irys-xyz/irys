@@ -583,6 +583,15 @@ impl IrysNode {
                 .expect("storage_submodules.toml must exist for genesis node");
         let pledge_count = storage_submodule_config.submodule_paths.len() as u64;
 
+        // Genesis nodes must have at least 3 storage submodules to ensure minimum
+        // network capacity. This matches the pre-refactor invariant from
+        // get_genesis_commitments.
+        eyre::ensure!(
+            pledge_count >= 3,
+            "genesis node requires at least 3 storage submodules (found {pledge_count}). \
+             Add more paths to storage_submodules.toml."
+        );
+
         let miner_entry = GenesisMinerEntry {
             signing_key: self.config.node_config.mining_key.clone(),
             pledge_count,

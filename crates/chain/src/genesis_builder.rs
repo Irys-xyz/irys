@@ -9,7 +9,7 @@
 use std::{
     path::Path,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,9 @@ pub struct GenesisMinerEntry {
 /// mining_key = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 /// pledge_count = 3
 /// ```
+///
+/// **Security:** This file contains raw private keys. It must never be
+/// committed to version control or shared over insecure channels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisMinerManifest {
     pub miners: Vec<GenesisMinerManifestEntry>,
@@ -65,9 +68,9 @@ impl GenesisMinerManifest {
     /// Load from a TOML file path.
     pub fn load(path: &Path) -> eyre::Result<Self> {
         let contents = std::fs::read_to_string(path)
-            .map_err(|e| eyre::eyre!("Failed to read genesis miners file {:?}: {}", path, e))?;
+            .wrap_err_with(|| format!("failed to read genesis miners file {:?}", path))?;
         let manifest: Self = toml::from_str(&contents)
-            .map_err(|e| eyre::eyre!("Failed to parse genesis miners file {:?}: {}", path, e))?;
+            .wrap_err_with(|| format!("failed to parse genesis miners file {:?}", path))?;
         eyre::ensure!(
             !manifest.miners.is_empty(),
             "genesis_miners.toml must contain at least one [[miners]] entry"
@@ -92,6 +95,8 @@ impl GenesisMinerManifest {
                     "miner[{}] has pledge_count == 0; every miner must pledge at least one partition",
                     i,
                 );
+                // Hex→key parsing duplicated from commands::signing_key_from_hex for
+                // per-miner error context (includes index `i`).
                 let key_bytes = hex::decode(entry.mining_key.trim_start_matches("0x"))
                     .map_err(|e| eyre::eyre!("Invalid hex for miner[{}] mining_key: {}", i, e))?;
                 let signing_key = SigningKey::from_slice(&key_bytes)
@@ -181,6 +186,8 @@ struct GenesisPrelude {
 fn prepare_unsigned_genesis(config: &Config) -> eyre::Result<GenesisPrelude> {
     // Determine timestamp (prefer configured value, else now())
     let configured_ts = config.consensus.genesis.timestamp_millis;
+    // A configured timestamp of 0 is the sentinel for "use current time",
+    // matching the convention in IrysNode::create_new_genesis_block.
     let timestamp_millis = if configured_ts != 0 {
         configured_ts
     } else {
@@ -189,12 +196,12 @@ fn prepare_unsigned_genesis(config: &Config) -> eyre::Result<GenesisPrelude> {
             .expect("system clock before UNIX epoch")
             .as_millis()
     };
-    let timestamp_secs = Duration::from_millis(
-        timestamp_millis
-            .try_into()
-            .wrap_err("timestamp_millis overflow")?,
-    )
-    .as_secs();
+    let timestamp_secs = u64::try_from(timestamp_millis / 1000).map_err(|_| {
+        eyre::eyre!(
+            "timestamp seconds {} overflows u64",
+            timestamp_millis / 1000
+        )
+    })?;
 
     // Build reth chain spec
     let reth_chain_spec = irys_chain_spec(
@@ -296,15 +303,29 @@ pub async fn build_signed_genesis_block(
         "at least one miner entry is required to build a genesis block"
     );
 
+    // Verify miners are in canonical (IrysAddress-sorted) order.
+    // The CLI's GenesisMinerManifest::into_entries() guarantees this, but direct
+    // callers must also provide canonically-ordered entries for deterministic output.
+    for pair in miners.windows(2) {
+        let addr_a = signer_from_key_address(&pair[0].signing_key);
+        let addr_b = signer_from_key_address(&pair[1].signing_key);
+        eyre::ensure!(
+            addr_a < addr_b,
+            "miners must be sorted by IrysAddress for deterministic genesis. \
+             Found {} (>= {}) out of order.",
+            addr_a,
+            addr_b,
+        );
+    }
+
     let GenesisPrelude {
         mut genesis_block,
         reth_chain_spec,
-        ..
     } = prepare_unsigned_genesis(config)?;
 
     // Generate multi-miner commitments
     let (commitments, initial_treasury) =
-        generate_multi_miner_commitments(&mut genesis_block, config, miners).await;
+        generate_multi_miner_commitments(&mut genesis_block, config, miners).await?;
 
     let total_pledges: u64 = miners.iter().map(|m| m.pledge_count).sum();
     finalize_genesis_block(
@@ -312,7 +333,7 @@ pub async fn build_signed_genesis_block(
         config,
         initial_treasury,
         total_pledges,
-        &miners[0].signing_key,
+        &miners[0].signing_key, // First miner is the designated block producer / signer.
         "multi-miner",
     )?;
 
@@ -356,7 +377,6 @@ pub fn build_genesis_block_from_commitments(
     let GenesisPrelude {
         mut genesis_block,
         reth_chain_spec,
-        ..
     } = prepare_unsigned_genesis(config)?;
 
     // Validate all commitment signatures before building the block.
@@ -391,6 +411,18 @@ pub fn build_genesis_block_from_commitments(
                     c.signer(),
                 );
             }
+        }
+    }
+
+    // Reject duplicate commitment IDs — duplicates would inflate the treasury.
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, c) in commitments.iter().enumerate() {
+            eyre::ensure!(
+                seen.insert(c.id()),
+                "duplicate commitment txid at index {i}: {}",
+                c.id(),
+            );
         }
     }
 
@@ -443,7 +475,7 @@ async fn generate_multi_miner_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
     miners: &[GenesisMinerEntry],
-) -> (Vec<CommitmentTransaction>, U256) {
+) -> eyre::Result<(Vec<CommitmentTransaction>, U256)> {
     let mut all_commitments: Vec<CommitmentTransaction> = Vec::new();
     // Anchor chaining: each commitment's txid becomes the anchor for the next,
     // creating a dependency chain that ensures unique transaction IDs even when
@@ -482,12 +514,12 @@ async fn generate_multi_miner_commitments(
     let mut total_value = U256::zero();
     for commitment in &all_commitments {
         ledger.tx_ids.push(commitment.id());
-        total_value = total_value
-            .checked_add(commitment.value())
-            .expect("treasury overflow from config-derived commitment values");
+        total_value = total_value.checked_add(commitment.value()).ok_or_else(|| {
+            eyre::eyre!("treasury overflow from config-derived commitment values")
+        })?;
     }
 
-    (all_commitments, total_value)
+    Ok((all_commitments, total_value))
 }
 
 /// Find or create the `Commitment` system ledger on the genesis block.

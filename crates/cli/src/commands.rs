@@ -19,10 +19,13 @@ use irys_types::{Config, DatabaseProvider, NodeConfig};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 fn signing_key_from_hex(hex_str: &str) -> eyre::Result<k256::ecdsa::SigningKey> {
-    let key_bytes = hex::decode(hex_str.trim_start_matches("0x"))
-        .map_err(|e| eyre::eyre!("Invalid hex for signing key: {e}"))?;
+    let key_bytes = Zeroizing::new(
+        hex::decode(hex_str.trim_start_matches("0x"))
+            .map_err(|e| eyre::eyre!("Invalid hex for signing key: {e}"))?,
+    );
     k256::ecdsa::SigningKey::from_slice(&key_bytes)
         .map_err(|e| eyre::eyre!("Invalid signing key: {e}"))
 }
@@ -79,13 +82,14 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             let timestamp_secs =
                 timestamp_millis_to_secs(config.consensus.genesis.timestamp_millis)?;
             if timestamp_secs == 0 {
-                panic!(
-                    "GENESIS TIMESTAMP MUST BE A CONCRETE VALUE FOR INIT STATE TO WORK! current time (ms) is: {}",
-                    &SystemTime::now()
+                bail!(
+                    "genesis timestamp must be a concrete value for init-state to work. \
+                     Current time (ms): {}",
+                    SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .expect("system clock before UNIX epoch")
                         .as_millis()
-                )
+                );
             }
             info!("Using timestamp {} (secs)", &timestamp_secs);
             let chain_spec = irys_chain_spec(

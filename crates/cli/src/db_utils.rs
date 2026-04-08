@@ -1,34 +1,40 @@
 use crate::cli_args::timestamp_millis_to_secs;
 use eyre::{Context as _, bail};
 use irys_types::chainspec::irys_chain_spec;
-use irys_types::{Config, NodeConfig};
+use irys_types::{Config, H256, NodeConfig};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{ProviderFactory, providers::StaticFileProvider};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
 
-/// Load NodeConfig from the CONFIG env var (default "config.toml"), falling
-/// back to testnet defaults if the file is missing.
-fn load_node_config_from_env() -> NodeConfig {
+/// Load NodeConfig from the CONFIG env var (default "config.toml").
+///
+/// This is separate from `irys_chain::utils::load_config` because CLI
+/// database utilities (reth provider, irys DB init) need only the NodeConfig
+/// and cannot depend on the full irys_chain config loading pipeline.
+fn load_node_config_from_env() -> eyre::Result<NodeConfig> {
     let config_path = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
         .expect("file path to be valid");
 
-    std::fs::read_to_string(config_path)
-        .map(|content| toml::from_str::<NodeConfig>(&content).expect("invalid config file"))
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                custom.error = ?err,
-                "config file not provided, defaulting to testnet config"
-            );
-            NodeConfig::testnet()
-        })
+    let content = std::fs::read_to_string(&config_path).map_err(|e| {
+        eyre::eyre!(
+            "config file {:?} not found or unreadable: {e}. \
+             Set CONFIG env var or create config.toml.",
+            config_path
+        )
+    })?;
+    toml::from_str::<NodeConfig>(&content)
+        .map_err(|e| eyre::eyre!("failed to parse config file {:?}: {e}", config_path))
 }
 
-pub(crate) fn import_genesis_to_db(genesis_dir: &PathBuf, config: &Config) -> eyre::Result<()> {
+pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre::Result<()> {
     use irys_chain::genesis_utilities::{
         load_genesis_block_from_disk, load_genesis_commitments_from_disk,
         save_genesis_block_to_disk, save_genesis_commitments_to_disk,
@@ -48,6 +54,63 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &PathBuf, config: &Config) -> ey
             "Genesis block signature is invalid for hash {}",
             genesis_block.block_hash
         );
+    }
+
+    // Validate all commitment signatures before importing.
+    for (i, c) in commitments.iter().enumerate() {
+        use irys_types::IrysTransactionCommon as _;
+        eyre::ensure!(
+            c.is_signature_valid(),
+            "commitment {i} (txid={}) has an invalid signature",
+            c.id(),
+        );
+    }
+
+    // Reject duplicate commitment txids.
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, c) in commitments.iter().enumerate() {
+            eyre::ensure!(
+                seen.insert(c.id()),
+                "duplicate commitment txid at index {i}: {}",
+                c.id(),
+            );
+        }
+    }
+
+    // Verify the block header's commitment ledger txids match the supplied commitments.
+    {
+        use irys_types::SystemLedger;
+        let ledger = genesis_block
+            .system_ledgers
+            .iter()
+            .find(|l| l.ledger_id == SystemLedger::Commitment);
+        match ledger {
+            Some(ledger) => {
+                let ledger_ids: Vec<H256> = ledger.tx_ids.iter().copied().collect();
+                let commitment_ids: Vec<H256> = commitments
+                    .iter()
+                    .map(irys_types::CommitmentTransaction::id)
+                    .collect();
+                eyre::ensure!(
+                    ledger_ids.len() == commitment_ids.len(),
+                    "commitment count mismatch: block header has {} txids, \
+                     but {} commitments were supplied",
+                    ledger_ids.len(),
+                    commitment_ids.len(),
+                );
+                for (i, (ledger_id, commit_id)) in
+                    ledger_ids.iter().zip(commitment_ids.iter()).enumerate()
+                {
+                    eyre::ensure!(
+                        *ledger_id == *commit_id,
+                        "commitment txid mismatch at index {i}: \
+                         block header has {ledger_id}, supplied commitment has {commit_id}",
+                    );
+                }
+            }
+            None => bail!("genesis block has no commitment ledger in system_ledgers"),
+        }
     }
 
     let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
@@ -84,6 +147,7 @@ Use an empty/reset database before importing.",
 
     Ok(())
 }
+
 /// Load the commitment transactions referenced by an epoch block's system ledger.
 pub(crate) fn load_block_commitments<T: irys_database::reth_db::transaction::DbTx>(
     read_tx: &T,
@@ -116,7 +180,7 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
     Arc<DatabaseEnv>,
     ProviderFactory<NodeTypesWithDBAdapter<irys_reth::IrysEthereumNode, Arc<DatabaseEnv>>>,
 )> {
-    let node_config = load_node_config_from_env();
+    let node_config = load_node_config_from_env()?;
     let config = Config::new_with_random_peer_id(node_config.clone());
 
     let db_path = node_config.reth_data_dir().join("db");
@@ -139,7 +203,9 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
     let static_files_path = node_config.reth_data_dir().join("static_files");
     let static_file_provider = StaticFileProvider::read_only(static_files_path, false)?;
 
-    // Workaround: zero-sized stub -- rocksdb feature must be disabled
+    // RocksDB is disabled in this build (the `rocksdb` feature is off).
+    // The stub must be zero-sized so ProviderFactory accepts it without
+    // actually initializing a RocksDB instance.
     const _: () = assert!(
         std::mem::size_of::<reth_provider::providers::RocksDBProvider>() == 0,
         "RocksDBProvider must be the zero-sized stub (rocksdb feature must be disabled)"
@@ -163,7 +229,7 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 
-    let config = load_node_config_from_env();
+    let config = load_node_config_from_env()?;
     let db_path = config.irys_consensus_data_dir();
 
     let db_env = match access {

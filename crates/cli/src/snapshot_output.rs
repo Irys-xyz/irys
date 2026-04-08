@@ -2,7 +2,7 @@ use irys_chain::utils::load_config;
 use irys_types::{Config, H256, NodeConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::db_utils::load_block_commitments;
@@ -28,10 +28,7 @@ impl PartitionAssignmentOutput {
             PartitionAssignmentKindOutput::Data {
                 ledger_id,
                 slot_index,
-            } => format!(
-                "[data L{ledger_id} S{slot_index}] {}   (ledger_id={ledger_id}, slot={slot_index})",
-                self.partition_hash
-            ),
+            } => format!("[data L{ledger_id} S{slot_index}] {}", self.partition_hash),
         }
     }
 }
@@ -445,7 +442,9 @@ fn count_pledge_commitments(commitments: &[irys_types::CommitmentTransaction]) -
 
 /// Create placeholder submodule paths for partition assignment computation.
 /// These paths are never accessed on disk — `EpochSnapshot::new` only uses
-/// the path count and `is_using_hardcoded_paths` flag to derive partition hashes.
+/// the path count to determine partition assignments and `is_using_hardcoded_paths`
+/// to derive partition hashes from the path index rather than the actual path value.
+/// This means the specific path strings are irrelevant; only the count matters.
 fn hardcoded_submodules(prefix: &str, count: usize) -> irys_config::StorageSubmodulesConfig {
     irys_config::StorageSubmodulesConfig {
         is_using_hardcoded_paths: true,
@@ -486,7 +485,7 @@ pub(crate) fn cli_config() -> eyre::Result<Config> {
 }
 
 pub(crate) fn snapshot_from_genesis_dir(
-    genesis_dir: &PathBuf,
+    genesis_dir: &Path,
     config: &Config,
     submodule_prefix: &str,
 ) -> eyre::Result<(
@@ -544,6 +543,7 @@ pub(crate) fn replay_current_network_snapshot<T: irys_database::reth_db::transac
     let latest_height =
         block_index_latest_height(read_tx)?.ok_or_else(|| eyre::eyre!("Block index is empty"))?;
     let epoch_len = config.consensus.epoch.num_blocks_in_epoch;
+    // +1 because the genesis block at height 0 is the first epoch block.
     let num_epoch_blocks = (latest_height / epoch_len) + 1;
 
     info!(
