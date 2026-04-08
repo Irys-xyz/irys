@@ -177,15 +177,17 @@ async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::
         if let Ok(header) = genesis_node
             .get_storage_tx_header_from_mempool(&tx.header.id)
             .await
+            && header.metadata().included_height == Some(inclusion_block.height)
         {
-            if header.metadata().included_height == Some(inclusion_block.height) {
-                included = true;
-                break;
-            }
+            included = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(included, "tx should have included_height set after submit confirmation");
+    assert!(
+        included,
+        "tx should have included_height set after submit confirmation"
+    );
 
     // Wait for ingress proofs after submit confirmation
     genesis_node
@@ -1262,7 +1264,12 @@ async fn heavy3_mempool_publish_fork_recovery_test(
             .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
             .await?;
         b_node
-            .send_full_block(&a_node, &b_blk1_promo, b_blk1_promo_payload, b_blk1_promo_txs)
+            .send_full_block(
+                &a_node,
+                &b_blk1_promo,
+                b_blk1_promo_payload,
+                b_blk1_promo_txs,
+            )
             .await?;
         a_node
             .wait_for_block(&b_blk1_promo.block_hash, seconds_to_wait)
