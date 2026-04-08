@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775659350982,
+  "lastUpdate": 1775660240329,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2251,6 +2251,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "57fc73c168ed195bc0cd97c0faab33decb1bc27c",
+          "message": "fix(build): pass git metadata via env vars for Docker builds (#1386)\n\n* fix(build): pass git metadata via env vars for Docker builds\n\n* fix(build): add rerun-if-env-changed directives and fix Docker git metadata\n\n* fix(docker): default telemetry to local observation stack\n\n* fix(build): validate git env vars and fix sidecar host resolution\n\n* fix: review comments\n\n* fix(build): reject empty GIT_SHA for untagged builds at compile time",
+          "timestamp": "2026-04-08T15:33:33+01:00",
+          "tree_id": "8bf25017f8306fa3a02b6432b2e9fda3bddd1485",
+          "url": "https://github.com/Irys-xyz/irys/commit/57fc73c168ed195bc0cd97c0faab33decb1bc27c"
+        },
+        "date": 1775660238330,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074694,
+            "range": "± 0.000298",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.162749,
+            "range": "± 3.035919",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.159498,
+            "range": "± 9.135333",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121507,
+            "range": "± 0.002869",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1180.023644,
+            "range": "± 25.339113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1524.109981,
+            "range": "± 1.00325",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.466405,
+            "range": "± 0.021749",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.486208,
+            "range": "± 2.117413",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.477543,
+            "range": "± 2.163417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
