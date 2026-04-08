@@ -59,7 +59,10 @@ impl Inner {
             )
             .await;
 
-        // Update `CachedDataRoots` so that this block_hash is cached for each data_root
+        // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
+        // Track which roots were successfully cached so we only trigger proof generation
+        // for roots whose block_set was actually updated.
+        let mut confirmed_data_roots = Vec::new();
         for submit_tx in sealed_block
             .transactions()
             .get_ledger_txs(DataLedger::Submit)
@@ -74,6 +77,7 @@ impl Inner {
                         "Successfully cached data_root {:?} for tx {:?}",
                         data_root, submit_tx.id
                     );
+                    confirmed_data_roots.push(data_root);
                 }
                 Err(db_error) => {
                     error!(
@@ -87,12 +91,6 @@ impl Inner {
         // After block_set is populated for each confirmed data_root, notify the
         // chunk ingress service to try generating ingress proofs. These will now
         // pass the block_set gate since the block hash was just recorded above.
-        let confirmed_data_roots: Vec<_> = sealed_block
-            .transactions()
-            .get_ledger_txs(DataLedger::Submit)
-            .iter()
-            .map(|tx| tx.data_root)
-            .collect();
         if !confirmed_data_roots.is_empty()
             && let Err(e) = self.service_senders.chunk_ingress.send_traced(
                 ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
