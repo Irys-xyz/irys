@@ -96,6 +96,10 @@ Storage modules (`crates/domain`) manage partition assignments. Lifecycle: Activ
 
 HTTP-based gossip protocol. Routes: `/gossip/block`, `/gossip/tx`, `/gossip/chunk`. Includes circuit breaker pattern and per-peer rate limiting.
 
+## Code Style
+
+When refactoring or simplifying code, preserve existing comments that explain *why* something is done or map code to external concepts (CLI flags, config fields, protocol steps, etc.). Only remove comments that are genuinely redundant or stale.
+
 ## Git Conventions
 
 Never add "Co-Authored-By" lines to commit messages.

@@ -173,6 +173,21 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Returns the amount this commitment adds to the protocol treasury.
+    ///
+    /// Only Stake and Pledge lock funds into the treasury at inclusion time.
+    /// Unstake/Unpledge refunds are handled on epoch boundaries (not here),
+    /// and UpdateRewardAddress has no treasury impact.
+    #[inline]
+    pub fn treasury_delta(&self) -> U256 {
+        match self.commitment_type() {
+            CommitmentTypeV2::Stake | CommitmentTypeV2::Pledge { .. } => self.value(),
+            CommitmentTypeV2::Unstake
+            | CommitmentTypeV2::Unpledge { .. }
+            | CommitmentTypeV2::UpdateRewardAddress { .. } => U256::zero(),
+        }
+    }
+
     /// Get the signer address from any version
     #[inline]
     pub fn signer(&self) -> IrysAddress {
@@ -783,6 +798,66 @@ mod tests {
             H256::zero(),
         );
         assert_eq!(result, expected);
+    }
+
+    // ===================
+    // treasury_delta: Stake/Pledge return value(), all others return zero
+    // ===================
+
+    /// Build a minimal `CommitmentTransaction::V2` with the given type and value.
+    /// Signature and id are zeroed — only `commitment_type` and `value` matter here.
+    fn make_commitment(commitment_type: CommitmentTypeV2, value: U256) -> CommitmentTransaction {
+        CommitmentTransaction::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id: H256::zero(),
+                anchor: H256::zero(),
+                signer: IrysAddress::ZERO,
+                commitment_type,
+                chain_id: 1,
+                fee: 0,
+                value,
+                signature: IrysSignature::default(),
+            },
+            metadata: CommitmentTransactionMetadata::new(),
+        })
+    }
+
+    #[rstest]
+    // Stake and Pledge lock funds into the treasury — delta equals the committed value.
+    #[case(CommitmentTypeV2::Stake, U256::from(1000_u64), U256::from(1000_u64))]
+    #[case(
+        CommitmentTypeV2::Pledge { pledge_count_before_executing: 3 },
+        U256::from(500_u64),
+        U256::from(500_u64)
+    )]
+    // Unstake/Unpledge refunds are settled at epoch boundaries, not at inclusion.
+    // UpdateRewardAddress carries no value. All three contribute zero to the treasury.
+    #[case(CommitmentTypeV2::Unstake, U256::from(1000_u64), U256::zero())]
+    #[case(
+        CommitmentTypeV2::Unpledge {
+            pledge_count_before_executing: 3,
+            partition_hash: H256::zero(),
+        },
+        U256::from(500_u64),
+        U256::zero()
+    )]
+    #[case(
+        CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::ZERO },
+        U256::from(999_u64),
+        U256::zero()
+    )]
+    fn test_treasury_delta(
+        #[case] commitment_type: CommitmentTypeV2,
+        #[case] value: U256,
+        #[case] expected_delta: U256,
+    ) {
+        let tx = make_commitment(commitment_type, value);
+        assert_eq!(
+            tx.treasury_delta(),
+            expected_delta,
+            "treasury_delta() mismatch for {:?} with value {value}",
+            tx.commitment_type(),
+        );
     }
 }
 

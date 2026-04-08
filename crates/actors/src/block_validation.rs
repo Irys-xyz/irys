@@ -3522,8 +3522,9 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let (commitments, initial_treasury) =
-            add_genesis_commitments(&mut genesis_block, &config).await;
+        let (commitments, initial_treasury) = add_genesis_commitments(&mut genesis_block, &config)
+            .await
+            .unwrap();
         genesis_block.treasury = initial_treasury;
 
         let arc_genesis = Arc::new(genesis_block.clone());
@@ -3539,9 +3540,11 @@ mod tests {
         let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db);
 
-        let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
-                .expect("Expected to load storage submodules config");
+        let storage_submodules_config = StorageSubmodulesConfig::load(
+            config.node_config.base_directory.clone(),
+            config.node_config.node_mode,
+        )
+        .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block
         let epoch_snapshot = EpochSnapshot::new(

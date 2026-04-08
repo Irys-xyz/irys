@@ -23,11 +23,19 @@ irys-reth-node-bridge.workspace = true
 irys-reth.workspace = true
 irys-chain.workspace = true
 tokio.workspace = true
+irys-config.workspace = true
 irys-domain.workspace = true
+irys-storage.workspace = true
+irys-utils.workspace = true
 irys-tui.workspace = true
 reth-provider.workspace = true
 reth-node-types.workspace = true
 reth-tasks.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+alloy-signer.workspace = true
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

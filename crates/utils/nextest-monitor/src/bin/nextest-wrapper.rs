@@ -7,6 +7,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,13 +35,9 @@ const VALUE_TAKING_FLAGS: &[&str] = &[
 ];
 
 fn flag_takes_value(flag: &str) -> bool {
-    // Exact match (e.g. "--test-threads")
-    if VALUE_TAKING_FLAGS.contains(&flag) {
-        return true;
-    }
-    // Prefix form with '=' already consumed the value (e.g. "--test-threads=4"),
-    // so the *next* token is NOT a value — return false for those.
-    false
+    // Only exact flag names match — prefix forms like "--test-threads=4" have
+    // already consumed their value, so the next token is not a value argument.
+    VALUE_TAKING_FLAGS.contains(&flag)
 }
 
 fn extract_test_name(args: &[String]) -> Option<String> {
@@ -148,6 +146,19 @@ fn main() -> std::io::Result<()> {
     #[cfg(not(feature = "heap-profile"))]
     let heap_profile = false;
 
+    // Register SIGTERM handler so we can detect nextest timeouts.
+    // When a test times out, nextest sends SIGTERM to our process group.
+    // By catching it (instead of dying), we survive long enough to write
+    // stats with timed_out=true before nextest escalates to SIGKILL.
+    // Ctrl+C sends SIGINT, which we leave unhandled (default: terminate),
+    // so user interrupts don't get false-flagged as timeouts.
+    let sigterm_received = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&sigterm_received))
+            .expect("failed to register SIGTERM handler");
+    }
+
     let exit_code = run_with_monitoring(MonitorConfig {
         binary,
         test_args: &test_args,
@@ -158,6 +169,7 @@ fn main() -> std::io::Result<()> {
         record_samples,
         test_name,
         heap_profile,
+        sigterm_received,
     })?;
 
     std::process::exit(exit_code);
@@ -173,6 +185,7 @@ struct MonitorConfig<'a> {
     record_samples: bool,
     test_name: Option<String>,
     heap_profile: bool,
+    sigterm_received: Arc<AtomicBool>,
 }
 
 /// Derive the heap profile output path from the test name.
@@ -212,6 +225,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         record_samples,
         test_name,
         heap_profile,
+        sigterm_received,
     } = config;
 
     #[cfg(feature = "heap-profile")]
@@ -265,16 +279,52 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
 
     let monitoring_enabled = monitor_cpu || effective_monitor_memory;
 
-    let mut cpu_monitor = if monitor_cpu {
-        Some(CpuMonitor::new(pid))
-    } else {
-        None
+    let mut cpu_monitor = monitor_cpu.then(|| CpuMonitor::new(pid));
+    let memory_monitor = effective_monitor_memory.then(|| MemoryMonitor::new(pid));
+
+    // Writes a minimal stats entry the moment SIGTERM is detected, so the test
+    // is recorded as timed_out even if SIGKILL arrives before the child exits.
+    // Returns the file path so the caller can delete it once the final (complete)
+    // entry is written — keeping downstream analysis free of duplicate records.
+    let write_eager_timeout = || {
+        append_stats(
+            output_path,
+            TestStats {
+                binary: binary.to_string(),
+                test_name: test_name.clone(),
+                passed: false,
+                started_at,
+                duration_ms: start_instant.elapsed().as_millis() as u64,
+                exit_code: None,
+                timed_out: Some(true),
+                peak_cpu: None,
+                avg_cpu: None,
+                p50_cpu: None,
+                p90_cpu: None,
+                time_at_p90_ms: None,
+                time_near_peak_ms: None,
+                time_above_1t_ms: None,
+                time_above_2t_ms: None,
+                time_above_3t_ms: None,
+                time_above_4t_ms: None,
+                cpu_samples: None,
+                peak_rss_bytes: None,
+                avg_rss_bytes: None,
+                p50_rss_bytes: None,
+                p90_rss_bytes: None,
+                time_above_100mb_ms: None,
+                time_above_500mb_ms: None,
+                time_above_1gb_ms: None,
+                memory_samples: None,
+                heap_profile_path: None,
+            },
+        )
     };
-    let memory_monitor = if effective_monitor_memory {
-        Some(MemoryMonitor::new(pid))
-    } else {
-        None
-    };
+
+    // Path of the eager timeout entry, set when SIGTERM is first detected.
+    // Deleted after the final entry is successfully written so downstream
+    // analysis never sees two entries for the same test.
+    let mut eager_timeout_path: Option<PathBuf> = None;
 
     let status = if monitoring_enabled {
         // Initial delay to let the process start before first CPU sample
@@ -284,6 +334,15 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
             match child.try_wait()? {
                 Some(status) => break status,
                 None => {
+                    if eager_timeout_path.is_none() && sigterm_received.load(Ordering::Relaxed) {
+                        match write_eager_timeout() {
+                            Ok(path) => eager_timeout_path = Some(path),
+                            Err(e) => eprintln!(
+                                "warning: failed to write eager timeout entry after SIGTERM: {e}"
+                            ),
+                        }
+                    }
+
                     let elapsed_ms = start_instant.elapsed().as_millis() as u64;
 
                     if let Some(ref mut cpu_mon) = cpu_monitor {
@@ -307,24 +366,34 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
             }
         }
     } else {
-        child.wait()?
+        // Poll instead of blocking on wait() so we can detect SIGTERM and
+        // write an eager timeout entry before a potential SIGKILL.
+        loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => {
+                    if eager_timeout_path.is_none() && sigterm_received.load(Ordering::Relaxed) {
+                        match write_eager_timeout() {
+                            Ok(path) => eager_timeout_path = Some(path),
+                            Err(e) => eprintln!(
+                                "warning: failed to write eager timeout entry after SIGTERM: {e}"
+                            ),
+                        }
+                    }
+                    thread::sleep(sample_interval);
+                }
+            }
+        }
     };
 
     let duration_ms = start_instant.elapsed().as_millis() as u64;
+    let timed_out = sigterm_received.load(Ordering::Relaxed);
     let exit_code = status.code();
-    let passed = exit_code == Some(0);
+    let passed = !timed_out && exit_code == Some(0);
 
-    let cpu_stats = if monitor_cpu {
-        Some(calculate_cpu_stats(&cpu_samples, duration_ms))
-    } else {
-        None
-    };
-
-    let mem_stats = if effective_monitor_memory {
-        Some(calculate_memory_stats(&memory_samples, duration_ms))
-    } else {
-        None
-    };
+    let cpu_stats = monitor_cpu.then(|| calculate_cpu_stats(&cpu_samples, duration_ms));
+    let mem_stats =
+        effective_monitor_memory.then(|| calculate_memory_stats(&memory_samples, duration_ms));
 
     let stats = TestStats {
         binary: binary.to_string(),
@@ -333,6 +402,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         started_at,
         duration_ms,
         exit_code,
+        timed_out: Some(timed_out),
         peak_cpu: cpu_stats.as_ref().map(|s| s.peak_cpu),
         avg_cpu: cpu_stats.as_ref().map(|s| s.avg_cpu),
         p50_cpu: cpu_stats.as_ref().map(|s| s.p50_cpu),
@@ -343,11 +413,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         time_above_2t_ms: cpu_stats.as_ref().map(|s| s.time_above_2t_ms),
         time_above_3t_ms: cpu_stats.as_ref().map(|s| s.time_above_3t_ms),
         time_above_4t_ms: cpu_stats.as_ref().map(|s| s.time_above_4t_ms),
-        cpu_samples: if record_samples && monitor_cpu {
-            Some(cpu_samples)
-        } else {
-            None
-        },
+        cpu_samples: (record_samples && monitor_cpu).then_some(cpu_samples),
         peak_rss_bytes: mem_stats.as_ref().map(|s| s.peak_rss_bytes),
         avg_rss_bytes: mem_stats.as_ref().map(|s| s.avg_rss_bytes),
         p50_rss_bytes: mem_stats.as_ref().map(|s| s.p50_rss_bytes),
@@ -355,18 +421,26 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         time_above_100mb_ms: mem_stats.as_ref().map(|s| s.time_above_100mb_ms),
         time_above_500mb_ms: mem_stats.as_ref().map(|s| s.time_above_500mb_ms),
         time_above_1gb_ms: mem_stats.as_ref().map(|s| s.time_above_1gb_ms),
-        memory_samples: if record_samples && effective_monitor_memory {
-            Some(memory_samples)
-        } else {
-            None
-        },
+        memory_samples: (record_samples && effective_monitor_memory).then_some(memory_samples),
         heap_profile_path: heap_profile_path.and_then(|hp_path| {
             find_heaptrack_output(&hp_path).map(|p| p.to_string_lossy().to_string())
         }),
     };
 
-    if let Err(e) = append_stats(output_path, stats) {
-        eprintln!("Warning: failed to append telemetry stats: {e}");
+    match append_stats(output_path, stats) {
+        Ok(_) => {
+            // Final entry written — remove the eager timeout entry so downstream
+            // analysis doesn't see two records for the same test run.
+            if let Some(ref p) = eager_timeout_path
+                && let Err(e) = fs::remove_file(p)
+            {
+                eprintln!(
+                    "warning: failed to remove eager timeout file {}: {e}",
+                    p.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("Warning: failed to append telemetry stats: {e}"),
     }
 
     Ok(exit_code.unwrap_or(1))

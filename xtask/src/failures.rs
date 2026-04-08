@@ -294,6 +294,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             duration_ms: 100,
             exit_code: if passed { Some(0) } else { Some(1) },
+            timed_out: None,
             peak_cpu: None,
             avg_cpu: None,
             p50_cpu: None,

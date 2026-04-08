@@ -610,26 +610,14 @@ impl<'a> ShadowTxGenerator<'a> {
         // Process commitment transaction
         let shadow_metadata = self.process_commitment_transaction(tx)?;
 
-        // Update treasury based on commitment type
-        match tx.commitment_type() {
-            irys_types::CommitmentTypeV2::Stake | irys_types::CommitmentTypeV2::Pledge { .. } => {
-                // Stake and Pledge lock funds in the treasury
-                self.treasury_balance =
-                    self.treasury_balance
-                        .checked_add(tx.value())
-                        .ok_or_else(|| {
-                            eyre!("Treasury balance overflow when adding commitment value")
-                        })?;
-            }
-            irys_types::CommitmentTypeV2::Unstake => {
-                // Unstake handled on epoch boundary
-            }
-            irys_types::CommitmentTypeV2::Unpledge { .. } => {
-                // Unpledge handled on epoch boundary
-            }
-            irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {
-                // No treasury movement - fee only
-            }
+        // Update treasury — treasury_delta() returns the canonical amount that
+        // this commitment type adds to the treasury (non-zero only for Stake/Pledge).
+        let delta = tx.treasury_delta();
+        if !delta.is_zero() {
+            self.treasury_balance = self
+                .treasury_balance
+                .checked_add(delta)
+                .ok_or_else(|| eyre!("Treasury balance overflow when adding commitment value"))?;
         }
 
         Ok(shadow_metadata)

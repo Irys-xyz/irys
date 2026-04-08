@@ -120,6 +120,7 @@ mod tests {
             vdf_seed: H256::zero(),
             vdf_next_seed: None,
             genesis_price: Amount::token(Decimal::new(15, 2)).expect("valid token amount"),
+            initial_packed_partitions: None,
         }
     }
 

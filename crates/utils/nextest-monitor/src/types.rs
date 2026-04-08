@@ -40,6 +40,10 @@ pub struct TestStats {
     pub duration_ms: u64,
     /// Exit code of the test
     pub exit_code: Option<i32>,
+    /// Whether the test was killed by nextest due to a timeout (SIGTERM).
+    /// `None` means unknown (e.g. older stats files), `Some(true)` means timed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
 
     // -- CPU fields (optional) --
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +161,10 @@ fn parse_stats_dir(dir: &Path) -> std::io::Result<Vec<TestStats>> {
 /// Each invocation creates a unique file under `{path}.d/`, keyed by PID and
 /// nanosecond timestamp. Because every writer targets a distinct file, there is
 /// no risk of interleaved output from concurrent processes.
-pub fn append_stats(path: &Path, stats: TestStats) -> std::io::Result<()> {
+///
+/// Returns the path of the file that was written, so callers can delete it
+/// later if needed (e.g. to replace an eager timeout entry with a final one).
+pub fn append_stats(path: &Path, stats: TestStats) -> std::io::Result<PathBuf> {
     let dir = stats_dir(path);
     fs::create_dir_all(&dir)?;
 
@@ -169,7 +176,8 @@ pub fn append_stats(path: &Path, stats: TestStats) -> std::io::Result<()> {
     let file_path = dir.join(unique_name);
 
     let content = serde_json::to_string(&stats)?;
-    fs::write(&file_path, content)
+    fs::write(&file_path, &content)?;
+    Ok(file_path)
 }
 
 #[cfg(test)]
@@ -188,6 +196,7 @@ mod tests {
             started_at: Utc::now(),
             duration_ms: 2000,
             exit_code: Some(0),
+            timed_out: None,
             peak_cpu: Some(3.0),
             avg_cpu: Some(2.0),
             p50_cpu: Some(1.8),
