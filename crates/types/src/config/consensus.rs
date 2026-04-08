@@ -310,7 +310,7 @@ pub struct GenesisConfig {
     pub genesis_price: Amount<(IrysPrice, Usd)>,
 
     /// Number of fully packed partitions to use for initial difficulty
-    /// calculation at genesis. Used by [`genesis_builder::initial_packed_partitions_from_config`]
+    /// calculation at genesis. Used by `genesis_builder::initial_packed_partitions_from_config`
     /// with fallback chain: this field > `epoch.num_capacity_partitions` > total pledges.
     ///
     /// Set this explicitly for custom networks or tests requiring exact genesis difficulty.

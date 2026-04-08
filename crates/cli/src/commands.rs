@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-fn signing_key_from_hex(hex_str: &str) -> eyre::Result<k256::ecdsa::SigningKey> {
+fn signing_key_from_hex(hex_str: Zeroizing<String>) -> eyre::Result<k256::ecdsa::SigningKey> {
     let key_bytes = Zeroizing::new(
         hex::decode(hex_str.trim_start_matches("0x"))
             .map_err(|e| eyre::eyre!("Invalid hex for signing key: {e}"))?,
@@ -40,7 +40,7 @@ fn resolve_signing_key(
 ) -> eyre::Result<k256::ecdsa::SigningKey> {
     // 1. Direct hex value (from --signing-key / --key or IRYS_SIGNING_KEY)
     if let Some(hex_str) = explicit_hex {
-        return signing_key_from_hex(&hex_str);
+        return signing_key_from_hex(Zeroizing::new(hex_str));
     }
 
     // 2. Read hex from a file (--signing-key-file / --key-file or IRYS_SIGNING_KEY_FILE)
@@ -48,7 +48,7 @@ fn resolve_signing_key(
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| eyre::eyre!("Failed to read key file {}: {e}", path.display()))?;
         info!("Loaded signing key from {}", path.display());
-        return signing_key_from_hex(contents.trim());
+        return signing_key_from_hex(Zeroizing::new(contents.trim().to_owned()));
     }
 
     // 3. Fall back to config.toml mining_key

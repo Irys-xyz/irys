@@ -95,6 +95,14 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
         }
     }
 
+    if let Some(expected) = config.consensus.expected_genesis_hash {
+        eyre::ensure!(
+            genesis_block.block_hash == expected,
+            "genesis block hash mismatch: expected {expected}, got {}",
+            genesis_block.block_hash
+        );
+    }
+
     let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
     let db = DatabaseProvider(db_env);
     let block_index = BlockIndex::new(&config.node_config, db.clone())?;
@@ -123,9 +131,9 @@ Use an empty/reset database before importing.",
     write_tx.commit()?;
 
     save_genesis_block_to_disk(genesis_block, &config.node_config.base_directory)
-        .wrap_err("writing genesis block to node base_directory")?;
+        .wrap_err("writing genesis block to node base_directory — Database was already updated successfully. You may need to manually copy the genesis files to resolve this.")?;
     save_genesis_commitments_to_disk(&commitments, &config.node_config.base_directory)
-        .wrap_err("writing genesis commitments to node base_directory")?;
+        .wrap_err("writing genesis commitments to node base_directory — Database was already updated successfully. You may need to manually copy the genesis files to resolve this.")?;
 
     Ok(())
 }

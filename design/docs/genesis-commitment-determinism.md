@@ -1,6 +1,7 @@
 # Determinism Guarantees in Multi-Miner Genesis Construction
 
 ## Status
+
 Accepted
 
 ## Context

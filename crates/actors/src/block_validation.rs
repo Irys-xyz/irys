@@ -3522,8 +3522,9 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let (commitments, initial_treasury) =
-            add_genesis_commitments(&mut genesis_block, &config).await;
+        let (commitments, initial_treasury) = add_genesis_commitments(&mut genesis_block, &config)
+            .await
+            .unwrap();
         genesis_block.treasury = initial_treasury;
 
         let arc_genesis = Arc::new(genesis_block.clone());

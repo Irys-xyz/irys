@@ -321,13 +321,20 @@ impl IrysBlockHeader {
     /// This is the single source of truth for "commitments → ledger + treasury"
     /// logic, used by both genesis block builders and test helpers.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the sum of treasury deltas overflows `U256::MAX`.
+    ///
     /// # Panics
     ///
     /// Panics if any of the commitment txids being added already exist in the ledger.
     /// Duplicate registration would inflate the treasury.
-    pub fn append_commitments(&mut self, commitments: &[CommitmentTransaction]) -> U256 {
+    pub fn append_commitments(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> eyre::Result<U256> {
         if commitments.is_empty() {
-            return U256::zero();
+            return Ok(U256::zero());
         }
 
         // Guard: check for duplicate txids to prevent double-registration which
@@ -366,9 +373,15 @@ impl IrysBlockHeader {
         let mut treasury_delta = U256::zero();
         for commitment in commitments {
             ledger.tx_ids.push(commitment.id());
-            treasury_delta = treasury_delta.saturating_add(commitment.treasury_delta());
+            treasury_delta = treasury_delta
+                .checked_add(commitment.treasury_delta())
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "treasury_delta overflow: sum of commitment deltas exceeded U256::MAX"
+                    )
+                })?;
         }
-        treasury_delta
+        Ok(treasury_delta)
     }
 }
 

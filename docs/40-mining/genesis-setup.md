@@ -25,8 +25,12 @@ Use `generate-miner-info` to derive a miner's Irys and EVM addresses:
 cargo run -p irys-cli -- generate-miner-info --key <hex-private-key>
 ```
 
+> **Security warning:** Passing private keys on the command line exposes them
+> in shell history and process listings. Prefer `--key-file <path>` or the
+> `IRYS_SIGNING_KEY` environment variable instead.
+
 Output:
-```
+```text
 Mining key:   f57554aff54acd4...
 Irys address: 2Z7NNbu2hgdx9qzoYbLX8YTAAJtR
 EVM address:  0x81c23e4bde4c7086400cdcbca2dfe9a96dbd0fad
@@ -74,9 +78,9 @@ balance = "10000000000000000000000000"
 ```
 
 Every miner with pledges must also have a stake -- the genesis builder creates
-one stake commitment per miner automatically. Genesis pledges have no cost, so
-the balance only needs to cover the stake commitment value, denominated in the
-chain's smallest token unit.
+one stake commitment per miner automatically. The alloc balance must cover
+both the stake commitment value and any pledge fees (which increase with
+pledge count per miner), denominated in the chain's smallest token unit.
 
 ### 3. Build the Genesis Block
 
@@ -122,7 +126,7 @@ The format is a JSON array matching the `Vec<CommitmentTransaction>` schema
 ### 2. Fund Miner Accounts
 
 Same as Workflow A Step 2 -- add `reth.alloc` entries for each miner's EVM
-address.
+address with sufficient balance to cover stake and pledge fees.
 
 ### 3. Build the Genesis Block
 
@@ -132,6 +136,10 @@ CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
   --signing-key <hex-private-key-for-block-signature> \
   --output ./genesis-artifacts/
 ```
+
+> **Security warning:** Passing private keys on the command line exposes them
+> in shell history and process listings. Prefer `--signing-key-file <path>` or
+> the `IRYS_SIGNING_KEY` environment variable instead.
 
 The `--signing-key` is the secp256k1 private key used to sign the genesis block
 header. This does not need to be one of the miners' keys.
@@ -174,7 +182,7 @@ directory.
 3. **Logs partition assignments** -- after replaying all epochs, prints the
    current partition hash assignments grouped by miner address:
 
-   ```
+   ```text
    Replaying 5 epoch blocks (epoch_len=100, chain_height=450)
      Epoch 0 (height 0): 14 commitments
      Epoch 1 (height 100): 3 commitments
@@ -215,6 +223,10 @@ CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
   --output ./genesis-artifacts/
 ```
 
+> **Security warning:** Passing private keys on the command line exposes them
+> in shell history and process listings. Prefer `--signing-key-file <path>` or
+> the `IRYS_SIGNING_KEY` environment variable instead.
+
 ---
 
 ## Output Files
@@ -235,7 +247,7 @@ CONFIG=config.toml cargo run -p irys-cli -- inspect-genesis --genesis-dir ./gene
 ```
 
 Output:
-```
+```text
 Genesis Block
   Hash:        4eiVupe...
   Timestamp:   1700000000000

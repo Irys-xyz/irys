@@ -221,22 +221,14 @@ fn test_build_genesis_rejects_conflicting_args() {
 }
 
 #[test]
-fn test_build_genesis_no_input_parses_but_has_neither() {
-    // build-genesis with no --miners or --commitments parses successfully
-    // (the runtime check in commands.rs catches this with bail!)
+fn test_build_genesis_no_input_is_rejected() {
+    // build-genesis with no --miners or --commitments is now rejected at parse time
+    // by the required ArgGroup, so no runtime fallback is needed.
     let args = &["irys-cli", "build-genesis"];
-    let cli = IrysCli::try_parse_from(args).expect("should parse with no input flags");
-    match cli.command {
-        Commands::BuildGenesis {
-            miners,
-            commitments,
-            ..
-        } => {
-            assert!(miners.is_none());
-            assert!(commitments.is_none());
-        }
-        other => panic!("expected BuildGenesis, got {:?}", other),
-    }
+    assert!(
+        IrysCli::try_parse_from(args).is_err(),
+        "should reject build-genesis with neither --miners nor --commitments"
+    );
 }
 
 #[test]
@@ -252,19 +244,11 @@ fn test_generate_miner_info_address_derivation() {
     let evm_address = secret_key_to_address(&signing_key);
     let irys_address = IrysAddress::from(evm_address);
 
-    // EVM address should be a valid 0x-prefixed checksum address
+    // Pin the exact EVM checksum address for this key.
     let evm_str = format!("{evm_address}");
-    assert!(
-        evm_str.starts_with("0x"),
-        "EVM address should be 0x-prefixed"
-    );
-    assert_eq!(
-        evm_str.len(),
-        42,
-        "EVM address should be 42 chars (0x + 40 hex)"
-    );
+    assert_eq!(evm_str, "0x64f1a2829e0E698c18E7792D6E74f67d89AA0a32");
 
-    // Irys address should be non-empty base58
+    // Irys address should be non-empty base58.
     let irys_str = format!("{irys_address}");
     assert!(!irys_str.is_empty(), "Irys address should not be empty");
 }

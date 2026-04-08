@@ -335,7 +335,12 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
                 Some(status) => break status,
                 None => {
                     if eager_timeout_path.is_none() && sigterm_received.load(Ordering::Relaxed) {
-                        eager_timeout_path = write_eager_timeout().ok();
+                        match write_eager_timeout() {
+                            Ok(path) => eager_timeout_path = Some(path),
+                            Err(e) => eprintln!(
+                                "warning: failed to write eager timeout entry after SIGTERM: {e}"
+                            ),
+                        }
                     }
 
                     let elapsed_ms = start_instant.elapsed().as_millis() as u64;
@@ -368,7 +373,12 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
                 Some(status) => break status,
                 None => {
                     if eager_timeout_path.is_none() && sigterm_received.load(Ordering::Relaxed) {
-                        eager_timeout_path = write_eager_timeout().ok();
+                        match write_eager_timeout() {
+                            Ok(path) => eager_timeout_path = Some(path),
+                            Err(e) => eprintln!(
+                                "warning: failed to write eager timeout entry after SIGTERM: {e}"
+                            ),
+                        }
                     }
                     thread::sleep(sample_interval);
                 }

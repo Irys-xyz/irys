@@ -478,7 +478,7 @@ pub fn build_genesis_block_from_commitments(
     // genesis blocks use identical ordering logic to regular blocks.
     commitments.sort();
 
-    let initial_treasury = genesis_block.append_commitments(&commitments);
+    let initial_treasury = genesis_block.append_commitments(&commitments)?;
 
     let total_pledges = commitments
         .iter()
@@ -559,7 +559,7 @@ async fn generate_multi_miner_commitments(
     // so the anchor chain and generated txids are deterministic.
     all_commitments.sort();
 
-    let total_value = genesis_block.append_commitments(&all_commitments);
+    let total_value = genesis_block.append_commitments(&all_commitments)?;
 
     Ok((all_commitments, total_value))
 }

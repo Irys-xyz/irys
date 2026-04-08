@@ -22,7 +22,8 @@ pub(crate) enum Commands {
     },
     #[command(
         name = "build-genesis",
-        about = "Build a signed genesis block from miner keys or existing commitments"
+        about = "Build a signed genesis block from miner keys or existing commitments",
+        group = clap::ArgGroup::new("genesis-source").required(true).args(&["miners", "commitments"]),
     )]
     BuildGenesis {
         /// Path to genesis_miners.toml containing miner keys and pledge counts.
