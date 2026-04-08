@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775639141812,
+  "lastUpdate": 1775659350982,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2167,6 +2167,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "Jesse Cruz Wright",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cca32388c5a2456c48b34ff4a4c62be30dbf183e",
+          "message": "feat: genesis CLI (#1380)\n\n* docs: add implementation plan for standalone genesis block CLI\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\n\n* feat: add genesis_builder core function with multi-miner support\n\n* feat: add disk I/O for genesis commitment transactions\n\n* feat: add GenesisMinerManifest TOML config for multi-miner genesis\n\nAdd GenesisMinerManifest and GenesisMinerManifestEntry types with serde\nSerialize/Deserialize derives for parsing genesis_miners.toml files.\nIncludes GenesisMinerManifest::load() for reading from disk and\ninto_entries() for converting parsed TOML entries into GenesisMinerEntry\nvalues with hex-decoded signing keys.\n\n* feat: add build-genesis CLI subcommand\n\n* refactor: delegate IrysNode genesis creation to genesis_builder core function\n\n* chore: fmt and clippy fixes for genesis CLI\n\n* feat: validate and canonicalize genesis miner manifest\n\nReject duplicate mining keys and zero-pledge miners in into_entries().\nSort miners by derived IrysAddress so manifest order does not affect\nthe resulting block hash.\n\n* refactor: use sort_by_cached_key to avoid redundant EC derivations in into_entries\n\n* test: verify manifest canonicalization produces stable order\n\n* test: verify build_signed_genesis_block produces deterministic output\n\n* test: verify partition assignments are deterministic from genesis commitments\n\n* fix: compare full PartitionAssignment structs in determinism test\n\nCheck all fields (partition_hash, miner_address, ledger_id, slot_index)\ninstead of only miner_address for stronger determinism verification.\n\n* feat: add generate-miner-info CLI to derive addresses from mining key\n\n* docs: add multi-miner genesis setup guide\n\n* fix: remove redundant clone flagged by clippy\n\n* feat: support building genesis block from pre-signed commitments\n\nAdd build_genesis_block_from_commitments() which packages already-signed\ncommitment transactions into a genesis block, enabling a production\nworkflow where miners independently sign commitments offline and a\ncoordinator assembles them. The CLI build-genesis command now accepts\neither --miners (existing behavior) or --commitments + --signing-key.\n\n* feat: add inspect-genesis CLI to display partition assignments\n\nLoads genesis block and commitments from disk, replays them through\nEpochSnapshot, and prints a partition assignment table grouped by miner.\n\n* docs: update genesis setup guide with existing-commitments workflow and inspect-genesis\n\n* docs: fix genesis balance requirement — pledges are free at genesis\n\n* docs: clarify that genesis miners need both stake and pledges\n\n* feat: add dump-commitments CLI to export commitments from database\n\n* fix: rename _ba variables to _rev to fix typos check\n\n* feat: dump commitment refinement\n\n* docs: update genesis CLI docs\n\n* feat: update functionality\n\n* feat: proper database init\n\n* feat: support additonal key loading methods\n\n* feat: address feedback\n\n* feat: address feedback\n\n* feat: address feedback\n\n* fix: move 3 SM invariant\n\n* feat: address feedback\n\n* chore: remove old docs\n\n* feat: address feedback\n\n* docs: update StorageSubmodulesConfig::load API call to include node_mode parameter\n\n* feat: add genesis block hash mismatch warning to compare-genesis output\n\nAdd prominent visual warning when comparing genesis blocks if their hashes\ndiffer. The comparison now displays:\n- \"Block hash: MATCH\" for matching hashes\n- Bold red warning \"⚠ Block hash: MISMATCH — current and target genesis blocks differ\" when hashes don't match\n\nThis helps operators quickly identify when genesis blocks diverge, which indicates\na critical mismatch requiring investigation.\n\n* feat: improve nextest wrapper timeout behaviour\n\n* feat: address feedback\n\n* fix: refine commitment duplicate guard\n\n* feat: address feedback\n\n* fix: add intraslice duplicate detection\n\n* feat: address feedback\n\n* feat: refine append_commitments guard\n\n---------\n\nCo-authored-by: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-04-08T15:21:06+01:00",
+          "tree_id": "aad165f97b8beebf10d231a6c7076c0533894383",
+          "url": "https://github.com/Irys-xyz/irys/commit/cca32388c5a2456c48b34ff4a4c62be30dbf183e"
+        },
+        "date": 1775659348970,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.084377,
+            "range": "± 0.00364",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 867.679206,
+            "range": "± 16.121871",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 996.411647,
+            "range": "± 36.758818",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120074,
+            "range": "± 0.001434",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1246.347125,
+            "range": "± 52.672863",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1929.943009,
+            "range": "± 155.747644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.800788,
+            "range": "± 0.161612",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 256.750021,
+            "range": "± 25.288518",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 282.680067,
+            "range": "± 2.546765",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
