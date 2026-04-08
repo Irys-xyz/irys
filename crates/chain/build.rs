@@ -20,6 +20,14 @@ fn main() {
         println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
         println!("cargo:rustc-env=GIT_DIRTY={dirty}");
         return;
+    } else if std::env::var("GIT_SHA").is_ok()
+        || std::env::var("GIT_HAS_TAG").is_ok()
+        || std::env::var("GIT_DIRTY").is_ok()
+    {
+        panic!(
+            "GIT_SHA, GIT_HAS_TAG, and GIT_DIRTY must all be set together; \
+             found only a subset — check your Docker build args"
+        );
     }
 
     // In worktrees, HEAD lives in the worktree's own git dir, but refs/tags and

@@ -4,7 +4,7 @@
 # Override with IMAGE_NAME env var if needed.
 # Sends telemetry to local observability stack by default.
 #
-# OTEL_HOST: defaults to host.docker.internal (local observation stack).
+# OTEL_HOST: defaults to host.docker.internal (local observability stack).
 # Override for remote environments:
 #   OTEL_HOST=51.38.53.126 docker compose up
 
