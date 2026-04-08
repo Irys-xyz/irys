@@ -583,7 +583,7 @@ impl IrysNode {
             self.config.node_config.base_directory.clone(),
             self.config.node_config.node_mode,
         )
-        .expect("storage_submodules.toml must exist for genesis node");
+        .context("failed to load storage_submodules config for genesis node")?;
         let pledge_count = storage_submodule_config.submodule_paths.len() as u64;
 
         let miner_entry = GenesisMinerEntry {

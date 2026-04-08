@@ -7,6 +7,7 @@
 //! commitments globally to produce unique transaction IDs.
 
 use std::{
+    fmt,
     path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -17,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
-    CommitmentTransaction, CommitmentTypeV2, Config, H256, H256List, IrysAddress, IrysBlockHeader,
-    IrysTransactionCommon as _, SystemLedger, SystemTransactionLedger, U256, UnixTimestamp,
-    UnixTimestampMs, calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
+    CommitmentTransaction, CommitmentTypeV2, Config, H256, IrysAddress, IrysBlockHeader,
+    IrysTransactionCommon as _, U256, UnixTimestamp, UnixTimestampMs, calculate_initial_difficulty,
+    chainspec::irys_chain_spec, irys::IrysSigner,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -53,15 +54,32 @@ pub struct GenesisMinerEntry {
 ///
 /// **Security:** This file contains raw private keys. It must never be
 /// committed to version control or shared over insecure channels.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GenesisMinerManifest {
     pub miners: Vec<GenesisMinerManifestEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl fmt::Debug for GenesisMinerManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GenesisMinerManifest")
+            .field("miners", &self.miners)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GenesisMinerManifestEntry {
     pub mining_key: String,
     pub pledge_count: u64,
+}
+
+impl fmt::Debug for GenesisMinerManifestEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GenesisMinerManifestEntry")
+            .field("mining_key", &"[REDACTED]")
+            .field("pledge_count", &self.pledge_count)
+            .finish()
+    }
 }
 
 impl GenesisMinerManifest {
@@ -356,7 +374,7 @@ pub async fn build_signed_genesis_block(
 /// calculation fails, VDF execution fails, or block signing fails.
 pub fn build_genesis_block_from_commitments(
     config: &Config,
-    commitments: Vec<CommitmentTransaction>,
+    mut commitments: Vec<CommitmentTransaction>,
     block_signing_key: &SigningKey,
 ) -> eyre::Result<GenesisOutput> {
     let has_stake = commitments
@@ -426,15 +444,13 @@ pub fn build_genesis_block_from_commitments(
         }
     }
 
-    // Register all commitment txids in the commitment ledger and sum values
-    let ledger = get_or_create_commitment_ledger(&mut genesis_block);
-    let mut initial_treasury = U256::zero();
-    for (i, commitment) in commitments.iter().enumerate() {
-        ledger.tx_ids.push(commitment.id());
-        initial_treasury = initial_treasury
-            .checked_add(commitment.value())
-            .ok_or_else(|| eyre::eyre!("treasury overflow at commitment {i}"))?;
-    }
+    // Sort commitments by their transaction ID for deterministic genesis hash.
+    // The caller may provide commitments in arbitrary JSON order; sorting by ID
+    // bytes ensures the ledger tx_ids list — and thus the block hash — is
+    // independent of input ordering.
+    commitments.sort_by(|a, b| a.id().as_bytes().cmp(b.id().as_bytes()));
+
+    let initial_treasury = genesis_block.register_commitments(&commitments);
 
     let total_pledges = commitments
         .iter()
@@ -509,37 +525,13 @@ async fn generate_multi_miner_commitments(
         }
     }
 
-    // Register all commitment txids in the genesis block's commitment ledger.
-    let ledger = get_or_create_commitment_ledger(genesis_block);
-    let mut total_value = U256::zero();
-    for commitment in &all_commitments {
-        ledger.tx_ids.push(commitment.id());
-        total_value = total_value.checked_add(commitment.value()).ok_or_else(|| {
-            eyre::eyre!("treasury overflow from config-derived commitment values")
-        })?;
-    }
+    // Sort commitments by txid for a canonical ledger order that matches
+    // build_genesis_block_from_commitments (which also sorts by txid).
+    all_commitments.sort_by(|a, b| a.id().as_bytes().cmp(b.id().as_bytes()));
+
+    let total_value = genesis_block.register_commitments(&all_commitments);
 
     Ok((all_commitments, total_value))
-}
-
-/// Find or create the `Commitment` system ledger on the genesis block.
-fn get_or_create_commitment_ledger(
-    genesis_block: &mut IrysBlockHeader,
-) -> &mut SystemTransactionLedger {
-    let pos = genesis_block
-        .system_ledgers
-        .iter()
-        .position(|e| e.ledger_id == SystemLedger::Commitment);
-    match pos {
-        Some(i) => &mut genesis_block.system_ledgers[i],
-        None => {
-            genesis_block.system_ledgers.push(SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: H256List::new(),
-            });
-            genesis_block.system_ledgers.last_mut().unwrap()
-        }
-    }
 }
 
 /// Construct an [`IrysSigner`] from a raw [`SigningKey`] and the node

@@ -311,6 +311,39 @@ impl IrysBlockHeader {
     pub fn timestamp_secs(&self) -> crate::UnixTimestamp {
         self.timestamp.to_secs()
     }
+
+    /// Register commitment transactions in this block's commitment system ledger.
+    ///
+    /// Creates the `Commitment` ledger if it doesn't already exist, appends each
+    /// commitment's txid, and returns the total treasury delta (the sum of
+    /// [`CommitmentTransaction::treasury_delta`] across all commitments).
+    ///
+    /// This is the single source of truth for "commitments → ledger + treasury"
+    /// logic, used by both genesis block builders and test helpers.
+    pub fn register_commitments(&mut self, commitments: &[CommitmentTransaction]) -> U256 {
+        // Find or create the Commitment system ledger.
+        let ledger_idx = self
+            .system_ledgers
+            .iter()
+            .position(|e| e.ledger_id == SystemLedger::Commitment);
+        let ledger = match ledger_idx {
+            Some(i) => &mut self.system_ledgers[i],
+            None => {
+                self.system_ledgers.push(SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment.into(),
+                    tx_ids: H256List::new(),
+                });
+                self.system_ledgers.last_mut().unwrap()
+            }
+        };
+
+        let mut treasury_delta = U256::zero();
+        for commitment in commitments {
+            ledger.tx_ids.push(commitment.id());
+            treasury_delta = treasury_delta.saturating_add(commitment.treasury_delta());
+        }
+        treasury_delta
+    }
 }
 
 impl Versioned for IrysBlockHeaderV1 {

@@ -57,9 +57,9 @@ fn resolve_signing_key(
             info!("Using mining_key from config.toml as signing key");
             Ok(node_config.mining_key)
         }
-        Err(_) => {
+        Err(e) => {
             bail!(
-                "No signing key provided. Supply one via:\n  \
+                "No signing key provided (config.toml error: {e}). Supply one via:\n  \
                  --signing-key <hex>\n  \
                  IRYS_SIGNING_KEY env var\n  \
                  --signing-key-file <path> / IRYS_SIGNING_KEY_FILE env var\n  \
@@ -379,15 +379,18 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
             let mut terminal = irys_tui::utils::terminal::init()?;
 
-            let app_result = if record {
-                let mut app = irys_tui::app::App::new(node_urls, config)?
-                    .start_recording()
-                    .await?;
-                app.run(&mut terminal).await
-            } else {
-                let mut app = irys_tui::app::App::new(node_urls, config)?;
-                app.run(&mut terminal).await
-            };
+            let app_result = async {
+                if record {
+                    let mut app = irys_tui::app::App::new(node_urls, config)?
+                        .start_recording()
+                        .await?;
+                    app.run(&mut terminal).await
+                } else {
+                    let mut app = irys_tui::app::App::new(node_urls, config)?;
+                    app.run(&mut terminal).await
+                }
+            }
+            .await;
 
             irys_tui::utils::terminal::restore()?;
 

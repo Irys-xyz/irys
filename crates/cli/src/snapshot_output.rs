@@ -3,7 +3,7 @@ use irys_types::{Config, H256, NodeConfig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::db_utils::load_block_commitments;
 
@@ -69,6 +69,13 @@ impl SnapshotPartitionState {
         }
 
         for (&hash, assignment) in &snapshot.partition_assignments.data_partitions {
+            if assignment.ledger_id.is_none() || assignment.slot_index.is_none() {
+                warn!(
+                    partition_hash = %hash,
+                    miner = %assignment.miner_address,
+                    "data partition missing ledger_id or slot_index metadata"
+                );
+            }
             by_miner
                 .entry(assignment.miner_address)
                 .or_default()

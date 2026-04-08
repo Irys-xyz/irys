@@ -236,6 +236,23 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case(0, false)]
+    #[case(1, false)]
+    #[case(2, false)]
+    #[case(3, false)]
+    #[case(10, false)]
+    fn from_toml_submodule_count_boundary_peer(
+        #[case] count: usize,
+        #[case] should_err: bool,
+    ) -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().build();
+        let path = write_config_toml(dir.path(), count)?;
+        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Peer);
+        assert_eq!(result.is_err(), should_err);
+        Ok(())
+    }
+
     #[test]
     fn load_creates_default_config_when_none_exists() -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();

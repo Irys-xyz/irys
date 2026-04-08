@@ -87,7 +87,7 @@ CONFIG=config.toml cargo run -p irys-cli -- build-genesis \
 ```
 
 Set the initial packed partitions used for genesis difficulty in
-`config.toml` under `consensus.<network>.genesis.initial_packed_partitions`.
+`config.toml` under `[consensus.genesis]` as `initial_packed_partitions`.
 
 ---
 
@@ -308,6 +308,18 @@ expected_genesis_hash = "<block-hash>"
    pointing to itself or with the genesis files on disk.
 2. Peer nodes start in `Peer` mode and fetch genesis from the producer (or
    another peer that already has it).
+
+### Offline Bootstrap (Alternative)
+
+Instead of fetching genesis over the network, peers can preload genesis
+artifacts locally:
+
+1. Copy the genesis output directory to the peer machine.
+2. Run `irys-cli import-genesis --genesis-dir <path-to-genesis-artifacts>` to
+   import the genesis block and commitments into the local database.
+3. Set `expected_genesis_hash` in the peer's `config.toml` as described above.
+4. Start the peer node in `Peer` mode — it will use the preloaded genesis
+   instead of fetching it from the network.
 
 ## Security Notes
 
