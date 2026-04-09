@@ -183,6 +183,19 @@ jobs:
             --tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" \
             .
 
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: .config/cliff.toml
+          args: >-
+            --unreleased
+            --tag ${{ env.TAG }}
+            ${{ inputs.release_type == 'release' && '--ignore-tags ^rc-' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          OUTPUT: /tmp/cliff-changelog.md
+
       # --- Publish phase: tag, push image, update head-tracking, create release ---
       # If any step here fails, cleanup steps at the bottom delete pushed git tags.
 
@@ -247,43 +260,10 @@ jobs:
           git tag -f "$HEAD_TAG" "${INPUT_COMMIT}"
           git push -f origin "$HEAD_TAG"
 
-      - name: Generate changelog
-        id: changelog
-        env:
-          INPUT_COMMIT: ${{ inputs.commit }}
-          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
-        run: |
-          # Find the previous tag in the same stream (RC vs release),
-          # excluding head-tracking tags and the current tag.
-          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
-            PREV_TAG=$(git tag --sort=-creatordate \
-              | grep '^rc-' \
-              | grep -v '^rc-latest$' \
-              | grep -v "^${TAG}$" \
-              | head -1 || true)
-          else
-            PREV_TAG=$(git tag --sort=-creatordate \
-              | grep -v '^rc-' \
-              | grep -v '^latest$' \
-              | grep -v "^${TAG}$" \
-              | head -1 || true)
-          fi
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..${INPUT_COMMIT}" --max-count=50)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s" "${INPUT_COMMIT}" --max-count=50)
-          fi
-          {
-            echo "CHANGELOG<<EOF"
-            echo "$CHANGELOG"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Create GitHub Release (RC — auto-published prerelease)
         if: inputs.release_type == 'rc' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           RELEASE_TAG: ${{ env.TAG }}
           INPUT_COMMIT: ${{ inputs.commit }}
@@ -291,7 +271,7 @@ jobs:
           {
             echo "## Changes"
             echo ""
-            printf '%s\n' "$CHANGELOG"
+            cat /tmp/cliff-changelog.md
             echo ""
             echo "## Docker"
             echo ""
@@ -310,7 +290,6 @@ jobs:
         if: inputs.release_type == 'release' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           RELEASE_TAG: ${{ env.TAG }}
           INPUT_COMMIT: ${{ inputs.commit }}
@@ -322,7 +301,7 @@ jobs:
             echo ""
             echo "## Changes"
             echo ""
-            printf '%s\n' "$CHANGELOG"
+            cat /tmp/cliff-changelog.md
             echo ""
             echo "## Docker"
             echo ""
