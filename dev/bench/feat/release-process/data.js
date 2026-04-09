@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775660240329,
+  "lastUpdate": 1775741495989,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2329,6 +2329,86 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 276.477543,
             "range": "± 2.163417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "0a63c198cee596e8170cafd7319947592a1a0e40",
+          "message": "feat: release process",
+          "timestamp": "2026-04-08T14:35:27Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1393/commits/0a63c198cee596e8170cafd7319947592a1a0e40"
+        },
+        "date": 1775741494762,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074755,
+            "range": "± 0.0001",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.321512,
+            "range": "± 0.556328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.770491,
+            "range": "± 0.824281",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117344,
+            "range": "± 0.00007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1173.376578,
+            "range": "± 1.043055",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1525.542288,
+            "range": "± 5.324779",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.466324,
+            "range": "± 0.019832",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 215.811559,
+            "range": "± 2.959479",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.108714,
+            "range": "± 2.272564",
             "unit": "ms/iter"
           },
           {
