@@ -1,15 +1,10 @@
-name: Docker Release
+name: Docker Rebuild
 
 on:
-  push:
-    tags:
-      - mainnet-*
-      - testnet-*
-      - nightly-*
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag (e.g., mainnet-0.1.0, testnet-0.2.0, nightly-20250611)'
+        description: 'Existing image tag to rebuild (e.g., rc-1.2.3, 1.2.3)'
         required: true
         type: string
       tag_latest:
@@ -39,16 +34,13 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
+          echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
 
       - name: Start rootless Docker
         run: |
           dockerd-rootless.sh &
-          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+            || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
 
       - name: Log in to GitHub Container Registry
         run: |
@@ -59,13 +51,16 @@ jobs:
           docker build \
             --file ./docker/Dockerfile.release \
             --build-arg GIT_COMMIT=${{ github.sha }} \
+            --build-arg GIT_SHA=${{ github.sha }} \
+            --build-arg GIT_HAS_TAG=false \
+            --build-arg GIT_DIRTY=false \
             --tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} \
             .
 
           docker push ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }}
 
       - name: Tag as latest
-        if: ${{ inputs.tag_latest || (startsWith(github.ref_name, 'mainnet-') && !contains(github.ref_name, '-rc') && github.event_name == 'push') }}
+        if: ${{ inputs.tag_latest }}
         run: |
           docker tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} ${{ steps.image.outputs.name }}:latest
           docker push ${{ steps.image.outputs.name }}:latest
@@ -75,7 +70,7 @@ jobs:
         run: |
           # stop all containers
           docker stop $(docker ps -aq) 2>/dev/null || true
-          docker system prune -a -f --volumes
+          docker system prune -a -f --volumes || true
 
           # kill daemon
           pkill -f dockerd-rootless.sh || true
