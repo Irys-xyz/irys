@@ -1,0 +1,51 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+#
+# Usage:
+#   git cliff --config .config/cliff.toml              # full changelog
+#   git cliff --config .config/cliff.toml --unreleased  # preview next release
+
+[changelog]
+header = ""
+body = """
+{%- for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{%- for commit in commits %}
+- {% if commit.breaking %}[**breaking**] {% endif %}\
+{% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+{{ commit.message | upper_first }}
+{%- endfor %}
+
+{%- endfor %}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+protect_breaking_commits = true
+sort_commits = "oldest"
+
+commit_preprocessors = [
+    # Strip trailing periods from commit messages
+    { pattern = '\.+$', replace = '' },
+]
+
+commit_parsers = [
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactoring" },
+    { message = "^doc|^docs", group = "Documentation" },
+    { message = "^test", group = "Testing" },
+    { message = "^chore\\(deps\\)", skip = true },
+    { message = "^chore|^ci", group = "Miscellaneous" },
+]
+
+# Match both production (X.Y.Z) and RC (rc-X.Y.Z) tags as versions
+tag_pattern = "^(rc-)?[0-9]+\\.[0-9]+\\.[0-9]+$"
+
+# Exclude head-tracking tags (rc-latest, latest) — they are not versions
+ignore_tags = "^(rc-)?latest$"
