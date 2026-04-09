@@ -18,7 +18,7 @@
 
 **Semantic Versioning** (`MAJOR.MINOR.PATCH`):
 
-- **MAJOR** — breaking protocol changes, consensus-incompatible upgrades, node software specific changes
+- **MAJOR** — breaking protocol changes, consensus-incompatible upgrades, node-software-specific changes
 - **MINOR** — new features, non-breaking protocol changes
 - **PATCH** — bug fixes, performance improvements, configuration changes
 
