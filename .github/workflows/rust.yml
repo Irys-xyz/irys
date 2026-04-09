@@ -143,6 +143,11 @@ jobs:
             SHOULD_RUN=true
           fi
 
+          # always run on release branches
+          if [[ "${{ github.ref }}" == refs/heads/release/* ]]; then
+            SHOULD_RUN=true
+          fi
+
           # always run on workflow_dispatch
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SHOULD_RUN=true
