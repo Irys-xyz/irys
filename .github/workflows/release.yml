@@ -1,0 +1,291 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        type: choice
+        options:
+          - rc
+          - release
+      version:
+        description: 'Semver version (e.g. 1.2.3)'
+        required: true
+        type: string
+      commit:
+        description: 'Commit SHA on a release/* branch'
+        required: true
+        type: string
+      force:
+        description: 'Skip RC validation check (emergency hotfixes only)'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Build and validate without tagging or publishing'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit exists on a release branch
+        run: |
+          if ! git cat-file -e "${{ inputs.commit }}^{commit}" 2>/dev/null; then
+            echo "::error::Commit ${{ inputs.commit }} does not exist"
+            exit 1
+          fi
+
+          BRANCHES=$(git branch -r --contains "${{ inputs.commit }}" | grep 'origin/release/' || true)
+          if [ -z "$BRANCHES" ]; then
+            echo "::error::Commit ${{ inputs.commit }} is not on any release/* branch"
+            echo "Found on branches:"
+            git branch -r --contains "${{ inputs.commit }}"
+            exit 1
+          fi
+          echo "Commit found on: $BRANCHES"
+
+      - name: Verify Cargo.toml version matches input
+        run: |
+          git checkout "${{ inputs.commit }}" -- Cargo.toml crates/chain/Cargo.toml
+          CARGO_VER=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "irys-chain") | .version')
+          if [ -z "$CARGO_VER" ]; then
+            echo "::error::Could not extract version from irys-chain package"
+            exit 1
+          fi
+          if [ "$CARGO_VER" != "${{ inputs.version }}" ]; then
+            echo "::error::Input version ${{ inputs.version }} does not match irys-chain Cargo.toml version $CARGO_VER"
+            exit 1
+          fi
+          echo "Version validated: ${{ inputs.version }} matches irys-chain $CARGO_VER"
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ inputs.release_type }}" = "rc" ]; then
+            echo "name=rc-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check tag does not already exist
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      - name: Validate RC tag exists (release only)
+        if: inputs.release_type == 'release' && !inputs.force
+        run: |
+          RC_TAG="rc-${{ inputs.version }}"
+          if ! git rev-parse "$RC_TAG" >/dev/null 2>&1; then
+            echo "::error::RC tag $RC_TAG does not exist. Deploy an RC first, or use force=true to override."
+            exit 1
+          fi
+
+          RC_COMMIT=$(git rev-parse "$RC_TAG^{commit}")
+          if [ "$RC_COMMIT" != "${{ inputs.commit }}" ]; then
+            echo "::error::RC tag $RC_TAG points to $RC_COMMIT, but requested commit is ${{ inputs.commit }}"
+            exit 1
+          fi
+          echo "RC tag $RC_TAG validated (same commit)"
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
+
+  release:
+    name: build and publish
+    needs: validate
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      packages: write
+      contents: write
+    env:
+      TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+
+      - name: Set image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> "$GITHUB_OUTPUT"
+
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless.sh &
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      # --- Build phase: build image locally, no push yet ---
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --file ./docker/Dockerfile.release \
+            --build-arg GIT_COMMIT="${{ inputs.commit }}" \
+            --build-arg GIT_SHA="${{ inputs.commit }}" \
+            --build-arg GIT_HAS_TAG=true \
+            --build-arg GIT_DIRTY=false \
+            --tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" \
+            .
+
+      # --- Publish phase: tag, push image, update head-tracking, create release ---
+      # If any step here fails, cleanup steps at the bottom delete pushed git tags.
+
+      - name: Push git tag
+        id: push_tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git tag -a "$TAG" -m "Release ${{ inputs.version }} (${{ inputs.release_type }})" "${{ inputs.commit }}"
+          git push origin "$TAG"
+
+      - name: Push Docker image
+        id: push_image
+        if: ${{ !inputs.dry_run }}
+        run: |
+          docker push "${{ steps.image.outputs.name }}:${{ env.TAG }}"
+
+      - name: Update head-tracking Docker tag
+        id: head_docker
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ "${{ inputs.release_type }}" = "rc" ]; then
+            HEAD_TAG="rc-latest"
+          else
+            HEAD_TAG="latest"
+          fi
+          docker tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" "${{ steps.image.outputs.name }}:${HEAD_TAG}"
+          docker push "${{ steps.image.outputs.name }}:${HEAD_TAG}"
+
+      - name: Update head-tracking git tag
+        id: head_git
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ "${{ inputs.release_type }}" = "rc" ]; then
+            HEAD_TAG="rc-latest"
+          else
+            HEAD_TAG="latest"
+          fi
+          git tag -f "$HEAD_TAG" "${{ inputs.commit }}"
+          git push -f origin "$HEAD_TAG"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Find the previous tag (excluding head-tracking tags)
+          # Use commit SHA for range end — TAG may not exist yet in dry-run mode
+          PREV_TAG=$(git tag --sort=-creatordate \
+            | grep -v '^latest$' | grep -v '^rc-latest$' \
+            | grep -v "^${TAG}$" \
+            | head -1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..${{ inputs.commit }}" --max-count=50)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" "${{ inputs.commit }}" --max-count=50)
+          fi
+          {
+            echo "CHANGELOG<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release (RC — auto-published prerelease)
+        if: inputs.release_type == 'rc' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(cat <<- ENDBODY
+          ## Changes
+
+          ${{ steps.changelog.outputs.CHANGELOG }}
+
+          ## Docker
+
+          \`\`\`
+          docker pull ${{ steps.image.outputs.name }}:${{ env.TAG }}
+          \`\`\`
+          ENDBODY
+          )
+
+          echo "$body" | gh release create --prerelease \
+            --title "${{ env.TAG }}" \
+            --target "${{ inputs.commit }}" \
+            -F "-" \
+            "${{ env.TAG }}"
+
+      - name: Create GitHub Release (mainnet — draft for manual review)
+        if: inputs.release_type == 'release' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(cat <<- ENDBODY
+          ## Summary
+
+          <!-- Fill in release highlights, breaking changes, critical fixes -->
+
+          ## Changes
+
+          ${{ steps.changelog.outputs.CHANGELOG }}
+
+          ## Docker
+
+          \`\`\`
+          docker pull ${{ steps.image.outputs.name }}:${{ env.TAG }}
+          \`\`\`
+          ENDBODY
+          )
+
+          echo "$body" | gh release create --draft \
+            --title "${{ env.TAG }}" \
+            --target "${{ inputs.commit }}" \
+            -F "-" \
+            "${{ env.TAG }}"
+
+      # --- Cleanup: runs on failure to remove orphaned git tags ---
+
+      - name: 'Cleanup: delete release git tag'
+        if: failure() && steps.push_tag.outcome == 'success'
+        run: |
+          echo "::warning::Cleaning up orphaned git tag $TAG"
+          git push origin --delete "$TAG" || true
+
+      - name: 'Cleanup: revert head-tracking git tag'
+        if: failure() && steps.head_git.outcome == 'success'
+        run: |
+          if [ "${{ inputs.release_type }}" = "rc" ]; then
+            HEAD_TAG="rc-latest"
+          else
+            HEAD_TAG="latest"
+          fi
+          echo "::warning::Cleaning up head-tracking git tag $HEAD_TAG"
+          git push origin --delete "$HEAD_TAG" || true
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker system prune -a -f --volumes
+          pkill -f dockerd-rootless.sh || true
+          sleep 2
+          rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
+          rm -rf ~/.local/share/docker/* || true
