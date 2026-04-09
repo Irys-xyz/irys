@@ -1583,9 +1583,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.mine_blocks(1).await?;
         let hash = self.wait_for_block_at_height(height + 1, 10).await?;
         let block = self.get_block_by_hash(&hash)?;
-        // note: this is because the block tree cache lock is dropped before reth processes.
-        // this causes a small gap between the head-of-chain state between Reth and Irys which can cause flaky test behaviour.
-        self.wait_for_evm_block(block.evm_block_hash, 10).await?;
         Ok(block)
     }
 
