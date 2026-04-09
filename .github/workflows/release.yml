@@ -130,7 +130,8 @@ jobs:
       - name: Start rootless Docker
         run: |
           dockerd-rootless.sh &
-          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+            || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
 
       - name: Log in to GitHub Container Registry
         run: |
@@ -177,6 +178,19 @@ jobs:
           docker tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" "${{ steps.image.outputs.name }}:${HEAD_TAG}"
           docker push "${{ steps.image.outputs.name }}:${HEAD_TAG}"
 
+      - name: Save current head-tracking git tag position
+        id: save_head
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ "${{ inputs.release_type }}" = "rc" ]; then
+            HEAD_TAG="rc-latest"
+          else
+            HEAD_TAG="latest"
+          fi
+          PREV=$(git rev-parse "$HEAD_TAG" 2>/dev/null || true)
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "tag=${HEAD_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Update head-tracking git tag
         id: head_git
         if: ${{ !inputs.dry_run }}
@@ -214,7 +228,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          body=$(cat <<- ENDBODY
+          body=$(cat <<- 'ENDBODY'
           ## Changes
 
           ${{ steps.changelog.outputs.CHANGELOG }}
@@ -238,7 +252,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          body=$(cat <<- ENDBODY
+          body=$(cat <<- 'ENDBODY'
           ## Summary
 
           <!-- Fill in release highlights, breaking changes, critical fixes -->
@@ -272,19 +286,22 @@ jobs:
       - name: 'Cleanup: revert head-tracking git tag'
         if: failure() && steps.head_git.outcome == 'success'
         run: |
-          if [ "${{ inputs.release_type }}" = "rc" ]; then
-            HEAD_TAG="rc-latest"
+          HEAD_TAG="${{ steps.save_head.outputs.tag }}"
+          PREV="${{ steps.save_head.outputs.prev }}"
+          if [ -n "$PREV" ]; then
+            echo "::warning::Restoring head-tracking git tag $HEAD_TAG to previous commit $PREV"
+            git tag -f "$HEAD_TAG" "$PREV"
+            git push -f origin "$HEAD_TAG"
           else
-            HEAD_TAG="latest"
+            echo "::warning::No previous head-tracking git tag $HEAD_TAG existed, deleting"
+            git push origin --delete "$HEAD_TAG" || true
           fi
-          echo "::warning::Cleaning up head-tracking git tag $HEAD_TAG"
-          git push origin --delete "$HEAD_TAG" || true
 
       - name: Cleanup Docker
         if: always()
         run: |
           docker stop $(docker ps -aq) 2>/dev/null || true
-          docker system prune -a -f --volumes
+          docker system prune -a -f --volumes || true
           pkill -f dockerd-rootless.sh || true
           sleep 2
           rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
