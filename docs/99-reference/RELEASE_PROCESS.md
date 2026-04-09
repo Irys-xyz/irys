@@ -54,7 +54,7 @@ release/<major>.x ──rc-X.Y.Z──► testnet (auto-published prerelease)
 
 ### Atomicity
 
-The workflow builds the Docker image **before** pushing any git tags. If the build fails, nothing is published. If a later step fails after the git tag is pushed, a cleanup step automatically deletes the orphaned tag. This ensures the repository is never left in an inconsistent state.
+The workflow builds the Docker image **before** pushing any git tags. If the build fails, nothing is published. If a later step fails after the git tag is pushed, cleanup steps automatically delete orphaned git tags and restore head-tracking git tags to their previous position. Note that pushed Docker images are not automatically cleaned up on failure — use the **Docker Retag** workflow to manually restore head-tracking Docker tags if needed.
 
 ### Head-Tracking Tags
 

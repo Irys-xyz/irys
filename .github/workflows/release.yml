@@ -1,5 +1,9 @@
 name: Release
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -36,70 +40,97 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate inputs
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if ! [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format: $INPUT_VERSION (expected: X.Y.Z)"
+            exit 1
+          fi
+          if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::Invalid commit SHA format: $INPUT_COMMIT"
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Validate commit exists on a release branch
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
-          if ! git cat-file -e "${{ inputs.commit }}^{commit}" 2>/dev/null; then
-            echo "::error::Commit ${{ inputs.commit }} does not exist"
+          if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
+            echo "::error::Commit ${INPUT_COMMIT} does not exist"
             exit 1
           fi
 
-          BRANCHES=$(git branch -r --contains "${{ inputs.commit }}" | grep 'origin/release/' || true)
+          BRANCHES=$(git branch -r --contains "${INPUT_COMMIT}" | grep 'origin/release/' || true)
           if [ -z "$BRANCHES" ]; then
-            echo "::error::Commit ${{ inputs.commit }} is not on any release/* branch"
+            echo "::error::Commit ${INPUT_COMMIT} is not on any release/* branch"
             echo "Found on branches:"
-            git branch -r --contains "${{ inputs.commit }}"
+            git branch -r --contains "${INPUT_COMMIT}"
             exit 1
           fi
           echo "Commit found on: $BRANCHES"
 
       - name: Verify Cargo.toml version matches input
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          git checkout "${{ inputs.commit }}" -- Cargo.toml crates/chain/Cargo.toml
-          CARGO_VER=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "irys-chain") | .version')
+          CARGO_VER=$(git show "${INPUT_COMMIT}:crates/chain/Cargo.toml" \
+            | sed -n '/^\[package\]/,/^\[/p' \
+            | grep '^version' \
+            | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/')
           if [ -z "$CARGO_VER" ]; then
-            echo "::error::Could not extract version from irys-chain package"
+            echo "::error::Could not extract version from irys-chain Cargo.toml at commit ${INPUT_COMMIT}"
             exit 1
           fi
-          if [ "$CARGO_VER" != "${{ inputs.version }}" ]; then
-            echo "::error::Input version ${{ inputs.version }} does not match irys-chain Cargo.toml version $CARGO_VER"
+          if [ "$CARGO_VER" != "${INPUT_VERSION}" ]; then
+            echo "::error::Input version ${INPUT_VERSION} does not match irys-chain Cargo.toml version $CARGO_VER"
             exit 1
           fi
-          echo "Version validated: ${{ inputs.version }} matches irys-chain $CARGO_VER"
+          echo "Version validated: ${INPUT_VERSION} matches irys-chain $CARGO_VER"
 
       - name: Determine tag name
         id: tag
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ inputs.release_type }}" = "rc" ]; then
-            echo "name=rc-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
+            echo "name=rc-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
           else
-            echo "name=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "name=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check tag does not already exist
         run: |
           TAG="${{ steps.tag.outputs.name }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "::error::Tag $TAG already exists"
             exit 1
           fi
 
       - name: Validate RC tag exists (release only)
         if: inputs.release_type == 'release' && !inputs.force
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          RC_TAG="rc-${{ inputs.version }}"
-          if ! git rev-parse "$RC_TAG" >/dev/null 2>&1; then
+          RC_TAG="rc-${INPUT_VERSION}"
+          if ! git rev-parse "refs/tags/$RC_TAG" >/dev/null 2>&1; then
             echo "::error::RC tag $RC_TAG does not exist. Deploy an RC first, or use force=true to override."
             exit 1
           fi
 
-          RC_COMMIT=$(git rev-parse "$RC_TAG^{commit}")
-          if [ "$RC_COMMIT" != "${{ inputs.commit }}" ]; then
-            echo "::error::RC tag $RC_TAG points to $RC_COMMIT, but requested commit is ${{ inputs.commit }}"
+          RC_COMMIT=$(git rev-parse "refs/tags/$RC_TAG^{commit}")
+          if [ "$RC_COMMIT" != "${INPUT_COMMIT}" ]; then
+            echo "::error::RC tag $RC_TAG points to $RC_COMMIT, but requested commit is ${INPUT_COMMIT}"
             exit 1
           fi
           echo "RC tag $RC_TAG validated (same commit)"
@@ -140,11 +171,13 @@ jobs:
       # --- Build phase: build image locally, no push yet ---
 
       - name: Build Docker image
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           docker build \
             --file ./docker/Dockerfile.release \
-            --build-arg GIT_COMMIT="${{ inputs.commit }}" \
-            --build-arg GIT_SHA="${{ inputs.commit }}" \
+            --build-arg GIT_COMMIT="${INPUT_COMMIT}" \
+            --build-arg GIT_SHA="${INPUT_COMMIT}" \
             --build-arg GIT_HAS_TAG=true \
             --build-arg GIT_DIRTY=false \
             --tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" \
@@ -156,8 +189,12 @@ jobs:
       - name: Push git tag
         id: push_tag
         if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          git tag -a "$TAG" -m "Release ${{ inputs.version }} (${{ inputs.release_type }})" "${{ inputs.commit }}"
+          git tag -a "$TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
           git push origin "$TAG"
 
       - name: Push Docker image
@@ -169,8 +206,10 @@ jobs:
       - name: Update head-tracking Docker tag
         id: head_docker
         if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${{ inputs.release_type }}" = "rc" ]; then
+          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
             HEAD_TAG="rc-latest"
           else
             HEAD_TAG="latest"
@@ -181,8 +220,10 @@ jobs:
       - name: Save current head-tracking git tag position
         id: save_head
         if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${{ inputs.release_type }}" = "rc" ]; then
+          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
             HEAD_TAG="rc-latest"
           else
             HEAD_TAG="latest"
@@ -194,28 +235,43 @@ jobs:
       - name: Update head-tracking git tag
         id: head_git
         if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${{ inputs.release_type }}" = "rc" ]; then
+          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
             HEAD_TAG="rc-latest"
           else
             HEAD_TAG="latest"
           fi
-          git tag -f "$HEAD_TAG" "${{ inputs.commit }}"
+          git tag -f "$HEAD_TAG" "${INPUT_COMMIT}"
           git push -f origin "$HEAD_TAG"
 
       - name: Generate changelog
         id: changelog
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          # Find the previous tag (excluding head-tracking tags)
-          # Use commit SHA for range end — TAG may not exist yet in dry-run mode
-          PREV_TAG=$(git tag --sort=-creatordate \
-            | grep -v '^latest$' | grep -v '^rc-latest$' \
-            | grep -v "^${TAG}$" \
-            | head -1 || true)
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..${{ inputs.commit }}" --max-count=50)
+          # Find the previous tag in the same stream (RC vs release),
+          # excluding head-tracking tags and the current tag.
+          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
+            PREV_TAG=$(git tag --sort=-creatordate \
+              | grep '^rc-' \
+              | grep -v '^rc-latest$' \
+              | grep -v "^${TAG}$" \
+              | head -1 || true)
           else
-            CHANGELOG=$(git log --pretty=format:"- %s" "${{ inputs.commit }}" --max-count=50)
+            PREV_TAG=$(git tag --sort=-creatordate \
+              | grep -v '^rc-' \
+              | grep -v '^latest$' \
+              | grep -v "^${TAG}$" \
+              | head -1 || true)
+          fi
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..${INPUT_COMMIT}" --max-count=50)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" "${INPUT_COMMIT}" --max-count=50)
           fi
           {
             echo "CHANGELOG<<EOF"
@@ -227,53 +283,59 @@ jobs:
         if: inputs.release_type == 'rc' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ env.TAG }}
+          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
-          body=$(cat <<- 'ENDBODY'
-          ## Changes
+          {
+            echo "## Changes"
+            echo ""
+            printf '%s\n' "$CHANGELOG"
+            echo ""
+            echo "## Docker"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE_NAME}:${RELEASE_TAG}"
+            echo '```'
+          } > /tmp/release-body.md
 
-          ${{ steps.changelog.outputs.CHANGELOG }}
-
-          ## Docker
-
-          \`\`\`
-          docker pull ${{ steps.image.outputs.name }}:${{ env.TAG }}
-          \`\`\`
-          ENDBODY
-          )
-
-          echo "$body" | gh release create --prerelease \
-            --title "${{ env.TAG }}" \
-            --target "${{ inputs.commit }}" \
-            -F "-" \
-            "${{ env.TAG }}"
+          gh release create --prerelease \
+            --title "${RELEASE_TAG}" \
+            --target "${INPUT_COMMIT}" \
+            -F /tmp/release-body.md \
+            "${RELEASE_TAG}"
 
       - name: Create GitHub Release (mainnet — draft for manual review)
         if: inputs.release_type == 'release' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ env.TAG }}
+          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
-          body=$(cat <<- 'ENDBODY'
-          ## Summary
+          {
+            echo "## Summary"
+            echo ""
+            echo "<!-- Fill in release highlights, breaking changes, critical fixes -->"
+            echo ""
+            echo "## Changes"
+            echo ""
+            printf '%s\n' "$CHANGELOG"
+            echo ""
+            echo "## Docker"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE_NAME}:${RELEASE_TAG}"
+            echo '```'
+          } > /tmp/release-body.md
 
-          <!-- Fill in release highlights, breaking changes, critical fixes -->
-
-          ## Changes
-
-          ${{ steps.changelog.outputs.CHANGELOG }}
-
-          ## Docker
-
-          \`\`\`
-          docker pull ${{ steps.image.outputs.name }}:${{ env.TAG }}
-          \`\`\`
-          ENDBODY
-          )
-
-          echo "$body" | gh release create --draft \
-            --title "${{ env.TAG }}" \
-            --target "${{ inputs.commit }}" \
-            -F "-" \
-            "${{ env.TAG }}"
+          gh release create --draft \
+            --title "${RELEASE_TAG}" \
+            --target "${INPUT_COMMIT}" \
+            -F /tmp/release-body.md \
+            "${RELEASE_TAG}"
 
       # --- Cleanup: runs on failure to remove orphaned git tags ---
 
