@@ -1094,8 +1094,14 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .iter()
                 .find(|b| b.height() == target_height)
             {
-                info!("Canonical block at height {} is available", target_height);
-                return Ok(block.block_hash());
+                // wait for the EVM Block - there is a subtle delay between the Irys canonical chain updating and Reth processing the FCU.
+                if self
+                    .get_evm_block_by_hash(block.header().evm_block_hash)
+                    .is_ok()
+                {
+                    info!("Canonical block at height {} is available", target_height);
+                    return Ok(block.block_hash());
+                }
             }
 
             // Check timeout
@@ -1576,7 +1582,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
         let hash = self.wait_for_block_at_height(height + 1, 10).await?;
-        self.get_block_by_hash(&hash)
+        let block = self.get_block_by_hash(&hash)?;
+        Ok(block)
     }
 
     #[diag_slow(state = self.diag_wait_state().await)]
