@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775660240329,
+  "lastUpdate": 1776019249197,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2329,6 +2329,90 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 276.477543,
             "range": "± 2.163417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "276eea580a9bb632444557cf4bdd8e055c91ede9",
+          "message": "feat: wait_for_evm_block in mine_block and wait_for_block_at_height (#1391)\n\n* feat: wait_for_evm_block in mine_block and wait_for_block_at_height\n\n* chore: fmt\n\n* fix: remove redundant wait_for_evm_block in mine_block",
+          "timestamp": "2026-04-12T19:25:41+01:00",
+          "tree_id": "bd0c593b19855834096134734159a931dc76b17d",
+          "url": "https://github.com/Irys-xyz/irys/commit/276eea580a9bb632444557cf4bdd8e055c91ede9"
+        },
+        "date": 1776019247403,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.08243,
+            "range": "± 0.00169",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 828.857646,
+            "range": "± 31.280374",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.305584,
+            "range": "± 3.053285",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118058,
+            "range": "± 0.002716",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1270.465361,
+            "range": "± 104.846557",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1542.567122,
+            "range": "± 17.952736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.461149,
+            "range": "± 0.026833",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.816832,
+            "range": "± 1.699113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 279.466147,
+            "range": "± 3.066136",
             "unit": "ms/iter"
           },
           {
