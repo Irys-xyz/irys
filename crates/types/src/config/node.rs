@@ -845,6 +845,12 @@ pub struct MempoolNodeConfig {
     /// Maximum number of concurrent handlers for chunk ingress messages
     pub max_concurrent_chunk_ingress_tasks: usize,
 
+    /// Reserved concurrency for control-plane messages (`IngestIngressProof`,
+    /// `ProcessPendingChunks`) on the chunk ingress service. Sized small on
+    /// purpose: the point is to keep this lane available even when the chunk
+    /// lane is fully saturated, not to run high-throughput work here.
+    pub max_control_plane_concurrent_tasks: usize,
+
     /// Backpressure channel capacity for the async chunk write-behind buffer.
     /// Controls how many chunk writes can be queued before the sender blocks.
     pub chunk_writer_buffer_size: usize,
@@ -867,6 +873,7 @@ impl Default for MempoolNodeConfig {
             max_commitments_per_address: 5,
             max_concurrent_mempool_tasks: 30,
             max_concurrent_chunk_ingress_tasks: 30,
+            max_control_plane_concurrent_tasks: 4,
             chunk_writer_buffer_size: 4096,
         }
     }
@@ -1050,6 +1057,7 @@ impl NodeConfig {
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
                 max_concurrent_chunk_ingress_tasks: 30,
+                max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
 
@@ -1209,6 +1217,7 @@ impl NodeConfig {
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
                 max_concurrent_chunk_ingress_tasks: 30,
+                max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
 

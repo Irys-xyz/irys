@@ -30,6 +30,11 @@ pub enum IngressProofError {
     /// The ingress proof is anchored to an unknown/expired anchor
     #[error("Invalid anchor: {0}")]
     InvalidAnchor(BlockHash),
+    /// The service is at capacity and rejected the proof. Distinct from a
+    /// network failure: the peer is fine, the receiver is just saturated.
+    /// Callers should retry later.
+    #[error("Ingress proof service overloaded")]
+    Overloaded,
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
@@ -260,6 +265,16 @@ impl ChunkIngressServiceInner {
                         error!(
                             ingress_proof.data_root = ?ingress_proof.data_root,
                             "Database error during ingress proof expiration validation: {}", message
+                        );
+                        ProofCheckResult {
+                            expired_or_invalid: false,
+                            regeneration_action: RegenAction::DoNotRegenerate,
+                        }
+                    }
+                    IngressProofError::Overloaded => {
+                        warn!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            "Ingress proof service overloaded during expiration validation"
                         );
                         ProofCheckResult {
                             expired_or_invalid: false,

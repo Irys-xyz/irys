@@ -51,6 +51,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::DatabaseError(err) => {
                 Self::Internal(InternalGossipError::Database(err))
             }
+            IngressProofError::Overloaded => Self::Internal(InternalGossipError::Unknown(
+                "Ingress proof service overloaded".into(),
+            )),
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
