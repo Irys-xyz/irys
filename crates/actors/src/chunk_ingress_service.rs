@@ -208,12 +208,21 @@ impl ChunkIngressService {
                 "Adjusted max_concurrent_chunk_ingress_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
             );
         }
-        // Reserved lane for control-plane messages. Sized small on purpose:
-        // the only producers are the mempool service (`ProcessPendingChunks`)
-        // and inbound `IngestIngressProof` gossip, neither of which is high
-        // throughput. The point is to keep this lane available even when the
-        // chunk lane is fully saturated.
-        const CONTROL_PLANE_TASKS: usize = 4;
+        // Reserved lane for control-plane messages (`IngestIngressProof`,
+        // `ProcessPendingChunks`). Sized small on purpose: the point is to
+        // keep this lane available even when the chunk lane is fully
+        // saturated, not to run high-throughput work here. Clamped to a
+        // u32::MAX permit ceiling to match the chunk lane's semaphore
+        // constraint.
+        let raw_control_plane_tasks = mempool_config.max_control_plane_concurrent_tasks;
+        let control_plane_tasks = raw_control_plane_tasks.clamp(1, MAX_PERMITS);
+        if control_plane_tasks != raw_control_plane_tasks {
+            warn!(
+                configured = raw_control_plane_tasks,
+                effective = control_plane_tasks,
+                "Adjusted max_control_plane_concurrent_tasks to supported range 1..=u32::MAX"
+            );
+        }
         let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
         let service_senders = service_senders.clone();
 
@@ -248,11 +257,11 @@ impl ChunkIngressService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_chunk_ingress_tasks,
                         )),
-                        control_plane_semaphore: Arc::new(Semaphore::new(CONTROL_PLANE_TASKS)),
+                        control_plane_semaphore: Arc::new(Semaphore::new(control_plane_tasks)),
                         max_concurrent_tasks: u32::try_from(max_concurrent_chunk_ingress_tasks)
                             .expect("clamped to u32::MAX above"),
-                        max_control_plane_tasks: u32::try_from(CONTROL_PLANE_TASKS)
-                            .expect("CONTROL_PLANE_TASKS fits in u32"),
+                        max_control_plane_tasks: u32::try_from(control_plane_tasks)
+                            .expect("clamped to u32::MAX above"),
                         service_senders,
                         storage_modules_guard,
                         recent_valid_chunks,
@@ -450,9 +459,7 @@ impl ChunkIngressService {
                 )));
             }
             ChunkIngressMessage::IngestIngressProof(_, reply) => {
-                let _ = reply.send(Err(IngressProofError::Other(
-                    "service overloaded: control plane lane saturated".into(),
-                )));
+                let _ = reply.send(Err(IngressProofError::Overloaded));
             }
             // No response channel — nothing to notify.
             ChunkIngressMessage::IngestChunk(_, None)
@@ -512,16 +519,18 @@ mod overload_helpers_tests {
     }
 
     /// Control-plane `IngestIngressProof` callers must also receive a fast
-    /// failure (not a silent drop) when the control lane is saturated.
+    /// failure (not a silent drop) when the control lane is saturated. The
+    /// dedicated `Overloaded` variant lets callers distinguish backpressure
+    /// from generic errors without string matching.
     #[tokio::test]
-    async fn ingest_ingress_proof_overloaded_returns_other() {
+    async fn ingest_ingress_proof_overloaded_returns_overloaded() {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx);
 
         ChunkIngressService::send_overloaded_errors(msg);
 
         let result = reply_rx.await.expect("oneshot must be resolved");
-        assert!(matches!(result, Err(IngressProofError::Other(_))));
+        assert!(matches!(result, Err(IngressProofError::Overloaded)));
     }
 
     /// `ProcessPendingChunks` has no caller to notify; the helper must just
