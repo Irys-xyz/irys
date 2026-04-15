@@ -154,6 +154,13 @@ impl Config {
             "mempool.max_control_plane_concurrent_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall control-plane messages)"
         );
         ensure!(
+            self.mempool.max_control_plane_concurrent_tasks
+                < self.mempool.max_concurrent_chunk_ingress_tasks,
+            "mempool.max_control_plane_concurrent_tasks ({}) must be strictly less than max_concurrent_chunk_ingress_tasks ({}) (the control-plane lane is carved out of the total budget and must leave at least one permit for chunk handlers)",
+            self.mempool.max_control_plane_concurrent_tasks,
+            self.mempool.max_concurrent_chunk_ingress_tasks
+        );
+        ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
@@ -1129,6 +1136,30 @@ mod validate_tests {
         assert!(
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    /// `max_control_plane_concurrent_tasks` is carved out of
+    /// `max_concurrent_chunk_ingress_tasks`, so it must be strictly less to
+    /// leave at least one permit for chunk handlers. Validate fails fast
+    /// rather than letting `spawn_service()` silently clamp.
+    #[rstest]
+    #[case::equal(30, 30)]
+    #[case::greater(40, 30)]
+    fn validate_rejects_control_plane_not_less_than_total(
+        #[case] control_plane: usize,
+        #[case] total: usize,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.mempool.max_concurrent_chunk_ingress_tasks = total;
+            nc.mempool.max_control_plane_concurrent_tasks = control_plane;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_control_plane_concurrent_tasks")
+                && msg.contains("max_concurrent_chunk_ingress_tasks"),
+            "expected error referencing both fields, got: {msg}"
         );
     }
 }
