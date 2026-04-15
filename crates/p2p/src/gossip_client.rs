@@ -2814,10 +2814,14 @@ mod tests {
             );
 
             let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
+            // NetworkError penalty was reduced from -3 to -1 as part of the
+            // 2026-04-15 divergence post-mortem. A transient timeout against
+            // an overloaded-but-honest peer is not the same signal as an
+            // offline peer.
             assert_eq!(
                 updated_score,
-                initial_score - 3,
-                "Failed response should decrease by 3"
+                initial_score - 1,
+                "Failed response should decrease by 1 (NetworkError penalty)"
             );
         }
 
@@ -2828,6 +2832,10 @@ mod tests {
             let (peer_id, _, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(peer, true);
 
+            // Sequence: 50 (initial) → +1 (fast Ok) → +1 (normal Ok) → -1 (slow Ok)
+            // → -1 (NetworkError). NetworkError is -1 since the 2026-04-15
+            // divergence post-mortem reclassified transient network errors
+            // away from offline-style penalties.
             let operations = vec![
                 (Duration::from_millis(100), Ok(()), 51),
                 (Duration::from_millis(1500), Ok(()), 52),
@@ -2835,7 +2843,7 @@ mod tests {
                 (
                     Duration::from_millis(500),
                     Err(GossipError::Network("error".to_string())),
-                    48,
+                    50,
                 ),
             ];
 
