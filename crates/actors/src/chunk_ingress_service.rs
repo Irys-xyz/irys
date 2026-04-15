@@ -208,19 +208,25 @@ impl ChunkIngressService {
                 "Adjusted max_concurrent_chunk_ingress_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
             );
         }
-        // Reserved lane for control-plane messages (`IngestIngressProof`,
-        // `ProcessPendingChunks`). Sized small on purpose: the point is to
-        // keep this lane available even when the chunk lane is fully
-        // saturated, not to run high-throughput work here. Clamped to a
-        // u32::MAX permit ceiling to match the chunk lane's semaphore
-        // constraint.
+        // Carve the control-plane slice out of the total chunk ingress
+        // budget rather than stacking on top. Peak concurrency therefore
+        // stays at `max_concurrent_chunk_ingress_tasks`, matching what an
+        // operator who tuned that knob to a safe limit would expect. Must
+        // leave at least one permit for the chunk lane; clamped to at least
+        // 1 for the control plane (mempool config validation also rejects 0).
         let raw_control_plane_tasks = mempool_config.max_control_plane_concurrent_tasks;
-        let control_plane_tasks = raw_control_plane_tasks.clamp(1, MAX_PERMITS);
+        let control_plane_tasks = raw_control_plane_tasks
+            .min(max_concurrent_chunk_ingress_tasks.saturating_sub(1))
+            .max(1);
+        let chunk_lane_tasks = max_concurrent_chunk_ingress_tasks
+            .saturating_sub(control_plane_tasks)
+            .max(1);
         if control_plane_tasks != raw_control_plane_tasks {
             warn!(
                 configured = raw_control_plane_tasks,
                 effective = control_plane_tasks,
-                "Adjusted max_control_plane_concurrent_tasks to supported range 1..=u32::MAX"
+                total = max_concurrent_chunk_ingress_tasks,
+                "Adjusted max_control_plane_concurrent_tasks: carved out of max_concurrent_chunk_ingress_tasks"
             );
         }
         let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
@@ -254,11 +260,9 @@ impl ChunkIngressService {
                         config,
                         exec: task_executor,
                         irys_db,
-                        message_handler_semaphore: Arc::new(Semaphore::new(
-                            max_concurrent_chunk_ingress_tasks,
-                        )),
+                        message_handler_semaphore: Arc::new(Semaphore::new(chunk_lane_tasks)),
                         control_plane_semaphore: Arc::new(Semaphore::new(control_plane_tasks)),
-                        max_concurrent_tasks: u32::try_from(max_concurrent_chunk_ingress_tasks)
+                        max_concurrent_tasks: u32::try_from(chunk_lane_tasks)
                             .expect("clamped to u32::MAX above"),
                         max_control_plane_tasks: u32::try_from(control_plane_tasks)
                             .expect("clamped to u32::MAX above"),
@@ -325,14 +329,60 @@ impl ChunkIngressService {
                                     break;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    // Receive loop must not park. Returning
-                                    // Overloaded immediately is what stops
-                                    // the gossip-timeout cascade upstream.
+                                    // Receive loop must not park. External
+                                    // callers get Overloaded immediately so
+                                    // the gossip-timeout cascade upstream
+                                    // stays broken. Internal one-shot
+                                    // triggers (`ProcessPendingChunks`) are
+                                    // the only drain path for parked
+                                    // pre-header chunks tied to a data_root
+                                    // and cannot be dropped — defer them to
+                                    // a waiter task off the receive loop.
                                     warn!(
                                         msg_type,
                                         "Chunk ingress lane saturated, returning Overloaded"
                                     );
-                                    Self::send_overloaded_errors(msg);
+                                    match msg {
+                                        ChunkIngressMessage::ProcessPendingChunks(_) => {
+                                            let inner = Arc::clone(&self.inner);
+                                            let semaphore = self
+                                                .inner
+                                                .control_plane_semaphore
+                                                .clone();
+                                            runtime_handle.spawn(
+                                                async move {
+                                                    let permit = match semaphore
+                                                        .acquire_owned()
+                                                        .await
+                                                    {
+                                                        Ok(permit) => permit,
+                                                        Err(err) => {
+                                                            error!(
+                                                                ?err,
+                                                                "Control plane semaphore closed while deferring ProcessPendingChunks"
+                                                            );
+                                                            return;
+                                                        }
+                                                    };
+                                                    let _permit = permit;
+                                                    let task_info = format!(
+                                                        "deferred chunk ingress: {}",
+                                                        msg_type
+                                                    );
+                                                    wait_with_progress(
+                                                        inner.handle_message(msg),
+                                                        20,
+                                                        &task_info,
+                                                    )
+                                                    .await;
+                                                }
+                                                .instrument(span),
+                                            );
+                                        }
+                                        external_msg => {
+                                            Self::send_overloaded_errors(external_msg);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -533,8 +583,11 @@ mod overload_helpers_tests {
         assert!(matches!(result, Err(IngressProofError::Overloaded)));
     }
 
-    /// `ProcessPendingChunks` has no caller to notify; the helper must just
-    /// drop the message without panicking.
+    /// `send_overloaded_errors` is defensive — the main loop routes
+    /// `ProcessPendingChunks` to a waiter task and never calls this helper
+    /// for that variant, but if it ever is called the match arm must not
+    /// panic. `ProcessPendingChunks` has no caller to notify, so the
+    /// no-op branch is the correct shape.
     #[tokio::test]
     async fn process_pending_chunks_overloaded_is_noop() {
         let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
