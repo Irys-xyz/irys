@@ -196,16 +196,20 @@ impl ChunkIngressService {
         let max_valid_chunks = mempool_config.max_valid_chunks;
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_preheader_chunks_per_item = mempool_config.max_preheader_chunks_per_item;
-        let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
+        // The only runtime clamp kept here is the u32 ceiling: the semaphore
+        // permit count is stored as `u32` for `acquire_many_owned`, so values
+        // above `u32::MAX` must be capped. `Config::validate()` already
+        // enforces the real invariants (>0 and strict inequality with the
+        // control-plane lane), so there is no lower clamp — operator intent
+        // is honoured instead of silently overridden.
         const MAX_PERMITS: usize = u32::MAX as usize;
-        const MIN_CONCURRENT: usize = 20;
-        let max_concurrent_chunk_ingress_tasks =
-            raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
+        let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
+        let max_concurrent_chunk_ingress_tasks = raw_max_concurrent.min(MAX_PERMITS);
         if max_concurrent_chunk_ingress_tasks != raw_max_concurrent {
             warn!(
                 configured = raw_max_concurrent,
                 effective = max_concurrent_chunk_ingress_tasks,
-                "Adjusted max_concurrent_chunk_ingress_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
+                "Capped max_concurrent_chunk_ingress_tasks at u32::MAX (semaphore permit count ceiling)"
             );
         }
         // Carve the control-plane slice out of the total chunk ingress
@@ -294,11 +298,11 @@ impl ChunkIngressService {
         info!("starting ChunkIngressService");
 
         let mut shutdown_future = pin!(self.shutdown);
-        loop {
+        'service: loop {
             tokio::select! {
                 _ = &mut shutdown_future => {
                     info!("ChunkIngressService received shutdown signal");
-                    break;
+                    break 'service;
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
@@ -326,60 +330,53 @@ impl ChunkIngressService {
                                 }
                                 Err(tokio::sync::TryAcquireError::Closed) => {
                                     error!("Chunk ingress message handler semaphore closed");
-                                    break;
+                                    break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    // Receive loop must not park. External
-                                    // callers get Overloaded immediately so
-                                    // the gossip-timeout cascade upstream
-                                    // stays broken. Internal one-shot
-                                    // triggers (`ProcessPendingChunks`) are
-                                    // the only drain path for parked
-                                    // pre-header chunks tied to a data_root
-                                    // and cannot be dropped — defer them to
-                                    // a waiter task off the receive loop.
-                                    warn!(
-                                        msg_type,
-                                        "Chunk ingress lane saturated, returning Overloaded"
-                                    );
                                     match msg {
-                                        ChunkIngressMessage::ProcessPendingChunks(_) => {
-                                            let inner = Arc::clone(&self.inner);
-                                            let semaphore = self
-                                                .inner
-                                                .control_plane_semaphore
-                                                .clone();
-                                            runtime_handle.spawn(
-                                                async move {
-                                                    let permit = match semaphore
-                                                        .acquire_owned()
-                                                        .await
-                                                    {
-                                                        Ok(permit) => permit,
-                                                        Err(err) => {
-                                                            error!(
-                                                                ?err,
-                                                                "Control plane semaphore closed while deferring ProcessPendingChunks"
-                                                            );
-                                                            return;
-                                                        }
-                                                    };
-                                                    let _permit = permit;
-                                                    let task_info = format!(
-                                                        "deferred chunk ingress: {}",
-                                                        msg_type
-                                                    );
-                                                    wait_with_progress(
-                                                        inner.handle_message(msg),
-                                                        20,
-                                                        &task_info,
-                                                    )
-                                                    .await;
-                                                }
-                                                .instrument(span),
+                                        process_pending @ ChunkIngressMessage::ProcessPendingChunks(_) => {
+                                            warn!(
+                                                msg_type = %msg_type,
+                                                "Chunk ingress service lane saturated, waiting for permit"
                                             );
+                                            let inner = Arc::clone(&self.inner);
+                                            let semaphore = self.inner.control_plane_semaphore.clone();
+                                            let permit_result = tokio::select! {
+                                                _ = &mut shutdown_future => {
+                                                    info!("ChunkIngressService received shutdown signal while waiting for ProcessPendingChunks permit");
+                                                    break 'service;
+                                                }
+                                                permit = semaphore.acquire_owned() => permit,
+                                            };
+                                            let permit = match permit_result {
+                                                Ok(permit) => permit,
+                                                Err(err) => {
+                                                    error!(
+                                                        ?err,
+                                                        "Control plane semaphore closed while waiting for ProcessPendingChunks"
+                                                    );
+                                                    break 'service;
+                                                }
+                                            };
+                                            runtime_handle.spawn(async move {
+                                                let _permit = permit;
+                                                let task_info = format!(
+                                                    "deferred chunk ingress: {}",
+                                                    msg_type
+                                                );
+                                                wait_with_progress(
+                                                    inner.handle_message(process_pending),
+                                                    20,
+                                                    &task_info,
+                                                )
+                                                .await;
+                                            }.instrument(span));
                                         }
                                         external_msg => {
+                                            warn!(
+                                                msg_type = %msg_type,
+                                                "Chunk ingress service lane saturated, returning Overloaded"
+                                            );
                                             Self::send_overloaded_errors(external_msg);
                                         }
                                     }
@@ -583,11 +580,11 @@ mod overload_helpers_tests {
         assert!(matches!(result, Err(IngressProofError::Overloaded)));
     }
 
-    /// `send_overloaded_errors` is defensive — the main loop routes
-    /// `ProcessPendingChunks` to a waiter task and never calls this helper
-    /// for that variant, but if it ever is called the match arm must not
-    /// panic. `ProcessPendingChunks` has no caller to notify, so the
-    /// no-op branch is the correct shape.
+    /// `send_overloaded_errors` is defensive — the main loop waits for a
+    /// permit before spawning `ProcessPendingChunks`, so it never calls this
+    /// helper for that variant. If it ever is called the match arm must not
+    /// panic. `ProcessPendingChunks` has no caller to notify, so the no-op
+    /// branch is the correct shape.
     #[tokio::test]
     async fn process_pending_chunks_overloaded_is_noop() {
         let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
