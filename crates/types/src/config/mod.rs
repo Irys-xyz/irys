@@ -350,8 +350,9 @@ pub struct MempoolConfig {
     pub max_concurrent_chunk_ingress_tasks: usize,
 
     /// Reserved concurrency for control-plane messages (`IngestIngressProof`,
-    /// `ProcessPendingChunks`) on the chunk ingress service. Isolated from the
-    /// chunk lane so chunk floods cannot starve the control plane.
+    /// `ProcessPendingChunks`) on the chunk ingress service. Carved out of
+    /// `max_concurrent_chunk_ingress_tasks` so total peak concurrency is
+    /// unchanged; chunk floods still cannot starve control-plane work.
     pub max_control_plane_concurrent_tasks: usize,
 
     /// Backpressure channel capacity for the async chunk write-behind buffer
