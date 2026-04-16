@@ -162,8 +162,10 @@ impl ChunkIngressServiceInner {
 
         // check consensus config
 
-        let min_anchor_height = latest_height
-            .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64);
+        let min_anchor_height = crate::anchor_validation::min_ingress_proof_anchor_height(
+            &config.consensus,
+            latest_height,
+        );
 
         let too_old = anchor_height < min_anchor_height;
 
