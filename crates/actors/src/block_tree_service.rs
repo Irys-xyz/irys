@@ -635,7 +635,7 @@ impl BlockTreeServiceInner {
                         debug!("old_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
-                    for o in new_canonical.0.iter() {
+                    for o in new_canonical.entries.iter() {
                         debug!("new_canonical({}) - {}", o.height(), o.block_hash());
                     }
 
@@ -644,7 +644,7 @@ impl BlockTreeServiceInner {
                     // Trim both chains back to their common ancestor to isolate the divergent portions
                     let (old_fork, new_fork) = prune_chains_at_ancestor(
                         old_canonical,
-                        new_canonical.0,
+                        new_canonical.entries,
                         fork_hash,
                         fork_height,
                     );

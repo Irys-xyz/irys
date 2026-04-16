@@ -168,7 +168,7 @@ impl InnerCacheTask {
         }
 
         if prune_height.is_none() {
-            let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
+            let canonical = self.block_tree_guard.read().get_canonical_chain().entries;
 
             let found_block = canonical.iter().rev().find_map(|block_entry| {
                 let block = block_entry.header();

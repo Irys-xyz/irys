@@ -38,16 +38,15 @@ impl BlockValidationTracker {
         let block_state_rx = service_senders.subscribe_block_state_updates();
 
         // Get initial blockchain state
-        let (target_hash, target_height) = {
+        let info = {
             let tree = block_tree_guard.read();
-            let (hash, height, _) = tree.get_max_block_info();
-            (hash, height)
+            tree.get_max_block_info()
         };
 
         Self {
             state: ValidationState::Tracking {
-                target_hash,
-                target_height,
+                target_hash: info.block_hash,
+                target_height: info.height,
             },
             block_tree_guard,
             block_state_rx,
@@ -80,32 +79,32 @@ impl BlockValidationTracker {
             };
 
             // Check current blockchain state
-            let (max_hash, max_height, can_build) = {
+            let info = {
                 let tree = self.block_tree_guard.read();
                 tree.get_max_block_info()
             };
 
             // If best block is validated, done
-            if can_build {
+            if info.can_build_upon {
                 self.state = ValidationState::Validated {
-                    block_hash: max_hash,
-                    block_height: max_height,
+                    block_hash: info.block_hash,
+                    block_height: info.height,
                 };
                 continue;
             }
 
             // Switch target if max-difficulty block changed
-            if max_hash != target_hash {
+            if info.block_hash != target_hash {
                 debug!(
                     block_validation.old_target = %target_hash,
                     block_validation.old_height = target_height,
-                    block_validation.new_target = %max_hash,
-                    block_validation.new_height = max_height,
+                    block_validation.new_target = %info.block_hash,
+                    block_validation.new_height = info.height,
                     "Target block changed during validation wait"
                 );
                 self.state = ValidationState::Tracking {
-                    target_hash: max_hash,
-                    target_height: max_height,
+                    target_hash: info.block_hash,
+                    target_height: info.height,
                 };
             }
 

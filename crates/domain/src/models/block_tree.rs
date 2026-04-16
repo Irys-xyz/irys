@@ -17,6 +17,35 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
+/// The canonical chain: ordered block entries with chain-state metadata.
+#[derive(Debug, Clone)]
+pub struct CanonicalChain {
+    pub entries: Vec<BlockTreeEntry>,
+    pub not_onchain_count: usize,
+}
+
+/// Lightweight reference to a block by hash and height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainBlockRef {
+    pub block_hash: H256,
+    pub height: u64,
+}
+
+/// Tracks the block with the highest cumulative difficulty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxDifficultyInfo {
+    pub cumulative_diff: U256,
+    pub block_hash: BlockHash,
+}
+
+/// Extended info about the max-difficulty block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxBlockInfo {
+    pub block_hash: BlockHash,
+    pub height: u64,
+    pub can_build_upon: bool,
+}
+
 #[derive(Debug)]
 pub struct BlockTreeEntry(pub Arc<SealedBlock>);
 
@@ -68,13 +97,13 @@ pub struct BlockTree {
     pub tip: BlockHash,
 
     // Track max cumulative difficulty
-    max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)
+    max_cumulative_difficulty: MaxDifficultyInfo,
 
     // Height -> Hash mapping
     height_index: BTreeMap<u64, HashSet<BlockHash>>,
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
-    longest_chain_cache: (Vec<BlockTreeEntry>, usize),
+    longest_chain_cache: CanonicalChain,
 
     // Consensus configuration containing cache depth
     consensus_config: ConsensusConfig,
@@ -160,7 +189,10 @@ impl BlockTree {
 
         // Initialize longest chain cache to contain the genesis block
         let entry = make_block_tree_entry(Arc::clone(&sealed_genesis));
-        let longest_chain_cache = (vec![(entry)], 0);
+        let longest_chain_cache = CanonicalChain {
+            entries: vec![entry],
+            not_onchain_count: 0,
+        };
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
@@ -184,7 +216,10 @@ impl BlockTree {
             blocks,
             solutions,
             tip: block_hash,
-            max_cumulative_difficulty: (cumulative_diff, block_hash),
+            max_cumulative_difficulty: MaxDifficultyInfo {
+                cumulative_diff,
+                block_hash,
+            },
             height_index,
             longest_chain_cache,
             consensus_config,
@@ -297,9 +332,15 @@ impl BlockTree {
             blocks: HashMap::new(),
             solutions: HashMap::new(),
             tip: start_block_hash,
-            max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
+            max_cumulative_difficulty: MaxDifficultyInfo {
+                cumulative_diff: start_block.cumulative_diff,
+                block_hash: start_block_hash,
+            },
             height_index: BTreeMap::new(),
-            longest_chain_cache: (vec![entry], 0),
+            longest_chain_cache: CanonicalChain {
+                entries: vec![entry],
+                not_onchain_count: 0,
+            },
             consensus_config: consensus_config.clone(),
         };
 
@@ -475,7 +516,7 @@ impl BlockTree {
 
         debug!(
             "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}, ema_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0,
+            self.max_cumulative_difficulty.cumulative_diff,
             block.header().cumulative_diff,
             block.header().block_hash,
             &commitment_snapshot.get_hash(),
@@ -483,14 +524,17 @@ impl BlockTree {
             &ema_snapshot.get_hash()
         );
 
-        if block.header().cumulative_diff > self.max_cumulative_difficulty.0 {
+        if block.header().cumulative_diff > self.max_cumulative_difficulty.cumulative_diff {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
                 block.header().cumulative_diff,
                 hash,
                 block.header().height
             );
-            self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
+            self.max_cumulative_difficulty = MaxDifficultyInfo {
+                cumulative_diff: block.header().cumulative_diff,
+                block_hash: hash,
+            };
         }
 
         self.blocks.insert(
@@ -585,7 +629,7 @@ impl BlockTree {
         self.blocks.remove(block_hash);
 
         // Update max_cumulative_difficulty if necessary
-        if self.max_cumulative_difficulty.1 == *block_hash {
+        if self.max_cumulative_difficulty.block_hash == *block_hash {
             self.max_cumulative_difficulty = self.find_max_difficulty();
         }
 
@@ -617,53 +661,49 @@ impl BlockTree {
     }
 
     // Helper to find new max difficulty when current max is removed
-    fn find_max_difficulty(&self) -> (U256, BlockHash) {
+    fn find_max_difficulty(&self) -> MaxDifficultyInfo {
         self.blocks
             .iter()
-            .map(|(hash, entry)| (entry.block.header().cumulative_diff, *hash))
-            .max_by_key(|(diff, _)| *diff)
-            .unwrap_or((U256::zero(), BlockHash::default()))
+            .map(|(hash, entry)| MaxDifficultyInfo {
+                cumulative_diff: entry.block.header().cumulative_diff,
+                block_hash: *hash,
+            })
+            .max_by_key(|info| info.cumulative_diff)
+            .unwrap_or(MaxDifficultyInfo {
+                cumulative_diff: U256::zero(),
+                block_hash: BlockHash::default(),
+            })
     }
 
     /// Returns the canonical chain as a cached sequence of block entries.
     ///
-    /// The canonical chain represents the longest valid chain from the earliest cached block
-    /// to the current tip. The chain is maintained as a cached tuple containing:
-    /// - **Block entries**: Ordered sequence from oldest to newest block in cache
-    /// - **Non-onchain count**: Number of blocks not yet fully validated
+    /// Returns the canonical chain as a [`CanonicalChain`].
     ///
-    /// ## Canonical Chain Structure
-    /// * **First element**: Genesis block or the oldest block within `block_tree_depth`
-    /// * **Last element**: Current chain tip (highest cumulative difficulty)
-    /// * **Ordering**: Chronological from oldest to newest block
-    ///
-    /// ## Returns
-    /// `(Vec<BlockTreeEntry>, usize)` - Tuple of (block entries, count of non-onchain blocks)
-    ///
-    /// ## Note
-    /// This returns a cloned copy of the cached chain for thread-safe access. The cache
-    /// is updated whenever the canonical chain changes due to new blocks or reorganizations.
+    /// Entries are ordered chronologically from the oldest cached block (genesis or
+    /// earliest within `block_tree_depth`) to the current tip (highest cumulative
+    /// difficulty). Returns a cloned copy for thread-safe access; the cache is
+    /// updated on new blocks or reorganisations.
     #[must_use]
-    pub fn get_canonical_chain(&self) -> (Vec<BlockTreeEntry>, usize) {
+    pub fn get_canonical_chain(&self) -> CanonicalChain {
         self.longest_chain_cache.clone()
     }
 
     #[must_use]
     pub fn get_latest_canonical_entry(&self) -> &BlockTreeEntry {
         self.longest_chain_cache
-            .0
+            .entries
             .last()
             .expect("canonical chain must always have an entry in it")
     }
 
     fn update_longest_chain_cache(&mut self) {
         let pairs = {
-            self.longest_chain_cache.0.clear();
-            &mut self.longest_chain_cache.0
+            self.longest_chain_cache.entries.clear();
+            &mut self.longest_chain_cache.entries
         };
         let mut not_onchain_count = 0;
 
-        let mut current = self.max_cumulative_difficulty.1;
+        let mut current = self.max_cumulative_difficulty.block_hash;
         let mut blocks_to_collect = self.consensus_config.block_tree_depth;
         debug!(
             "updating canonical chain cache latest_cache_tip: {}",
@@ -729,7 +769,7 @@ impl BlockTree {
         }
 
         pairs.reverse();
-        self.longest_chain_cache.1 = not_onchain_count;
+        self.longest_chain_cache.not_onchain_count = not_onchain_count;
     }
 
     /// Helper to mark off-chain blocks in a set
@@ -791,7 +831,8 @@ impl BlockTree {
         let block_header = block_entry.block.header().clone();
         let old_tip = self.tip;
 
-        let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
+        let canonical_diff = self.max_cumulative_difficulty.cumulative_diff;
+        let canonical_block_hash = self.max_cumulative_difficulty.block_hash;
 
         if block_header.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
             // "Cannot move tip away from canonical for another block with same cumulative_diff"
@@ -881,7 +922,7 @@ impl BlockTree {
     pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
         let head_entry = self
             .longest_chain_cache
-            .0
+            .entries
             .last()
             .expect("at least one block in the longest chain");
 
@@ -895,7 +936,7 @@ impl BlockTree {
     pub fn canonical_epoch_snapshot(&self) -> Arc<EpochSnapshot> {
         let head_entry = self
             .longest_chain_cache
-            .0
+            .entries
             .last()
             .expect("at least one block in the longest chain");
 
@@ -935,25 +976,25 @@ impl BlockTree {
     }
 
     /// Get the block with maximum cumulative difficulty
-    pub fn get_max_cumulative_difficulty_block(&self) -> (U256, BlockHash) {
+    pub fn get_max_cumulative_difficulty_block(&self) -> MaxDifficultyInfo {
         self.max_cumulative_difficulty
     }
 
-    /// Returns max-difficulty block info: (hash, height, can_build_upon)
+    /// Returns max-difficulty block info.
     ///
     /// # Panics
     /// Panics if the max difficulty block is not in the tree (invariant violation).
-    pub fn get_max_block_info(&self) -> (BlockHash, u64, bool) {
-        let (_, hash) = self.max_cumulative_difficulty;
+    pub fn get_max_block_info(&self) -> MaxBlockInfo {
+        let hash = self.max_cumulative_difficulty.block_hash;
         let entry = self
             .blocks
             .get(&hash)
             .expect("max difficulty block must exist in tree");
-        (
-            hash,
-            entry.block.header().height,
-            self.can_be_built_upon(&hash),
-        )
+        MaxBlockInfo {
+            block_hash: hash,
+            height: entry.block.header().height,
+            can_build_upon: self.can_be_built_upon(&hash),
+        }
     }
 
     /// Check if a block can be built upon
@@ -1091,14 +1132,14 @@ impl BlockTree {
         &self,
     ) -> Option<(&BlockMetadata, Vec<Arc<SealedBlock>>, SystemTime)> {
         // Get the block with max cumulative difficulty
-        let (_max_cdiff, max_diff_hash) = self.max_cumulative_difficulty;
+        let max_diff_hash = self.max_cumulative_difficulty.block_hash;
 
         // Get the tip's cumulative difficulty
         let tip_entry = self.blocks.get(&self.tip)?;
         let tip_cdiff = tip_entry.block.header().cumulative_diff;
 
         // Check if tip's difficulty exceeds max difficulty
-        if tip_cdiff >= self.max_cumulative_difficulty.0 {
+        if tip_cdiff >= self.max_cumulative_difficulty.cumulative_diff {
             return None;
         }
 
@@ -1297,7 +1338,7 @@ fn build_current_ema_snapshot_from_index(
         .expect("Failed to create EMA snapshot from chain history")
 }
 
-pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
+pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<ChainBlockRef>> {
     let canonical_chain = tokio::task::spawn_blocking(move || {
         let cache = tree.read();
 
@@ -1307,11 +1348,14 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
                 .try_into()
                 .expect("u64 must fit into usize"),
         );
-        let mut current = cache.max_cumulative_difficulty.1;
+        let mut current = cache.max_cumulative_difficulty.block_hash;
         debug!("get_optimistic_chain with latest_cache_tip: {}", current);
 
         while let Some(entry) = cache.blocks.get(&current) {
-            chain_cache.push((current, entry.block.header().height));
+            chain_cache.push(ChainBlockRef {
+                block_hash: current,
+                height: entry.block.header().height,
+            });
 
             if blocks_to_collect == 0 {
                 break;
@@ -1336,9 +1380,7 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
 /// Uses spawn_blocking to prevent the read operation from blocking the async executor
 /// and locking other async tasks while traversing the block tree.
 /// Notably useful in single-threaded tokio based unittests.
-pub async fn get_canonical_chain(
-    tree: BlockTreeReadGuard,
-) -> eyre::Result<(Vec<BlockTreeEntry>, usize)> {
+pub async fn get_canonical_chain(tree: BlockTreeReadGuard) -> eyre::Result<CanonicalChain> {
     let canonical_chain =
         tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
     Ok(canonical_chain)
@@ -2617,8 +2659,9 @@ mod tests {
         expected_not_onchain: usize,
         cache: &BlockTree,
     ) -> eyre::Result<()> {
-        let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
-        let actual_blocks: Vec<_> = canonical_blocks
+        let chain = cache.get_canonical_chain();
+        let actual_blocks: Vec<_> = chain
+            .entries
             .iter()
             .map(super::BlockTreeEntry::block_hash)
             .collect();
@@ -2639,10 +2682,10 @@ mod tests {
             "Canonical chain does not match expected blocks"
         );
         ensure!(
-            not_onchain_count == expected_not_onchain,
+            chain.not_onchain_count == expected_not_onchain,
             format!(
                 "Number of not-onchain blocks ({}) does not match expected ({})",
-                not_onchain_count, expected_not_onchain
+                chain.not_onchain_count, expected_not_onchain
             )
         );
         Ok(())
