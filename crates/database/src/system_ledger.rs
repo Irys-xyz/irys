@@ -87,7 +87,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     let mut anchor = stake_commitment.id();
     for i in 0..num_submodules {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
+            create_pledge_commitment_transaction(signer, anchor, config, &(i as u64)).await;
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
@@ -143,7 +143,7 @@ pub async fn add_test_commitments(
     config: &Config,
 ) -> eyre::Result<(Vec<CommitmentTransaction>, U256)> {
     let signer = config.irys_signer();
-    add_test_commitments_for_signer(block_header, &signer, pledge_count, config).await
+    add_test_commitments_for_signer(block_header, signer, pledge_count, config).await
 }
 
 #[cfg(any(test, feature = "test-utils"))]
