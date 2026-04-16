@@ -333,53 +333,11 @@ impl ChunkIngressService {
                                     break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    match msg {
-                                        process_pending @ ChunkIngressMessage::ProcessPendingChunks(_) => {
-                                            warn!(
-                                                msg_type = %msg_type,
-                                                "Chunk ingress service lane saturated, waiting for permit"
-                                            );
-                                            let inner = Arc::clone(&self.inner);
-                                            let semaphore = self.inner.control_plane_semaphore.clone();
-                                            let permit_result = tokio::select! {
-                                                _ = &mut shutdown_future => {
-                                                    info!("ChunkIngressService received shutdown signal while waiting for ProcessPendingChunks permit");
-                                                    break 'service;
-                                                }
-                                                permit = semaphore.acquire_owned() => permit,
-                                            };
-                                            let permit = match permit_result {
-                                                Ok(permit) => permit,
-                                                Err(err) => {
-                                                    error!(
-                                                        ?err,
-                                                        "Control plane semaphore closed while waiting for ProcessPendingChunks"
-                                                    );
-                                                    break 'service;
-                                                }
-                                            };
-                                            runtime_handle.spawn(async move {
-                                                let _permit = permit;
-                                                let task_info = format!(
-                                                    "deferred chunk ingress: {}",
-                                                    msg_type
-                                                );
-                                                wait_with_progress(
-                                                    inner.handle_message(process_pending),
-                                                    20,
-                                                    &task_info,
-                                                )
-                                                .await;
-                                            }.instrument(span));
-                                        }
-                                        external_msg => {
-                                            warn!(
-                                                msg_type = %msg_type,
-                                                "Chunk ingress service lane saturated, returning Overloaded"
-                                            );
-                                            Self::send_overloaded_errors(external_msg);
-                                        }
-                                    }
+                                    warn!(
+                                        msg_type = %msg_type,
+                                        "Chunk ingress service lane saturated, returning Overloaded"
+                                    );
+                                    Self::send_overloaded_errors(msg);
                                 }
                             }
                         }
@@ -580,11 +538,9 @@ mod overload_helpers_tests {
         assert!(matches!(result, Err(IngressProofError::Overloaded)));
     }
 
-    /// `send_overloaded_errors` is defensive — the main loop waits for a
-    /// permit before spawning `ProcessPendingChunks`, so it never calls this
-    /// helper for that variant. If it ever is called the match arm must not
-    /// panic. `ProcessPendingChunks` has no caller to notify, so the no-op
-    /// branch is the correct shape.
+    /// `ProcessPendingChunks` has no response channel, so `send_overloaded_errors`
+    /// is a no-op for it — the pending chunks stay queued and will be
+    /// processed on a future trigger. Must not panic.
     #[tokio::test]
     async fn process_pending_chunks_overloaded_is_noop() {
         let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
