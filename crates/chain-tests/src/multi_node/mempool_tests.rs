@@ -85,16 +85,13 @@ async fn pending_chunks_test() -> eyre::Result<()> {
     // wait for chunks to be in CachedChunks table
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
 
-    // Wait for proofs before mining so the first inclusion path is stable.
+    // Mine a block to confirm the tx in the submit ledger, which triggers
+    // ingress proof generation (proofs require block confirmation).
+    genesis_node.mine_block().await?;
+
+    // Wait for ingress proofs after submit confirmation.
     genesis_node
         .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
-        .await?;
-
-    // Mine the first block, then wait for the mempool confirmation metadata
-    // that later block templates rely on before mining the rest.
-    let inclusion_block = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
         .await?;
 
     // Mine the remaining blocks to trigger block and chunk migration.
@@ -161,31 +158,65 @@ async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::
     post_data_tx(&app, &tx).await;
 
     genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
+    let stale_parent_hash = genesis_node.get_max_difficulty_block().block_hash;
+
+    // Mine a block to confirm tx in submit ledger, triggering ingress proof generation
+    let inclusion_block = genesis_node.mine_block().await?;
+    assert!(
+        inclusion_block.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .0
+            .contains(&tx.header.id),
+        "tx should be included in Submit ledger"
+    );
+
+    // Poll for included_height to be set (mempool processes BlockConfirmed asynchronously)
+    let mut included = false;
+    for _ in 0..100 {
+        if let Ok(header) = genesis_node
+            .get_storage_tx_header_from_mempool(&tx.header.id)
+            .await
+            && header.metadata().included_height == Some(inclusion_block.height)
+        {
+            included = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        included,
+        "tx should have included_height set after submit confirmation"
+    );
+
+    // Wait for ingress proofs after submit confirmation
     genesis_node
         .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
         .await?;
 
-    let stale_parent_hash = genesis_node.get_max_difficulty_block().block_hash;
-    let inclusion_block = genesis_node.mine_block().await?;
+    // Mine another block to promote from submit to publish
+    let promotion_block = genesis_node.mine_block().await?;
     assert!(
-        inclusion_block.data_ledgers[DataLedger::Publish]
+        promotion_block.data_ledgers[DataLedger::Publish]
             .tx_ids
             .0
             .contains(&tx.header.id),
-        "tx should be promoted into Publish when all chunks are present before tx ingress"
+        "tx should be promoted into Publish in the subsequent block"
     );
 
-    let raw_mempool_header = genesis_node
-        .wait_for_tx_confirmed_in_raw_mempool(&tx.header.id, inclusion_block.height, 10)
-        .await?;
-    assert_eq!(
-        raw_mempool_header.metadata().included_height,
-        Some(inclusion_block.height)
-    );
-    assert_eq!(
-        raw_mempool_header.promoted_height(),
-        Some(inclusion_block.height)
-    );
+    // Poll for promoted_height to be set (mempool processes confirmations asynchronously)
+    let mut promoted = false;
+    for _ in 0..10 {
+        let header = genesis_node
+            .get_storage_tx_header_from_mempool(&tx.header.id)
+            .await?;
+        if header.promoted_height() == Some(promotion_block.height) {
+            promoted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(promoted, "tx should have promoted_height set");
 
     let best_txs = genesis_node.get_best_mempool_tx(stale_parent_hash).await?;
 
@@ -1119,6 +1150,22 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         .await;
 
     a_node.upload_chunks(&a_blk1_tx1).await?;
+
+    // Mine block to confirm tx in submit ledger, triggering ingress proof generation
+    a_node.mine_block().await?;
+    network_height += 1;
+
+    let a_blk1 = a_node.get_block_by_height(network_height).await?;
+    assert_eq!(
+        a_blk1.data_ledgers[DataLedger::Submit].tx_ids,
+        vec![a_blk1_tx1.header.id]
+    );
+    assert_eq!(
+        a_blk1.data_ledgers[DataLedger::Publish].tx_ids,
+        vec![] // promotion requires a subsequent block
+    );
+
+    // Wait for ingress proofs after submit confirmation, then mine for promotion
     a_node
         .wait_for_ingress_proofs_no_mining(vec![a_blk1_tx1.header.id], seconds_to_wait)
         .await?;
@@ -1126,14 +1173,9 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     a_node.mine_block().await?;
     network_height += 1;
 
-    let a_blk1 = a_node.get_block_by_height(network_height).await?;
-    // check that a_blk1 contains a_blk1_tx1 in both publish and submit ledgers
+    let a_blk2 = a_node.get_block_by_height(network_height).await?;
     assert_eq!(
-        a_blk1.data_ledgers[DataLedger::Submit].tx_ids,
-        vec![a_blk1_tx1.header.id]
-    );
-    assert_eq!(
-        a_blk1.data_ledgers[DataLedger::Publish].tx_ids,
+        a_blk2.data_ledgers[DataLedger::Publish].tx_ids,
         vec![a_blk1_tx1.header.id]
     );
 
@@ -1149,22 +1191,31 @@ async fn heavy3_mempool_publish_fork_recovery_test(
             .await;
 
         b_node.upload_chunks(&b_blk1_tx1).await?;
-        b_node
-            .wait_for_ingress_proofs_no_mining(vec![b_blk1_tx1.header.id], seconds_to_wait)
-            .await?;
-
         b_blk1_tx1
     };
 
+    // Mine block to confirm tx in submit ledger
     let (b_blk1, b_blk1_payload, b_blk1_txs) = b_node.mine_block_with_payload().await?;
 
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Submit].tx_ids,
         vec![b_blk1_tx1.header.id]
     );
-
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Publish].tx_ids,
+        vec![] // promotion requires a subsequent block
+    );
+
+    // Wait for ingress proofs after submit confirmation, then mine for promotion
+    b_node
+        .wait_for_ingress_proofs_no_mining(vec![b_blk1_tx1.header.id], seconds_to_wait)
+        .await?;
+
+    let (b_blk1_promo, b_blk1_promo_payload, b_blk1_promo_txs) =
+        b_node.mine_block_with_payload().await?;
+
+    assert_eq!(
+        b_blk1_promo.data_ledgers[DataLedger::Publish].tx_ids,
         vec![b_blk1_tx1.header.id]
     );
 
@@ -1201,7 +1252,7 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    // send B1&2 to A, causing a reorg
+    // send B's blocks (submit, promote, submit-only) to A, causing a reorg
     {
         let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
@@ -1211,6 +1262,17 @@ async fn heavy3_mempool_publish_fork_recovery_test(
             .await?;
         a_node
             .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
+            .await?;
+        b_node
+            .send_full_block(
+                &a_node,
+                &b_blk1_promo,
+                b_blk1_promo_payload,
+                b_blk1_promo_txs,
+            )
+            .await?;
+        a_node
+            .wait_for_block(&b_blk1_promo.block_hash, seconds_to_wait)
             .await?;
         b_node
             .send_full_block(&a_node, &b_blk2, b_blk2_payload, b_blk2_txs)
@@ -1236,15 +1298,17 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    // Wait for mempool to stabilize with expected shape after reorg
+    // Wait for mempool to stabilize with expected shape after reorg.
+    // a_blk1_tx1 returns as a submit candidate only (not publish, since it’s not in the
+    // canonical submit ledger yet — single-block promotion is not supported).
     a_node
-        .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
+        .wait_for_mempool_best_txs_shape(1, 0, 0, seconds_to_wait.try_into()?)
         .await?;
 
     let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
-    // assert that a_blk1_tx1 is back in a's mempool
+    // assert that a_blk1_tx1 is back in a’s mempool
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx.len(),
         1,
@@ -1256,38 +1320,12 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         a_blk1_tx1.header.id
     );
 
-    assert_eq!(
-        a1_b2_reorg_mempool_txs.publish_tx.txs.len(),
-        1,
-        "unexpected best mempool txs shape"
-    );
-
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
         // Get the ingress proof from the database
         tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
-            .expect("Able to get a_blk1_tx1's ingress proof from DB")
+            .expect("Able to get a_blk1_tx1’s ingress proof from DB")
     };
-
-    let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.set_promoted_height(None); // <- mark this tx as unpublished
-
-    // assert that A’s tx is among publish candidates (treated as if it wasn't promoted)
-    // (allow additional candidates as sometimes Bs tx will also show up)
-    assert!(
-        a1_b2_reorg_mempool_txs
-            .publish_tx
-            .txs
-            .iter()
-            .any(|h| h.id == a_blk1_tx1.header.id),
-        "A's tx missing in publish candidates: got {:?}",
-        a1_b2_reorg_mempool_txs
-            .publish_tx
-            .txs
-            .iter()
-            .map(|h| h.id)
-            .collect::<Vec<_>>()
-    );
 
     let a_blk1_tx1_mempool = {
         // Use mempool-only lookup (no DB fallback) to verify the tx was orphaned back into mempool state
@@ -1309,47 +1347,62 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     );
 
     // gossip A's orphaned tx to B
-    // get it ready for promotion, and then mine a block on B to include it
+    // get it ready for promotion: mine a block to confirm in submit, then promote in next block
 
     b_node.post_data_tx_raw(&a_blk1_tx1.header).await;
     b_node.upload_chunks(&a_blk1_tx1).await?;
-    b_node
-        .wait_for_ingress_proofs_no_mining(vec![a_blk1_tx1.header.id], seconds_to_wait)
-        .await?;
 
-    // B: Mine B3
+    // B: Mine B3 — confirms tx in submit ledger
     let (b_blk3, b_blk3_payload, b_blk3_txs) = {
         let result = b_node.mine_block_with_payload().await?;
         network_height += 1;
         result
     };
 
-    // ensure a_blk1_tx1 is included
     assert_eq!(
         b_blk3.data_ledgers[DataLedger::Submit].tx_ids,
         vec![a_blk1_tx1.header.id]
     );
     assert_eq!(
-        b_blk3.data_ledgers[DataLedger::Publish].tx_ids, // should be promoted
+        b_blk3.data_ledgers[DataLedger::Publish].tx_ids,
+        vec![] // promotion requires a subsequent block
+    );
+
+    // Wait for ingress proofs after submit confirmation, then mine for promotion
+    b_node
+        .wait_for_ingress_proofs_no_mining(vec![a_blk1_tx1.header.id], seconds_to_wait)
+        .await?;
+
+    // B: Mine B4 — promotes tx to publish ledger
+    let (b_blk4, b_blk4_payload, b_blk4_txs) = {
+        let result = b_node.mine_block_with_payload().await?;
+        network_height += 1;
+        result
+    };
+
+    assert_eq!(
+        b_blk4.data_ledgers[DataLedger::Publish].tx_ids,
         vec![a_blk1_tx1.header.id]
     );
 
-    assert!(b_blk3.data_ledgers[DataLedger::Publish].proofs.is_some());
+    assert!(b_blk4.data_ledgers[DataLedger::Publish].proofs.is_some());
 
-    // a_blk1_tx1 should have a new ingress proof (assert it's not the original from a_blk2)
+    // a_blk1_tx1 should have a new ingress proof (assert it's not the original from a_blk1)
     assert!(
-        b_blk3.data_ledgers[DataLedger::Publish]
+        b_blk4.data_ledgers[DataLedger::Publish]
             .proofs
             .clone()
             .unwrap()
             .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()]))
     );
 
-    // now we send (bypassing gossip) B3 back to A
-    // it shouldn't reorg, and should accept the block
-    // as well as overriding the ingress proof it has locally with the one from the block
+    // now we send (bypassing gossip) B3 and B4 back to A
+    // it shouldn't reorg, and should accept the blocks
     b_node
         .send_full_block(&a_node, &b_blk3, b_blk3_payload, b_blk3_txs)
+        .await?;
+    b_node
+        .send_full_block(&a_node, &b_blk4, b_blk4_payload, b_blk4_txs)
         .await?;
 
     // wait for height and index on node a
@@ -1378,12 +1431,20 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
     assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
-    // get a_blk1_tx1 from a, it should have b_blk3's ingress proof
-    let a_blk1_tx1_b_blk3_tx1 = a_node
-        .get_storage_tx_header_from_mempool(&a_blk1_tx1.header.id)
-        .await?;
-
-    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height(), Some(b_blk3.height));
+    // get a_blk1_tx1 from a, it should have b_blk4's promotion height.
+    // The mempool processes BlockConfirmed asynchronously, so poll until set.
+    let mut promoted_height = None;
+    for _ in 0..seconds_to_wait {
+        let header = a_node
+            .get_storage_tx_header_from_mempool(&a_blk1_tx1.header.id)
+            .await?;
+        if header.promoted_height().is_some() {
+            promoted_height = header.promoted_height();
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(promoted_height, Some(b_blk4.height));
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);

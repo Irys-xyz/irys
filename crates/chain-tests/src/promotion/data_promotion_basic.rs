@@ -4,7 +4,6 @@ use actix_web::http::StatusCode;
 use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use assert_matches::assert_matches;
 use irys_actors::MempoolServiceMessage;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_testing_utils::initialize_tracing;
@@ -375,26 +374,30 @@ async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
 
-    let res = genesis_node
-        .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait)
-        .await;
-
-    assert_matches!(res, Ok(()));
-
-    // assert that the tx is not promoted and wasn't included in any blocks
+    // The tx has a too-new anchor so it shouldn't be included in any block yet
     let block = genesis_node.mine_block().await?;
+    assert_eq!(
+        block.data_ledgers.iter().fold(0, |n, l| n + l.tx_ids.len()),
+        0,
+        "tx with too-new anchor should not be included in any ledger"
+    );
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(!is_promoted);
 
-    assert_eq!(
-        block.data_ledgers.iter().fold(0, |n, l| n + l.tx_ids.len()),
-        0
-    );
-
-    // now we wait for the tx to have an old enough anchor
+    // Mine enough blocks for the anchor to mature, which also includes the tx in
+    // the submit ledger and triggers ingress proof generation
     genesis_node
         .mine_blocks(config.consensus_config().block_migration_depth as usize + 1)
         .await?;
+
+    // Wait for ingress proofs (may need additional mining for submit confirmation + proof trigger)
+    genesis_node
+        .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
+        .await?;
+
+    // Mine a block to promote from submit to publish
+    genesis_node.mine_block().await?;
+
     // ..and now it should be promoted!
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(is_promoted);
@@ -601,9 +604,12 @@ async fn test_ingress_proof_anchor_edge_case(
         .mempool
         .ingress_proof_anchor_expiry_depth as u64;
 
+    // Mine enough blocks so the chain is tall enough for edge-case anchor calculations.
+    // We add +3 buffer because 2 additional blocks will be mined later (submit confirmation
+    // + final promotion block) before the anchor expiry is checked.
     genesis_node
         .mine_until_condition(
-            |b| b.last().unwrap().height >= ingress_anchor_expiry + 2, // buffer
+            |b| b.last().unwrap().height >= ingress_anchor_expiry + 3,
             1,
             10,
             30,
@@ -612,8 +618,13 @@ async fn test_ingress_proof_anchor_edge_case(
 
     let current_height = genesis_node.get_canonical_chain_height().await;
 
-    // calculate the edge case anchor height with the provided offset
-    let edge_case_anchor_height = (current_height - ingress_anchor_expiry) + anchor_height_offset;
+    // Calculate the edge case anchor height. Two more blocks will be mined before
+    // validation: one for submit confirmation and one for promotion. The anchor expiry
+    // check runs at (current_height + 2), so the minimum valid anchor is
+    // (current_height + 2) - ingress_anchor_expiry. With offset=0 the anchor must be
+    // one below the minimum (invalid); with offset=1 it must be exactly at (valid).
+    let edge_case_anchor_height =
+        (current_height + 2 - ingress_anchor_expiry) + anchor_height_offset - 1;
     let edge_case_block = genesis_node
         .get_block_by_height(edge_case_anchor_height)
         .await?;
@@ -666,10 +677,15 @@ async fn test_ingress_proof_anchor_edge_case(
         edge_case_ingress_proof.id()
     );
 
-    // Post chunks first so the node auto-generates an ingress proof once all chunks are cached.
+    // Post chunks first so the node auto-generates an ingress proof once submit-confirmed.
     genesis_node.post_chunk_32b(&edge_data_tx, 0, &chunks).await;
     genesis_node.post_chunk_32b(&edge_data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&edge_data_tx, 2, &chunks).await;
+
+    // Mine a block to confirm tx in submit ledger, triggering ingress proof generation.
+    // This also advances the chain height by 1, which is accounted for in the anchor
+    // expiry calculations below.
+    genesis_node.mine_block().await?;
 
     // Wait for the auto-generated proof (1 proof from genesis_signer).
     // We must wait for this async task to complete before injecting the edge-case proof,

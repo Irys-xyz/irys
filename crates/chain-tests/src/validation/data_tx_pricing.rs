@@ -9,8 +9,6 @@ use irys_actors::{
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
 };
-use irys_database::tables::IngressProofs as IngressProofsTable;
-use irys_database::walk_all;
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::IngressProofsList;
 use irys_types::storage_pricing::{
@@ -20,7 +18,6 @@ use irys_types::{
     Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256,
     UnixTimestamp,
 };
-use reth_db::Database as _;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 
@@ -549,29 +546,24 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
     // Gossip ONLY the transaction header (no chunks yet) via mempool service
     gossip_data_tx_to_node(&genesis_node, &tx.header).await?;
 
-    // Upload chunks via public API and wait for ingress proofs to be generated
+    // Upload chunks via public API
     genesis_node.upload_chunks(&tx).await?;
-    genesis_node
-        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
-        .await?;
 
-    // Build an EvilBlockProducer that force-includes the tx in both ledgers
-    // Collect proofs for this tx from the DB
-    let proofs_list = {
-        let ro_tx = genesis_node
-            .node_ctx
-            .db
-            .as_ref()
-            .tx()
-            .expect("create mdbx read tx");
-        let mut proofs = Vec::new();
-        for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
-            if root == tx.header.data_root {
-                proofs.push(cached.proof.clone());
-            }
-        }
-        IngressProofsList(proofs)
-    };
+    // The tx has deliberately insufficient fees, so the tx_selector will reject it
+    // for submit ledger inclusion. We manually generate an ingress proof instead of
+    // relying on auto-generation (which requires submit confirmation).
+    let genesis_signer = genesis_config.signer();
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data_for_proof = tx.data.as_ref().expect("tx should have data").0.clone();
+    let chunks_for_proof: Vec<Vec<u8>> = data_for_proof.chunks(chunk_size).map(Vec::from).collect();
+    let manual_proof = irys_types::ingress::generate_ingress_proof(
+        &genesis_signer,
+        tx.header.data_root,
+        chunks_for_proof.iter().map(|c| Ok(c.as_slice())),
+        genesis_config.consensus_config().chain_id,
+        genesis_node.get_anchor().await?,
+    )?;
+    let proofs_list = IngressProofsList(vec![manual_proof]);
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -594,6 +586,8 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
             irys_actors::block_producer::MempoolTxsBundle,
             irys_actors::tx_selector::TxSelectorError,
         > {
+            // The tx was never confirmed in a block (insufficient fees), so
+            // the evil block includes it in both submit and publish ledgers.
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],

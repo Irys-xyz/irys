@@ -498,10 +498,23 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        let root_hash: H256 = root_hash.into();
+        self.try_generate_ingress_proof_for_root(root_hash.into(), chunk_size)
+    }
+
+    /// Checks whether an ingress proof should be generated for the given `data_root`
+    /// and spawns proof generation if all prerequisites are met:
+    /// - data_size is confirmed (rightmost chunk merkle validation)
+    /// - data_root is included in a confirmed block (block_set non-empty)
+    /// - no local proof already exists
+    /// - all expected chunks are present
+    pub(crate) fn try_generate_ingress_proof_for_root(
+        &self,
+        data_root: H256,
+        chunk_size: u64,
+    ) -> Result<(), ChunkIngressError> {
         let cached_data_root = self
             .irys_db
-            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, root_hash))
+            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         // Early out: only generate ingress proofs for confirmed data sizes
@@ -510,6 +523,13 @@ impl ChunkIngressServiceInner {
         };
 
         if !cdr.data_size_confirmed {
+            return Ok(());
+        }
+
+        // Only generate ingress proofs for txs confirmed in a block's submit ledger.
+        // block_set is populated by cache_data_root() when called with a block header
+        // during block confirmation (lifecycle.rs). Empty means mempool-only.
+        if cdr.block_set.is_empty() {
             return Ok(());
         }
 
@@ -526,21 +546,21 @@ impl ChunkIngressServiceInner {
             .view_eyre(|tx| {
                 let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
                     tx,
-                    root_hash,
+                    data_root,
                     local_address,
                 )?;
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
-                    .dup_count(root_hash)?
+                    .dup_count(data_root)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
                 Ok((count, existing_local_proof))
             })
             .map_err(|e| {
                 error!(
                     "Database error checking ingress proof/chunk count for data_root {:?}: {:?}",
-                    root_hash, e
+                    data_root, e
                 );
                 CriticalChunkIngressError::DatabaseError
             })?;
@@ -549,7 +569,7 @@ impl ChunkIngressServiceInner {
         if existing_local_proof.is_some() {
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
-                &root_hash
+                &data_root
             );
             return Ok(());
         }
@@ -560,7 +580,7 @@ impl ChunkIngressServiceInner {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}",
                 CriticalChunkIngressError::InvalidDataSize,
-                chunk_data_root,
+                data_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         };
@@ -577,15 +597,15 @@ impl ChunkIngressServiceInner {
                     &block_tree_read_guard,
                     &db,
                     &config,
-                    chunk_data_root,
+                    data_root,
                     None,
                     &gossip_sender,
                     &cache_sender,
                 ) {
                     if error.is_benign() {
-                        debug!(proof.data_root = ?chunk_data_root, "Skipped ingress proof generation: {error}");
+                        debug!(proof.data_root = ?data_root, "Skipped ingress proof generation: {error}");
                     } else {
-                        warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {error}");
+                        warn!(proof.data_root = ?data_root, "Failed to generate ingress proof: {error}");
                     }
                 }
             }).in_current_span();

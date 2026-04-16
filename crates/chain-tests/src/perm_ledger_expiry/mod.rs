@@ -52,10 +52,13 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
 
     // Upload chunks to trigger promotion to Publish
     node.upload_chunks(&tx).await?;
+
+    // Mine a block to confirm tx in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await?;
 
-    // Mine 1 block to include tx (triggers promotion to Publish)
+    // Mine another block to promote from submit to publish
     node.mine_block().await?;
 
     // Capture balance before expiry mining
@@ -284,12 +287,13 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx2.header.id, 10).await?;
     node.upload_chunks(&tx2).await?;
+
+    // Mine a block to confirm tx2 in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
         .await?;
 
-    // Mine 1 block to include both txs, then another so block migration
-    // (block_migration_depth=1) promotes tx2 to Publish.
-    node.mine_block().await?;
+    // Mine another block to promote tx2 to Publish
     node.mine_block().await?;
 
     // Verify promotion state before expiry
@@ -539,10 +543,13 @@ async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx.header.id, 10).await?;
     node.upload_chunks(&tx).await?;
+
+    // Mine a block to confirm tx in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await?;
 
-    // Mine 1 block to include tx (triggers promotion to Publish)
+    // Mine another block to promote from submit to publish
     node.mine_block().await?;
 
     // Mine to first epoch boundary to trigger slot allocation (need 2+ slots)
@@ -664,10 +671,13 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx.header.id, 10).await?;
     node.upload_chunks(&tx).await?;
+
+    // Mine a block to confirm tx in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await?;
 
-    // Mine 1 block to include tx
+    // Mine another block to promote from submit to publish
     node.mine_block().await?;
 
     // Mine to 5x past where expiry would trigger: (EPOCH_LENGTH + 4) * BLOCKS_PER_EPOCH
@@ -817,11 +827,13 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx1.header.id, 10).await?;
     node.upload_chunks(&tx1).await?;
+
+    // Mine a block to confirm tx1 in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx1.header.id], 20)
         .await?;
 
-    // Mine 2 blocks: 1 to include tx, 1 for migration (block_migration_depth=1) → promotion
-    node.mine_block().await?;
+    // Mine another block to promote tx1 to Publish
     node.mine_block().await?;
 
     assert!(
@@ -937,11 +949,12 @@ async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx2.header.id, 10).await?;
     node.upload_chunks(&tx2).await?;
-    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
+
+    // Mine blocks until ingress proofs are generated (submit confirmation + proof trigger)
+    node.wait_for_ingress_proofs(vec![tx2.header.id], 20)
         .await?;
 
-    // Mine 2 blocks: 1 to include tx2, 1 for migration → promotion
-    node.mine_block().await?;
+    // Mine another block to promote tx2 to Publish
     node.mine_block().await?;
 
     // Mine to next epoch boundary → triggers slot allocation for new data + backfill with
@@ -1067,10 +1080,13 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx1.header.id, 10).await?;
     node.upload_chunks(&tx1).await?;
+
+    // Mine a block to confirm tx1 in submit ledger, triggering ingress proof generation
+    node.mine_block().await?;
     node.wait_for_ingress_proofs_no_mining(vec![tx1.header.id], 20)
         .await?;
 
-    // Mine 1 block to include tx1
+    // Mine another block to promote tx1 to Publish
     node.mine_block().await?;
 
     // Mine to first epoch boundary → triggers slot allocation → 2+ Publish slots
@@ -1084,10 +1100,12 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
         .await;
     node.wait_for_mempool(tx2.header.id, 10).await?;
     node.upload_chunks(&tx2).await?;
-    node.wait_for_ingress_proofs_no_mining(vec![tx2.header.id], 20)
+
+    // Mine blocks until ingress proofs are generated (submit confirmation + proof trigger)
+    node.wait_for_ingress_proofs(vec![tx2.header.id], 20)
         .await?;
 
-    // Mine 1 block to include tx2
+    // Mine another block to promote tx2 to Publish
     node.mine_block().await?;
 
     // Mine to 8 * BLOCKS_PER_EPOCH (far past where expiry would trigger if Some(2))

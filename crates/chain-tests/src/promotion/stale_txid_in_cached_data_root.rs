@@ -247,15 +247,20 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
 
     genesis_node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-    // Upload chunks and wait for ingress proof (WITHOUT mining — so the tx
-    // doesn't get included in a block before we can check)
-    genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
-    genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
-    genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
-
-    genesis_node
-        .wait_for_ingress_proofs_no_mining(vec![txid], seconds_to_wait)
-        .await?;
+    // The tx has a genesis anchor that will expire quickly, so it can never enter the
+    // submit ledger (tx_selector rejects expired anchors). Manually generate and store
+    // an ingress proof to simulate the pre-pruning state.
+    let anchor = genesis_node.get_anchor().await?;
+    let ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        anchor,
+    )?;
+    genesis_node.node_ctx.db.update_eyre(|db_tx| {
+        irys_database::store_ingress_proof_checked(db_tx, &ingress_proof, &genesis_signer)
+    })?;
 
     // Verify CachedDataRoot.txid_set contains our txid
     genesis_node.node_ctx.db.view_eyre(|db_tx| {

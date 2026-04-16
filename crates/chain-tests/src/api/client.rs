@@ -204,12 +204,16 @@ async fn api_client_wait_for_promotion_happy_path() {
         .await
         .expect("post_transaction should succeed");
 
-    // Wait until the ingress proof is persisted before mining.
-    // Promotion selection reads proofs from DB during block processing.
+    // Mine a block so the tx is confirmed in the submit ledger, which triggers
+    // ingress proof generation (proofs require block confirmation).
+    let _ = ctx.mine_block().await.expect("expected mined block");
+
+    // Wait for ingress proofs to be generated after submit ledger confirmation.
     ctx.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await
-        .expect("ingress proof should be persisted before mining");
+        .expect("ingress proof should be persisted after submit confirmation");
 
+    // Mine another block to promote from submit to publish ledger.
     let _ = ctx.mine_block().await.expect("expected mined block");
 
     // This should succeed if promotion occurs within the attempts window
@@ -635,12 +639,16 @@ async fn api_double_promotion_after_restart() {
         .await
         .expect("post_transaction should succeed");
 
-    // Wait for ingress proofs to be generated (async background task) before mining
+    // Mine a block so the tx is confirmed in the submit ledger, which triggers
+    // ingress proof generation (proofs require block confirmation).
+    ctx.mine_block().await.expect("expected mined block");
+
+    // Wait for ingress proofs to be generated after submit ledger confirmation.
     ctx.wait_for_ingress_proofs_no_mining(vec![tx_id], 10)
         .await
         .expect("ingress proofs should be generated");
 
-    // Mine a block to trigger single-block promotion (Submit + Publish in one block)
+    // Mine another block to promote from submit to publish ledger.
     ctx.mine_block().await.expect("expected mined block");
 
     // Wait for the promotion to be reflected in the API
